@@ -14,7 +14,6 @@ import { resolve, basename } from 'path';
 import { existsSync } from 'fs';
 import { discoverApplicationForm, detectATS } from './discovery.mjs';
 import { findField, handleDropdown, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
-import { handlePostSubmitOTP } from './otp.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
 import { recordResult } from './learner.mjs';
 import { isSubmitButton } from './scanner.mjs';
@@ -581,14 +580,11 @@ export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpP
         return 'submitted';
       }
 
-      // Check for post-submit OTP if prompted
+      // Check for post-submit verification prompts (OTP handling disabled)
       const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
       if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-        if (otpEmail && otpPassword) {
-          const submitTime = Date.now() - 10000;
-          return await handlePostSubmitOTP(page, otpEmail, otpPassword, submitTime);
-        }
-        return 'needs-otp';
+        console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
+        return 'needs-manual-verification';
       }
 
       return 'submitted';
@@ -613,6 +609,172 @@ export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpP
   }
 
   return 'submitted';
+}
+
+// Adaptive scan/fill loop — OTP handling disabled
+export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode = 'signin' } = {}) {
+  const maxIterations = 15;
+  for (let iter = 0; iter < maxIterations; iter++) {
+    console.log(`\n=== Adaptive Loop iteration ${iter + 1} ===`);
+
+    // 1) Collect visible fields
+    const visibleFields = await page.evaluate(() => {
+      const results = [];
+      const seen = new Set();
+
+      function getLabel(el) {
+        try {
+          if (el.id) {
+            const label = document.querySelector(`label[for="${el.id}"]`);
+            if (label) return label.textContent.trim();
+          }
+          const parentLabel = el.closest && el.closest('label');
+          if (parentLabel) return parentLabel.textContent.trim();
+          if (el.getAttribute && el.getAttribute('aria-label')) return el.getAttribute('aria-label');
+          if (el.placeholder) return el.placeholder;
+          const autoId = el.getAttribute && (el.getAttribute('data-automation-id') || '');
+          const idOrName = el.id || el.name || autoId;
+          if (idOrName) {
+            const clean = idOrName.replace(/--/g, ' ').replace(/_/g, ' ').replace(/([A-Z])/g, ' $1').trim();
+            if (clean) return clean;
+          }
+          return el.name || el.id || '';
+        } catch { return ''; }
+      }
+
+      document.querySelectorAll('input, select, textarea, [data-automation-id="select-widget"]').forEach(el => {
+        try {
+          const type = el.type || el.tagName.toLowerCase();
+          if (type === 'hidden' || type === 'submit' || type === 'button' || type === 'image' || type === 'reset') return;
+          const key = el.id || el.name || (el.getAttribute && el.getAttribute('data-automation-id')) || `f-${results.length}`;
+          if (seen.has(key)) return;
+          seen.add(key);
+          results.push({
+            id: el.id || '',
+            name: el.name || '',
+            label: getLabel(el) || '',
+            type,
+            required: el.required || (el.getAttribute && el.getAttribute('aria-required') === 'true') || false,
+            selector: el.id ? `#${CSS.escape(el.id)}` : (el.name ? `${el.tagName.toLowerCase()}[name="${el.name}"]` : ''),
+          });
+        } catch {}
+      });
+      return results;
+    });
+
+    // 2) Log scanned fields
+    console.log('Scanned fields:', JSON.stringify(visibleFields, null, 2));
+
+    // 3) Fill mapped fields
+    let anyAction = false;
+    for (const f of visibleFields) {
+      if (!f.label && !f.id && !f.name) continue;
+      const label = (f.label || f.id || f.name).trim();
+      const mappedVal = mapLabelToProfileValue(label, profile);
+      if (!mappedVal) {
+        if (f.required) {
+          const answer = await promptUserInTerminal(label, f.type, []);
+          if (answer) {
+            try {
+              const el = await findField(page, f);
+              if (el) { await el.fill(answer); anyAction = true; }
+            } catch (err) { console.log(`Could not fill required field "${label}": ${err.message?.slice(0,80)}`); }
+          }
+        }
+        continue;
+      }
+
+      try {
+        const el = await findField(page, f);
+        if (!el) continue;
+        let currentVal = '';
+        try { currentVal = await el.inputValue(); } catch {}
+        if (currentVal && currentVal.trim() !== '' && f.type !== 'checkbox') continue;
+
+        await el.scrollIntoViewIfNeeded().catch(() => {});
+        if (f.type === 'checkbox') {
+          const shouldCheck = ['true','yes','1','on'].includes(String(mappedVal).toLowerCase());
+          if (shouldCheck) { await el.click({ force: true }).catch(() => el.evaluate(e => e.click())); anyAction = true; console.log(`Checked: ${label}`); }
+        } else if (f.type === 'select' || f.type === 'custom-select') {
+          const res = await handleDropdown(page, el, mappedVal, label).catch(() => ({ success: false }));
+          if (res && res.success) { anyAction = true; console.log(`Selected: ${label} <- ${mappedVal}`); }
+        } else if (f.type === 'file') {
+          if (mappedVal) {
+            await el.setInputFiles(mappedVal).catch(() => {});
+            anyAction = true;
+            console.log(`Uploaded file for: ${label}`);
+          }
+        } else {
+          await el.click().catch(() => {});
+          await page.waitForTimeout(80);
+          await el.fill(String(mappedVal)).catch(() => {});
+          anyAction = true;
+          console.log(`Filled: ${label} <- "${String(mappedVal).slice(0,80)}"`);
+        }
+      } catch (err) {
+        console.log(`Could not fill ${label}: ${err?.message?.substring(0,80)}`);
+      }
+    }
+
+    // 4) Try action buttons
+    const actionClicked = await (async () => {
+      const actions = [
+        'button:has-text("Sign In")',
+        'button:has-text("Sign in")',
+        'button:has-text("Create Account")',
+        'button:has-text("Create")',
+        'button:has-text("Save and Continue")',
+        'button:has-text("Save & Continue")',
+        'button:has-text("Submit")',
+        'button:has-text("Submit application")',
+        'input[type="submit"]',
+        'button[type="submit"]'
+      ];
+      for (const sel of actions) {
+        try {
+          const btn = await page.$(sel);
+          if (btn && await btn.isVisible().catch(() => false)) {
+            const text = await btn.textContent().catch(() => sel);
+            console.log(`Clicking action button: ${text.trim()}`);
+            await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+            await page.waitForTimeout(2500);
+            try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+            return true;
+          }
+        } catch {}
+      }
+      return false;
+    })();
+
+    // 5) Detect Review/Submission
+    const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+    if (/review(\s*application)?|review and submit|review your application/i.test(bodyText)) {
+      console.log('Review page detected, attempting final submit...');
+      await clickSubmitButton(page).catch(() => {});
+      await page.waitForTimeout(4000);
+      const confirmText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+      if (/application\s*submitted|thank\s*you\s*for\s*applying|submission\s*complete/i.test(confirmText)) {
+        console.log('Submission confirmed.');
+        return 'submitted';
+      } else {
+        console.log('No clear submission confirmation detected after final submit attempt.');
+      }
+    }
+
+    // 6) Detect verification prompts and exit for manual verification
+    if (/verification\s*code|confirm.*email|check your email|enter.*code/i.test(bodyText)) {
+      console.log('Verification prompt detected, but OTP auto-handling is disabled in this build. Please verify manually if required.');
+      return 'needs-manual-verification';
+    }
+
+    if (!actionClicked && !anyAction) {
+      console.log('No action or fills performed this iteration; waiting before next scan...');
+      await page.waitForTimeout(2000);
+    }
+  }
+
+  console.log('Adaptive loop ended (max iterations reached).');
+  return 'done';
 }
 
 // ─── Submit button finder ───────────────────────────────────────────────────
@@ -828,7 +990,7 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
 
       // Load profile and execute complete 5-step wizard loop
       const profile = await loadProfile().catch(() => ({}));
-      const status = await runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword });
+      const status = await runAdaptiveScanFillLoop(page, profile, plan, { mode });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
       await logToCSV(url, plan.company || '', plan.role || '', status, postSubmitSS, { ats });
@@ -1151,10 +1313,8 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
       if (errorMessages.length === 0) {
         const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
         if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-          if (otpEmail && otpPassword) {
-            const submitTime = Date.now() - 10000;
-            status = await handlePostSubmitOTP(page, otpEmail, otpPassword, submitTime);
-          } else { status = 'needs-otp'; }
+          console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
+          status = 'needs-manual-verification';
         } else { status = 'submitted'; }
         break;
       }

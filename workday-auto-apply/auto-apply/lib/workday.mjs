@@ -9,7 +9,6 @@
  * 5. Navigates to the application form
  */
 
-import { fetchOTPFromGmail } from './otp.mjs';
 import {
   discoverApplicationForm,
   isInNavOrHeader,
@@ -184,31 +183,7 @@ export async function workdayCreateAccount(page, email, otpEmail, otpPassword, g
   // Check for email verification
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/verif|confirm|code|check your email/i.test(bodyText)) {
-    console.log('   Email verification required for account...');
-
-    if (otpEmail && otpPassword) {
-      const submitTime = Date.now() - 10000;
-      for (let i = 0; i < 12; i++) {
-        await new Promise(r => setTimeout(r, 5000));
-        const code = await fetchOTPFromGmail(otpEmail, otpPassword, 3, submitTime);
-        if (code) {
-          console.log(`   Verification code: ${code}`);
-          const codeInput = await page.$('input[name*="code"], input[name*="verification"], input[placeholder*="code"]');
-          if (codeInput) {
-            await codeInput.fill(code);
-            const verifyBtn = await page.$('button:has-text("Verify"), button:has-text("Confirm"), button[type="submit"]');
-            if (verifyBtn) {
-              await verifyBtn.click({ force: true }).catch(() => verifyBtn.evaluate(el => el.click()));
-              await page.waitForTimeout(3000);
-            }
-          }
-          break;
-        }
-        console.log(`     Waiting for verification email... (${(i + 1) * 5}s)`);
-      }
-    } else {
-      console.log('   No email credentials provided for verification.');
-    }
+    console.log('   Email verification required for account — OTP auto-handling is disabled. Please verify manually if required.');
   }
 
   return password;
