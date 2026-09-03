@@ -20,6 +20,29 @@ import { recordResult } from './learner.mjs';
 import { isSubmitButton } from './scanner.mjs';
 import { handleWorkday } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue } from './planner.mjs';
+import * as readline from 'readline/promises';
+import { stdin as input, stdout as output } from 'process';
+
+// ─── Terminal Prompt Fallback for Unmapped Required Fields ─────────────────
+export async function promptUserInTerminal(label, fieldType, options = []) {
+  const rl = readline.createInterface({ input, output });
+  try {
+    console.log(`\n${'─'.repeat(60)}`);
+    console.log(`❓ [Required Field Not Found in Profile/Plan]`);
+    console.log(`   Question: "${label}"`);
+    console.log(`   Field Type: ${fieldType}`);
+    if (options && options.length > 0) {
+      console.log(`   Available Options: ${options.slice(0, 10).join(', ')}`);
+    }
+    const answer = await rl.question('   👉 Please enter your answer to continue: ');
+    console.log(`${'─'.repeat(60)}\n`);
+    return answer.trim();
+  } catch {
+    return '';
+  } finally {
+    rl.close();
+  }
+}
 
 // ─── Workday Step Detector ──────────────────────────────────────────────────
 export async function detectWorkdayStep(page) {
@@ -322,6 +345,42 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
       if (match && match.value) mappedVal = match.value;
     }
 
+    // Check runtime answers cached during this session
+    if (!mappedVal && profile._runtimeAnswers && profile._runtimeAnswers[label]) {
+      mappedVal = profile._runtimeAnswers[label];
+    }
+
+    // If still not mapped, check if required or on Questions/Disclosures steps — ask in terminal
+    if (!mappedVal) {
+      const isRequired = field.required || label.includes('*') || /required/i.test(label) || stepName === 'Application Questions';
+      if (isRequired) {
+        let options = [];
+        try {
+          const el = await findField(page, field);
+          if (el) {
+            options = await el.evaluate(node => {
+              if (node.tagName.toLowerCase() === 'select') {
+                return Array.from(node.options).map(o => o.text.trim()).filter(t => t && !t.startsWith('Select'));
+              }
+              const container = node.closest('[data-automation-id*="formField"], [class*="field"], div');
+              if (container) {
+                const labels = Array.from(container.querySelectorAll('label'));
+                return labels.map(r => r.textContent.trim()).filter(Boolean);
+              }
+              return [];
+            }).catch(() => []);
+          }
+        } catch {}
+
+        const userAnswer = await promptUserInTerminal(label, field.type, options);
+        if (userAnswer) {
+          mappedVal = userAnswer;
+          if (!profile._runtimeAnswers) profile._runtimeAnswers = {};
+          profile._runtimeAnswers[label] = userAnswer;
+        }
+      }
+    }
+
     if (!mappedVal) continue;
 
     try {
@@ -340,7 +399,7 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
       await el.scrollIntoViewIfNeeded().catch(() => {});
 
       if (field.type === 'checkbox') {
-        const shouldCheck = mappedVal === true || mappedVal === 'true' || mappedVal === 'yes' || mappedVal === '_static.true';
+        const shouldCheck = mappedVal === true || mappedVal === 'true' || mappedVal === 'yes' || mappedVal === 'y' || mappedVal === '_static.true' || mappedVal === '1' || mappedVal === 'on';
         if (shouldCheck) {
           const isChecked = await el.isChecked().catch(() => false);
           if (!isChecked) {

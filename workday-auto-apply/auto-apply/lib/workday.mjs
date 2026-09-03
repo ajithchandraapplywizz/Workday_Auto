@@ -16,6 +16,8 @@ import {
   isSignInFormVisible,
   clickGatewaySignIn,
   clickGatewayCreateAccount,
+  prescanGatewayElements,
+  handleAdaptiveGateway,
 } from './discovery.mjs';
 
 // ─── Generate a secure password ─────────────────────────────────────────────
@@ -35,71 +37,28 @@ export async function isWorkdayLogin(page) {
   const url = page.url();
   if (!/workday|myworkday/i.test(url)) return false;
 
-  // If application form fields or wizard steps are already present, we are past login
-  const hasAppFields = await page.$([
-    'input[data-automation-id="legalNameSection_firstName"]',
-    'input[name*="legalName"]',
-    'input[id*="legalName"]',
-    'input[id*="address--"]',
-    '[data-automation-id="phone-number"]',
-    '[data-automation-id="file-upload-input-drop-zone"]',
-    'button:has-text("Save and Continue")',
-    'button:has-text("Save & Continue")',
-    'button[data-automation-id="bottom-navigation-next-button"]',
-    '[data-automation-id*="wizardStep"]',
-  ].join(', ')).catch(() => null);
+  const scan = await prescanGatewayElements(page);
+  if (scan.hasWizardFields) return false;
+  if (scan.hasApplyBtn) return false;
 
-  if (hasAppFields && await hasAppFields.isVisible().catch(() => false)) {
-    return false;
-  }
-
-  // If initial JD page Apply buttons are visible, we are on the JD page, NOT a login page
-  const hasApplyBtn = await page.$([
-    'a[data-automation-id="adventureButton"]',
-    'a[data-automation-id="applyButton"]',
-    'button[data-automation-id="applyButton"]',
-    '[data-automation-id="jobPostingApplyButton"]',
-    'a:has-text("Apply for this job")',
-    'button:has-text("Apply for this job")',
-  ].join(', ')).catch(() => null);
-
-  if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
-    return false;
-  }
-
-  // Check for genuine login inputs or gateway action controls (excluding nav/header)
-  const hasLoginInputs = await page.$([
-    'input[data-automation-id="password"]:visible',
-    'input[data-automation-id="verifyPassword"]:visible',
-    'button[data-automation-id="signInSubmitButton"]:visible',
-    'button[data-automation-id="createAccountSubmitButton"]:visible',
-    'button[data-automation-id="createAccountLink"]:visible',
-    '[data-automation-id="signInLink"]:visible',
-    '[data-automation-id="createAccountTab"]:visible',
-    '[data-automation-id="signInTab"]:visible',
-  ].join(', ')).catch(() => null);
-
-  if (hasLoginInputs) {
-    if (await isInNavOrHeader(hasLoginInputs)) {
-      return false;
-    }
-    return true;
-  }
-
-  return false;
+  return !!(
+    scan.hasEmailInput ||
+    scan.hasPasswordInput ||
+    scan.hasVerifyPassword ||
+    scan.hasSignInWithEmailBtn ||
+    scan.hasCreateAccountBtn ||
+    scan.hasSignInUnderCreateAccount
+  );
 }
 
 // ─── Login to Workday ───────────────────────────────────────────────────────
 export async function workdayLogin(page, email, password) {
   console.log('   Logging into Workday...');
 
-  // 1. If not already showing password field, click the gateway "Sign In" link below Create Account (not nav bar)
-  const isFormReady = await isSignInFormVisible(page);
-  if (!isFormReady) {
-    await clickGatewaySignIn(page);
-  }
+  // Adaptively ensure we are on the sign-in form (handles SSO "Sign in with email" and "Sign In" link below Create Account)
+  await handleAdaptiveGateway(page, 'signin');
 
-  // 2. Wait for signin form to appear (email + password inputs)
+  // Wait for signin form to appear (email + password inputs)
   try {
     await page.waitForSelector('input[data-automation-id="password"], input[type="password"]', { timeout: 8000 });
   } catch {}
@@ -208,6 +167,18 @@ export async function workdayCreateAccount(page, email, otpEmail, otpPassword, g
         break;
       }
     }
+  }
+
+  // Check if account already exists with this email
+  const alreadyExists = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /already\s*exists|already\s*registered|please\s*sign\s*in/i.test(text);
+  }).catch(() => false);
+
+  if (alreadyExists) {
+    console.log('   ℹ️  Account already exists with this email — clicking "Sign In" link below Create Account...');
+    await clickGatewaySignIn(page);
+    return password;
   }
 
   // Check for email verification

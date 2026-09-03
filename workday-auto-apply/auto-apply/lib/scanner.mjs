@@ -79,13 +79,26 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     // Step 2: Authenticate if Workday
     if (ats === 'workday') {
       console.log(`   Authenticating on Workday (${mode} mode) before scanning form fields...`);
-      await handleWorkday(page, {
+      const authOk = await handleWorkday(page, {
         email: workdayEmail || otpEmail,
         password: workdayPassword,
         otpEmail,
         otpPassword,
         mode,
       });
+
+      if (!authOk) {
+        console.log('   ⚠️  Workday authentication was not completed — skipping premature gateway scan.');
+        return {
+          url: page.url(),
+          original_url: url,
+          title: await page.title(),
+          scanned_at: new Date().toISOString(),
+          field_count: 0,
+          fields: [],
+          submit_buttons: [],
+        };
+      }
 
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
       await page.waitForTimeout(3000);
