@@ -10,7 +10,13 @@
  */
 
 import { fetchOTPFromGmail } from './otp.mjs';
-import { discoverApplicationForm } from './discovery.mjs';
+import {
+  discoverApplicationForm,
+  isInNavOrHeader,
+  isSignInFormVisible,
+  clickGatewaySignIn,
+  clickGatewayCreateAccount,
+} from './discovery.mjs';
 
 // ─── Generate a secure password ─────────────────────────────────────────────
 function generatePassword() {
@@ -24,53 +30,74 @@ function generatePassword() {
   return pwd;
 }
 
-// ─── Detect if page is Workday login ────────────────────────────────────────
+// ─── Detect if page is Workday login/gateway ────────────────────────────────
 export async function isWorkdayLogin(page) {
   const url = page.url();
   if (!/workday|myworkday/i.test(url)) return false;
 
-  // If application form fields are already present, we are past login
-  const hasAppFields = await page.$('input[data-automation-id="legalNameSection_firstName"], input[name*="legalName"], input[id*="legalName"], input[id*="address--"], [data-automation-id="phone-number"], [data-automation-id="file-upload-input-drop-zone"]');
-  if (hasAppFields) return false;
+  // If application form fields or wizard steps are already present, we are past login
+  const hasAppFields = await page.$([
+    'input[data-automation-id="legalNameSection_firstName"]',
+    'input[name*="legalName"]',
+    'input[id*="legalName"]',
+    'input[id*="address--"]',
+    '[data-automation-id="phone-number"]',
+    '[data-automation-id="file-upload-input-drop-zone"]',
+    'button:has-text("Save and Continue")',
+    'button:has-text("Save & Continue")',
+    'button[data-automation-id="bottom-navigation-next-button"]',
+    '[data-automation-id*="wizardStep"]',
+  ].join(', ')).catch(() => null);
 
-  const hasLogin = await page.$([
-    'input[data-automation-id="email"]',
-    'input[data-automation-id="userName"]',
-    'input[data-automation-id="password"]',
-    'input[data-automation-id="verifyPassword"]',
-    'button[data-automation-id="signInLink"]',
-    'button[data-automation-id="createAccountSubmitButton"]',
-    'button[data-automation-id="signInSubmitButton"]',
-    'button[data-automation-id="createAccountLink"]',
-    'a:has-text("Sign In")',
-    'button:has-text("Sign In")',
-    'button:has-text("Create Account")',
-    'a:has-text("Create Account")',
-  ].join(', '));
+  if (hasAppFields && await hasAppFields.isVisible().catch(() => false)) {
+    return false;
+  }
 
-  return !!hasLogin;
+  // If initial JD page Apply buttons are visible, we are on the JD page, NOT a login page
+  const hasApplyBtn = await page.$([
+    'a[data-automation-id="adventureButton"]',
+    'a[data-automation-id="applyButton"]',
+    'button[data-automation-id="applyButton"]',
+    '[data-automation-id="jobPostingApplyButton"]',
+    'a:has-text("Apply for this job")',
+    'button:has-text("Apply for this job")',
+  ].join(', ')).catch(() => null);
+
+  if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
+    return false;
+  }
+
+  // Check for genuine login inputs or gateway action controls (excluding nav/header)
+  const hasLoginInputs = await page.$([
+    'input[data-automation-id="password"]:visible',
+    'input[data-automation-id="verifyPassword"]:visible',
+    'button[data-automation-id="signInSubmitButton"]:visible',
+    'button[data-automation-id="createAccountSubmitButton"]:visible',
+    'button[data-automation-id="createAccountLink"]:visible',
+    '[data-automation-id="signInLink"]:visible',
+    '[data-automation-id="createAccountTab"]:visible',
+    '[data-automation-id="signInTab"]:visible',
+  ].join(', ')).catch(() => null);
+
+  if (hasLoginInputs) {
+    if (await isInNavOrHeader(hasLoginInputs)) {
+      return false;
+    }
+    return true;
+  }
+
+  return false;
 }
 
 // ─── Login to Workday ───────────────────────────────────────────────────────
 export async function workdayLogin(page, email, password) {
   console.log('   Logging into Workday...');
 
-  // 1. If on two-button page or Create Account tab, click "Sign In" link/button
-  try {
-    const signInLinks = await page.$$('a:has-text("Sign In"), button:has-text("Sign In"), [data-automation-id="signInLink"], [data-automation-id="signInTab"]');
-    for (const link of signInLinks) {
-      if (await link.isVisible().catch(() => false)) {
-        const autoId = await link.getAttribute('data-automation-id').catch(() => '');
-        const type = await link.getAttribute('type').catch(() => '');
-        if (autoId !== 'signInSubmitButton' && type !== 'submit') {
-          console.log('    Clicking Workday "Sign In" link...');
-          await link.click({ force: true }).catch(() => link.evaluate(el => el.click()));
-          await page.waitForTimeout(1500);
-          break;
-        }
-      }
-    }
-  } catch {}
+  // 1. If not already showing password field, click the gateway "Sign In" link below Create Account (not nav bar)
+  const isFormReady = await isSignInFormVisible(page);
+  if (!isFormReady) {
+    await clickGatewaySignIn(page);
+  }
 
   // 2. Wait for signin form to appear (email + password inputs)
   try {
@@ -105,12 +132,17 @@ export async function workdayLogin(page, email, password) {
     console.log('    ⚠️  Could not locate visible email/password inputs on Sign In form.');
   }
 
-  // 5. Click visible Sign In submit button with force: true
+  // 5. Click visible Sign In submit button with force: true (excluding nav header)
   const signInButtons = await page.$$('button[data-automation-id="signInSubmitButton"], button:has-text("Sign In"), button[type="submit"]');
   for (const btn of signInButtons) {
     if (await btn.isVisible().catch(() => false)) {
-      await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
-      break;
+      if (await isInNavOrHeader(btn)) continue;
+      const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
+      const type = await btn.getAttribute('type').catch(() => '');
+      if (autoId === 'signInSubmitButton' || type === 'submit') {
+        await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        break;
+      }
     }
   }
 
@@ -134,22 +166,8 @@ export async function workdayLogin(page, email, password) {
 export async function workdayCreateAccount(page, email, otpEmail, otpPassword, givenPassword) {
   console.log('   Creating Workday account...');
 
-  // 1. If on two-button page or Sign In tab, click "Create Account" button/link
-  try {
-    const createBtns = await page.$$('button[data-automation-id="createAccountLink"], button:has-text("Create Account"), a:has-text("Create Account"), [data-automation-id="createAccountTab"]');
-    for (const btn of createBtns) {
-      if (await btn.isVisible().catch(() => false)) {
-        const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
-        const type = await btn.getAttribute('type').catch(() => '');
-        if (autoId !== 'createAccountSubmitButton' && type !== 'submit') {
-          console.log('    Clicking Workday "Create Account" button...');
-          await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
-          await page.waitForTimeout(1500);
-          break;
-        }
-      }
-    }
-  } catch {}
+  // 1. If on two-button page or Sign In tab, click "Create Account" button/link (not nav bar)
+  await clickGatewayCreateAccount(page);
 
   // 2. Wait for create account form to appear
   try {
@@ -177,11 +195,19 @@ export async function workdayCreateAccount(page, email, otpEmail, otpPassword, g
     if (!isChecked) await termsCheckbox.click({ force: true }).catch(() => termsCheckbox.evaluate(el => el.click()));
   }
 
-  const submitBtn = await page.$('button[data-automation-id="createAccountSubmitButton"], button[type="submit"], button:has-text("Create Account"), button:has-text("Sign Up")');
-  if (submitBtn) {
-    await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-    await page.waitForTimeout(5000);
-    try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+  const submitBtns = await page.$$('button[data-automation-id="createAccountSubmitButton"], button:has-text("Create Account"), button:has-text("Sign Up"), button[type="submit"]');
+  for (const btn of submitBtns) {
+    if (await btn.isVisible().catch(() => false)) {
+      if (await isInNavOrHeader(btn)) continue;
+      const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
+      const type = await btn.getAttribute('type').catch(() => '');
+      if (autoId === 'createAccountSubmitButton' || type === 'submit') {
+        await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        await page.waitForTimeout(5000);
+        try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+        break;
+      }
+    }
   }
 
   // Check for email verification
@@ -239,9 +265,9 @@ export async function isWorkdaySignInPage(page) {
   // 2. Check for visible sign-in inputs (email/password fields)
   const pwdInput = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, input[name="password"]:visible').catch(() => null);
   const emailInput = await page.$('input[data-automation-id="email"]:visible, input[data-automation-id="userName"]:visible, input[type="email"]:visible').catch(() => null);
-  const signInBtn = await page.$('button[data-automation-id="signInSubmitButton"]:visible, button:has-text("Sign In"):visible').catch(() => null);
+  const signInSubmitBtn = await page.$('button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
 
-  return !!((pwdInput && emailInput) || pwdInput || signInBtn);
+  return !!((pwdInput && emailInput) || (pwdInput && signInSubmitBtn));
 }
 
 // ─── Full Workday flow ──────────────────────────────────────────────────────
@@ -281,6 +307,22 @@ export async function handleWorkday(page, { email, password, otpEmail, otpPasswo
       if (loggedIn) {
         await page.waitForTimeout(3000);
         try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+        // Check if after sign-in we are back on JD page with Apply button visible
+        const hasApplyBtn = await page.$([
+          'a[data-automation-id="adventureButton"]',
+          'a[data-automation-id="applyButton"]',
+          'button[data-automation-id="applyButton"]',
+          '[data-automation-id="jobPostingApplyButton"]',
+          'a:has-text("Apply for this job")',
+          'button:has-text("Apply for this job")',
+        ].join(', ')).catch(() => null);
+
+        if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
+          console.log('   Logged in, on JD page — clicking Apply to enter application wizard...');
+          await discoverApplicationForm(page, page.url(), { mode });
+        }
+
         return true;
       }
       console.log('   ❌ Sign-in failed with provided credentials in signin mode.');
