@@ -4,13 +4,16 @@ package-lock.json
 
 # User data (never commit)
 .env
+.env.*
 config/profile.yml
+config/settings.yml
 config/resumes.yml
 targets.txt
 resumes/*.pdf
 data/applied.csv
 data/queue.csv
 data/learnings.json
+data/qa-store.json
 
 # Generated files
 forms/*

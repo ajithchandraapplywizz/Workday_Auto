@@ -23,20 +23,73 @@ import { scanForm, slugify } from './lib/scanner.mjs';
 import { fillForm } from './lib/engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './lib/planner.mjs';
 import { applyLearnings, getStats } from './lib/learner.mjs';
-import { extractJDText, detectATS } from './lib/discovery.mjs';
+import { extractJDText, detectATS, validateWorkdayUrl, readTargetsFile } from './lib/discovery.mjs';
 import { loadQueue, saveQueue, addToQueue, getPendingFromQueue } from './lib/reporter.mjs';
+import { 
+  getTodayMMDDYYYY, 
+  isCurrentDateQuestionLabel, 
+  getDynamicDateValueForField 
+} from './lib/date-utils.mjs';
 import { chromium } from 'playwright';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+// ─── Dynamic Field Resolvers ────────────────────────────────────────────────
+
+/**
+ * Resolves date fields dynamically inside the plan using date-utils.mjs logic.
+ */
+function resolveDynamicFields(plan) {
+  if (!plan) return plan;
+
+  const defaultDate = getTodayMMDDYYYY('Asia/Kolkata');
+
+  // 1. Resolve within plan.fills array
+  if (Array.isArray(plan.fills)) {
+    for (const item of plan.fills) {
+      const label = item.label || item.id || '';
+      
+      // Check via regex rules in date-utils.mjs
+      if (isCurrentDateQuestionLabel(label, item)) {
+        item.value = getDynamicDateValueForField(label, item) || defaultDate;
+        item.answer = item.value;
+      }
+      
+      // Fallback: direct script string checks
+      if (typeof item.value === 'string' && (item.value === 'date-utils.mjs' || item.value.endsWith('.mjs'))) {
+        item.value = defaultDate;
+      }
+      if (typeof item.answer === 'string' && (item.answer === 'date-utils.mjs' || item.answer.endsWith('.mjs'))) {
+        item.answer = defaultDate;
+      }
+    }
+  }
+
+  // 2. Resolve within qa_answers or unmapped dictionaries
+  if (plan.qa_answers) {
+    for (const [key, val] of Object.entries(plan.qa_answers)) {
+      if (isCurrentDateQuestionLabel(key)) {
+        plan.qa_answers[key] = defaultDate;
+      } else if (typeof val === 'string' && (val === 'date-utils.mjs' || val.endsWith('.mjs'))) {
+        plan.qa_answers[key] = defaultDate;
+      } else if (val && typeof val === 'object' && val.answer && (val.answer === 'date-utils.mjs' || val.answer.endsWith('.mjs'))) {
+        val.answer = defaultDate;
+      }
+    }
+  }
+
+  return plan;
+}
+
 // ─── Parse CLI args ─────────────────────────────────────────────────────────
-const [,, command, ...rawArgs] = process.argv;
+const [, , command, ...rawArgs] = process.argv;
 
 let otpEmail = process.env.EMAIL || '';
 let otpPassword = process.env.APP_PASSWORD || '';
 let workdayEmail = process.env.WORKDAY_EMAIL || '';
 let workdayPassword = process.env.WORKDAY_PASSWORD || '';
 let isSignup = false;
+let confirmSubmit = false;
 const positionalArgs = [];
 
 for (let i = 0; i < rawArgs.length; i++) {
@@ -46,6 +99,7 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--workday-password' && rawArgs[i + 1]) workdayPassword = rawArgs[++i];
   else if (rawArgs[i] === '--signup') isSignup = true;
   else if (rawArgs[i] === '--signin') isSignup = false;
+  else if (rawArgs[i] === '--confirm-submit') confirmSubmit = true;
   else positionalArgs.push(rawArgs[i]);
 }
 const mode = isSignup ? 'signup' : 'signin';
@@ -115,13 +169,11 @@ async function resolveAuthCredentials() {
   const resolvedOtpPassword = otpPassword || process.env.APP_PASSWORD || '';
 
   if (mode === 'signin') {
-    // For signin mode, read credentials from environment variables instead of profile.yml
     if (!resolvedWorkdayEmail || !resolvedWorkdayPassword) {
       console.error('\n❌ Error: Set WORKDAY_EMAIL and WORKDAY_PASSWORD in .env file\n');
       process.exit(1);
     }
   } else if (mode === 'signup') {
-    // For signup mode, fallback to profile email if not provided in env
     resolvedWorkdayEmail = resolvedWorkdayEmail || profile?.workday?.email || profile?.personal?.email || resolvedOtpEmail;
     resolvedWorkdayPassword = resolvedWorkdayPassword || profile?.workday?.password || '';
   }
@@ -140,7 +192,7 @@ async function resolveAuthCredentials() {
 async function cmdSetup() {
   console.log(`
 ╔════════════════════════════════════════════════════════╗
-║          auto-apply — Setup Wizard                    ║
+║          auto-apply — Setup Wizard                     ║
 ╚════════════════════════════════════════════════════════╝
 
 This wizard creates your config/profile.yml.
@@ -157,7 +209,6 @@ You can also create it manually — see config/profile.example.yml.
   console.log('Create config/profile.yml with your details.');
   console.log('Use config/profile.example.yml as a template.\n');
 
-  // Look for example in cwd first, then in package directory (for npx)
   const examplePath = resolve(process.cwd(), 'config', 'profile.example.yml');
   const pkgExamplePath = resolve(__dirname, 'config', 'profile.example.yml');
   const foundExample = existsSync(examplePath) ? examplePath : existsSync(pkgExamplePath) ? pkgExamplePath : null;
@@ -179,7 +230,7 @@ personal:
   phone: ""
   linkedin: ""
   location: ""
-  country: "United States +1"
+  country: "United States of America +1"
 
 eeo:
   gender: ""
@@ -200,16 +251,28 @@ education:
   graduation_year: ""
 
 experience:
-  years: ""
-  current_company: ""
-  current_title: ""
+  current_title: "Full stack intern"
+  current_company: "Student Spot"
+  location: "Hybrid"
+  from_date: "11/2022"
+  to_date: "05/2026"
+  description: ""
+  currently_working: false
+
+education:
+  university: "AVNIET"
+  degree: "Bachelor's Degree"
+  major: "Computer Engineering"
+  field_of_study_hierarchy:
+    - "Engineering"
+    - "Computer Engineering"
+  graduation_year: "2026"
 `;
     await mkdir(resolve(process.cwd(), 'config'), { recursive: true });
     await writeFile(profilePath, blank);
     console.log('📄 Created blank config/profile.yml — fill in your details.');
   }
 
-  // Copy resumes.example.yml if missing
   const resumesPath = resolve(process.cwd(), 'config', 'resumes.yml');
   if (!existsSync(resumesPath)) {
     const resumeExample = resolve(__dirname, 'config', 'resumes.example.yml');
@@ -221,7 +284,6 @@ experience:
     }
   }
 
-  // Copy .env.example if no .env
   const envPath = resolve(process.cwd(), '.env');
   if (!existsSync(envPath)) {
     const envExample = resolve(__dirname, '.env.example');
@@ -233,7 +295,6 @@ experience:
     }
   }
 
-  // Create directories
   await mkdir(resolve(process.cwd(), 'resumes'), { recursive: true });
   await mkdir(resolve(process.cwd(), 'forms'), { recursive: true });
   await mkdir(resolve(process.cwd(), 'screenshots'), { recursive: true });
@@ -244,7 +305,7 @@ experience:
 
   1. Edit config/profile.yml with your details
   2. Edit config/resumes.yml and add your PDF to resumes/
-  3. Edit .env with your Gmail App Password (for OTP)
+  3. Edit .env with WORKDAY_EMAIL, WORKDAY_PASSWORD, and Gmail App Password (for OTP)
   4. Run: auto-apply apply <job-url>
 
 Or add URLs to queue:
@@ -253,12 +314,23 @@ Or add URLs to queue:
 `);
 }
 
+// ─── Workday URL guard ──────────────────────────────────────────────────────
+function assertWorkdayUrl(url) {
+  const check = validateWorkdayUrl(url);
+  if (!check.valid) {
+    console.error(`❌ ${check.reason}`);
+    console.error('   This build supports Workday career URLs only (myworkdayjobs.com).');
+    process.exit(1);
+  }
+}
+
 // ─── SCAN ───────────────────────────────────────────────────────────────────
 async function cmdScan(url) {
   if (!url) {
     console.log('Usage: node cli.mjs scan <url>');
     process.exit(1);
   }
+  assertWorkdayUrl(url);
   const creds = await resolveAuthCredentials();
   await scanForm(url, {
     workdayEmail: creds.workdayEmail,
@@ -275,16 +347,15 @@ async function cmdFill(url, planPath) {
     console.log('Usage: node cli.mjs fill <url> [plan.json]');
     process.exit(1);
   }
+  assertWorkdayUrl(url);
 
   const creds = await resolveAuthCredentials();
   let plan;
   if (planPath) {
-    // Use provided plan
     const raw = await readFile(planPath, 'utf-8');
     plan = JSON.parse(raw);
     console.log(`📋 Plan: ${planPath}`);
   } else {
-    // Auto-generate plan
     console.log('📋 Auto-generating fill plan from profile...');
     const profile = creds.profile || await loadProfile();
     const scan = await scanForm(url, {
@@ -295,9 +366,9 @@ async function cmdFill(url, planPath) {
       mode: creds.mode,
     });
     const resumePath = await pickResume('', resolve(process.cwd(), 'config', 'resumes.yml')).catch(() => null);
+    if (resumePath) profile._resumePath = resumePath;
     plan = await generatePlan(scan, profile, { resumePath, url });
 
-    // Save generated plan
     const slug = slugify(url);
     const planOutPath = resolve(process.cwd(), 'forms', `${slug}-plan.json`);
     await writeFile(planOutPath, JSON.stringify(plan, null, 2));
@@ -309,8 +380,8 @@ async function cmdFill(url, planPath) {
     }
   }
 
-  // Apply learnings from past runs
   plan = await applyLearnings(plan, url);
+  plan = resolveDynamicFields(plan);
 
   try {
     await fillForm(url, plan, {
@@ -319,6 +390,7 @@ async function cmdFill(url, planPath) {
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
+      confirmSubmit,
     });
   } catch (err) {
     const timestamp = new Date().toISOString();
@@ -330,9 +402,10 @@ async function cmdFill(url, planPath) {
 // ─── APPLY (full pipeline) ──────────────────────────────────────────────────
 async function cmdApply(url) {
   if (!url) {
-    console.log('Usage: node cli.mjs apply <url> [--signup|--signin]');
+    console.log('Usage: node cli.mjs apply <url> [--signup|--signin] [--confirm-submit]');
     process.exit(1);
   }
+  assertWorkdayUrl(url);
 
   const profilePath = findFilePath('config/profile.yml');
   if (!existsSync(profilePath)) {
@@ -348,9 +421,12 @@ async function cmdApply(url) {
   console.log(`${'═'.repeat(60)}\n`);
 
   const ats = detectATS(url);
-  console.log(`🔍 ATS detected: ${ats}`);
+  console.log(`🔍 ATS: ${ats}`);
+  if (ats !== 'workday') {
+    console.error('❌ Only Workday career URLs are supported in this build.');
+    process.exit(1);
+  }
 
-  // Launch single browser session for the entire pipeline
   const browser = await chromium.launch({ headless: false });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -359,7 +435,6 @@ async function cmdApply(url) {
   const page = await context.newPage();
 
   try {
-    // Step 1: Scan (with auth if Workday)
     console.log('\n── Step 1: Scan form ──');
     const scan = await scanForm(url, {
       browser,
@@ -373,7 +448,6 @@ async function cmdApply(url) {
       mode: creds.mode,
     });
 
-    // Step 2: Pick resume
     console.log('\n── Step 2: Load profile & pick resume ──');
     let jdText = '';
     try {
@@ -385,12 +459,11 @@ async function cmdApply(url) {
     if (existsSync(resumesYml)) {
       resumePath = await pickResume(jdText, resumesYml);
     }
+    if (resumePath) profile._resumePath = resumePath;
 
-    // Step 3: Generate plan
     console.log('\n── Step 3: Generate fill plan ──');
     let plan = await generatePlan(scan, profile, { resumePath, jdText, url });
 
-    // Save plan
     const slug = slugify(url);
     const planPath = resolve(process.cwd(), 'forms', `${slug}-plan.json`);
     await writeFile(planPath, JSON.stringify(plan, null, 2));
@@ -402,10 +475,9 @@ async function cmdApply(url) {
       plan.unmapped.forEach(f => console.log(`    - ${f.label} [${f.type}]`));
     }
 
-    // Step 4: Apply learnings
     plan = await applyLearnings(plan, url);
+    plan = resolveDynamicFields(plan);
 
-    // Step 5: Fill + Submit
     console.log('\n── Step 4: Fill & Submit ──');
     const status = await fillForm(url, plan, {
       browser,
@@ -416,6 +488,7 @@ async function cmdApply(url) {
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
+      confirmSubmit,
     });
 
     console.log(`\n${'═'.repeat(60)}`);
@@ -425,7 +498,7 @@ async function cmdApply(url) {
     const timestamp = new Date().toISOString();
     console.error(`\n❌ [${timestamp}] Form fill error for ${url}: ${err.message}`);
     console.log('   Stopping pipeline. Exiting cleanly without reopening job link.\n');
-    try { await browser.close(); } catch {}
+    try { await browser.close(); } catch { }
   }
 }
 
@@ -435,6 +508,7 @@ async function cmdQueue(subcommand, ...args) {
     case 'add': {
       const url = args[0];
       if (!url) { console.log('Usage: node cli.mjs queue add <url> [company]'); process.exit(1); }
+      assertWorkdayUrl(url);
       const company = args.slice(1).join(' ') || '';
       await addToQueue(url, company);
       break;
@@ -495,11 +569,14 @@ async function cmdQueue(subcommand, ...args) {
 async function cmdBatch(file) {
   let urls;
   if (file) {
-    const content = await readFile(file, 'utf-8');
-    urls = content.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
-    console.log(`📦 Batch apply: ${urls.length} URLs from ${file}\n`);
+    const targets = await readTargetsFile(file);
+    urls = targets.map(t => t.url);
+    console.log(`📦 Batch apply: ${urls.length} Workday URL(s) from ${file}\n`);
+    if (urls.length === 0) {
+      console.log('No valid Workday URLs found in file.');
+      return;
+    }
   } else {
-    // Process queue
     const pending = await getPendingFromQueue();
     if (pending.length === 0) {
       console.log('📋 No pending URLs. Add some with: node cli.mjs queue add <url>');
@@ -564,7 +641,6 @@ Learnings:
   Last run: ${stats.lastRun || 'never'}
 `);
 
-  // Show CSV report if exists
   const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
   if (existsSync(csvPath)) {
     const csv = await readFile(csvPath, 'utf-8');
@@ -573,7 +649,6 @@ Learnings:
     lines.slice(-6).forEach(l => console.log(`  ${l}`));
   }
 
-  // Show queue status
   const queue = await loadQueue();
   if (queue.length > 0) {
     const pending = queue.filter(e => e.status === 'pending').length;
@@ -592,7 +667,6 @@ async function cmdList() {
 ╚════════════════════════════════════════════════════════╝
 `);
 
-  // 1. Load applied.csv
   const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
   let applied = [];
   if (existsSync(csvPath)) {
@@ -606,16 +680,13 @@ async function cmdList() {
       if (isNewFormat) {
         applied.push({ date: parts[0], company: parts[1], role: parts[2], url: parts[3], status: parts[4], ats: parts[5] || '' });
       } else {
-        // Old format: date,url,company,role,status,screenshot
         applied.push({ date: parts[0], url: parts[1], company: parts[2], role: parts[3], status: parts[4], ats: '' });
       }
     }
   }
 
-  // 2. Load queue
   const queue = await loadQueue();
 
-  // 3. Load targets.txt
   const targetsPath = resolve(process.cwd(), 'targets.txt');
   let targets = [];
   if (existsSync(targetsPath)) {
@@ -623,13 +694,12 @@ async function cmdList() {
     targets = raw.split('\n').map(l => l.trim()).filter(l => l && !l.startsWith('#'));
   }
 
-  // Applied jobs
   const submitted = applied.filter(a => a.status === 'submitted');
   const attempted = applied.filter(a => a.status !== 'submitted');
 
   if (submitted.length > 0) {
     console.log(`✅ SUBMITTED (${submitted.length})\n`);
-    console.log('  Date       │ Company              │ Role                              │ ATS');
+    console.log('  Date        │ Company              │ Role                              │ ATS');
     console.log('  ───────────┼──────────────────────┼───────────────────────────────────┼──────────');
     for (const a of submitted) {
       const company = (a.company || '—').substring(0, 20).padEnd(20);
@@ -650,7 +720,6 @@ async function cmdList() {
     console.log();
   }
 
-  // Pending queue
   const pending = queue.filter(e => e.status === 'pending');
   if (pending.length > 0) {
     console.log(`⏳ PENDING in queue (${pending.length})\n`);
@@ -662,13 +731,11 @@ async function cmdList() {
     console.log(`\n  Run 'auto-apply batch' to process these.\n`);
   }
 
-  // Targets not yet in queue or applied
   const appliedUrls = new Set([...applied.map(a => a.url), ...queue.map(e => e.url)]);
   const unapplied = targets.filter(t => !appliedUrls.has(t));
   if (unapplied.length > 0) {
     console.log(`📋 NOT YET APPLIED from targets.txt (${unapplied.length})\n`);
     for (const url of unapplied.slice(0, 20)) {
-      // Extract company from URL
       try {
         const host = new URL(url).hostname.replace(/^(www|careers|jobs|job-boards)\./i, '').replace(/\..+$/, '');
         console.log(`  ${host.padEnd(20)} ${url}`);
@@ -685,13 +752,11 @@ async function cmdList() {
     console.log('📋 No applications yet. Run: auto-apply apply <url>\n');
   }
 
-  // Summary
   console.log('═'.repeat(80));
   console.log(`  Total: ${submitted.length} submitted, ${attempted.length} attempted, ${pending.length} pending, ${unapplied.length} remaining`);
   console.log('═'.repeat(80));
 }
 
-// Simple CSV line parser (duplicated from reporter for CLI standalone use)
 function parseCSVLine(line) {
   const parts = [];
   let current = '';
@@ -714,15 +779,15 @@ function parseCSVLine(line) {
 // ─── HELP ───────────────────────────────────────────────────────────────────
 function showHelp() {
   console.log(`
-auto-apply — Autonomous job application engine
+auto-apply — Workday Auto-Apply Bot (Node.js + Playwright)
 
 Usage:
-  node cli.mjs setup                       Set up your profile
-  node cli.mjs scan <url>                  Scan form fields → JSON
+  node cli.mjs setup                     Set up your profile
+  node cli.mjs scan <url>                  Scan Workday form fields → JSON
   node cli.mjs fill <url> [plan.json]      Fill form (auto-plan if no plan given)
-  node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit → OTP
-  node cli.mjs batch [targets.txt]         Apply to all URLs in file (or process queue)
-  node cli.mjs queue add <url> [company]   Add URL to application queue
+  node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit
+  node cli.mjs batch [targets.txt]         Apply to all Workday URLs in file (or queue)
+  node cli.mjs queue add <url> [company]   Add Workday URL to application queue
   node cli.mjs queue list                  Show queue entries
   node cli.mjs queue remove <url>          Remove URL from queue
   node cli.mjs queue clear                 Clear completed/failed entries
@@ -730,18 +795,16 @@ Usage:
   node cli.mjs status                      Show stats & learnings
 
 Options:
-  --otp-email <gmail>           Gmail for OTP (or set EMAIL in .env)
-  --otp-password <app-pw>       Gmail App Password (or set APP_PASSWORD in .env)
-  --workday-email <email>       Workday account email (or set WORKDAY_EMAIL in .env)
-  --workday-password <password> Workday account password (or set WORKDAY_PASSWORD in .env)
+  --signin / --signup          Workday auth mode (default: signin — tries login, then Create Account if no account exists on that tenant)
+  --confirm-submit             Pause for operator confirmation before final Submit
+  --workday-email <email>      Workday account email (or WORKDAY_EMAIL in .env)
+  --workday-password <password> Workday password (or WORKDAY_PASSWORD in .env)
 
-Supported ATS: Greenhouse, Ashby, Lever, Workday, Gem, iCIMS, SmartRecruiters, generic
+Scope: Workday career sites only (myworkdayjobs.com). Headed browser always.
 
 Examples:
-  node cli.mjs apply https://job-boards.greenhouse.io/company/jobs/123
-  node cli.mjs queue add https://careers.adobe.com/us/en/job/R167447 Adobe
-  node cli.mjs batch                       # process pending queue entries
-  node cli.mjs batch targets.txt           # process URLs from file
+  node cli.mjs apply https://company.wd5.myworkdayjobs.com/en-US/company/job/123
+  node cli.mjs batch targets.txt
 `);
 }
 
@@ -750,15 +813,15 @@ async function main() {
   await loadEnv();
 
   switch (command) {
-    case 'setup':  await cmdSetup(); break;
-    case 'scan':   await cmdScan(positionalArgs[0]); break;
-    case 'fill':   await cmdFill(positionalArgs[0], positionalArgs[1]); break;
-    case 'apply':  await cmdApply(positionalArgs[0]); break;
-    case 'batch':  await cmdBatch(positionalArgs[0]); break;
-    case 'queue':  await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;
-    case 'list':   await cmdList(); break;
+    case 'setup': await cmdSetup(); break;
+    case 'scan': await cmdScan(positionalArgs[0]); break;
+    case 'fill': await cmdFill(positionalArgs[0], positionalArgs[1]); break;
+    case 'apply': await cmdApply(positionalArgs[0]); break;
+    case 'batch': await cmdBatch(positionalArgs[0]); break;
+    case 'queue': await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;
+    case 'list': await cmdList(); break;
     case 'status': await cmdStatus(); break;
-    default:       showHelp();
+    default: showHelp();
   }
 }
 

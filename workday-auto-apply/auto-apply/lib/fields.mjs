@@ -18,48 +18,114 @@ export function fuzzyScore(needle, haystack) {
   return overlap.length / Math.max(aWords.length, bWords.length) * 0.6;
 }
 
+/**
+ * If a locator resolved to a <label> or wrapper (Workday often has label.for
+ * pointing at a missing id), walk to the actual input/combobox.
+ * @param {import('playwright').ElementHandle} handle
+ * @returns {Promise<import('playwright').ElementHandle>}
+ */
+export async function resolveEditableControl(handle) {
+  if (!handle) return null;
+  const resolved = await handle.evaluateHandle(el => {
+    const isFillable = (n) => {
+      if (!n || n.nodeType !== 1) return false;
+      const tag = n.tagName.toLowerCase();
+      if (tag === 'label') return false;
+      if (['input', 'textarea', 'select'].includes(tag)) return true;
+      const role = n.getAttribute('role');
+      if (role === 'combobox' || role === 'textbox' || role === 'searchbox' || role === 'listbox') return true;
+      if (n.getAttribute('contenteditable') === 'true') return true;
+      if (n.getAttribute('data-automation-id') === 'select-widget') return true;
+      return false;
+    };
+
+    if (isFillable(el)) return el;
+
+    if (el.tagName === 'LABEL') {
+      const forId = el.getAttribute('for');
+      if (forId) {
+        const byId = document.getElementById(forId);
+        if (isFillable(byId)) return byId;
+      }
+      const inner = el.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"], [role="textbox"], [data-automation-id="select-widget"]');
+      if (inner) return inner;
+    }
+
+    const nested = el.querySelector('input:not([type="hidden"]):not([type="search"]), textarea, select, [role="combobox"], [role="textbox"], [data-automation-id="select-widget"]');
+    if (nested) return nested;
+
+    const container = el.closest('[data-automation-id*="formField"], [data-automation-id*="Field"], fieldset') || el.parentElement;
+    if (container) {
+      const inContainer = container.querySelector('input:not([type="hidden"]):not([type="search"]), textarea, select, [role="combobox"], [role="textbox"], [data-automation-id="select-widget"]');
+      if (inContainer) return inContainer;
+    }
+    return el;
+  });
+  return resolved.asElement() || handle;
+}
+
 // ─── Universal element finder ───────────────────────────────────────────────
-// Tries multiple strategies to locate a form field. No hardcoded portal logic.
+export async function repairBrokenLabelForAttributes(page) {
+  await page.evaluate(() => {
+    const assignId = (el) => {
+      if (!el || el.id) return el?.id || null;
+      const id = `auto-generated-${Math.random().toString(36).slice(2, 10)}`;
+      el.id = id;
+      return id;
+    };
+
+    const candidates = Array.from(document.querySelectorAll('input, select, textarea, [role="combobox"], [role="textbox"], [contenteditable="true"], [data-automation-id*="select"], [data-automation-id*="field"]'));
+    for (const candidate of candidates) {
+      const candidateId = candidate.id || assignId(candidate);
+      const label = candidate.closest('label') || Array.from(document.querySelectorAll('label')).find((node) => {
+        const forId = node.getAttribute('for');
+        return forId && forId === candidateId;
+      });
+      if (!label) continue;
+      const labelFor = label.getAttribute('for');
+      if (!labelFor || !document.getElementById(labelFor)) {
+        label.setAttribute('for', candidateId);
+      }
+    }
+
+    const labels = Array.from(document.querySelectorAll('label[for]'));
+    for (const label of labels) {
+      const targetId = label.getAttribute('for');
+      if (!targetId || document.getElementById(targetId)) continue;
+      const root = label.closest('[data-automation-id*="formField"], fieldset, [role="group"], .field');
+      const field = (root || label.parentElement)?.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select, [role="combobox"], [role="textbox"], [contenteditable="true"], [data-automation-id*="select"], [data-automation-id*="field"]') || document.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, select, [role="combobox"], [role="textbox"], [contenteditable="true"], [data-automation-id*="select"], [data-automation-id*="field"]');
+      if (!field) continue;
+      const resolvedId = assignId(field);
+      label.setAttribute('for', resolvedId);
+    }
+  }).catch(() => {});
+}
+
 export async function findField(page, entry) {
   const { selector, id, name, label, automationId } = entry;
+  await repairBrokenLabelForAttributes(page).catch(() => {});
   const strategies = [
-    // 1. Direct selector from scan
-    async () => selector ? await page.$(selector) : null,
-    // 2. By data-automation-id (Workday standard)
+    // 1. data-automation-id (Workday highest-priority locator)
     async () => {
       const autoId = automationId || entry['data-automation-id'];
-      if (autoId) return await page.$(`[data-automation-id="${autoId}"]`);
-      return null;
-    },
-    // 3. By ID (with attribute selector and escaped ID)
-    async () => {
-      if (!id) return null;
-      try {
-        const byAttr = await page.$(`[id="${id}"]`);
-        if (byAttr) return byAttr;
-        return await page.$(`#${CSS.escape(id)}`);
-      } catch {
-        return null;
+      if (!autoId) return null;
+      const loc = page.locator(`[data-automation-id="${autoId}"]`).first();
+      if (await loc.count() > 0 && await loc.isVisible().catch(() => false)) {
+        return await loc.elementHandle();
       }
+      return await page.$(`[data-automation-id="${autoId}"]`);
     },
-    // 4. By name
-    async () => name ? await page.$(`[name="${name}"]`) : null,
-    // 5. Playwright's getByLabel (the most robust for accessible forms)
+    // 2. Label text
     async () => {
       if (!label) return null;
       const cleanLabel = label.replace(/\*+/g, '').trim();
       if (!cleanLabel) return null;
       try {
         const loc = page.getByLabel(cleanLabel, { exact: false });
-        if (await loc.count() > 0) return await loc.first().elementHandle();
+        if (await loc.count() > 0 && await loc.first().isVisible().catch(() => false)) {
+          return await loc.first().elementHandle();
+        }
       } catch { /* label not found */ }
-      return null;
-    },
-    // 6. Find input near label text (for custom layouts)
-    async () => {
-      if (!label) return null;
-      const cleanLabel = label.replace(/\*+/g, '').trim();
-      if (!cleanLabel) return null;
       for (const combo of [
         `label:has-text("${cleanLabel}") + input`,
         `label:has-text("${cleanLabel}") + div input`,
@@ -79,12 +145,42 @@ export async function findField(page, entry) {
       }
       return null;
     },
+    // 3. id / name
+    async () => {
+      if (id) {
+        try {
+          const byAttr = await page.$(`[id="${id}"]`);
+          if (byAttr) return byAttr;
+          return await page.$(`#${CSS.escape(id)}`);
+        } catch { /* try name */ }
+      }
+      return name ? await page.$(`[name="${name}"]`) : null;
+    },
+    // 4. ARIA role + accessible name
+    async () => {
+      if (!label) return null;
+      const cleanLabel = label.replace(/\*+/g, '').trim();
+      if (!cleanLabel) return null;
+      const escaped = cleanLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const nameRegex = new RegExp(escaped, 'i');
+      for (const role of ['textbox', 'combobox', 'checkbox', 'radio', 'button', 'searchbox']) {
+        try {
+          const loc = page.getByRole(role, { name: nameRegex });
+          if (await loc.count() > 0 && await loc.first().isVisible().catch(() => false)) {
+            return await loc.first().elementHandle();
+          }
+        } catch { /* try next role */ }
+      }
+      return null;
+    },
+    // 5. Direct selector from scan
+    async () => selector ? await page.$(selector) : null,
   ];
 
   for (const strategy of strategies) {
     try {
       const el = await strategy();
-      if (el) return el;
+      if (el) return await resolveEditableControl(el);
     } catch { /* try next */ }
   }
   return null;
@@ -110,8 +206,254 @@ const OPTION_SELECTORS = [
   '[class*="MenuItem"]',                   // MUI Select
 ];
 
+/**
+ * Collect visible dropdown option labels from the open list (or open via trigger).
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator|null} [trigger]
+ * @returns {Promise<string[]>}
+ */
+export async function collectVisibleDropdownOptions(page, trigger = null) {
+  if (trigger) {
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(200);
+    await trigger.scrollIntoViewIfNeeded().catch(() => {});
+    await trigger.click({ force: true }).catch(() => trigger.evaluate((el) => el.click()));
+    await page.waitForTimeout(600);
+  }
+
+  const selectorCsv = OPTION_SELECTORS.join(', ');
+  const options = await page.evaluate((selectors) => {
+    const seen = new Set();
+    const results = [];
+    for (const sel of selectors.split(', ')) {
+      document.querySelectorAll(sel).forEach((el) => {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+        if (!el.offsetParent && el.getClientRects().length === 0) return;
+        const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || text.length > 140 || /^no options$/i.test(text) || /^select\.{3}$/i.test(text)) return;
+        const key = text.toLowerCase();
+        if (seen.has(key)) return;
+        seen.add(key);
+        results.push(text);
+      });
+    }
+    return results;
+  }, selectorCsv);
+
+  return options;
+}
+
+// ─── Hierarchical dropdown handler (Workday prompt drill-down) ───────────────
+export async function handleHierarchicalDropdown(page, trigger, primaryText, secondaryText, options = {}) {
+  const timeout = options.timeout || 8000;
+  const steps = [primaryText, secondaryText].filter(Boolean);
+
+  async function clickVisibleTextOption(targetText, hint = '') {
+    const escaped = String(targetText).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const regex = new RegExp(escaped, 'i');
+    const candidates = [
+      page.getByRole('option', { name: regex }),
+      page.getByRole('treeitem', { name: regex }),
+      page.locator('[data-automation-id="promptOption"]').filter({ hasText: regex }),
+      page.locator('[role="option"], [data-automation-id="promptOption"], li, div').filter({ hasText: regex }),
+    ];
+
+    for (const c of candidates) {
+      const count = await c.count().catch(() => 0);
+      if (!count) continue;
+      const hit = c.first();
+      const visible = await hit.isVisible({ timeout: 700 }).catch(() => false);
+      if (visible) {
+        await hit.click({ force: true });
+        return true;
+      }
+    }
+
+    const fallback = page.locator('[role="option"], [data-automation-id="promptOption"], li, div').filter({ hasText: new RegExp(String(targetText).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+    if (await fallback.isVisible({ timeout: 700 }).catch(() => false)) {
+      await fallback.click({ force: true });
+      return true;
+    }
+
+    if (hint) {
+      const maybe = page.locator('button, [role="combobox"], [role="button"]').filter({ hasText: new RegExp(String(hint).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+      if (await maybe.isVisible({ timeout: 700 }).catch(() => false)) {
+        await maybe.click({ force: true });
+      }
+    }
+
+    return false;
+  }
+
+  try {
+    if (trigger && typeof trigger.click === 'function') {
+      await trigger.scrollIntoViewIfNeeded().catch(() => {});
+      await trigger.click({ force: true }).catch(() => trigger.evaluate(el => el.click()));
+    } else if (typeof trigger === 'string') {
+      const el = await page.$(trigger);
+      if (el) await el.click({ force: true });
+    }
+    await page.waitForTimeout(400);
+
+    for (let i = 0; i < steps.length; i++) {
+      const text = String(steps[i]);
+      const ok = await clickVisibleTextOption(text, i === 0 ? primaryText : secondaryText);
+      if (!ok) {
+        throw new Error(`Could not select hierarchical option: ${text}`);
+      }
+
+      if (i < steps.length - 1) {
+        try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+        await page.waitForTimeout(700);
+      }
+    }
+
+    return { success: true, method: 'hierarchical-dropdown', steps };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Click a visible Workday prompt option by DOM text.
+ * Prefers "United States of America (+1)" over "United States Minor Outlying Islands (+1)".
+ * @param {import('playwright').Page} page
+ * @param {string[]} needles
+ * @returns {Promise<string|null>}
+ */
+export async function clickVisiblePromptOption(page, needles = []) {
+  const chosen = await page.evaluate((needlesIn) => {
+    const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const nodes = Array.from(document.querySelectorAll(
+      '[role="option"], [data-automation-id="promptOption"], [role="treeitem"], [data-automation-id="menuItem"]'
+    )).filter(el => {
+      const style = window.getComputedStyle(el);
+      return style.display !== 'none' && style.visibility !== 'hidden' && (el.offsetWidth > 0 || el.getClientRects().length > 0);
+    });
+
+    const items = nodes.map(el => ({ el, text: normalize(el.textContent) })).filter(i => i.text);
+
+    const score = (text) => {
+      const t = text.toLowerCase();
+      let s = 0;
+      for (const n of needlesIn) {
+        const needle = String(n || '').toLowerCase().replace(/\s+/g, ' ').trim();
+        if (!needle) continue;
+        if (t === needle) s += 10;
+        if (t.includes(needle)) s += 4;
+        if (needle.includes('united states of america') && t.includes('united states of america') && t.includes('+1')) s += 8;
+        if (t.includes('minor outlying')) s -= 6;
+      }
+      return s;
+    };
+
+    let best = null;
+    let bestScore = 0;
+    for (const item of items) {
+      const sc = score(item.text);
+      if (sc > bestScore) {
+        bestScore = sc;
+        best = item;
+      }
+    }
+    if (!best || bestScore <= 0) return null;
+    best.el.click();
+    return best.text;
+  }, needles);
+
+  return chosen;
+}
+
+// ─── Searchable dropdown handler (Country Phone Code etc.) ──────────────────
+export async function handleSearchableDropdown(page, trigger, searchTerm, optionText, options = {}) {
+  const timeout = options.timeout || 8000;
+  try {
+    if (options.alreadyOpen) {
+      /* trigger already opened by caller */
+    } else if (trigger && typeof trigger.click === 'function') {
+      await trigger.scrollIntoViewIfNeeded().catch(() => {});
+      await trigger.click({ force: true }).catch(() => trigger.evaluate(el => el.click()));
+      await page.waitForTimeout(300);
+    } else if (typeof trigger === 'string') {
+      const el = await page.$(trigger);
+      if (el) await el.click({ force: true });
+      await page.waitForTimeout(300);
+    }
+
+    // 2. Locate search input or use trigger if it's already an input
+    const searchInput = page.locator('input[role="searchbox"], input[type="search"], [data-automation-id*="search" i], input[aria-label*="Search" i]')
+      .filter({ has: page.locator(':visible') })
+      .first();
+
+    const isSearchBoxVisible = await searchInput.isVisible().catch(() => false);
+    if (isSearchBoxVisible) {
+      await searchInput.fill('');
+      await searchInput.pressSequentially(searchTerm, { delay: 40 });
+    } else {
+      let isInput = false;
+      try {
+        isInput = await trigger.evaluate(el => el.tagName.toLowerCase() === 'input');
+      } catch {}
+
+      if (isInput) {
+        await trigger.fill('');
+        await trigger.pressSequentially(searchTerm, { delay: 40 });
+      } else {
+        await page.keyboard.type(searchTerm, { delay: 40 });
+      }
+    }
+
+    await page.waitForTimeout(400);
+    try {
+      await page.waitForFunction((needle) => {
+        const n = String(needle || '').toLowerCase();
+        return Array.from(document.querySelectorAll('[role="option"], [data-automation-id="promptOption"]'))
+          .some(el => (el.textContent || '').toLowerCase().includes(n) && el.offsetParent !== null);
+      }, searchTerm, { timeout: 6000 });
+    } catch { /* list may still be unfiltered; Enter often still selects the top match */ }
+
+    // Workday country codes: type query then Enter (same as manual use)
+    if (options.confirmWithEnter !== false) {
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(400);
+      return { success: true, method: 'searchable-dropdown-enter' };
+    }
+
+    // 3. Select matching option from open list (DOM text, not vision)
+    const clicked = await clickVisiblePromptOption(page, [optionText, searchTerm]);
+    if (clicked) {
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(300);
+      return { success: true, method: 'searchable-dropdown' };
+    }
+
+    const optEscaped = optionText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const optRegex = new RegExp(optEscaped, 'i');
+
+    const matchOpt = page.getByRole('option', { name: optRegex })
+      .or(page.locator('[data-automation-id="promptOption"]').filter({ hasText: optRegex }))
+      .or(page.getByText(optionText, { exact: false }))
+      .first();
+
+    await matchOpt.waitFor({ state: 'visible', timeout });
+    await matchOpt.click({ force: true }).catch(() => matchOpt.evaluate(el => el.click()));
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.waitForTimeout(300);
+
+    return { success: true, method: 'searchable-dropdown' };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+}
+
 // ─── Universal dropdown handler ─────────────────────────────────────────────
 export async function handleDropdown(page, element, value, label) {
+  // If hierarchical array provided (e.g. ['Website', 'Workday.com'])
+  if (Array.isArray(value) && value.length >= 2) {
+    return await handleHierarchicalDropdown(page, element, value[0], value[1]);
+  }
+
   // Strategy 1: Try native <select> first
   const tagName = await element.evaluate(el => el.tagName.toLowerCase());
   if (tagName === 'select') {
@@ -126,7 +468,9 @@ export async function handleDropdown(page, element, value, label) {
     }
   }
 
-  // Strategy 2: Type value + press Enter (best for Workday searchable selects, "How Did You Hear", React Select)
+  // Strategy 2: Type value + press Enter — skip for referral source (click-only; avoids +91 phone search)
+  const isReferralSource = /how\s*did\s*you\s*hear/i.test(String(label || ''));
+  if (!isReferralSource) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await element.scrollIntoViewIfNeeded();
@@ -194,6 +538,7 @@ export async function handleDropdown(page, element, value, label) {
         console.log(`    ↻ Error attempt ${attempt}/3: ${err.message?.substring(0, 60)}`);
       }
     }
+  }
   }
 
   // Strategy 3: Click to open + scan all options (non-searchable dropdowns)

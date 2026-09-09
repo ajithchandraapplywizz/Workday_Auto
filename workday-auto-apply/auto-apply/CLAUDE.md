@@ -1,76 +1,45 @@
-# auto-apply — Autonomous Job Application Engine
+# CLAUDE.md — Workday Auto-Apply Bot
 
-## What is this
+Context file for Claude Code (or any Claude-based IDE agent) working in this repository. This complements `AGENTS.md` — read both before making changes.
 
-Playwright-based autonomous job application form filler. User provides resume + profile details + job URLs → engine scans each form, auto-generates a fill plan, fills every field, submits, handles OTP, takes screenshots, logs results. Self-learns from failures.
+## What this project is
 
-## Architecture
+A Node.js + Playwright bot that applies to jobs on live **Workday** career sites. Local Phase: single-user, terminal-driven. Production Phase: multi-user, Telegram + Supabase-driven. Full spec lives in `docs/` — always check there before assuming behavior.
 
-```
-cli.mjs                → CLI entry point (setup/scan/fill/apply/batch/queue/status)
-lib/
-  engine.mjs           → Core fill engine (all field type handlers + verify + submit)
-  scanner.mjs          → Form field scanner (extracts inputs/selects/buttons)
-  planner.mjs          → Auto plan generation (maps field labels → profile YAML)
-  discovery.mjs        → ATS detection & form navigation (Greenhouse/Ashby/Lever/Workday)
-  fields.mjs           → Universal field finder, dropdown handler, fuzzy matching
-  otp.mjs              → Gmail IMAP OTP extraction & entry
-  workday.mjs          → Workday account creation & login
-  learner.mjs          → Self-learning store (tracks failures, corrections)
-  reporter.mjs         → Screenshots, CSV logging & queue management
-```
+## Non-negotiable rules for this codebase
 
-## Supported ATS Platforms
+1. **Workday only.** Do not add, restore, or reference Greenhouse/Lever/Ashby/iCIMS/SmartRecruiters logic.
+2. **DOM-first.** Field discovery and decisions come from the DOM/accessibility tree, never from screenshots or vision models. Screenshots exist for audit only.
+3. **Never fabricate an answer.** Sources, in priority order: (1) Q&A cache fuzzy match, (2) resume/profile factual data, (3) human-provided answer (terminal locally, Telegram in production) — which is then persisted permanently.
+4. **Compliance questions always need a human-sourced answer on file** before they're ever auto-submitted (work auth, visa, EEO categories).
+5. **Headed browser always** — `headless: false` is not configurable away in Local Phase.
+6. **Config/data-driven, not hardcoded.** Profile data, answers, and credentials live in `config/*.yml` (Local) or Supabase (Production) — never inline in code.
+7. **Ask, don't guess,** on any ambiguous Workday selector, page flow, or Telegram/Supabase behavior not covered by `docs/`.
 
-- **Greenhouse** — React Select dropdowns, intl-tel-input phone, embedded forms
-- **Ashby** — Yes/No button toggles, typeahead location, custom domain support
-- **Lever** — /apply/ path navigation, ARIA dropdowns
-- **Workday** — Login/account creation, multi-step wizard, conditional fields
-- **Gem** — Direct application pages
-- **iCIMS** — Detection, generic fill
-- **SmartRecruiters** — Detection, generic fill
-- **Generic** — Any form with Apply button + standard inputs
+## Where to look first
 
-## Commands
+| Question | File |
+|---|---|
+| What are we building and why? | `docs/prd.md` |
+| What exactly must this feature do? (by requirement ID) | `docs/rd.md` |
+| What's the exact control flow? | `docs/workflow.md` |
+| How should the bot interact with Workday's DOM / escalate to a human? | `docs/ui-ux.md` |
+| What does the Supabase schema look like? | `docs/backend-schema.md` |
+| What order do I build things in, and what's the checkpoint for each? | `docs/implementation.md` |
+| How do I set up the Telegram bot? | `docs/telegram-bot-setup.md` |
+| What currently works / is broken / is next? | `STATE.md` |
+| What does the code actually do right now? | `CODEBASE-ANALYSIS.md` |
 
-```bash
-node cli.mjs setup                       # Create config/profile.yml
-node cli.mjs scan <url>                  # Scan form → forms/{slug}-scan.json
-node cli.mjs fill <url> [plan.json]      # Fill form (auto-plans if no plan.json)
-node cli.mjs apply <url>                 # Full pipeline: scan → plan → fill → submit → OTP
-node cli.mjs batch [targets.txt]         # Apply to all URLs (or process queue)
-node cli.mjs queue add <url> [company]   # Add URL to queue
-node cli.mjs queue list                  # Show queue
-node cli.mjs queue remove <url>          # Remove from queue
-node cli.mjs queue clear                 # Clear completed entries
-node cli.mjs status                      # Show stats & learnings
-```
+## Working style expected in this repo
 
-## Config Files
+- Smallest correct diff for the current sub-phase — no scope creep into a later phase's work.
+- Every change that touches `lib/`, `cli.mjs`, or `config/` updates `CODEBASE-ANALYSIS.md` in the same commit.
+- Every commit updates `STATE.md`.
+- Do not mark a task done without a passing checkpoint on a **live Workday URL**.
+- Do not silently swallow errors — catch, log (URL + timestamp + stack), screenshot, close cleanly, surface to the operator/user.
 
-- `config/profile.yml` — User profile (personal info, EEO, work auth, education)
-- `config/resumes.yml` — Resume variants with keyword matching
-- `.env` — Gmail credentials for OTP (EMAIL, APP_PASSWORD)
-- `targets.txt` — Job URLs to batch apply
+## Production Phase specifics (only after Local Phase Gate passes)
 
-## Data Files
-
-- `data/applied.csv` — Application log (date, company, role, url, status, ats)
-- `data/queue.csv` — Application queue (pending/applied/failed)
-- `data/learnings.json` — Self-learning corrections
-- `forms/` — Scan JSONs and fill plans
-- `screenshots/` — Pre/post-submit screenshots
-
-## Key Rules
-
-- **Always headed browser** — never use headless mode
-- **Profile is gitignored** — never commit personal data
-- **Verify before submit** — every field re-checked in DOM
-- **Screenshot everything** — evidence of what was filled/submitted
-- **Self-learn** — record results, apply corrections on future fills
-
-## Dependencies
-
-- `playwright` — Browser automation
-- `imapflow` — Gmail IMAP for OTP
-- `js-yaml` — YAML config parsing
+- `qaStore.mjs` switches its backing store from local YAML to Supabase `qa_answers` — same interface, different persistence layer. Don't fork the module; parameterize it.
+- All Telegram-facing text must never leak internal selectors, stack traces, or field IDs — plain language only (see `docs/ui-ux.md` §2.3).
+- Every table access must respect per-user isolation — verify with at least 2 concurrent test users before considering a Production task done.

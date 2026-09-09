@@ -12,7 +12,7 @@
 import { readFile, writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
 import { existsSync } from 'fs';
-import { detectATS } from './discovery.mjs';
+import { detectATS, getWorkdayTenant } from './discovery.mjs';
 
 const LEARNINGS_PATH = resolve(process.cwd(), 'data', 'learnings.json');
 
@@ -44,6 +44,7 @@ async function saveLearnings(data) {
 export async function recordResult(url, plan, status, fieldResults = []) {
   const data = await loadLearnings();
   const ats = detectATS(url);
+  const tenant = getWorkdayTenant(url || plan?.url || '');
 
   // Track result
   data.results.push({
@@ -51,6 +52,7 @@ export async function recordResult(url, plan, status, fieldResults = []) {
     company: plan.company || '',
     role: plan.role || '',
     ats,
+    tenant,
     status,
     date: new Date().toISOString(),
     field_errors: fieldResults.filter(f => f.status !== 'ok').map(f => ({
@@ -79,7 +81,7 @@ export async function recordResult(url, plan, status, fieldResults = []) {
 
     // Check if we already have this correction
     const existing = data.field_corrections.find(c =>
-      c.ats === ats && c.field === fr.field
+      c.ats === ats && c.tenant === tenant && c.field === fr.field
     );
 
     if (existing) {
@@ -88,6 +90,7 @@ export async function recordResult(url, plan, status, fieldResults = []) {
     } else {
       data.field_corrections.push({
         ats,
+        tenant,
         field: fr.field,
         type: fr.type,
         error: fr.error || fr.status,
@@ -103,11 +106,11 @@ export async function recordResult(url, plan, status, fieldResults = []) {
 // ─── Record an option correction ────────────────────────────────────────────
 // When the plan says "I don't wish to answer" but the actual option is
 // "I do not want to answer", record the mapping for future plans.
-export async function recordOptionCorrection(ats, fieldLabel, planValue, actualValue) {
+export async function recordOptionCorrection(ats, fieldLabel, planValue, actualValue, tenant = '') {
   const data = await loadLearnings();
 
   const existing = data.option_mappings.find(m =>
-    m.ats === ats && m.field_label === fieldLabel && m.plan_value === planValue
+    m.ats === ats && m.tenant === tenant && m.field_label === fieldLabel && m.plan_value === planValue
   );
 
   if (existing) {
@@ -116,6 +119,7 @@ export async function recordOptionCorrection(ats, fieldLabel, planValue, actualV
   } else {
     data.option_mappings.push({
       ats,
+      tenant,
       field_label: fieldLabel,
       plan_value: planValue,
       actual_value: actualValue,
@@ -128,15 +132,17 @@ export async function recordOptionCorrection(ats, fieldLabel, planValue, actualV
 
 // ─── Apply learnings to a plan ──────────────────────────────────────────────
 // Before filling, check if any field values need correction based on past experience.
-export async function applyLearnings(plan, url) {
+export async function applyLearnings(plan, url, tenantOverride = '') {
   const data = await loadLearnings();
   const ats = detectATS(url);
+  const tenant = tenantOverride || getWorkdayTenant(url || plan?.url || '');
   let corrections = 0;
 
   for (const fill of (plan.fills || [])) {
     // Check option mappings
     const mapping = data.option_mappings.find(m =>
       m.ats === ats &&
+      (m.tenant === tenant || (!m.tenant && !tenant)) &&
       m.plan_value === fill.value &&
       (m.field_label === fill.label || m.field_label === fill.id)
     );
@@ -159,9 +165,11 @@ export async function applyLearnings(plan, url) {
 export async function getStats() {
   const data = await loadLearnings();
   const byATS = {};
+  const byTenant = {};
 
   for (const result of data.results) {
     const ats = result.ats || 'unknown';
+    const tenant = result.tenant || 'global';
     if (!byATS[ats]) byATS[ats] = { total: 0, submitted: 0, failed: 0 };
     byATS[ats].total++;
     if (result.status === 'submitted' || result.status === 'submitted-with-otp') {
@@ -169,11 +177,20 @@ export async function getStats() {
     } else {
       byATS[ats].failed++;
     }
+
+    if (!byTenant[tenant]) byTenant[tenant] = { total: 0, submitted: 0, failed: 0 };
+    byTenant[tenant].total++;
+    if (result.status === 'submitted' || result.status === 'submitted-with-otp') {
+      byTenant[tenant].submitted++;
+    } else {
+      byTenant[tenant].failed++;
+    }
   }
 
   return {
     overall: data.stats,
     byATS,
+    byTenant,
     corrections: data.field_corrections.length,
     optionMappings: data.option_mappings.length,
     lastRun: data.results[data.results.length - 1]?.date || null,

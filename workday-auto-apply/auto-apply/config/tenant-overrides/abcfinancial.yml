@@ -1,0 +1,3 @@
+field_overrides:
+  - ["do you have any relatives that are currently employed by abc fitness", "_static.No"]
+  - ["are you currently or have you ever worked at an abc customer site", "_static.No"]

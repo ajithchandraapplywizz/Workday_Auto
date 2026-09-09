@@ -1,3 +1,10 @@
-import handshakeConfig from "./one-click-handshake/eslint.config.js";
-
-export default handshakeConfig;
+export default [
+  {
+    ignores: [
+      "**/node_modules/**",
+      "**/.git/**",
+      "**/dist/**",
+      "**/coverage/**",
+    ],
+  },
+];

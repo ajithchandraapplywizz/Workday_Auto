@@ -2,7 +2,7 @@
 
 > **Purpose:** Full analysis of the existing `auto-apply` codebase before planning and documentation begins. This report is the source of truth for what currently exists.
 
----
+
 
 ## 1. Overall Architecture
 
@@ -13,6 +13,7 @@ CLI entry point (cli.mjs)
         │
         ├─► scanner.mjs     — Navigates to job URL, extracts form fields
         ├─► planner.mjs     — Maps scanned fields → profile values → plan JSON
+        ├─► workdayDom.mjs  — Workday DOM + a11y discovery, MutationObserver, review check
         ├─► engine.mjs      — Fills form fields using the plan, handles Workday wizard
         ├─► workday.mjs     — Workday sign-in / sign-up / account creation
         ├─► discovery.mjs   — ATS detection + "Apply" button navigation
@@ -46,6 +47,7 @@ config/profile.yml + config/resumes.yml
 | `lib/scanner.mjs` | Scans job page form fields, outputs scan JSON |
 | `lib/planner.mjs` | Maps scanned fields to profile values, generates plan JSON |
 | `lib/engine.mjs` | Core fill engine: fills every field type, runs Workday 5-step wizard |
+| `lib/workdayDom.mjs` | Workday DOM/a11y field discovery, MutationObserver, required-field gate, review parse |
 | `lib/workday.mjs` | Workday-specific: sign-in, sign-up, account creation, email verification |
 | `lib/discovery.mjs` | ATS detection + portal navigation (Greenhouse, Lever, Ashby, Workday, Gem, Generic) |
 | `lib/fields.mjs` | Field finder (6 strategies), dropdown handler (4 strategies), fuzzy scoring |
@@ -277,11 +279,12 @@ The `FIELD_MAP` is an **83-entry regex→profile-path lookup table** covering:
 - Static answers (`_static.No`, `_static.Mobile`, `_static.LinkedIn`, `_static.true`)
 - Consent/terms checkboxes
 
-**Answer resolution priority** (V1+):
-1. `profile.yml` via FIELD_MAP match
-2. Parsed resume content — stored to profile/DB for future reuse
-3. Telegram fallback — bot asks user the question via Telegram; answer stored for future reuse
-4. Unmapped (skipped)
+**Answer resolution priority** (Workday runtime):
+1. `profile.yml` via FIELD_MAP (`mapLabelToProfileValue`)
+2. `profile.qa_answers` (canonical Q&A store)
+3. Plan fills / session `_runtimeAnswers`
+4. Terminal prompt for unknown required questions (`saveAnswerToYaml`)
+5. Unmapped (skipped if not required)
 
 **Fuzzy matching** (`fuzzyScore()`) is used when a plan value doesn't exactly match a dropdown option — returns 0–1 score based on exact, inclusion, and word-overlap comparisons.
 
@@ -412,6 +415,7 @@ workday-auto-apply/
     ├── lib/
     │   ├── scanner.mjs            ← Form field scanner
     │   ├── planner.mjs            ← Plan generator + FIELD_MAP
+    │   ├── workdayDom.mjs         ← Workday DOM + accessibility discovery
     │   ├── engine.mjs             ← Fill engine + Workday wizard
     │   ├── workday.mjs            ← Workday auth (sign-in + sign-up)
     │   ├── discovery.mjs          ← ATS detection + portal navigation

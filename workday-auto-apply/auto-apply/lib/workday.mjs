@@ -19,6 +19,99 @@ import {
   handleAdaptiveGateway,
 } from './discovery.mjs';
 
+/**
+ * Classify a failed Workday login attempt from visible page text.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<'needs-signup'|'locked'|'unknown'>}
+ */
+async function detectLoginFailureReason(page) {
+  return await page.evaluate(() => {
+    const text = (document.body?.innerText || '').toLowerCase();
+    if (
+      text.includes('wrong email address or password') ||
+      text.includes('wrong email or password') ||
+      text.includes('invalid credentials') ||
+      text.includes('unable to sign in') ||
+      text.includes('no account') ||
+      text.includes('account does not exist') ||
+      text.includes('create an account')
+    ) {
+      return 'needs-signup';
+    }
+    if (text.includes('account might be locked') || text.includes('account is locked')) {
+      return 'locked';
+    }
+    return 'unknown';
+  }).catch(() => 'unknown');
+}
+
+/** @returns {Promise<boolean>} */
+async function isStillOnSignInForm(page) {
+  const pwd = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible').catch(() => null);
+  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
+  return Boolean(pwd && !verifyPwd);
+}
+
+/**
+ * After successful login, click Apply if back on the JD page.
+ * @param {import('playwright').Page} page
+ * @param {string} mode
+ * @returns {Promise<true>}
+ */
+async function finishSuccessfulLogin(page, mode) {
+  await page.waitForTimeout(3000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  const hasApplyBtn = await page.$([
+    'a[data-automation-id="adventureButton"]',
+    'a[data-automation-id="applyButton"]',
+    'button[data-automation-id="applyButton"]',
+    '[data-automation-id="jobPostingApplyButton"]',
+    'a:has-text("Apply for this job")',
+    'button:has-text("Apply for this job")',
+  ].join(', ')).catch(() => null);
+
+  if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
+    console.log('   Logged in, on JD page — clicking Apply to enter application wizard...');
+    await discoverApplicationForm(page, page.url(), { mode });
+  }
+
+  return true;
+}
+
+/**
+ * Create account on this tenant, then sign in (or continue if already on the form).
+ * @param {import('playwright').Page} page
+ * @param {{ email: string, password: string, otpEmail?: string, otpPassword?: string, mode?: string }} opts
+ * @returns {Promise<boolean>}
+ */
+async function fallbackCreateAccountAndLogin(page, { email, password, otpEmail, otpPassword, mode = 'signin' }) {
+  console.log('   No account on this tenant — clicking Create Account and registering...');
+  const createdPassword = await workdayCreateAccount(page, email, otpEmail, otpPassword, password);
+  if (!createdPassword) {
+    console.log('   ❌ Account creation failed during signin fallback.');
+    return false;
+  }
+
+  await page.waitForTimeout(3000);
+  try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+  await page.waitForTimeout(2000);
+
+  const onSignIn = await isWorkdaySignInPage(page);
+  if (onSignIn) {
+    console.log('   Workday redirected to Sign In — logging in with registered credentials...');
+    const loggedIn = await workdayLogin(page, email, createdPassword);
+    if (loggedIn !== true) {
+      console.log('   ❌ Sign-in failed after account creation.');
+      return false;
+    }
+    return finishSuccessfulLogin(page, mode);
+  }
+
+  console.log('   ✅ Page already on application form after account creation.');
+  return true;
+}
+
 // ─── Generate a secure password ─────────────────────────────────────────────
 function generatePassword() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
@@ -51,6 +144,9 @@ export async function isWorkdayLogin(page) {
 }
 
 // ─── Login to Workday ───────────────────────────────────────────────────────
+/**
+ * @returns {Promise<true|'needs-signup'|'locked'|false>}
+ */
 export async function workdayLogin(page, email, password) {
   console.log('   Logging into Workday...');
 
@@ -108,11 +204,26 @@ export async function workdayLogin(page, email, password) {
   try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
   await page.waitForTimeout(2000);
 
-  const stillHasPasswordInput = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible').catch(() => null);
-  const stillOnLogin = stillHasPasswordInput || await page.$('.error-message, [data-automation-id*="error"]').catch(() => null);
+  if (await isStillOnSignInForm(page)) {
+    const reason = await detectLoginFailureReason(page);
+    if (reason === 'needs-signup') {
+      console.log('    Login failed — account may not exist on this tenant (wrong email/password message).');
+      return 'needs-signup';
+    }
+    if (reason === 'locked') {
+      console.log('    Workday reports the account may be locked.');
+      return 'locked';
+    }
+    // Still on sign-in with no recognized error — treat as missing account for this tenant.
+    console.log('    Still on Sign In form after submit — will try Create Account fallback.');
+    return 'needs-signup';
+  }
 
-  if (stillOnLogin) {
-    console.log('    Workday login with existing credentials failed or account does not exist.');
+  const hasError = await page.$('.error-message, [data-automation-id*="error"]').catch(() => null);
+  if (hasError && await hasError.isVisible().catch(() => false)) {
+    const reason = await detectLoginFailureReason(page);
+    if (reason === 'needs-signup') return 'needs-signup';
+    if (reason === 'locked') return 'locked';
     return false;
   }
 
@@ -141,11 +252,20 @@ export async function workdayCreateAccount(page, email, otpEmail, otpPassword, g
   }
 
   const password = givenPassword || generatePassword();
-  const pwdInput = await page.$('input[data-automation-id="password"], input[type="password"]');
-  if (pwdInput && await pwdInput.isVisible().catch(() => false)) await pwdInput.fill(password);
+  const pwdInputs = await page.$$('input[data-automation-id="password"], input[type="password"]');
+  for (const inp of pwdInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
+      if (autoId === 'verifyPassword') continue;
+      await inp.fill(password);
+      break;
+    }
+  }
 
   const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]');
-  if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) await verifyPwdInput.fill(password);
+  if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) {
+    await verifyPwdInput.fill(password);
+  }
 
   const termsCheckbox = await page.$('input[type="checkbox"][data-automation-id*="createAccountCheckbox"], input[type="checkbox"][data-automation-id*="agree"], input[type="checkbox"][name*="agree"], label:has-text("agree") input[type="checkbox"]');
   if (termsCheckbox) {
@@ -245,33 +365,32 @@ export async function handleWorkday(page, { email, password, otpEmail, otpPasswo
 
   console.log(`   Workday auth mode: "${mode}"`);
 
-  // Mode: "signin" -> call workdayLogin() only (skip workdayCreateAccount)
+  // Mode: "signin" — try login first; on wrong-password / no-account, create account then sign in
   if (mode === 'signin') {
     if (email && password) {
       console.log(`   Logging in to Workday as ${email}...`);
-      const loggedIn = await workdayLogin(page, email, password);
-      if (loggedIn) {
-        await page.waitForTimeout(3000);
-        try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+      const loginResult = await workdayLogin(page, email, password);
 
-        // Check if after sign-in we are back on JD page with Apply button visible
-        const hasApplyBtn = await page.$([
-          'a[data-automation-id="adventureButton"]',
-          'a[data-automation-id="applyButton"]',
-          'button[data-automation-id="applyButton"]',
-          '[data-automation-id="jobPostingApplyButton"]',
-          'a:has-text("Apply for this job")',
-          'button:has-text("Apply for this job")',
-        ].join(', ')).catch(() => null);
-
-        if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
-          console.log('   Logged in, on JD page — clicking Apply to enter application wizard...');
-          await discoverApplicationForm(page, page.url(), { mode });
-        }
-
-        return true;
+      if (loginResult === true) {
+        return finishSuccessfulLogin(page, mode);
       }
-      console.log('   ❌ Sign-in failed with provided credentials in signin mode.');
+
+      if (loginResult === 'needs-signup') {
+        return fallbackCreateAccountAndLogin(page, {
+          email,
+          password,
+          otpEmail,
+          otpPassword,
+          mode,
+        });
+      }
+
+      if (loginResult === 'locked') {
+        console.log('   ❌ Workday account appears locked — cannot proceed automatically.');
+        return false;
+      }
+
+      console.log('   ❌ Sign-in failed with provided credentials.');
       return false;
     }
     console.log('   ❌ Missing email or password for Workday signin mode.');
@@ -297,14 +416,14 @@ export async function handleWorkday(page, { email, password, otpEmail, otpPasswo
           // 2. If yes: call workdayLogin with the new email and password, wait for sign-in to complete
           console.log('   Workday redirected to Sign In page — logging in with new credentials...');
           const loggedIn = await workdayLogin(page, email, newPassword);
-          if (!loggedIn) {
+          if (loggedIn !== true) {
             console.log('   ❌ Sign-in failed after account creation.');
             return false;
           }
           await page.waitForTimeout(3000);
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
           console.log('   ✅ Sign-in confirmed after account creation.');
-          return true;
+          return finishSuccessfulLogin(page, mode);
         } else {
           // 3. If no: page is already on application form, proceed directly to fillForm
           console.log('   ✅ Page already on application form after account creation — proceeding directly to form.');

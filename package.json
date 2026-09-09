@@ -1,37 +1,24 @@
 {
-  "name": "handshake-autoapply",
+  "name": "workday-auto-apply",
   "version": "1.0.0",
   "private": true,
   "type": "module",
   "workspaces": [
-    "one-click-handshake",
-    "one-click-handshake/src/frontend",
-    "one-click-handshake/bot",
     "workday-auto-apply"
   ],
   "scripts": {
-    "lint": "eslint one-click-handshake/api one-click-handshake/lib one-click-handshake/worker",
-    "typecheck": "tsc --noEmit --project one-click-handshake",
-    "validate": "node one-click-handshake/scripts/validate-api.mjs",
-    "test:schema": "supabase db reset --local",
-    "test-tele": "node one-click-handshake/test-tele.js",
-    "check-webhook": "node one-click-handshake/test-check-webhook.js",
-    "test-telegram-buttons": "node one-click-handshake/test-telegram-buttons.js",
-    "test:full-flow": "node one-click-handshake/test-orchestration-full-flow.js",
-    "test:mock-apply": "node one-click-handshake/test-telegram-to-mock-apply.js",
-    "test:whatsapp": "node one-click-handshake/test-whatsapp-flow.js",
-    "test:whatsapp:live": "node one-click-handshake/test-whatsapp-live.js",
-    "test:whatsapp:receiver": "node one-click-handshake/test-whatsapp-receiver.js",
-    "test:whatsapp-apply": "node one-click-handshake/test-whatsapp-to-mock-apply.js",
-    "worker": "node one-click-handshake/worker/index.js",
-    "test:worker": "node one-click-handshake/worker/test-a6-harness.js"
+    "setup": "node workday-auto-apply/auto-apply/cli.mjs setup",
+    "scan": "node workday-auto-apply/auto-apply/cli.mjs scan",
+    "fill": "node workday-auto-apply/auto-apply/cli.mjs fill",
+    "apply": "node workday-auto-apply/auto-apply/cli.mjs apply",
+    "batch": "node workday-auto-apply/auto-apply/cli.mjs batch",
+    "queue": "node workday-auto-apply/auto-apply/cli.mjs queue",
+    "status": "node workday-auto-apply/auto-apply/cli.mjs status",
+    "lint": "eslint . --ext .js,.mjs",
+    "typecheck": "node --check workday-auto-apply/auto-apply/cli.mjs"
   },
   "dependencies": {
-    "@supabase/supabase-js": "^2.112.3",
-    "@whiskeysockets/baileys": "^7.0.0-rc14",
     "dotenv": "^17.4.2",
-    "googleapis": "^140.0.0",
-    "pino": "^10.3.1",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   },

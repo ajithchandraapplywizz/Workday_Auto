@@ -1,0 +1,13 @@
+# Booz Allen Hamilton (bah.wd1.myworkdayjobs.com)
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["have you previously been employed by booz allen", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]

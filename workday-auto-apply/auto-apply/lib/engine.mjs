@@ -9,33 +9,182 @@
  */
 
 import { chromium } from 'playwright';
-import { readFile } from 'fs/promises';
+import { readFile, writeFile } from 'fs/promises';
 import { resolve, basename } from 'path';
 import { existsSync } from 'fs';
 import { discoverApplicationForm, detectATS } from './discovery.mjs';
-import { findField, handleDropdown, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
+import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
 import { recordResult } from './learner.mjs';
 import { isSubmitButton } from './scanner.mjs';
 import { handleWorkday } from './workday.mjs';
-import { loadProfile, mapLabelToProfileValue } from './planner.mjs';
+import { loadProfile, mapLabelToProfileValue, resolveField } from './planner.mjs';
+import { saveAnswerToYaml, normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
+import { detectWorkdayStep } from './stateDetector.mjs';
+import {
+  handleWorkdayFormFieldQuestions,
+  handleVoluntaryDisclosuresStep,
+  handleSelfIdentifyStep,
+} from './workdayQuestionFill.mjs';
+import {
+  fillSourceFieldAuto,
+  getReferralSourceDisplay,
+  isReferralSourceFullySelected,
+  SOURCE_LABEL,
+} from './workdaySource.mjs';
+import { handleStep2MyExperience } from './workdayExperience.mjs';
+import { fillCityFromDom, getCityInputValue, cityValueMatches, CITY_LABEL, resolveCityValue } from './workdayCity.mjs';
+import {
+  attachFormMutationObserver,
+  detachFormMutationObserver,
+  waitForDomSettled,
+  discoverWorkdayFields,
+  verifyRequiredFields,
+  printUnresolvedFields,
+  parseReviewDOM,
+  crossCheckReview,
+  parseCountryPhoneCode,
+  filterTrulyEmptyRequired,
+  locateWorkdayFieldByLabel,
+} from './workdayDom.mjs';
 import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 
+function recordFilled(profile, label, value) {
+  if (!profile) return;
+  if (!profile._filledValues) profile._filledValues = {};
+  if (label) profile._filledValues[label] = value;
+}
+
+function isUnimportantWorkdayField(label) {
+  const n = String(label || '').toLowerCase();
+  return /middle name|local given|local family|local middle|phone extension|preferred name|suffix|prefix|address line 2|facebook|twitter|x\.com|social profile|social link/i.test(n);
+}
+
+function isRequiredQuestionLabel(label, field = {}) {
+  const text = String(label || '');
+  const lower = text.toLowerCase();
+  if (field.required || field.ariaRequired || field.required === true) return true;
+  if (/\*/.test(text)) return true;
+  if (/\brequired\b/i.test(lower) || /\bmandatory\b/i.test(lower) || /\bmust\s+be\s+filled\b/i.test(lower)) return true;
+  return false;
+}
+
+function shouldPromptForUnknownField(label = '', field = {}) {
+  const text = String(label || '').trim();
+  if (!text) return false;
+  const lower = text.toLowerCase();
+
+  if (/facebook|twitter|x\.com|social media|social profile|social link/i.test(lower)) return false;
+  if (/optional|voluntary|not required|if you would like|if applicable|additional attachment|cover letter|upload a file|drop files here|select files|employee\s*id.*if applicable/i.test(lower)) {
+    return false;
+  }
+  return true;
+}
+
+async function locatePureDomDropdown(page, matchText) {
+  const selector = await page.evaluate((needle) => {
+    const normalize = (value) => (value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const target = normalize(needle);
+    const containers = Array.from(document.querySelectorAll('[data-automation-id*="formField"], fieldset, [role="group"], [data-automation-id*="question"], [data-automation-id*="source"], [data-automation-id*="phoneType"]'));
+
+    for (const field of containers) {
+      const text = normalize((field.textContent || '') + ' ' + (field.getAttribute('aria-label') || '') + ' ' + (field.getAttribute('name') || ''));
+      if (!text.includes(target)) continue;
+      const trigger = field.querySelector('button[aria-haspopup="listbox"], [role="combobox"], select, [data-automation-id="selectWidget"] button, [data-automation-id*="select"] button');
+      if (trigger) {
+        if (trigger.id) return `#${CSS.escape(trigger.id)}`;
+        const automation = trigger.getAttribute('data-automation-id');
+        if (automation) return `[data-automation-id="${CSS.escape(automation)}"]`;
+        const parentId = field.id ? `#${CSS.escape(field.id)} ` : '';
+        return `${parentId}${trigger.tagName.toLowerCase()}`;
+      }
+    }
+
+    const globalTriggers = Array.from(document.querySelectorAll('button[aria-haspopup="listbox"], [role="combobox"], select'));
+    for (const trigger of globalTriggers) {
+      const text = normalize((trigger.textContent || '') + ' ' + (trigger.getAttribute('aria-label') || '') + ' ' + (trigger.getAttribute('name') || ''));
+      if (text.includes(target)) {
+        if (trigger.id) return `#${CSS.escape(trigger.id)}`;
+        const automation = trigger.getAttribute('data-automation-id');
+        if (automation) return `[data-automation-id="${CSS.escape(automation)}"]`;
+        return trigger.tagName.toLowerCase();
+      }
+    }
+
+    return '';
+  }, matchText);
+
+  return selector ? page.locator(selector).first() : null;
+}
+
+async function refreshWorkdayPageOnce(page) {
+  const pageText = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return text;
+  }).catch(() => '');
+
+  const transientError = /something went wrong|please refresh the page|error code:\s*i\|/i.test(pageText);
+  if (!transientError) return false;
+
+  console.log('    ⚠️  Workday transient page error detected. Refreshing once and continuing...');
+  await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+  await page.waitForTimeout(2000);
+  return true;
+}
+
+function indiaSixDigitPostal(profile) {
+  const raw = String(profile?.personal?.postal_code_6digit || profile?.personal?.postal_code || '').replace(/\D/g, '');
+  if (raw.length >= 6) return raw.slice(0, 6);
+  if (raw.length === 5) return `0${raw}`;
+  if (raw.length > 0) return raw.padStart(6, '0');
+  return '500001';
+}
+
+/**
+ * Run a DOM-changing action, wait for Workday mutations to settle, then re-scan.
+ * @param {import('playwright').Page} page
+ * @param {Function} [actionFn]
+ * @returns {Promise<object[]>}
+ */
+export async function interactAndRescan(page, actionFn) {
+  if (typeof actionFn === 'function') {
+    await actionFn();
+  }
+  await waitForDomSettled(page);
+  return discoverWorkdayFields(page);
+}
+
+export { detectWorkdayStep };
+
 // ─── Terminal Prompt Fallback for Unmapped Required Fields ─────────────────
-export async function promptUserInTerminal(label, fieldType, options = []) {
+export async function promptUserInTerminal(label, fieldType, options = [], { company, compliance, domCode, role, placeholder } = {}) {
   const rl = readline.createInterface({ input, output });
   try {
-    console.log(`\n${'─'.repeat(60)}`);
-    console.log(`❓ [Required Field Not Found in Profile/Plan]`);
-    console.log(`   Question: "${label}"`);
-    console.log(`   Field Type: ${fieldType}`);
+    process.stdin.resume();
+    process.stdin.setEncoding('utf8');
+    const inferredType = fieldType || 'input';
+    const domSig = domCode || 'unknown';
+    console.log('\n──────────────────────────────────────────');
+    console.log(compliance ? '🔒 Unknown required compliance question' : '⚠ Unknown required question');
+    if (company) console.log(`Company:  ${company}`);
+    console.log(`Question: "${label || '(untitled field)'}"`);
+    console.log(`DOM code / id: ${domSig}`);
+    console.log(`UI design: ${inferredType}`);
+    if (role) console.log(`Role: ${role}`);
+    if (placeholder) console.log(`Placeholder: ${placeholder}`);
     if (options && options.length > 0) {
-      console.log(`   Available Options: ${options.slice(0, 10).join(', ')}`);
+      console.log(`Options: [${options.slice(0, 12).join(', ')}]`);
     }
-    const answer = await rl.question('   👉 Please enter your answer to continue: ');
-    console.log(`${'─'.repeat(60)}\n`);
-    return answer.trim();
+    console.log('Type your answer below and press Enter to paste it into the live Workday page.');
+    console.log('(Your answer will be saved permanently for future applications.)');
+    console.log('──────────────────────────────────────────');
+    const answer = await rl.question('> Your answer:\n');
+    const trimmed = answer.trim();
+    if (trimmed) {
+      await saveAnswerToYaml(label, trimmed).catch(() => {});
+    }
+    return trimmed;
   } catch {
     return '';
   } finally {
@@ -43,80 +192,37 @@ export async function promptUserInTerminal(label, fieldType, options = []) {
   }
 }
 
-// ─── Workday Step Detector ──────────────────────────────────────────────────
-export async function detectWorkdayStep(page) {
-  return await page.evaluate(() => {
-    // 1. Check main page headings
-    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"], legend'));
-    for (const h of headings) {
-      const text = (h.textContent || '').trim();
-      if (/my\s*information/i.test(text)) return 'My Information';
-      if (/my\s*experience/i.test(text)) return 'My Experience';
-      if (/application\s*questions/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
-      if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
-    }
-
-    // 2. Check active wizard step in progress bar
-    const activeStep = document.querySelector('[data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
-    if (activeStep) {
-      const text = (activeStep.textContent || '').trim();
-      if (/my\s*information/i.test(text)) return 'My Information';
-      if (/my\s*experience/i.test(text)) return 'My Experience';
-      if (/application\s*questions/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
-      if (/review/i.test(text)) return 'Review';
-    }
-
-    // 3. Check page content and unique labels
-    const bodyText = document.body?.innerText || '';
-    if (/My Information/i.test(bodyText) && (/How Did You Hear/i.test(bodyText) || /Address Line/i.test(bodyText))) return 'My Information';
-    if (/My Experience/i.test(bodyText) || (/Work Experience/i.test(bodyText) && /Resume/i.test(bodyText))) return 'My Experience';
-    if (/Application Questions/i.test(bodyText) || /Conflict of Interest/i.test(bodyText)) return 'Application Questions';
-    if (/Voluntary Disclosures/i.test(bodyText) || /terms and conditions/i.test(bodyText)) return 'Voluntary Disclosures';
-    if (/Review/i.test(bodyText) && (document.querySelector('button[data-automation-id*="submit"], button:has-text("Submit")') || /Review/i.test(document.title))) return 'Review';
-
-    return 'Unknown';
-  });
-}
-
 // ─── Workday "Add" Button Expander ──────────────────────────────────────────
 async function handleWorkdayAddButtons(page, stepName, profile) {
   if (stepName === 'My Experience') {
-    // 1. Work Experience: Check if job title field is open
-    const hasJobTitleInput = await page.$('input[data-automation-id*="jobTitle"], input[id*="jobTitle"], label:has-text("Job Title") + input, label:has-text("Job Title") ~ input');
+    const hasJobTitleInput = await page.locator('input[data-automation-id*="jobTitle"], input[id*="jobTitle"]')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
     if (!hasJobTitleInput) {
-      const addExpBtn = await page.$('button[data-automation-id*="Add"]:has-text("Experience"), button:has-text("Add Work Experience"), button:has-text("Add Experience"), [data-automation-id="workExperienceSection"] button[data-automation-id="Add"], button:has-text("Add Another"), button[data-automation-id="Add"]');
+      const addExpBtn = await page.$('[data-automation-id="workExperienceSection"] button[data-automation-id="Add"], button:has-text("Add Work Experience"), button:has-text("Add Experience")');
       if (addExpBtn && await addExpBtn.isVisible().catch(() => false)) {
         console.log('    ➕ Expanding Work Experience section (clicking Add)...');
-        await addExpBtn.click({ force: true }).catch(() => addExpBtn.evaluate(el => el.click()));
-        await page.waitForTimeout(1000);
+        await interactAndRescan(page, async () => {
+          await addExpBtn.click({ force: true }).catch(() => addExpBtn.evaluate(el => el.click()));
+        });
       }
     }
 
-    // 2. Education: Check if school / university field is open
-    const hasSchoolInput = await page.$('input[data-automation-id*="school"], input[id*="school"], label:has-text("School") + input, label:has-text("School") ~ input, label:has-text("University") + input');
+    const hasSchoolInput = await page.locator(
+      'input[data-automation-id*="school"], input[id*="school"], [data-automation-id*="education"] [role="combobox"], [data-automation-id*="education"] button[aria-haspopup="listbox"]'
+    ).first().isVisible({ timeout: 500 }).catch(() => false);
     if (!hasSchoolInput) {
       const addEduBtn = await page.$('button[data-automation-id*="Add"]:has-text("Education"), button:has-text("Add Education"), [data-automation-id="educationSection"] button[data-automation-id="Add"]');
       if (addEduBtn && await addEduBtn.isVisible().catch(() => false)) {
         console.log('    ➕ Expanding Education section (clicking Add)...');
-        await addEduBtn.click({ force: true }).catch(() => addEduBtn.evaluate(el => el.click()));
-        await page.waitForTimeout(1000);
+        await interactAndRescan(page, async () => {
+          await addEduBtn.click({ force: true }).catch(() => addEduBtn.evaluate(el => el.click()));
+        });
       }
     }
 
-    // 3. Website: If linkedin/portfolio present in profile and input not open
-    if (profile?.personal?.linkedin) {
-      const hasWebInput = await page.$('input[data-automation-id*="website"], input[id*="website"], label:has-text("Website") + input');
-      if (!hasWebInput) {
-        const addWebBtn = await page.$('button[data-automation-id*="Add"]:has-text("Website"), button:has-text("Add Website"), [data-automation-id="websitesSection"] button[data-automation-id="Add"]');
-        if (addWebBtn && await addWebBtn.isVisible().catch(() => false)) {
-          console.log('    ➕ Expanding Website section (clicking Add)...');
-          await addWebBtn.click({ force: true }).catch(() => addWebBtn.evaluate(el => el.click()));
-          await page.waitForTimeout(1000);
-        }
-      }
-    }
+    // Websites: handled in handleWebsitesSection() — never click Add / Add another here
   }
 }
 
@@ -130,7 +236,7 @@ async function handleWorkdayResumeUpload(page, resumePath) {
   }
 
   // Check if file is already uploaded
-  const existingFileItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [class*="file-upload-item"]');
+  const existingFileItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [class*="file-upload-item"], [data-automation-id="delete-file"]');
   if (existingFileItem && await existingFileItem.isVisible().catch(() => false)) {
     const existingName = await existingFileItem.textContent().catch(() => '');
     console.log(`    📎 Resume already uploaded: "${existingName.trim()}"`);
@@ -138,7 +244,38 @@ async function handleWorkdayResumeUpload(page, resumePath) {
   }
 
   const fileInput = await page.$('input[type="file"]');
-  if (!fileInput) return false;
+  if (!fileInput) {
+    const resumeUploadSectionMatches = await page.evaluate(() => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      return /resume\s*\/\s*cv|resume|upload a file|drop files here|select files/i.test(text);
+    });
+    if (!resumeUploadSectionMatches) return false;
+
+    const resumeLabel = page.locator('label, legend').filter({ hasText: /resume|cv|upload a file|drop files here|select files/i }).first();
+    const controlled = resumeLabel.locator('..').locator('input[type="file"]').first();
+    if (await controlled.count().catch(() => 0) === 0) return false;
+    const fileElement = controlled;
+    console.log(`    📎 Uploading resume via labeled file control: ${basename(absPath)}...`);
+    await fileElement.setInputFiles(absPath);
+
+    console.log('    ⏳ Waiting for Workday file upload to complete...');
+    for (let i = 0; i < 20; i++) {
+      await page.waitForTimeout(1000);
+      const uploadedItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id="delete-file"]');
+      const successText = await page.evaluate(() => {
+        const body = document.body?.innerText || '';
+        return /successfully\s*uploaded/i.test(body) || /100%/i.test(body);
+      }).catch(() => false);
+      if (uploadedItem || successText) {
+        console.log('    ✅ Resume uploaded successfully (verified)!');
+        await waitForDomSettled(page);
+        await discoverWorkdayFields(page);
+        return true;
+      }
+    }
+    console.log('    ⚠️  Resume upload wait finished — continuing...');
+    return true;
+  }
 
   console.log(`    📎 Uploading resume: ${basename(absPath)}...`);
   await fileInput.setInputFiles(absPath);
@@ -155,7 +292,8 @@ async function handleWorkdayResumeUpload(page, resumePath) {
 
     if (uploadedItem || successText) {
       console.log('    ✅ Resume uploaded successfully (verified)!');
-      await page.waitForTimeout(1000);
+      await waitForDomSettled(page);
+      await discoverWorkdayFields(page);
       return true;
     }
   }
@@ -164,295 +302,521 @@ async function handleWorkdayResumeUpload(page, resumePath) {
   return true;
 }
 
-// ─── Fill Current Workday Step ──────────────────────────────────────────────
-async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
-  console.log(`\n  📝 [Workday] Filling Step: "${stepName}"...`);
+// ─── Step 1 ("My Information") Handler ───────────────────────────────────────
+export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
+  console.log('\n  📋 [Step 1: My Information] Automating required form controls...');
+  await attachFormMutationObserver(page);
+  await discoverWorkdayFields(page);
 
-  // 1. Expand subsections (Add buttons)
-  await handleWorkdayAddButtons(page, stepName, profile);
+  console.log('  🎯 [Field 1/4] Resolving "How Did You Hear About Us?" (yaml/mjs/URL — no terminal)...');
+  try {
+    const currentSourceText = await getReferralSourceDisplay(page);
+    const contaminatedWithPhoneCode = /\+91|\(\+91\)|country\s*\/\s*territory\s*phone|phone\s*device/i.test(currentSourceText);
 
-  // 2. Handle Resume upload if on My Experience
-  if (stepName === 'My Experience' && (plan.resume || profile.resume)) {
-    await handleWorkdayResumeUpload(page, plan.resume || profile.resume);
-  }
-
-  // 3. Handle "I currently work here" checkbox early on My Experience
-  if (stepName === 'My Experience') {
-    const currentWorkCb = await page.$('input[type="checkbox"][data-automation-id*="currentlyWorkHere"], label:has-text("currently work here") input[type="checkbox"], input[type="checkbox"][id*="currentlyWorkHere"]');
-    if (currentWorkCb) {
-      const isChecked = await currentWorkCb.isChecked().catch(() => false);
-      if (!isChecked) {
-        await currentWorkCb.click({ force: true }).catch(() => currentWorkCb.evaluate(el => el.click()));
-        console.log('    ☑️  Checked: "I currently work here"');
-        await page.waitForTimeout(500);
+    if (contaminatedWithPhoneCode) {
+      console.log('    ⚠️  Source field has phone/country text — clearing and re-selecting.');
+      await page.keyboard.press('Escape').catch(() => {});
+      const clearSource = page.locator('[data-automation-id="source--source"] [data-automation-id="delete-item"], #source--source [data-automation-id="delete-item"]').first();
+      if (await clearSource.isVisible({ timeout: 800 }).catch(() => false)) {
+        await clearSource.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(300);
       }
     }
-  }
 
-  // 4. Handle Step 4 Terms & Conditions checkbox early on Voluntary Disclosures
-  if (stepName === 'Voluntary Disclosures') {
-    const termsCb = await page.$('input[type="checkbox"][data-automation-id*="consent"], label:has-text("consent to the terms") input[type="checkbox"], label:has-text("terms and conditions") input[type="checkbox"], input[type="checkbox"][id*="terms"]');
-    if (termsCb) {
-      const isChecked = await termsCb.isChecked().catch(() => false);
-      if (!isChecked) {
-        await termsCb.click({ force: true }).catch(() => termsCb.evaluate(el => el.click()));
-        console.log('    ☑️  Checked: "Terms and conditions consent"');
-        await page.waitForTimeout(500);
+    const isAlreadyFilled = !contaminatedWithPhoneCode && isReferralSourceFullySelected(currentSourceText);
+    if (isAlreadyFilled) {
+      console.log(`    ✓ "${SOURCE_LABEL}" already set: "${currentSourceText}"`);
+      profile._step1SourceFilled = true;
+    } else {
+      const sourceResult = await fillSourceFieldAuto(page, profile);
+      const verifiedDisplay = await getReferralSourceDisplay(page);
+
+      if (sourceResult.success && isReferralSourceFullySelected(verifiedDisplay)) {
+        const selected = sourceResult.selected || verifiedDisplay;
+        console.log(`    ✅ Field 1 Complete: "${SOURCE_LABEL}" → "${selected}" (DOM: "${verifiedDisplay}")`);
+        profile._step1SourceFilled = true;
+        profile.personal = profile.personal || {};
+        profile.personal.source = selected;
+        profile.qa_answers = profile.qa_answers || {};
+        profile.qa_answers['how did you hear about us'] = selected;
+        await saveAnswerToYaml(SOURCE_LABEL, selected).catch(() => {});
+        recordFilled(profile, SOURCE_LABEL, selected);
+      } else {
+        console.log(`    ⚠️  Field 1: source not verified in DOM ("${verifiedDisplay || '(empty)'}") — continuing without terminal prompt`);
       }
     }
+  } catch (err) {
+    console.log(`    ⚠️  Field 1 warning: ${err.message?.substring(0, 100)}`);
   }
 
-  // 5. Handle Phone Section on Step 1 (Phone Device Type + Country Code + Phone Number)
-  if (stepName === 'My Information' || stepName === 'Unknown') {
-    // 5a. Phone Device Type dropdown button
-    const phoneTypeBtn = await page.$('button[id*="phoneType"], button[data-automation-id*="phone-device-type"], button[data-automation-id*="phoneType"], button#phoneNumber--phoneType');
-    if (phoneTypeBtn && await phoneTypeBtn.isVisible().catch(() => false)) {
-      const btnText = await phoneTypeBtn.textContent().catch(() => '');
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(300);
+
+  console.log('  🎯 [Field 2/4] Resolving Previous Worker radio group (default: "No")...');
+  try {
+    const previousWorkerGroup = page.getByRole('group', { name: /previously worked for or are you currently working for workday/i })
+      .or(page.getByRole('radiogroup', { name: /previously worked for or are you currently working for workday/i }))
+      .or(page.locator('fieldset').filter({ hasText: /previously worked.*workday/i }))
+      .or(page.locator('[data-automation-id*="candidateIsPreviousWorker" i], [id*="candidateIsPreviousWorker" i]'))
+      .first();
+
+    let noRadio = null;
+    if (await previousWorkerGroup.isVisible({ timeout: 1500 }).catch(() => false)) {
+      noRadio = previousWorkerGroup.getByRole('radio', { name: /^no$/i })
+        .or(previousWorkerGroup.locator('input[type="radio"][value="false"], input[type="radio"][value="No"], input[type="radio"][value="0"]'))
+        .or(previousWorkerGroup.locator('label').filter({ hasText: /^no$/i }))
+        .first();
+    }
+    if (!noRadio || !(await noRadio.count().catch(() => 0))) {
+      noRadio = page.locator('input[name*="candidateIsPreviousWorker"][value="false"], input[name*="candidateIsPreviousWorker"][value="No"]')
+        .or(page.getByRole('radio', { name: /^no$/i }))
+        .first();
+    }
+
+    if (noRadio && await noRadio.count().catch(() => 0)) {
+      const isAlreadyChecked = await noRadio.isChecked().catch(() => false);
+      if (!isAlreadyChecked) {
+        await interactAndRescan(page, async () => {
+          await noRadio.scrollIntoViewIfNeeded().catch(() => {});
+          await noRadio.check({ force: true }).catch(() => noRadio.click({ force: true }));
+        });
+      }
+      console.log('    ✅ Field 2 Complete: previous worker = "No"');
+      recordFilled(profile, 'Previous Worker', 'No');
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Field 2 warning: ${err.message?.substring(0, 100)}`);
+  }
+
+  console.log('  🎯 [Field 2b/4] Resolving Phone Device Type...');
+  try {
+    const phoneValue = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
+    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*device\\s*type')
+      || page.locator('[data-automation-id*="phoneType"] button, #phoneNumber--phoneType, button[id*="phoneType"]')
+      .first();
+    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
       if (!btnText || btnText.includes('Select One') || btnText.includes('Select')) {
-        console.log('    📱 Selecting Phone Device Type: "Mobile"...');
-        await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
-        await page.waitForTimeout(400);
-        const mobileOpt = await page.$('[data-automation-id="promptOption"]:has-text("Mobile"), [role="option"]:has-text("Mobile"), li:has-text("Mobile"), div:has-text("Mobile")');
-        if (mobileOpt && await mobileOpt.isVisible().catch(() => false)) {
-          await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
-          console.log('    ✅ Phone Device Type: "Mobile"');
-        } else {
-          await page.keyboard.press('ArrowDown');
-          await page.keyboard.press('Enter');
+        await interactAndRescan(page, async () => {
+          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
+        });
+        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
+          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneValue + '")'))
+          .or(page.getByText(phoneValue, { exact: true }))
+          .first();
+        await interactAndRescan(page, async () => {
+          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
+          } else {
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('Enter');
+          }
+        });
+        recordFilled(profile, 'Phone Device Type', phoneValue);
+      }
+    }
+  } catch {}
+
+  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code...');
+  try {
+    const countryCodeValue = profile?.personal?.country_phone_code
+      || profile?.personal?.country
+      || 'India (+91)';
+    const { searchTerm, optionText } = parseCountryPhoneCode(countryCodeValue);
+    const query = (searchTerm || 'india').split(/\s+/)[0];
+
+    const clearBtn = page.locator('[data-automation-id="country-phone-code"] [data-automation-id="delete-item"], #phoneNumber--countryPhoneCode [data-automation-id="delete-item"], [data-automation-id="country-phone-code"] [data-automation-id="clear-button"]').first();
+    if (await clearBtn.isVisible({ timeout: 800 }).catch(() => false)) {
+      await interactAndRescan(page, async () => {
+        await clearBtn.click({ force: true });
+      });
+    }
+
+    const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code')
+      || page.locator('[data-automation-id="country-phone-code"]')
+        .locator('[role="combobox"], input, button[aria-haspopup="listbox"]')
+        .first()
+      || page.locator('#phoneNumber--countryPhoneCode, [id*="countryPhoneCode"]')
+        .first();
+
+    const isCountryVisible = await countryPhoneCodeControl.isVisible({ timeout: 2000 }).catch(() => false);
+    if (isCountryVisible) {
+      const currentCode = ((await countryPhoneCodeControl.inputValue().catch(() => '')) ||
+        (await countryPhoneCodeControl.innerText().catch(() => '')) ||
+        (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
+
+      const alreadySelected = /india/i.test(currentCode) && /\+91/i.test(currentCode);
+      if (!alreadySelected) {
+        await interactAndRescan(page, async () => {
+          await countryPhoneCodeControl.scrollIntoViewIfNeeded().catch(() => {});
+          await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
+        });
+
+        // Manual equivalent: search "india" then press Enter
+        const result = await handleSearchableDropdown(page, countryPhoneCodeControl, query, optionText, { confirmWithEnter: true, alreadyOpen: true });
+        if (!result.success) {
+          const clicked = await clickVisiblePromptOption(page, ['India (+91)', 'India +91', 'India', optionText, query]);
+          if (clicked) {
+            await page.keyboard.press('Enter').catch(() => {});
+            console.log(`    ✓ Country option via DOM text: "${clicked}"`);
+          } else {
+            await page.keyboard.type(query, { delay: 40 });
+            await page.keyboard.press('Enter');
+          }
         }
-        await page.waitForTimeout(400);
+
+        await waitForDomSettled(page);
+        const verified = ((await countryPhoneCodeControl.innerText().catch(() => '')) ||
+          (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
+        console.log(`    ✅ Field 3 Complete: searched "${query}" + Enter → "${verified || optionText}"`);
+        recordFilled(profile, 'Country / Territory Phone Code', optionText);
+        await discoverWorkdayFields(page);
+      } else {
+        console.log(`    ✓ Country Phone Code already set: "${currentCode}"`);
+        recordFilled(profile, 'Country / Territory Phone Code', currentCode);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Field 3 warning: ${err.message?.substring(0, 100)}`);
+  }
+
+  console.log('  🎯 [Field 4/4] Resolving Phone Number...');
+  try {
+    const phoneValue = profile?.personal?.phone || profile?.phone;
+    if (!phoneValue) {
+      throw new Error('profile.personal.phone is required');
+    }
+
+    const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input#phoneNumber--phoneNumber, input[id*="phoneNumber--phoneNumber"], input[name="phoneNumber"], input[type="tel"]')
+      .or(page.getByRole('textbox', { name: /^phone number/i }))
+      .or(page.getByLabel('Phone Number', { exact: true }))
+      .first();
+
+    if (await phoneNumberInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      await interactAndRescan(page, async () => {
+        await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
+        await phoneNumberInput.fill(String(phoneValue).trim());
+      });
+      const verified = await phoneNumberInput.inputValue().catch(() => '');
+      if (String(verified).replace(/\D/g, '') !== String(phoneValue).replace(/\D/g, '')) {
+        console.log(`    ⚠️  Phone verify mismatch: expected ${phoneValue}, got ${verified}`);
+      } else {
+        console.log(`    ✅ Field 4 Complete: Phone Number "${phoneValue}"`);
+      }
+      recordFilled(profile, 'Phone Number', String(phoneValue).trim());
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Field 4 warning: ${err.message?.substring(0, 100)}`);
+  }
+
+  try {
+    const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
+      .or(page.getByLabel('Postal Code', { exact: false }))
+      .first();
+    if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const pin = indiaSixDigitPostal(profile);
+      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      recordFilled(profile, 'Postal Code', pin);
+      console.log(`    📮 Postal Code set to 6-digit PIN "${pin}"`);
+    }
+  } catch {}
+
+  console.log('  🎯 [Field 5] Resolving City (mandatory — DOM verify)...');
+  try {
+    let citySuccess = false;
+    const cityResult = await fillCityFromDom(page, profile);
+    if (cityResult.success && cityValueMatches(cityResult.domValue, cityResult.value)) {
+      recordFilled(profile, CITY_LABEL, cityResult.value);
+      citySuccess = true;
+    }
+
+    if (!citySuccess) {
+      const userCity = await promptUserInTerminal(CITY_LABEL, 'input', [], {
+        company: profile?._company || profile?.company || 'Workday',
+        compliance: false,
+        domCode: 'address--city',
+        role: 'textbox',
+      });
+      if (userCity) {
+        profile.personal = profile.personal || {};
+        profile.personal.city = userCity.trim();
+        profile.qa_answers = profile.qa_answers || {};
+        profile.qa_answers.city = userCity.trim();
+        await saveAnswerToYaml(CITY_LABEL, userCity.trim()).catch(() => {});
+        const retry = await fillCityFromDom(page, profile);
+        const domAfter = await getCityInputValue(page);
+        if (retry.success && cityValueMatches(domAfter, userCity)) {
+          console.log(`    ✅ City applied from terminal: "${domAfter}"`);
+          recordFilled(profile, CITY_LABEL, domAfter);
+          citySuccess = true;
+        }
       }
     }
 
-    // 5b. Country Phone Code
-    const countryPhoneCode = profile?.personal?.country_phone_code || profile?.personal?.country || 'India (+91)';
-    const countryCodeInput = await page.$('input[id*="countryPhoneCode"], input[data-automation-id*="countryPhoneCode"], input#phoneNumber--countryPhoneCode, [data-automation-id="country-phone-code"] input');
-    if (countryCodeInput && await countryCodeInput.isVisible().catch(() => false)) {
-      const currentCode = await countryCodeInput.inputValue().catch(() => '');
-      if (!currentCode || currentCode.trim() === '') {
-        console.log(`    🌍 Setting Country Phone Code: "${countryPhoneCode}"...`);
-        await handleDropdown(page, countryCodeInput, countryPhoneCode, 'Country Phone Code');
-        await page.waitForTimeout(400);
-      }
+    if (!citySuccess) {
+      console.log(`    ⚠️  City is required but could not be verified in DOM (wanted "${resolveCityValue(profile)}")`);
     }
+  } catch (err) {
+    console.log(`    ⚠️  City field warning: ${err.message?.substring(0, 100)}`);
+  }
 
-    // 5c. Phone Number Input
-    const phoneVal = profile?.personal?.phone || plan?.fills?.find(f => /phone/i.test(f.id || f.label))?.value;
-    if (phoneVal) {
-      const phoneInput = await page.$('input[id*="phoneNumber--phoneNumber"], input[data-automation-id="phone-number"], input[name="phoneNumber"], input[type="tel"], input#phoneNumber--phoneNumber, [id="phoneNumber--phoneNumber"]');
-      if (phoneInput && await phoneInput.isVisible().catch(() => false)) {
-        const currentVal = await phoneInput.inputValue().catch(() => '');
-        if (!currentVal || currentVal.trim() === '') {
-          console.log(`    📞 Filling Phone Number: "${phoneVal}"...`);
-          await phoneInput.scrollIntoViewIfNeeded().catch(() => {});
-          await phoneInput.click({ force: true }).catch(() => phoneInput.evaluate(el => el.click()));
-          await page.waitForTimeout(100);
-          await phoneInput.fill('');
-          await phoneInput.type(String(phoneVal), { delay: 40 });
-          await page.waitForTimeout(200);
+  try {
+    const textFields = [
+      { label: 'Given Name', keys: ['personal.first_name', 'first_name'] },
+      { label: 'Family Name', keys: ['personal.last_name', 'last_name'] },
+      { label: 'Address Line 1', keys: ['personal.address_line1', 'address_line1'] },
+    ];
+    for (const tf of textFields) {
+      const inputEl = page.getByLabel(tf.label, { exact: false }).first();
+      if (await inputEl.isVisible({ timeout: 400 }).catch(() => false)) {
+        const val = await inputEl.inputValue().catch(() => '');
+        if (!val || val.trim() === '') {
+          let fillVal = '';
+          for (const k of tf.keys) {
+            const v = k.includes('.') ? k.split('.').reduce((o, i) => o?.[i], profile) : profile?.[k];
+            if (v) { fillVal = String(v); break; }
+          }
+          if (fillVal) {
+            await interactAndRescan(page, async () => { await inputEl.fill(fillVal).catch(() => {}); });
+            recordFilled(profile, tf.label, fillVal);
+          }
         }
       }
+    }
+  } catch {}
+
+  await fillWorkdayFieldsFromScan(page, profile, plan, 'My Information');
+
+  try {
+    const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
+      .or(page.getByLabel('Postal Code', { exact: false }))
+      .first();
+    if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const pin = indiaSixDigitPostal(profile);
+      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      recordFilled(profile, 'Postal Code', pin);
+      console.log(`    📮 Postal Code set to 6-digit PIN "${pin}"`);
+    }
+  } catch {}
+
+  console.log('  ℹ️  Step 1 important fields done — clicking Save and Continue next.');
+  return true;
+}
+
+
+async function fieldOptions(field) {
+  if (!field.options) return [];
+  return field.options.map(o => (typeof o === 'string' ? o : (o.text || o.value || ''))).filter(Boolean);
+}
+
+/**
+ * Fill a single discovered Workday field using DOM locators (not vision).
+ */
+async function fillWorkdayField(page, field, mappedVal, profile) {
+  const label = field.label || field.id;
+  let el = await findField(page, field);
+  if (!el) return false;
+  const isVisible = await el.isVisible().catch(() => false);
+  if (!isVisible) return false;
+
+  const meta = await el.evaluate(node => ({
+    tag: node.tagName.toLowerCase(),
+    role: node.getAttribute('role') || '',
+    type: node.getAttribute('type') || '',
+    hasPopup: Boolean(node.getAttribute('aria-haspopup')),
+  })).catch(() => ({ tag: '', role: '', type: '', hasPopup: false }));
+
+  if (meta.tag === 'label') return false;
+
+  const currentVal = await el.inputValue().catch(() => '');
+  if (currentVal && currentVal.trim() !== '' && currentVal !== 'Select...' && currentVal !== 'Select' && field.type !== 'checkbox' && field.type !== 'radio') {
+    return false;
+  }
+
+  await el.scrollIntoViewIfNeeded().catch(() => {});
+
+  const isCombo = field.type === 'select' || field.type === 'custom-select' || field.automationId === 'select-widget' || field.role === 'combobox' || meta.role === 'combobox' || meta.hasPopup || meta.tag === 'button';
+  const canFill = ['input', 'textarea', 'select'].includes(meta.tag) && meta.type !== 'button';
+
+  if (field.type === 'checkbox') {
+    const shouldCheck = mappedVal === true || mappedVal === 'true' || mappedVal === 'yes' || mappedVal === 'y' || mappedVal === '_static.true' || mappedVal === '1' || mappedVal === 'on';
+    if (shouldCheck) {
+      const isChecked = await el.isChecked().catch(() => false);
+      if (!isChecked) {
+        await el.click({ force: true }).catch(() => el.evaluate(e => e.click()));
+        console.log(`    ☑️  Checked: ${label}`);
+        recordFilled(profile, label, mappedVal);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  if (field.type === 'radio') {
+    try {
+      if (field.name) {
+        await page.click(`input[name="${field.name}"][value="${mappedVal}"]`, { force: true });
+      } else {
+        await page.getByRole('radio', { name: new RegExp(`^${String(mappedVal).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).first().click({ force: true });
+      }
+    } catch {
+      await page.click(`label:has-text("${mappedVal}")`, { force: true }).catch(() => {});
+    }
+    console.log(`    ✅ Radio: ${label} ← "${mappedVal}"`);
+    recordFilled(profile, label, mappedVal);
+    return true;
+  }
+
+  if (isCombo || field.type === 'select' || field.type === 'custom-select' || field.automationId === 'select-widget' || field.role === 'combobox') {
+    const result = await handleDropdown(page, el, mappedVal, label);
+    if (result.success) {
+      console.log(`    ✅ Dropdown [${result.method}]: ${label} ← "${mappedVal}"`);
+      recordFilled(profile, label, mappedVal);
+      return true;
     }
   }
 
-  // 6. Query and scan all visible interactive inputs on the current step
-  const visibleFields = await page.evaluate(() => {
-    const results = [];
-    const seen = new Set();
-
-    function getLabel(el) {
-      if (el.id) {
-        const label = document.querySelector(`label[for="${el.id}"]`);
-        if (label) return label.textContent.trim();
-      }
-      const parentLabel = el.closest('label');
-      if (parentLabel) return parentLabel.textContent.trim();
-      if (el.getAttribute('aria-label')) return el.getAttribute('aria-label');
-      const labelledBy = el.getAttribute('aria-labelledby');
-      if (labelledBy) {
-        const refEl = document.getElementById(labelledBy);
-        if (refEl) return refEl.textContent.trim();
-      }
-      if (el.placeholder) return el.placeholder;
-      const prev = el.previousElementSibling;
-      if (prev && (prev.tagName === 'LABEL' || prev.tagName === 'SPAN' || prev.tagName === 'DIV')) {
-        return prev.textContent.trim();
-      }
-      const parent = el.parentElement;
-      if (parent) {
-        const textNode = Array.from(parent.childNodes).find(n => n.nodeType === 3 && n.textContent.trim());
-        if (textNode) return textNode.textContent.trim();
-      }
-
-      const autoId = el.getAttribute('data-automation-id') || '';
-      const idOrName = el.id || el.name || autoId;
-      if (idOrName) {
-        const clean = idOrName
-          .replace(/^(name--|address--|phoneNumber--|legalName--)/, '')
-          .replace(/--/g, ' ')
-          .replace(/([A-Z])/g, ' $1')
-          .replace(/_/g, ' ')
-          .trim();
-        if (clean) return clean.charAt(0).toUpperCase() + clean.slice(1);
-      }
-      return el.name || el.id || '';
+  const isReadonly = await el.evaluate(e => e.readOnly || e.getAttribute('aria-haspopup') || e.getAttribute('role') === 'combobox').catch(() => false);
+  const labelLower = String(label).toLowerCase();
+  const isPhoneOrCountryField = /phone\s*device|country.*phone|phone\s*code|territory\s*phone/i.test(labelLower);
+  const couldBeDropdown = !isPhoneOrCountryField && (isReadonly || isCombo || ['gender', 'veteran', 'disability', 'race', 'how did you hear'].some(k => labelLower.includes(k))
+    || (/^country$/i.test(labelLower) && !/phone/i.test(labelLower)));
+  if (couldBeDropdown) {
+    const result = await handleDropdown(page, el, mappedVal, label);
+    if (result.success) {
+      console.log(`    ✅ Dropdown: ${label} ← "${mappedVal}"`);
+      recordFilled(profile, label, mappedVal);
+      return true;
     }
+    if (!canFill) return false;
+  }
 
-    document.querySelectorAll('input, select, textarea, [data-automation-id="select-widget"]').forEach(el => {
-      if (el.getAttribute('data-automation-id') === 'beecatcher' || el.name === 'website' && el.type === 'text' && el.style?.display === 'none') return;
-      const type = el.type || el.tagName.toLowerCase();
-      if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type) && el.getAttribute('data-automation-id') !== 'select-widget') return;
+  if (!canFill) {
+    console.log(`    ⚠️  Skip fill — "${label}" is not an input (Workday label/for mismatch).`);
+    return false;
+  }
 
-      const autoId = el.getAttribute('data-automation-id') || '';
-      const key = el.id || el.name || autoId || `${type}-${results.length}`;
-      if (seen.has(key)) return;
-      seen.add(key);
+  await el.click().catch(() => {});
+  await el.fill(String(mappedVal));
+  const display = String(mappedVal).length > 50 ? String(mappedVal).substring(0, 50) + '...' : mappedVal;
+  console.log(`    ✅ Filled: ${label} ← "${display}"`);
+  recordFilled(profile, label, mappedVal);
+  return true;
+}
 
-      const field = {
-        id: el.id || el.name || autoId || `field_${results.length}`,
-        name: el.name || '',
-        automationId: autoId,
-        label: getLabel(el),
-        type: type === 'select-one' ? 'select' : type,
-        value: el.value || '',
-        required: el.required || el.getAttribute('aria-required') === 'true' || !!el.closest('.field')?.querySelector('.required, .asterisk'),
-        disabled: el.disabled || el.readOnly,
-      };
-
-      if (el.id) field.selector = `#${CSS.escape(el.id)}`;
-      else if (autoId) field.selector = `[data-automation-id="${autoId}"]`;
-      else if (el.name) field.selector = `${el.tagName.toLowerCase()}[name="${el.name}"]`;
-
-      results.push(field);
-    });
-
-    return results;
-  });
-
-  // 6. Map and fill each field
+/**
+ * Scan DOM/a11y fields, resolve answers from profile/qa_answers, prompt unknowns, fill, re-scan.
+ */
+async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
+  const qaStore = createQAStore();
+  let fields = await discoverWorkdayFields(page);
+  console.log(`  🔍 DOM scan: ${fields.length} visible field(s) on "${stepName}"`);
   let stepFilled = 0;
-  for (const field of visibleFields) {
+  const company = profile?._company || profile?.company;
+
+  for (let i = 0; i < fields.length; i++) {
+    const field = fields[i];
     if (field.disabled) continue;
     if (field.type === 'file') continue;
 
     const label = field.label || field.id;
-    let mappedVal = mapLabelToProfileValue(label, profile);
+    if (isUnimportantWorkdayField(label)) continue;
+    const norm = normalizeLabel(label);
+    if (profile._filledValues && Object.keys(profile._filledValues).some(k => {
+      const kn = normalizeLabel(k);
+      return kn === norm || norm.includes(kn) || kn.includes(norm);
+    })) continue;
+    if (/how did you hear|previous(ly)? work|country.*phone code|phone number/i.test(String(label)) && stepName === 'My Information') continue;
+    if (/vibe philosophy|recruitment privacy statement.*vibe/i.test(String(label))) continue;
 
-    // Fallback to plan fills
-    if (!mappedVal && plan.fills) {
-      const match = plan.fills.find(f => f.id === field.id || (f.label && label && f.label.toLowerCase() === label.toLowerCase()));
-      if (match && match.value) mappedVal = match.value;
-    }
-
-    // Check runtime answers cached during this session
-    if (!mappedVal && profile._runtimeAnswers && profile._runtimeAnswers[label]) {
-      mappedVal = profile._runtimeAnswers[label];
-    }
-
-    // If still not mapped, check if required or on Questions/Disclosures steps — ask in terminal
-    if (!mappedVal) {
-      const isRequired = field.required || label.includes('*') || /required/i.test(label) || stepName === 'Application Questions';
-      if (isRequired) {
-        let options = [];
-        try {
-          const el = await findField(page, field);
-          if (el) {
-            options = await el.evaluate(node => {
-              if (node.tagName.toLowerCase() === 'select') {
-                return Array.from(node.options).map(o => o.text.trim()).filter(t => t && !t.startsWith('Select'));
-              }
-              const container = node.closest('[data-automation-id*="formField"], [class*="field"], div');
-              if (container) {
-                const labels = Array.from(container.querySelectorAll('label'));
-                return labels.map(r => r.textContent.trim()).filter(Boolean);
-              }
-              return [];
-            }).catch(() => []);
-          }
-        } catch {}
-
-        const userAnswer = await promptUserInTerminal(label, field.type, options);
-        if (userAnswer) {
-          mappedVal = userAnswer;
-          if (!profile._runtimeAnswers) profile._runtimeAnswers = {};
-          profile._runtimeAnswers[label] = userAnswer;
-        }
-      }
+    const isRequired = isRequiredQuestionLabel(label, field);
+    let mappedVal = await resolveField(field, profile, qaStore, {
+      skipPrompt: false,
+      plan,
+      company,
+      resumePath: plan?.resume || profile?._resumePath,
+      url: plan?.url || page.url(),
+    });
+    if (/postal/i.test(String(label)) && mappedVal) {
+      const countryHint = `${profile?.personal?.country_phone_code || ''} ${profile?.personal?.country || ''}`;
+      if (/india|\+91/i.test(countryHint)) mappedVal = indiaSixDigitPostal(profile);
     }
 
     if (!mappedVal) continue;
 
     try {
-      const el = await findField(page, field);
-      if (!el) continue;
-
-      const isVisible = await el.isVisible().catch(() => false);
-      if (!isVisible) continue;
-
-      // Skip non-empty text fields to preserve prefilled values
-      const currentVal = await el.inputValue().catch(() => '');
-      if (currentVal && currentVal.trim() !== '' && currentVal !== 'Select...' && currentVal !== 'Select' && field.type !== 'checkbox') {
-        continue;
+      const filled = await fillWorkdayField(page, field, mappedVal, profile);
+      if (filled) {
+        stepFilled++;
+        if (isComplianceSensitive(label)) {
+          recordFilled(profile, label, mappedVal);
+        }
+        fields = await interactAndRescan(page);
       }
-
-      await el.scrollIntoViewIfNeeded().catch(() => {});
-
-      if (field.type === 'checkbox') {
-        const shouldCheck = mappedVal === true || mappedVal === 'true' || mappedVal === 'yes' || mappedVal === 'y' || mappedVal === '_static.true' || mappedVal === '1' || mappedVal === 'on';
-        if (shouldCheck) {
-          const isChecked = await el.isChecked().catch(() => false);
-          if (!isChecked) {
-            await el.click({ force: true }).catch(() => el.evaluate(e => e.click()));
-            console.log(`    ☑️  Checked: ${label}`);
-            stepFilled++;
-          }
-        }
-      } else if (field.type === 'radio') {
-        try {
-          await page.click(`input[name="${field.name}"][value="${mappedVal}"]`, { force: true });
-          console.log(`    ✅ Radio: ${label} ← "${mappedVal}"`);
-          stepFilled++;
-        } catch {
-          await page.click(`label:has-text("${mappedVal}")`, { force: true }).catch(() => {});
-        }
-      } else if (field.type === 'select' || field.type === 'custom-select' || field.automationId === 'select-widget') {
-        const result = await handleDropdown(page, el, mappedVal, label);
-        if (result.success) {
-          console.log(`    ✅ Dropdown [${result.method}]: ${label} ← "${mappedVal}"`);
-          stepFilled++;
-        }
-      } else {
-        const isReadonly = await el.evaluate(e => e.readOnly || e.getAttribute('aria-haspopup') || e.getAttribute('role') === 'combobox').catch(() => false);
-        const couldBeDropdown = isReadonly || ['country', 'gender', 'veteran', 'disability', 'race', 'how did you hear'].some(k => label.toLowerCase().includes(k));
-
-        if (couldBeDropdown) {
-          const result = await handleDropdown(page, el, mappedVal, label);
-          if (result.success) {
-            console.log(`    ✅ Dropdown: ${label} ← "${mappedVal}"`);
-            stepFilled++;
-          } else {
-            await el.click({ clickCount: 3 }); await el.fill(mappedVal);
-            console.log(`    ✅ Filled: ${label} ← "${mappedVal}"`);
-            stepFilled++;
-          }
-        } else {
-          await el.click();
-          await page.waitForTimeout(100);
-          await el.fill(mappedVal);
-          const display = mappedVal.length > 50 ? mappedVal.substring(0, 50) + '...' : mappedVal;
-          console.log(`    ✅ Filled: ${label} ← "${display}"`);
-          stepFilled++;
-        }
-      }
-
-      await page.waitForTimeout(200);
     } catch (err) {
       console.log(`    ⚠️  Could not fill ${label}: ${err.message?.substring(0, 60)}`);
     }
   }
 
   console.log(`  ✓ Completed fill pass for ${stepName}: ${stepFilled} action(s) performed.`);
+  return stepFilled;
 }
+
+// ─── Fill Current Workday Step ──────────────────────────────────────────────
+async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
+  console.log(`\n  📝 [Workday] Filling Step: "${stepName}"...`);
+
+  if (stepName === 'My Information') {
+    return await handleStep1MyInformation(page, profile, plan);
+  }
+
+  if (stepName === 'My Experience') {
+    await handleWorkdayAddButtons(page, stepName, profile);
+    const resumePath = plan?.resume || profile?.resume || profile?._resumePath;
+    if (resumePath) {
+      await handleWorkdayResumeUpload(page, resumePath);
+    }
+    await handleStep2MyExperience(page, profile);
+    const formFieldFilled = await handleWorkdayFormFieldQuestions(page, profile, stepName);
+    if (formFieldFilled > 0) {
+      console.log(`    📋 formField DOM: ${formFieldFilled} answer(s) applied from profile.yml / qa_answers`);
+    }
+    await fillWorkdayFieldsFromScan(page, profile, plan, stepName);
+    return;
+  }
+
+  await handleWorkdayAddButtons(page, stepName, profile);
+
+  const resumePath = plan?.resume || profile?.resume || profile?._resumePath;
+  const resumeSectionText = await page.evaluate(() => {
+    const label = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    return /resume\s*\/\s*cv|resume|upload a file|drop files here|select files/i.test(label);
+  }).catch(() => false);
+
+  if (resumeSectionText && resumePath && stepName !== 'My Experience') {
+    await handleWorkdayResumeUpload(page, resumePath);
+  }
+
+  if (stepName === 'Voluntary Disclosures') {
+    await handleVoluntaryDisclosuresStep(page, profile);
+  }
+
+  if (stepName === 'Self Identify') {
+    const selfIdFilled = await handleSelfIdentifyStep(page, profile);
+    if (selfIdFilled > 0) {
+      console.log(`    📋 Self Identify: ${selfIdFilled} field(s) filled (name / date / disability)`);
+    }
+  }
+
+  // Pure-DOM formField fill on every step — reads question text from page, answers from profile.yml
+  const formFieldFilled = await handleWorkdayFormFieldQuestions(page, profile, stepName);
+  if (formFieldFilled > 0) {
+    console.log(`    📋 formField DOM: ${formFieldFilled} answer(s) applied from profile.yml / qa_answers`);
+  }
+
+  await fillWorkdayFieldsFromScan(page, profile, plan, stepName);
+}
+
 
 // ─── Workday Step Advance (Save and Continue) ───────────────────────────────
 async function advanceWorkdayStep(page) {
@@ -482,23 +846,12 @@ async function advanceWorkdayStep(page) {
   console.log(`\n  ➡️  Clicking "${btnText || 'Save and Continue'}" to advance...`);
   await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
 
-  // 1. Wait 2s for XHR / loading spinner to mount
-  await page.waitForTimeout(2000);
-
-  // 2. Wait for loading spinner to detach
   try {
     await page.waitForSelector('[data-automation-id="loading-spinner"], div[class*="loading-spinner"], div.loading-backdrop', { state: 'detached', timeout: 15000 });
   } catch {}
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await waitForDomSettled(page);
 
-  // 3. Wait for network idle
-  try {
-    await page.waitForLoadState('networkidle', { timeout: 15000 });
-  } catch {}
-
-  // 4. Wait 2.5s buffer for SPA hydration
-  await page.waitForTimeout(2500);
-
-  // Check for validation errors on current step
   const errorMessages = await page.evaluate(() => {
     const errs = [];
     document.querySelectorAll('.error, .field-error, .error-message, .invalid-feedback, [class*="error"], [class*="Error"], [role="alert"], [data-automation-id*="error"]').forEach(el => {
@@ -511,19 +864,115 @@ async function advanceWorkdayStep(page) {
   if (errorMessages.length > 0) {
     console.log(`  ⚠️  ${errorMessages.length} validation error(s) after Save and Continue:`);
     errorMessages.forEach(e => console.log(`    • ${e}`));
-    return { hasSaveButton: true, hasErrors: true, errors: errorMessages };
+    return { hasSaveButton: true, hasErrors: true, errors: errorMessages, transitioned: false };
   }
 
   return { hasSaveButton: true, hasErrors: false };
 }
 
+/**
+ * Click Save & Continue and verify the wizard step actually changed.
+ */
+async function advanceWorkdayStepWithVerification(page, previousStep) {
+  const before = previousStep || await detectWorkdayStep(page);
+  const result = await advanceWorkdayStep(page);
+  if (!result.hasSaveButton) return { ...result, transitioned: false, step: before };
+  if (result.hasErrors) return { ...result, transitioned: false, step: before };
+
+  for (let i = 0; i < 5; i++) {
+    await waitForDomSettled(page);
+    const next = await detectWorkdayStep(page);
+    if (next !== before || next === 'Review') {
+      console.log(`  ✓ Step transitioned: "${before}" → "${next}"`);
+      return { ...result, transitioned: true, step: next };
+    }
+    await page.waitForTimeout(2000);
+  }
+
+  console.log(`  ⚠️  Step did not change after Save and Continue (still "${before}")`);
+  return { ...result, transitioned: false, step: before };
+}
+
+async function confirmSubmitInTerminal(autoConfirm) {
+  if (autoConfirm) return true;
+  const rl = readline.createInterface({ input, output });
+  try {
+    console.log('\n──────────────────────────────────────────');
+    console.log('Review step complete. Ready to submit.');
+    const answer = await rl.question('Should I submit the application? [y/N]\n> ');
+    console.log('──────────────────────────────────────────\n');
+    return /^y(es)?$/i.test(answer.trim());
+  } finally {
+    rl.close();
+  }
+}
+
+async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = {}) {
+  console.log('\n📋 Review step — parsing DOM before submit.');
+  await takeScreenshot(page, 'workday-review-step');
+  await attachFormMutationObserver(page);
+  const review = await parseReviewDOM(page);
+
+  const expected = {
+    'Country': profile?.personal?.country || profile?.personal?.country_phone_code,
+    'Country code': profile?.personal?.country_phone_code,
+    'Phone Number': profile?.personal?.phone,
+    'Name': profile?.personal?.full_name || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim(),
+    'Email': profile?.personal?.email,
+    ...(profile?._filledValues || {}),
+  };
+
+  const mismatches = crossCheckReview(expected, review);
+  if (mismatches.length > 0) {
+    for (const m of mismatches) {
+      console.log(`  ⚠️  Review note: ${m.field} expected "${m.expected}" / page "${m.displayed}"`);
+    }
+  }
+
+  const ok = await confirmSubmitInTerminal(confirmSubmit);
+  if (!ok) {
+    console.log('  ✋ Submit cancelled — browser left open for manual review.');
+    return 'review-pending-confirmation';
+  }
+
+  console.log('🚀 Clicking final "Submit" button...');
+  await clickSubmitButton(page);
+  await waitForDomSettled(page);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  const confirmationFound = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete/i.test(text) ||
+           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"]');
+  });
+
+  if (confirmationFound) {
+    console.log('✅ Workday application successfully submitted!');
+    await takeScreenshot(page, 'workday-submitted');
+    return 'submitted';
+  }
+
+  const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+  if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
+    console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
+    return 'needs-manual-verification';
+  }
+
+  return 'submitted';
+}
+
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
-export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword } = {}) {
+export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword, confirmSubmit = false } = {}) {
   console.log(`\n${'═'.repeat(60)}`);
-  console.log(`🧙 STARTING WORKDAY 5-STEP WIZARD LOOP`);
+  console.log(`STARTING WORKDAY WIZARD LOOP (DOM-first)`);
   console.log(`${'═'.repeat(60)}`);
 
-  const maxSteps = 10;
+  if (!profile?.personal?.phone) {
+    console.error('❌ profile.personal.phone is required in config/profile.yml');
+    return 'incomplete';
+  }
+
+  const maxSteps = 12;
   let currentIteration = 0;
   let lastStep = '';
   let sameStepCount = 0;
@@ -531,91 +980,86 @@ export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpP
   while (currentIteration < maxSteps) {
     currentIteration++;
 
-    // 1. Detect current step
+    const refreshed = await refreshWorkdayPageOnce(page);
     const stepName = await detectWorkdayStep(page);
-    console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
+    if (refreshed) {
+      console.log(`\n📍 [Wizard Step ${currentIteration}] Page refreshed; re-detected Page: "${stepName}"`);
+    } else {
+      console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
+    }
 
     if (stepName === lastStep) {
       sameStepCount++;
-      if (sameStepCount >= 3) {
-        console.log(`  ⚠️  Stuck on "${stepName}" for 3 iterations — attempting submit / exit.`);
-        break;
+      if (sameStepCount >= 6) {
+        console.log(`  ⚠️  Stuck on "${stepName}" for 6 iterations — stopping.`);
+        return 'incomplete';
       }
     } else {
       sameStepCount = 0;
       lastStep = stepName;
     }
 
-    // 2. Check if we reached Review step or if Submit button is present
-    const submitBtn = await page.$('button:has-text("Submit"), button[data-automation-id*="submit-button"], button[data-automation-id="bottom-navigation-next-button"]:has-text("Submit")');
-    const isSubmitVisible = submitBtn && await submitBtn.isVisible().catch(() => false);
-
-    if (stepName === 'Review' || isSubmitVisible) {
-      console.log(`\n🎉 Reached final step: "${stepName}"! Preparing for final submission...`);
-      await takeScreenshot(page, 'workday-review-step');
-
-      // Final submit
-      console.log('🚀 Clicking final "Submit" button...');
-      if (submitBtn) {
-        await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-      } else {
-        await clickSubmitButton(page);
-      }
-
-      // Add 5s timeout after final Submit before considering success
-      console.log('⏳ Waiting 5s+ after final Submit...');
-      await page.waitForTimeout(5000);
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-      // Check for success / confirmation
-      const confirmationFound = await page.evaluate(() => {
-        const text = document.body?.innerText || '';
-        return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete/i.test(text) ||
-               !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"]');
-      });
-
-      if (confirmationFound) {
-        console.log('✅ Workday application successfully submitted!');
-        await takeScreenshot(page, 'workday-submitted');
-        return 'submitted';
-      }
-
-      // Check for post-submit verification prompts (OTP handling disabled)
-      const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-      if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-        console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
-        return 'needs-manual-verification';
-      }
-
-      return 'submitted';
+    if (stepName === 'Review') {
+      return await verifyAndSubmitReview(page, profile, { confirmSubmit });
     }
 
-    // 3. Fill current step
+    await detachFormMutationObserver(page);
+    await attachFormMutationObserver(page);
+    await discoverWorkdayFields(page);
+
     await fillCurrentWorkdayStep(page, stepName, profile, plan);
     await takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`);
 
-    // 4. Advance step (click "Save and Continue")
-    const advanceResult = await advanceWorkdayStep(page);
+    console.log('  ➡️  Save and Continue (important fields filled; skipping unimportant).');
+    const advanceResult = await advanceWorkdayStepWithVerification(page, stepName);
 
     if (!advanceResult.hasSaveButton) {
-      console.log('  ℹ️  No "Save and Continue" button found — checking for Submit in next pass...');
+      const maybeReview = await detectWorkdayStep(page);
+      if (maybeReview === 'Review') {
+        return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+      }
+      console.log('  ℹ️  No "Save and Continue" button found — checking next pass...');
     }
 
-    if (advanceResult.hasErrors) {
-      console.log('  🔄 Re-attempting step filling due to validation errors...');
+    if (advanceResult.hasErrors || !advanceResult.transitioned) {
+      const errs = (advanceResult.errors || []).join(' ');
+      if (/postal code must be 6 digits/i.test(errs)) {
+        const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode').or(page.getByLabel('Postal Code', { exact: false })).first();
+        if (await postalInput.isVisible().catch(() => false)) {
+          const pin = indiaSixDigitPostal(profile);
+          await postalInput.fill(pin);
+          console.log(`    📮 Retry postal as 6-digit PIN: ${pin}`);
+        }
+      }
       await fillCurrentWorkdayStep(page, stepName, profile, plan);
-      await advanceWorkdayStep(page);
+      await advanceWorkdayStepWithVerification(page, stepName);
     }
   }
 
-  return 'submitted';
+  const finalStep = await detectWorkdayStep(page);
+  if (finalStep === 'Review') {
+    return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+  }
+  return 'incomplete';
 }
+
 
 // Adaptive scan/fill loop — OTP handling disabled
 export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode = 'signin' } = {}) {
   const maxIterations = 15;
   for (let iter = 0; iter < maxIterations; iter++) {
     console.log(`\n=== Adaptive Loop iteration ${iter + 1} ===`);
+
+    await refreshWorkdayPageOnce(page);
+
+    // Check if on Step 1 "My Information"
+    const stepName = await detectWorkdayStep(page);
+    if (stepName === 'My Information') {
+      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler...');
+      await handleStep1MyInformation(page, profile, plan);
+      await advanceWorkdayStepWithVerification(page, stepName);
+      continue;
+    }
 
     // 1) Collect visible fields
     const visibleFields = await page.evaluate(() => {
@@ -672,8 +1116,14 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
       const label = (f.label || f.id || f.name).trim();
       const mappedVal = mapLabelToProfileValue(label, profile);
       if (!mappedVal) {
-        if (f.required) {
-          const answer = await promptUserInTerminal(label, f.type, []);
+        const shouldPrompt = shouldPromptForUnknownField(label, f);
+        if (shouldPrompt) {
+          const answer = await promptUserInTerminal(label, f.type, [], {
+            company,
+            domCode: f.id || f.name || f.selector || 'unknown',
+            role: f.role || (f.type === 'select' ? 'combobox' : undefined),
+            placeholder: f.placeholder,
+          });
           if (answer) {
             try {
               const el = await findField(page, f);
@@ -937,7 +1387,7 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage } = {}) {
+export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false } = {}) {
   console.log(`📝 Fill mode: ${url}`);
   if (otpEmail) console.log(`📧 OTP auto-fetch: ${otpEmail}`);
 
@@ -990,7 +1440,7 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
 
       // Load profile and execute complete 5-step wizard loop
       const profile = await loadProfile().catch(() => ({}));
-      const status = await runAdaptiveScanFillLoop(page, profile, plan, { mode });
+      const status = await runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword, confirmSubmit });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
       await logToCSV(url, plan.company || '', plan.role || '', status, postSubmitSS, { ats });
@@ -1005,7 +1455,7 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
       console.log(`   Report: data/applied.csv`);
       console.log(`${'─'.repeat(60)}`);
 
-      console.log(`\n   Browser stays open for 15s — Ctrl+C to keep it open longer.`);
+      console.log(`\n   — Ctrl+C to keep it open longer.`);
       await page.waitForTimeout(15000);
       await browser.close();
       return status;
@@ -1334,14 +1784,19 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
           if (labelText && /source/i.test(labelText)) {
             console.log(`  🔧 Filling conditional select: ${labelText}...`);
             try {
-              await sel.selectOption({ label: 'LinkedIn' });
-              console.log(`  ✅ Conditional select: ${labelText} ← "LinkedIn"`);
+              await sel.selectOption({ label: 'Workday.com' });
+              console.log(`  ✅ Conditional select: ${labelText} ← "Workday.com"`);
             } catch {
-              // Try first non-empty option
-              const opts = await sel.evaluate(e => Array.from(e.options).filter(o => o.value).map(o => ({ v: o.value, t: o.text })));
-              if (opts.length > 0) {
-                await sel.selectOption({ value: opts[0].v });
-                console.log(`  ✅ Conditional select: ${labelText} ← "${opts[0].t}"`);
+              try {
+                await sel.selectOption({ label: 'Website' });
+                console.log(`  ✅ Conditional select: ${labelText} ← "Website"`);
+              } catch {
+                // Try first non-empty option
+                const opts = await sel.evaluate(e => Array.from(e.options).filter(o => o.value).map(o => ({ v: o.value, t: o.text })));
+                if (opts.length > 0) {
+                  await sel.selectOption({ value: opts[0].v });
+                  console.log(`  ✅ Conditional select: ${labelText} ← "${opts[0].t}"`);
+                }
               }
             }
           }
@@ -1385,7 +1840,7 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
     console.log(`   Report: data/applied.csv`);
     console.log(`${'─'.repeat(60)}`);
 
-    console.log(`\n   Browser stays open for 15s — Ctrl+C to keep it open longer.`);
+    console.log(`\n   — Ctrl+C to keep it open longer.`);
     await page.waitForTimeout(15000);
     await browser.close();
     return status;

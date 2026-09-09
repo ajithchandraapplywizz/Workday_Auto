@@ -1,0 +1,11 @@
+# Runtime settings — copy to settings.yml and tune as needed
+
+matching:
+  fuzzy_threshold: 0.55
+
+runtime:
+  max_field_retries: 3
+  mutation_observer_debounce_ms: 300
+
+browser:
+  headless: false  # must remain false in Local Phase
