@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import {
   getTodayMMDDYYYY,
   getTodayISODate,
+  isAvailabilityStartDateLabel,
   isCurrentDateQuestionLabel,
   buildCurrentDateAction,
   validateMMDDYYYY,
@@ -59,6 +60,21 @@ test('date classification rejects non-current date fields', () => {
   assert.equal(isCurrentDateQuestionLabel('Graduation date'), false);
   assert.equal(isCurrentDateQuestionLabel('Visa expiration date'), false);
   assert.equal(isCurrentDateQuestionLabel('Availability date'), false);
+});
+
+test('isAvailabilityStartDateLabel detects availability start questions', () => {
+  assert.equal(isAvailabilityStartDateLabel('When are you available to start?'), true);
+  assert.equal(isAvailabilityStartDateLabel('What is your desired start date?'), true);
+  assert.equal(isAvailabilityStartDateLabel('When can you start?'), true);
+  assert.equal(isAvailabilityStartDateLabel('From'), false);
+  assert.equal(isAvailabilityStartDateLabel('Date of birth'), false);
+});
+
+test('buildCurrentDateAction fills availability start with today', () => {
+  const ref = new Date('2026-09-11T12:00:00+05:30');
+  const action = buildCurrentDateAction('When are you available to start?', { timeZone: 'Asia/Kolkata' }, ref);
+  assert.equal(action?.value, '09/11/2026');
+  assert.equal(action?.payload?.date?.source, 'availability_start_today');
 });
 
 test('buildCurrentDateAction creates the required field action', () => {

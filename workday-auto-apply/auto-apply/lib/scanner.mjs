@@ -312,7 +312,7 @@ export async function discoverFields(pageOrContainer = (typeof document !== 'und
 }
 
 // ─── Scan a form ────────────────────────────────────────────────────────────
-export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, otpEmail, otpPassword, mode = 'signin' } = {}) {
+export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, mode = 'signin' } = {}) {
   console.log(`🔍 Scanning: ${url}`);
   const outDir = formsDir || resolve(process.cwd(), 'forms');
   await mkdir(outDir, { recursive: true });
@@ -345,10 +345,8 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     if (ats === 'workday') {
       console.log(`   Authenticating on Workday (${mode} mode) before scanning form fields...`);
       const authOk = await handleWorkday(page, {
-        email: workdayEmail || otpEmail,
+        email: workdayEmail,
         password: workdayPassword,
-        otpEmail,
-        otpPassword,
         mode,
       });
 

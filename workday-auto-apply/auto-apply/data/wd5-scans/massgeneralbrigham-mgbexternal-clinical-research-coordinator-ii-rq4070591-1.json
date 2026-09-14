@@ -1,0 +1,86 @@
+{
+  "company": "massgeneralbrigham",
+  "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1",
+  "tenant": "massgeneralbrigham",
+  "status": "ok",
+  "error": null,
+  "steps": [
+    "My Information",
+    "My Experience",
+    "Application Questions",
+    "Voluntary Disclosures",
+    "Self Identify",
+    "Review"
+  ],
+  "questions": [
+    {
+      "label": "Given Name(s)",
+      "normalized": "given names",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Experience",
+      "company": "massgeneralbrigham",
+      "tenant": "massgeneralbrigham",
+      "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/en-US/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1/apply"
+    },
+    {
+      "label": "Phone Number",
+      "normalized": "phone number",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Experience",
+      "company": "massgeneralbrigham",
+      "tenant": "massgeneralbrigham",
+      "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/en-US/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1/apply"
+    },
+    {
+      "label": "I certify that I have read, fully understand and accept all terms of the foregoing statement.",
+      "normalized": "i certify that i have read fully understand and accept all terms of the foregoing statement",
+      "fieldType": "checkbox",
+      "required": true,
+      "options": [
+        "I certify that I have read, fully understand and accept all terms of the foregoing statement.*"
+      ],
+      "step": "Voluntary Disclosures",
+      "company": "massgeneralbrigham",
+      "tenant": "massgeneralbrigham",
+      "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/en-US/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1/apply"
+    },
+    {
+      "label": "Name",
+      "normalized": "name",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "Review",
+      "company": "massgeneralbrigham",
+      "tenant": "massgeneralbrigham",
+      "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/en-US/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1/apply"
+    },
+    {
+      "label": "Please check one of the boxes below:",
+      "normalized": "please check one of the boxes below",
+      "fieldType": "checkbox-group",
+      "required": true,
+      "options": [
+        "Yes, I have a disability, or have had one in the past",
+        "No, I do not have a disability and have not had one in the past",
+        "I do not want to answer"
+      ],
+      "step": "Review",
+      "company": "massgeneralbrigham",
+      "tenant": "massgeneralbrigham",
+      "url": "https://massgeneralbrigham.wd1.myworkdayjobs.com/en-US/MGBExternal/job/Boston-MA/Clinical-Research-Coordinator-II_RQ4070591-1/apply"
+    }
+  ],
+  "scanned_at": "2026-09-10T04:21:32.236Z",
+  "questions_by_step": {
+    "My Experience": 2,
+    "Voluntary Disclosures": 1,
+    "Review": 2
+  },
+  "reached_review": true,
+  "review_decision": "next"
+}

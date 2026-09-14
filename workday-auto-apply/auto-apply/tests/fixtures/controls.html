@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Controlled Workday-style controls</title>
+  <style>
+    body { font-family: sans-serif; max-width: 720px; margin: 24px auto; }
+    .wd-field { margin: 16px 0; padding: 8px 0; }
+    .help { color: #555; font-size: 13px; }
+    .hidden-honeypot { position: absolute; left: -9999px; }
+    #dynamicWrap[hidden] { display: none !important; }
+    [role="listbox"] { border: 1px solid #ccc; padding: 4px; list-style: none; }
+    [role="option"] { cursor: pointer; padding: 4px; }
+    [role="option"][aria-selected="true"], [data-selected="true"] { background: #def; }
+  </style>
+</head>
+<body>
+  <h1 data-page-title="Controls">Application Questions</h1>
+
+  <div class="wd-field" data-automation-id="formField-firstName" data-test-field="firstName" data-control="text" data-required="true">
+    <label data-automation-id="formField-firstName-label" for="firstName">First Name *</label>
+    <input id="firstName" type="text" aria-required="true" required />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-email" data-test-field="email" data-control="email" data-required="true">
+    <label data-automation-id="formField-email-label" for="email">Email Address *</label>
+    <input id="email" type="email" aria-required="true" required />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-phone" data-test-field="phone" data-control="tel" data-required="true">
+    <label data-automation-id="formField-phone-label" for="phone">Phone Number *</label>
+    <input id="phone" type="tel" aria-required="true" required />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-years" data-test-field="years" data-control="number">
+    <label data-automation-id="formField-years-label" for="years">How many years of professional work experience do you have?</label>
+    <input id="years" type="number" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-comments" data-test-field="comments" data-control="textarea">
+    <label data-automation-id="formField-comments-label" for="comments">Additional comments</label>
+    <div class="help" data-test-help>Optional notes for the recruiter.</div>
+    <textarea id="comments" rows="3"></textarea>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-start" data-test-field="startDate" data-control="date">
+    <label data-automation-id="formField-start-label" for="startDate">Available start date</label>
+    <input id="startDate" type="date" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-country" data-test-field="country" data-control="select" data-required="true">
+    <label data-automation-id="formField-country-label" for="country">Country *</label>
+    <select id="country" required>
+      <option>Select One</option>
+      <option>United States of America</option>
+      <option>Canada</option>
+    </select>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-degree" data-test-field="degree" data-control="dropdown" data-required="true">
+    <div data-automation-id="formField-degree-label">Degree *</div>
+    <div data-automation-id="selectOne">
+      <button type="button" id="degreeBtn" aria-haspopup="listbox" aria-label="Degree">Select One</button>
+      <span data-automation-id="selectedItem" id="degreeValue"></span>
+      <ul role="listbox" id="degreeList" hidden>
+        <li role="option">B.Tech Computer Science</li>
+        <li role="option">Bachelor's</li>
+        <li role="option">Master's</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-university" data-test-field="university" data-control="combobox">
+    <label data-automation-id="formField-university-label" for="university">University</label>
+    <input id="university" role="combobox" aria-autocomplete="list" aria-expanded="false" />
+    <ul role="listbox" id="universityList" hidden>
+      <li role="option">Test University</li>
+      <li role="option">Other</li>
+    </ul>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-location" data-test-field="location" data-control="custom-combobox">
+    <div data-automation-id="formField-location-label">Preferred work location</div>
+    <div data-automation-id="selectWidget">
+      <button type="button" role="combobox" aria-haspopup="listbox" aria-label="Preferred work location">Select One</button>
+      <span data-automation-id="selectedItem" id="locationValue"></span>
+      <ul role="listbox" hidden>
+        <li role="option">Remote</li>
+        <li role="option">Hybrid</li>
+        <li role="option">On-site</li>
+      </ul>
+    </div>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-workAuth" data-test-field="workAuth" data-control="radio" data-required="true" role="group">
+    <div data-automation-id="formField-workAuth-label">Are you legally authorized to work in the United States? *</div>
+    <input type="radio" name="workAuth" id="waYes" value="Yes" />
+    <label for="waYes">Yes</label>
+    <input type="radio" name="workAuth" id="waNo" value="No" />
+    <label for="waNo">No</label>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-agree" data-test-field="agree" data-control="checkbox">
+    <input type="checkbox" id="agree" />
+    <label for="agree" data-automation-id="formField-agree-label">I agree to the terms</label>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-skills" data-test-field="skills" data-control="checkbox-group">
+    <div data-automation-id="formField-skills-label">Skills (select all that apply)</div>
+    <input type="checkbox" id="skReact" value="React" />
+    <label for="skReact">React</label>
+    <input type="checkbox" id="skPython" value="Python" />
+    <label for="skPython">Python</label>
+    <input type="checkbox" id="skSql" value="SQL" />
+    <label for="skSql">SQL</label>
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-resume" data-test-field="resume" data-control="file">
+    <label data-automation-id="formField-resume-label" for="resume">Resume</label>
+    <input id="resume" type="file" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-requiredCity" data-test-field="requiredCity" data-control="text" data-required="true">
+    <label data-automation-id="formField-requiredCity-label" for="requiredCity">City *</label>
+    <input id="requiredCity" type="text" required aria-required="true" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-optionalNick" data-test-field="optionalNick" data-control="text">
+    <label data-automation-id="formField-optionalNick-label" for="optionalNick">Preferred name</label>
+    <input id="optionalNick" type="text" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-disabled" data-test-field="disabledCode" data-control="text" data-disabled="true">
+    <label data-automation-id="formField-disabled-label" for="disabledCode">Applicant ID</label>
+    <input id="disabledCode" type="text" disabled value="LOCKED" />
+  </div>
+
+  <div class="hidden-honeypot" data-automation-id="beecatcher">
+    <label for="website">Website</label>
+    <input id="website" name="website" type="hidden" value="trap" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-licenseYesNo" data-test-field="licenseYesNo" data-control="radio">
+    <div data-automation-id="formField-licenseYesNo-label">Do you have a driver's license?</div>
+    <input type="radio" name="license" id="licYes" value="Yes" />
+    <label for="licYes">Yes</label>
+    <input type="radio" name="license" id="licNo" value="No" />
+    <label for="licNo">No</label>
+  </div>
+
+  <div class="wd-field" id="dynamicWrap" hidden data-automation-id="formField-licenseNumber" data-test-field="licenseNumber" data-control="text" data-required="true">
+    <label data-automation-id="formField-licenseNumber-label" for="licenseNumber">Driver's license number *</label>
+    <input id="licenseNumber" type="text" />
+  </div>
+
+  <div class="wd-field" data-automation-id="formField-customWd" data-test-field="customWd" data-control="dropdown">
+    <div data-automation-id="richText">Workday-style custom control</div>
+    <div data-automation-id="selectWidget">
+      <button type="button" aria-haspopup="listbox">Select One</button>
+      <span data-automation-id="selectedItem"></span>
+      <ul role="listbox" hidden>
+        <li role="option">Option A</li>
+        <li role="option">Option B</li>
+      </ul>
+    </div>
+  </div>
+
+  <script>
+    function wireList(root) {
+      const btn = root.querySelector('button[aria-haspopup="listbox"], [role="combobox"]');
+      const list = root.querySelector('[role="listbox"]');
+      const selected = root.querySelector('[data-automation-id="selectedItem"]');
+      if (!btn || !list) return;
+      btn.addEventListener('click', () => {
+        list.hidden = !list.hidden;
+        btn.setAttribute('aria-expanded', String(!list.hidden));
+      });
+      list.querySelectorAll('[role="option"]').forEach((opt) => {
+        opt.addEventListener('click', () => {
+          list.querySelectorAll('[role="option"]').forEach((o) => o.removeAttribute('data-selected'));
+          opt.setAttribute('data-selected', 'true');
+          if (selected) selected.textContent = opt.textContent;
+          if (btn.tagName === 'INPUT' || btn.getAttribute('role') === 'combobox' && btn.tagName === 'INPUT') {
+            btn.value = opt.textContent;
+          } else {
+            btn.textContent = opt.textContent;
+          }
+          list.hidden = true;
+        });
+      });
+    }
+    document.querySelectorAll('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-test-field="university"]').forEach(wireList);
+    document.querySelectorAll('input[name="license"]').forEach((el) => {
+      el.addEventListener('change', () => {
+        const wrap = document.getElementById('dynamicWrap');
+        wrap.hidden = el.value !== 'Yes' || !el.checked;
+      });
+    });
+  </script>
+</body>
+</html>

@@ -54,16 +54,24 @@ async function findWebsitesUrlInput(page) {
     if (!root) return null;
 
     for (const labelEl of root.querySelectorAll('label, [data-automation-id*="label"], [data-automation-id*="richText"]')) {
-      const labelText = normalize(labelEl.textContent).replace(/\*+$/, '');
+      const rawLabelText = normalize(labelEl.textContent);
+      const labelText = rawLabelText.replace(/\*+$/, '');
       if (!/^url$/i.test(labelText)) continue;
 
       const field = labelEl.closest('[data-automation-id*="formField"]') || labelEl.parentElement?.parentElement;
       const input = field?.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
       if (!input) continue;
 
+      const required = input.required
+        || input.getAttribute('aria-required') === 'true'
+        || !!field?.querySelector('abbr[title*="required" i], [data-automation-id*="required" i]')
+        || /\*\s*$/.test(rawLabelText);
+      const hasError = Array.from(root.querySelectorAll('[data-automation-id*="errorMessage"], [role="alert"]'))
+        .some((el) => /required|error|enter/i.test(normalize(el.textContent)));
+
       const id = `wd-web-${Math.random().toString(36).slice(2, 8)}`;
       input.setAttribute('data-wd-website-url', id);
-      return { id, value: normalize(input.value) };
+      return { id, value: normalize(input.value), blocking: required || hasError };
     }
     return null;
   });
@@ -72,6 +80,7 @@ async function findWebsitesUrlInput(page) {
   return {
     locator: page.locator(`[data-wd-website-url="${markerId.id}"]`).first(),
     value: markerId.value || '',
+    blocking: markerId.blocking === true,
   };
 }
 
@@ -109,13 +118,16 @@ async function deleteWebsites1Row(page) {
 }
 
 /**
- * Handle Websites on My Experience — fill one URL or delete empty row.
+ * Handle Websites on My Experience — fill one URL, or leave the row alone unless
+ * it blocks the step.
  * @param {import('playwright').Page} page
  * @param {object} profile
+ * @param {{force?: boolean}} [options] `force: true` deletes an empty row even when
+ *   it is not marked required (used only after Workday refuses to advance)
  * @returns {Promise<boolean>}
  */
-export async function handleWebsitesSection(page, profile = {}) {
-  console.log('\n  ▶ WEBSITES — fill URL or delete empty (no Add another)');
+export async function handleWebsitesSection(page, profile = {}, options = {}) {
+  console.log('\n  ▶ WEBSITES — fill URL only when required (no Add another)');
 
   const url = getWebsiteUrl(profile);
   const field = await findWebsitesUrlInput(page);
@@ -126,6 +138,28 @@ export async function handleWebsitesSection(page, profile = {}) {
   }
 
   const current = norm(await field.locator.inputValue().catch(() => field.value));
+
+  // Required-only mode: never paste a URL into an optional Websites row; only
+  // clear empty rows so they cannot block Save and Continue.
+  const fillOptional = profile?._fillOptionalFields === true;
+  const force = options?.force === true;
+  if (!fillOptional) {
+    if (!current) {
+      if (!field.blocking && !force) {
+        console.log('    ⏭️  Websites optional and empty — left untouched (no Add, no Delete)');
+        return false;
+      }
+      const deleted = await deleteWebsites1Row(page);
+      if (deleted) {
+        console.log('    🗑️  Deleted empty Websites 1 (row was blocking Save and Continue)');
+        return true;
+      }
+      console.log('    ⏭️  Websites empty and blocking — Delete button not found');
+      return false;
+    }
+    console.log(`    ⏭️  Websites optional — left existing URL as-is: "${current}"`);
+    return true;
+  }
 
   if (url) {
     if (urlsMatch(current, url)) {
@@ -148,9 +182,13 @@ export async function handleWebsitesSection(page, profile = {}) {
   }
 
   if (!current) {
+    if (!field.blocking && !force) {
+      console.log('    ⏭️  Empty Websites 1 with no link in profile — left untouched');
+      return false;
+    }
     const deleted = await deleteWebsites1Row(page);
     if (deleted) {
-      console.log('    🗑️  Deleted empty Websites 1 (no link in profile)');
+      console.log('    🗑️  Deleted empty Websites 1 (no link in profile, row was blocking)');
       return true;
     }
     console.log('    ℹ️  Empty Websites 1 — Delete button not found, continuing');

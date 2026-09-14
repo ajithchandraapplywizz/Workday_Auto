@@ -1,0 +1,128 @@
+# cambiahealth — YAML keyed by tenant slug "cambiahealth" (any wd* platform)
+company: "cambiahealth"
+tenant: cambiahealth
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: ", H-1B status)?"
+    normalized: "h1b status"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Are there any contractual limitations on your ability to accept the position for which you are applying for perform all of its functions?"
+    normalized: "are there any contractual limitations on your ability to accept the position for which you are applying for perform all of its functions"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "Yes"
+      - "No"
+      - "Not Sure"
+    answer: "05/2026"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Are you currently employed (including self-employment, consultant, or independent contractor) as a Navigator?"
+    normalized: "are you currently employed including selfemployment consultant or independent contractor as a navigator"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Are you legally authorized to work in the United States?"
+    normalized: "are you legally authorized to work in the united states"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Cambia requires employees to reside in an approved state, even for remote positions. Approved states are listed in the job posting for this role. Please confirm your eligibility below."
+    normalized: "cambia requires employees to reside in an approved state even for remote positions approved states are listed in the job posting for this role please confirm your eligibility below"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Do you have any relatives who currently work for us or who are members of the board?"
+    normalized: "do you have any relatives who currently work for us or who are members of the board"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Have you ever been convicted, pled guilty to, no contest to, or forfeited bond or bail for any felony, even if the sentence was suspended and your records have been or you believe your records have been expunged or vacated?"
+    normalized: "have you ever been convicted pled guilty to no contest to or forfeited bond or bail for any felony even if the sentence was suspended and your records have been or you believe your records have been expunged or vacated"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Have you ever been employed by the Cambia family of companies?"
+    normalized: "have you ever been employed by the cambia family of companies"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "I have never been employed by the Cambia family of companies; or I currently work as a contractor or leased worker at Cambia."
+      - "I am currently employed as a regular or temporary employee at Cambia."
+      - "I previously worked as a regular or temporary employee, or as a contractor or leased worker at Cambia."
+    answer: "No"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "Have you ever been subject to disciplinary action, investigation, or sanction by any professional licensing board or regulatory agency related to the position for which you are applying?"
+    normalized: "have you ever been subject to disciplinary action investigation or sanction by any professional licensing board or regulatory agency related to the position for which you are applying"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    last_seen_at: 2026-09-13T09:08:41.392Z
+  - label: "Please indicate your salary expectation for this position."
+    normalized: "please indicate your salary expectation for this position"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Application Questions"
+    answer: "1000000"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)
+  - label: "What is your highest level of degree obtained?"
+    normalized: "what is your highest level of degree obtained"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "High School"
+      - "Associates Degree"
+      - "Bachelor of Science"
+      - "Master of Science"
+      - "PhD"
+      - "Master of Business Administration"
+      - "Bachelor of Arts"
+      - "Master of Arts"
+      - "Medical Doctorate"
+      - "Doctor of Law"
+    answer: "Yes"
+    last_seen_at: Sun Sep 13 2026 14:38:41 GMT+0530 (India Standard Time)

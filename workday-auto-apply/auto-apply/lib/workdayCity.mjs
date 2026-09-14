@@ -17,7 +17,7 @@ export function resolveCityValue(profile = {}) {
     || profile?.personal?.City
     || profile?.qa_answers?.city
     || profile?.qa_answers?.['address city']
-    || WORKDAY_DEFAULT_CITY
+    || ''
   ).trim();
 }
 

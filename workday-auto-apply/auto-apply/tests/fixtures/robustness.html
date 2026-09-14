@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Label association robustness</title>
+</head>
+<body>
+  <h1 data-page-title="Robustness">Same questions, unstable chrome</h1>
+
+  <!-- IDs and classes changed; label still associated via aria-labelledby -->
+  <div class="x-wrapper-v9" data-automation-id="formField-qA" data-test-field="reactExp">
+    <span id="lbl-react-new">Do you have experience with React?</span>
+    <div class="nested-deeper">
+      <fieldset>
+        <input type="radio" name="r1" id="r1y" value="Yes" aria-labelledby="lbl-react-new" />
+        <label for="r1y">Yes</label>
+        <input type="radio" name="r1" id="r1n" value="No" aria-labelledby="lbl-react-new" />
+        <label for="r1n">No</label>
+      </fieldset>
+    </div>
+  </div>
+
+  <!-- Order changed; extra description inserted -->
+  <p class="legal-blurb">Please answer based on professional work only. This is extra description.</p>
+  <section data-automation-id="questionPanel-auth" data-test-field="workAuth">
+    <legend id="auth-lbl">Are you legally authorized to work in the United States?</legend>
+    <div>
+      <label><input type="radio" name="auth" value="Yes" /> Yes</label>
+      <label><input type="radio" name="auth" value="No" /> No</label>
+    </div>
+  </section>
+
+  <!-- Optional question that appears only after a checkbox -->
+  <div data-automation-id="formField-optToggle" data-test-field="moreToggle">
+    <label for="more">Show optional question</label>
+    <input type="checkbox" id="more" />
+  </div>
+  <div id="optQ" hidden data-automation-id="formField-optCity" data-test-field="optCity">
+    <label for="optCity">City</label>
+    <input id="optCity" type="text" />
+  </div>
+
+  <script>
+    document.getElementById('more').addEventListener('change', (e) => {
+      document.getElementById('optQ').hidden = !e.target.checked;
+    });
+  </script>
+</body>
+</html>

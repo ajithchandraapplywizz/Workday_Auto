@@ -1,0 +1,96 @@
+# clearchanneloutdoor — YAML keyed by tenant slug "clearchanneloutdoor" (any wd* platform)
+company: "clearchanneloutdoor"
+tenant: clearchanneloutdoor
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Are you 18 years of age or older?"
+    normalized: "are you 18 years of age or older"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 16:46:13 GMT+0530 (India Standard Time)
+  - label: "Are you available to work full-time and/or overtime if required?"
+    normalized: "are you available to work fulltime andor overtime if required"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 16:47:50 GMT+0530 (India Standard Time)
+  - label: "Are you available to work on the weekends if required?"
+    normalized: "are you available to work on the weekends if required"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 16:47:52 GMT+0530 (India Standard Time)
+  - label: "Are you legally authorized to work in the United States?"
+    normalized: "are you legally authorized to work in the united states"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 16:46:11 GMT+0530 (India Standard Time)
+  - label: "Please indicate if you identify as Hispanic or Latino"
+    normalized: "please indicate if you identify as hispanic or latino"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 16:49:34 GMT+0530 (India Standard Time)
+  - label: "Please select the ethnicity which most accurately describes how you identify yourself"
+    normalized: "please select the ethnicity which most accurately describes how you identify yourself"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Asian"
+    last_seen_at: Fri Sep 11 2026 16:49:30 GMT+0530 (India Standard Time)
+  - label: "Please select your gender"
+    normalized: "please select your gender"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Male"
+    last_seen_at: Fri Sep 11 2026 16:49:27 GMT+0530 (India Standard Time)
+  - label: "Please select your veteran status"
+    normalized: "please select your veteran status"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    options:
+      - "I IDENTIFY AS ONE OR MORE OF THE CLASSIFICATIONS OF PROTECTED VETERANS LISTED ABOVE"
+      - "I AM NOT A PROTECTED VETERAN"
+      - "I DO NOT WISH TO SELF-IDENTIFY"
+    answer: "I AM NOT A PROTECTED VETERAN"
+    last_seen_at: Fri Sep 11 2026 16:49:49 GMT+0530 (India Standard Time)
+  - label: "Will you now or in the future require sponsorship for employment visa status (e.g. H-1B status)?"
+    normalized: "will you now or in the future require sponsorship for employment visa status eg h1b status"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 16:46:15 GMT+0530 (India Standard Time)
+  - label: "Yes, I have read and consent to the terms and conditions"
+    normalized: "yes i have read and consent to the terms and conditions"
+    fieldType: "checkbox"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Yes"
+    last_seen_at: 2026-09-11T11:19:58.168Z

@@ -1,0 +1,173 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Voluntary Disclosures — EEO fixture</title>
+  <style>
+    body { font-family: sans-serif; max-width: 720px; margin: 24px auto; }
+    [data-automation-id="formField-voluntary"] { margin: 18px 0; }
+    .wd-q { margin: 16px 0 4px; }
+    [data-automation-id="selectWidget"] {
+      position: relative;
+      min-width: 280px;
+      min-height: 36px;
+      border: 1px solid #666;
+      padding: 8px 28px 8px 8px;
+      cursor: pointer;
+    }
+    [data-automation-id="promptIcon"] {
+      position: absolute;
+      right: 0;
+      top: 0;
+      width: 36px;
+      height: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    [data-automation-id="promptIcon"] svg {
+      width: 16px;
+      height: 16px;
+      pointer-events: auto;
+    }
+    #wd-portal [role="listbox"] {
+      border: 1px solid #888;
+      list-style: none;
+      padding: 4px;
+      margin: 8px 0 0;
+      background: #fff;
+    }
+    [data-automation-id="promptOption"] { cursor: pointer; padding: 6px; }
+    [data-automation-id="promptOption"]:hover { background: #def; }
+    .err { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1 data-page-title="Voluntary Disclosures">Voluntary Disclosures</h1>
+
+  <!-- Live Workday: one ancestor holds every EEO label; widgets are sibling DIVs. -->
+  <div data-automation-id="formField-voluntary">
+    <div class="wd-q" data-automation-id="formField-ethnicity-label" data-test-field="ethnicity">
+      <div data-automation-id="richText">Please select the ethnicity which most accurately describes how you identify yourself.*</div>
+    </div>
+    <div data-automation-id="selectOne" data-test-widget="ethnicity">
+      <div data-automation-id="selectWidget" tabindex="0" aria-label="Please select the ethnicity which most accurately describes how you identify yourself.">
+        <span data-automation-id="selectedItem">Select One</span>
+        <span data-automation-id="promptIcon">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+        </span>
+      </div>
+    </div>
+    <p class="err" data-test-error hidden>Error: The field Please select the ethnicity which most accurately describes how you identify yourself. is required and must have a value.</p>
+
+    <div class="wd-q" data-automation-id="formField-hispanic-label" data-test-field="hispanic">
+      <div data-automation-id="richText">Are you Hispanic/Latino?</div>
+    </div>
+    <div data-automation-id="selectOne" data-test-widget="hispanic">
+      <div data-automation-id="selectWidget" tabindex="0" aria-label="Are you Hispanic/Latino?">
+        <span data-automation-id="selectedItem">Select One</span>
+        <span data-automation-id="promptIcon">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+        </span>
+      </div>
+    </div>
+
+    <div class="wd-q" data-automation-id="formField-gender-label" data-test-field="gender">
+      <div data-automation-id="richText">Please select your gender.*</div>
+    </div>
+    <div data-automation-id="selectOne" data-test-widget="gender">
+      <div data-automation-id="selectWidget" tabindex="0" aria-label="Please select your gender.">
+        <span data-automation-id="selectedItem">Select One</span>
+        <span data-automation-id="promptIcon">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+        </span>
+      </div>
+    </div>
+
+    <div class="wd-q" data-automation-id="formField-veteran-label" data-test-field="veteran">
+      <div data-automation-id="richText">Please select the veteran status which most accurately describes how you identify yourself.*</div>
+    </div>
+    <div data-automation-id="selectOne" data-test-widget="veteran">
+      <div data-automation-id="selectWidget" tabindex="0" aria-label="Please select the veteran status which most accurately describes how you identify yourself.">
+        <span data-automation-id="selectedItem">Select One</span>
+        <span data-automation-id="promptIcon">
+          <svg viewBox="0 0 12 12" aria-hidden="true"><path d="M2 4l4 4 4-4"/></svg>
+        </span>
+      </div>
+    </div>
+  </div>
+
+  <div id="wd-portal"></div>
+
+  <script>
+    const MENUS = {
+      ethnicity: [
+        'Asian (United States of America)',
+        'White (United States of America)',
+        'Black or African American',
+        'Two or More Races',
+        'Prefer not to say',
+      ],
+      hispanic: ['Yes', 'No', 'Not Hispanic or Latino'],
+      gender: ['Male', 'Female', 'Non-Binary', 'Prefer not to say'],
+      veteran: [
+        'I identify as one or more of the classifications of a protected veteran',
+        'I identify as a veteran, just not a protected veteran',
+        'I am not a veteran',
+        'I am not a protected veteran',
+        'I choose not to disclose',
+      ],
+    };
+
+    const portal = document.getElementById('wd-portal');
+    let openKey = null;
+
+    function closeMenu() {
+      portal.innerHTML = '';
+      openKey = null;
+    }
+
+    function openMenu(key, widget) {
+      if (openKey === key) {
+        closeMenu();
+        return;
+      }
+      closeMenu();
+      openKey = key;
+      const list = document.createElement('ul');
+      list.setAttribute('role', 'listbox');
+      MENUS[key].forEach((text) => {
+        const opt = document.createElement('li');
+        opt.setAttribute('role', 'option');
+        opt.setAttribute('data-automation-id', 'promptOption');
+        opt.setAttribute('data-automation-label', text);
+        opt.textContent = text;
+        opt.addEventListener('click', (ev) => {
+          ev.stopPropagation();
+          widget.querySelector('[data-automation-id="selectedItem"]').textContent = text;
+          const err = document.querySelector('[data-test-error]');
+          if (err && key === 'ethnicity') err.hidden = true;
+          closeMenu();
+        });
+        list.appendChild(opt);
+      });
+      portal.appendChild(list);
+    }
+
+    function wire(widget, key) {
+      const activate = (ev) => {
+        ev.preventDefault();
+        ev.stopPropagation();
+        openMenu(key, widget);
+      };
+      widget.addEventListener('click', activate);
+      widget.querySelector('[data-automation-id="promptIcon"]')?.addEventListener('click', activate);
+      widget.querySelector('svg')?.addEventListener('click', activate);
+    }
+
+    document.querySelectorAll('[data-test-widget]').forEach((root) => {
+      wire(root.querySelector('[data-automation-id="selectWidget"]'), root.getAttribute('data-test-widget'));
+    });
+  </script>
+</body>
+</html>

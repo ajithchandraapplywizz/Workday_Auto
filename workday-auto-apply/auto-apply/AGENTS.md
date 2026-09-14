@@ -99,7 +99,7 @@ Checkpoint must pass on a real Workday URL before commit. No mocks, no assumptio
 |---|---|
 | Workday DOM changes / selector fails | Log failing selector + page URL; add fallback selector; update `planner.mjs` FIELD_MAP |
 | Multi-step wizard shape unclear on a new tenant | Record the manual flow; extract a step map from the recording |
-| OTP/login verification fails | Check credential source (`.env` locally, `workday_credentials` in Production); inspect recent auth emails manually |
+| Login fails | Check WORKDAY_EMAIL / WORKDAY_PASSWORD in `.env` (or `workday_credentials` in Production). Mailbox OTP is not connected; Zoho Mail can be added later if a tenant requires a code |
 | Bot loops or hangs | Add timeout gates; log page URL at each step; inspect `screenshots/` for context |
 | Telegram reply doesn't map to pending escalation | Verify `telegram_chat_id` ↔ pending question state is tracked per user, not globally |
 

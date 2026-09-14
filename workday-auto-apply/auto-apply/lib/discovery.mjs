@@ -19,12 +19,42 @@ export function isWorkdayUrl(url) {
   }
 }
 
-export function getWorkdayTenant(url) {
+/**
+ * Parse any Workday career host: {tenant}.{wdN}.myworkdayjobs.com
+ * Supports wd1, wd3, wd5, wd12, wd108, and future wd* platforms.
+ * @returns {{ tenant: string, platform: string, hostname: string }|null}
+ */
+export function detectWorkdayTenant(url) {
   try {
-    return new URL(url).hostname.split('.')[0].toLowerCase();
+    const hostname = new URL(url).hostname.toLowerCase();
+    const match = hostname.match(/^([^.]+)\.(wd\d+)\.myworkdayjobs\.com$/i);
+    if (match) {
+      return {
+        tenant: match[1].toLowerCase(),
+        platform: match[2].toLowerCase(),
+        hostname,
+      };
+    }
+    if (/(^|\.)myworkdayjobs\.com$/i.test(hostname)) {
+      return {
+        tenant: hostname.split('.')[0],
+        platform: '',
+        hostname,
+      };
+    }
+    return null;
   } catch {
-    return 'unknown';
+    return null;
   }
+}
+
+/** Tenant slug only (visa, synechron, td). Same YAML for every wd* platform. */
+export function getWorkdayTenant(url) {
+  return detectWorkdayTenant(url)?.tenant || 'unknown';
+}
+
+export function getWorkdayPlatform(url) {
+  return detectWorkdayTenant(url)?.platform || '';
 }
 
 /**
@@ -66,25 +96,206 @@ export function validateWorkdayUrl(url) {
  * @returns {Promise<Array<{ url: string, company?: string }>>}
  */
 export async function readTargetsFile(filePath) {
+  return readJobLinksFile(filePath);
+}
+
+/**
+ * Load today's job dump (CSV or txt). Pulls every Workday URL from the file.
+ * Accepts: one URL per line, url|company, or any CSV row that contains a myworkdayjobs.com link.
+ * @returns {Promise<Array<{ url: string, company?: string }>>}
+ */
+export async function readJobLinksFile(filePath) {
   const content = await readFile(filePath, 'utf-8');
   const results = [];
+  const seen = new Set();
+  const urlRe = /https?:\/\/[^\s,"']+\.myworkdayjobs\.com[^\s,"']*/gi;
+
+  const add = (url, company) => {
+    const clean = String(url || '').replace(/[)\].,;]+$/g, '').trim();
+    const check = validateWorkdayUrl(clean);
+    if (!check.valid) return;
+    const key = clean.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    results.push({ url: clean, company: company || undefined });
+  };
+
   for (const line of content.split(/\r?\n/)) {
-    const parsed = parseTargetLine(line);
-    if (!parsed) continue;
-    const check = validateWorkdayUrl(parsed.url);
-    if (!check.valid) {
-      console.log(`⚠ Skipping malformed target: ${parsed.url}`);
-      console.log(`  Reason: ${check.reason}`);
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+
+    const found = trimmed.match(urlRe) || [];
+    if (found.length) {
+      let company = '';
+      const parts = trimmed.split(',').map((p) => p.replace(/^"|"$/g, '').trim());
+      if (parts.length >= 2 && !/myworkdayjobs\.com/i.test(parts[1] || '')) {
+        company = parts[1];
+      }
+      for (const raw of found) add(raw, company);
       continue;
     }
-    results.push(parsed);
+
+    const parsed = parseTargetLine(trimmed);
+    if (parsed) add(parsed.url, parsed.company);
   }
+
   return results;
 }
 
 // ─── ATS Detection (Workday-only) ──────────────────────────────────────────
 export function detectATS(url) {
   return isWorkdayUrl(url) ? 'workday' : 'unsupported';
+}
+
+/**
+ * Workday 404 / expired job posting — shown before login on bad URLs.
+ * e.g. "The page you are looking for doesn't exist." + "Search for Jobs"
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function isWorkdayJobPageMissing(page) {
+  return await page.evaluate(() => {
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    const missing = /the page you are looking for doesn'?t exist/i.test(text)
+      || /this job (?:posting )?has (?:been )?(?:filled|closed|expired|removed)/i.test(text)
+      || /job (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
+      || /position (?:has been )?filled/i.test(text);
+    const searchJobs = /search for jobs/i.test(text);
+    return missing && (searchJobs || /doesn'?t exist/i.test(text));
+  }).catch(() => false);
+}
+
+const WORKDAY_WIZARD_SELECTORS = [
+  'button:has-text("Save and Continue")',
+  'button:has-text("Save & Continue")',
+  'button[data-automation-id="bottom-navigation-next-button"]',
+  'input[data-automation-id="legalNameSection_firstName"]',
+  'input[data-automation-id="phone-number"]',
+  '[data-automation-id*="wizardStep"]',
+].join(', ');
+
+const CONTINUE_APPLICATION_SELECTORS = [
+  'a[data-automation-id="continueApplication"]',
+  'button[data-automation-id="continueApplication"]',
+  'a[data-automation-id="continueApplicationButton"]',
+  'button[data-automation-id="continueApplicationButton"]',
+  'a[data-automation-id="continueButton"]',
+  'button[data-automation-id="continueButton"]',
+  'a:has-text("Continue Application")',
+  'button:has-text("Continue Application")',
+  '[role="menuitem"]:has-text("Continue Application")',
+  'a:has-text("Continue application")',
+  'button:has-text("Continue application")',
+];
+
+/** True when the multi-step application wizard is visible (not JD / login). */
+export async function isWorkdayWizardVisible(page) {
+  const el = await page.$(WORKDAY_WIZARD_SELECTORS).catch(() => null);
+  return Boolean(el && await el.isVisible().catch(() => false));
+}
+
+/**
+ * Click "Continue Application" when a draft exists (JD page or Manage menu).
+ * @returns {Promise<boolean>} true if a continue control was clicked
+ */
+export async function clickContinueApplicationIfPresent(page) {
+  if (await isWorkdayWizardVisible(page)) return false;
+
+  for (const sel of CONTINUE_APPLICATION_SELECTORS) {
+    try {
+      const els = await page.$$(sel);
+      for (const el of els) {
+        if (!await el.isVisible().catch(() => false)) continue;
+        if (await isInNavOrHeader(el)) continue;
+        const text = (await el.textContent().catch(() => '')).replace(/\s+/g, ' ').trim();
+        if (!/continue\s*application/i.test(text) && !/continueApplication/i.test(sel)) continue;
+        console.log(`   Found draft resume control: "${text || 'Continue Application'}" — clicking...`);
+        await el.click({ force: true }).catch(() => el.evaluate((node) => node.click()));
+        await page.waitForTimeout(2000);
+        try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
+        return true;
+      }
+    } catch {}
+  }
+
+  const viaDom = await page.evaluate(() => {
+    const isVisible = (el) => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || el.getClientRects().length > 0);
+    };
+    const inNav = (el) => !!el.closest('nav, header, [role="navigation"], [role="banner"]');
+    const nodes = Array.from(document.querySelectorAll('a, button, [role="button"], [role="menuitem"]'));
+    const target = nodes.find((el) => {
+      if (!isVisible(el) || inNav(el)) return false;
+      const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      const autoId = el.getAttribute('data-automation-id') || '';
+      return /^continue\s*application$/i.test(t)
+        || autoId === 'continueApplication'
+        || autoId === 'continueApplicationButton';
+    });
+    if (!target) return null;
+    target.click();
+    return (target.textContent || '').replace(/\s+/g, ' ').trim() || 'Continue Application';
+  }).catch(() => null);
+
+  if (viaDom) {
+    console.log(`   Found draft resume control via DOM: "${viaDom}" — clicked`);
+    await page.waitForTimeout(2000);
+    try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
+    return true;
+  }
+
+  const manageBtn = page.locator('button, [role="button"]').filter({ hasText: /^manage$/i }).first();
+  if (await manageBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
+    if (!(await isInNavOrHeader(manageBtn).catch(() => false))) {
+      await manageBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(800);
+      const menuItem = page.locator('[role="menuitem"], li, a, button').filter({ hasText: /^Continue Application$/i }).first();
+      if (await menuItem.isVisible({ timeout: 2000 }).catch(() => false)) {
+        console.log('   Opening Manage menu → Continue Application...');
+        await menuItem.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(2000);
+        try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
+        return true;
+      }
+    }
+  }
+
+  return false;
+}
+
+/**
+ * Enter the application wizard from JD / draft / apply URL (DOM-only).
+ * @returns {Promise<{ entered: boolean, method: string }>}
+ */
+export async function ensureWorkdayApplicationWizard(page, { mode = 'signin' } = {}) {
+  if (await isWorkdayWizardVisible(page)) {
+    return { entered: true, method: 'already-on-wizard' };
+  }
+
+  const continued = await clickContinueApplicationIfPresent(page);
+  if (continued) {
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+    await page.waitForTimeout(1000);
+    if (await isWorkdayWizardVisible(page)) {
+      return { entered: true, method: 'continue-application' };
+    }
+  }
+
+  await discoverApplicationForm(page, page.url(), { mode });
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await page.waitForTimeout(1000);
+
+  if (await isWorkdayWizardVisible(page)) {
+    return { entered: true, method: continued ? 'continue-then-apply' : 'apply-button' };
+  }
+
+  const retried = await clickContinueApplicationIfPresent(page);
+  if (retried && await isWorkdayWizardVisible(page)) {
+    return { entered: true, method: 'continue-application-retry' };
+  }
+
+  return { entered: false, method: 'none' };
 }
 
 // ─── Check if an element is inside a nav or header ─────────────────────────
@@ -176,10 +387,18 @@ export async function prescanGatewayElements(page) {
       return !inNav && (autoId === 'adventureButton' || autoId === 'applyButton' || autoId === 'jobPostingApplyButton' || t === 'apply' || t === 'apply now' || t === 'apply for this job') && b.offsetParent !== null;
     });
 
+    const hasContinueApplicationBtn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      const t = (b.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const inNav = !!b.closest('nav, header, [role="navigation"], [role="banner"]');
+      return !inNav && (autoId === 'continueApplication' || autoId === 'continueApplicationButton' || t === 'continue application') && b.offsetParent !== null;
+    });
+
     return {
       hasActiveModal: !!modal,
       hasWizardFields,
       hasApplyBtn,
+      hasContinueApplicationBtn,
       hasEmailInput,
       hasPasswordInput,
       hasVerifyPassword,
@@ -343,21 +562,30 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
     } catch {}
 
     // 1. Check if already on wizard form (Step 1..5)
-    const isAlreadyOnWizard = await page.$([
-      'button:has-text("Save and Continue")',
-      'button:has-text("Save & Continue")',
-      'button[data-automation-id="bottom-navigation-next-button"]',
-      'input[data-automation-id="legalNameSection_firstName"]',
-      '[data-automation-id*="wizardStep"]',
-    ].join(', ')).catch(() => null);
-
-    if (isAlreadyOnWizard && await isAlreadyOnWizard.isVisible().catch(() => false)) {
+    if (await isWorkdayWizardVisible(page)) {
       console.log('   Already on Workday application wizard.');
       return page.url();
     }
 
-    // 2. Target initial Apply button on JD page (excluding nav/header links)
+    // 2. Draft in progress — "Continue Application" on JD (replaces Apply)
+    const continued = await clickContinueApplicationIfPresent(page);
+    if (continued) {
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+      await page.waitForTimeout(1000);
+      if (await isWorkdayWizardVisible(page)) {
+        console.log('   Resumed draft application via Continue Application.');
+        return page.url();
+      }
+      await handleAdaptiveGateway(page, mode);
+      if (await isWorkdayWizardVisible(page)) {
+        console.log('   Resumed draft application after gateway.');
+        return page.url();
+      }
+    }
+
+    // 3. Target initial Apply button on JD page (excluding nav/header links)
     const workdayApplySelectors = [
+      ...CONTINUE_APPLICATION_SELECTORS,
       'a[data-automation-id="adventureButton"]',
       'a[data-automation-id="applyButton"]',
       'button[data-automation-id="applyButton"]',
@@ -458,3 +686,4 @@ export async function extractJDText(page) {
     return document.body?.innerText?.substring(0, 5000) || '';
   });
 }
+

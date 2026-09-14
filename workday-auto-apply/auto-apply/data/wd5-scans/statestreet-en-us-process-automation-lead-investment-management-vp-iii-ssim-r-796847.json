@@ -1,0 +1,100 @@
+{
+  "company": "statestreet",
+  "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847",
+  "tenant": "statestreet",
+  "status": "ok",
+  "error": null,
+  "steps": [
+    "My Information",
+    "My Experience"
+  ],
+  "questions": [
+    {
+      "label": "Have you previously worked for our Organization (including all entities such as Charles River, SSGA)?",
+      "normalized": "have you previously worked for our organization including all entities such as charles river ssga",
+      "fieldType": "radio",
+      "required": true,
+      "options": [
+        "Yes",
+        "No"
+      ],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "Given Name(s)",
+      "normalized": "given names",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "Address Line 1",
+      "normalized": "address line 1",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "Postal Code",
+      "normalized": "postal code",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "Phone Number",
+      "normalized": "phone number",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "City*",
+      "normalized": "city",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Information",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    },
+    {
+      "label": "Type to Add Skills*",
+      "normalized": "type to add skills",
+      "fieldType": "text",
+      "required": true,
+      "options": [],
+      "step": "My Experience",
+      "company": "statestreet",
+      "tenant": "statestreet",
+      "url": "https://statestreet.wd1.myworkdayjobs.com/en-US/Global/job/Boston%2C-Massachusetts/Process-Automation-Lead---Investment-Management--VP-III-----SSIM_R-796847/apply/applyManually"
+    }
+  ],
+  "scanned_at": "2026-09-10T04:33:06.709Z",
+  "questions_by_step": {
+    "My Information": 6,
+    "My Experience": 1
+  },
+  "reached_review": false,
+  "review_decision": "next"
+}

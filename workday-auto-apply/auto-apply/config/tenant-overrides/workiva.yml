@@ -1,0 +1,99 @@
+# workiva — YAML keyed by tenant slug "workiva" (any wd* platform)
+company: "workiva"
+tenant: workiva
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Are you currently authorized to work in the U.S. for any employer?"
+    normalized: "are you currently authorized to work in the us for any employer"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Mon Sep 14 2026 10:25:47 GMT+0530 (India Standard Time)
+  - label: "Do you now or will you in the future require employer sponsorship for U.S. work authorization (e.g., H-1B, TN, O-1, green card, STEM OPT training plan, etc.)?"
+    normalized: "do you now or will you in the future require employer sponsorship for us work authorization eg h1b tn o1 green card stem opt training plan etc"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Mon Sep 14 2026 10:25:56 GMT+0530 (India Standard Time)
+  - label: "Does your work authorization now, or will it in the future, involve CPT or OPT?"
+    normalized: "does your work authorization now or will it in the future involve cpt or opt"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Mon Sep 14 2026 10:26:02 GMT+0530 (India Standard Time)
+  - label: "for any employer?"
+    normalized: "for any employer"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Mon Sep 14 2026 10:25:51 GMT+0530 (India Standard Time)
+  - label: "Gender"
+    normalized: "gender"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Male"
+    last_seen_at: Mon Sep 14 2026 10:35:54 GMT+0530 (India Standard Time)
+  - label: "Have you worked at Workiva before?"
+    normalized: "have you worked at workiva before"
+    fieldType: "radio"
+    field_type_code: 3
+    required: false
+    answer: "No"
+    last_seen_at: Mon Sep 14 2026 10:25:17 GMT+0530 (India Standard Time)
+  - label: "How Did You Hear About Us?"
+    normalized: "how did you hear about us"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    answer: "Alumni Talent Newsletter"
+    last_seen_at: Mon Sep 14 2026 10:23:42 GMT+0530 (India Standard Time)
+  - label: "Phone Device Type"
+    normalized: "phone device type"
+    fieldType: "select"
+    field_type_code: 2
+    required: false
+    answer: "Mobile"
+    last_seen_at: Mon Sep 14 2026 10:25:23 GMT+0530 (India Standard Time)
+  - label: "Please confirm your veteran status"
+    normalized: "please confirm your veteran status"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "I am not a protected veteran"
+    last_seen_at: 2026-09-14T05:06:05.965Z
+  - label: "Please provide additional information."
+    normalized: "please provide additional information"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Application Questions"
+    answer: "The applicant has 0.25 years of experience as an AI/ML Engineer, developing websites and automation, and working with agents and LLMs. They also have 0.17 years of experience as a Full Stack Developer, building and shipping full-stack features, integrating REST APIs, and troubleshooting issues. Additionally, they have 0.08 years of experience in QA/Validation Testing, performing quality assurance and validation testing on AI/ML training data."
+    last_seen_at: Mon Sep 14 2026 10:33:09 GMT+0530 (India Standard Time)

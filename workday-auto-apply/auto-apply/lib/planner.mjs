@@ -2,7 +2,8 @@
  * planner.mjs — Auto-generate fill plan from scan + profile
  *
  * Maps scanned field labels to profile YAML keys automatically.
- * Includes unknown-field fallback to persistent Q&A store and terminal prompt.
+ * Unknown required fields: Apply Wizz client profile → LLM closest match.
+ * Terminal Q&A is off unless FORM_ANSWER_TERMINAL=1.
  */
 
 import { readFile } from 'fs/promises';
@@ -11,11 +12,19 @@ import { resolve } from 'path';
 import yaml from 'js-yaml';
 import readline from 'readline/promises';
 import { fuzzyScore } from './fields.mjs';
-import { normalizeLabel, createQAStore, findBestMatch, isComplianceSensitive, isSalaryQuestion, loadSettings, saveAnswerToYaml } from './qaStore.mjs';
-import { inferFromResumeFile, DEFAULT_RESUME_PATH } from './resumeParser.mjs';
-import { mergeWorkdayDefaultAnswers, lookupDefaultAnswer } from './workdayDefaults.mjs';
-import { buildCurrentDateAction } from './date-utils.mjs';
-import { getWorkdayTenant } from './discovery.mjs';
+import { normalizeLabel, createQAStore, isComplianceSensitive, saveAnswerToYaml } from './qaStore.mjs';
+import { hydrateProfileFromApplyWizz } from './applyWizzClient.mjs';
+import {
+  mergeWorkdayDefaultAnswers,
+} from './workdayDefaults.mjs';
+import { resolveClientAnswer } from './clientAnswer.mjs';
+import { resolveDynamicAnswer } from './questionEngine/index.mjs';
+import { buildCurrentDateAction, getTodayMMDDYYYY } from './date-utils.mjs';
+import { getWorkdayPlatform, getWorkdayTenant } from './discovery.mjs';
+import { collectLiveFieldOptions } from './workdayDom.mjs';
+import { resolveUnknownWithLlm } from './openRouterLlm.mjs';
+import { shouldIncludeInScan, isSkippableUnimportantLabel, isMandatoryField, shouldSkipOptionalFill } from './scanFieldFilter.mjs';
+import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
 
 // ─── Field label → profile key mapping ──────────────────────────────────────
 // Each entry: [regex to match field label, path in profile.yml, optional transform]
@@ -29,7 +38,11 @@ export const FIELD_MAP = [
   [/are\s*you\s*bilingual\?/i, '_static.No'],
   [/do\s*you\s*have\s*any\s*relatives\s*that\s*are\s*currently\s*employed\s*by\s*abc\s*fitness\?/i, '_static.No'],
   [/are\s*you\s*currently\s*or\s*have\s*you\s*ever\s*worked\s*at\s*an\s*abc\s*customer\s*site\?/i, '_static.No'],
-  [/are\s*you\s*18\s*years\s*of\s*age\s*or\s*older\?/i, '_static.Yes'],
+  [/are\s*you\s*18\s*years\s*(of\s*age\s*)?or\s*older/i, '_static.Yes'],
+  [/legally\s*authorized\s*to\s*work\s*in\s*the\s*united\s*states/i, '_static.Yes'],
+  [/reside.*north\s*dakota.*wyoming.*puerto\s*rico|us\s*virgin\s*islands.*employment/i, '_static.No'],
+  [/mass\s*general\s*brigham\s*affiliate|worked\s*at\s*one\s*of\s*the\s*mass\s*general/i, '_static.No'],
+  [/require\s*sponsorship\s*for\s*employment\s*visa/i, '_static.No'],
   [/have\s*you\s*ever\s*been\s*employed\s*by\s*3m\s*or\s*a\s*subsidiary/i, '_static.No'],
   [/have\s*you\s*been\s*employed\s*by\s*pricewater\s*coopers\s*\(pwc\)\?/i, '_static.No'],
   [/have\s*you\s*signed\s*an\s*agreement\s*with\s*a\s*current\/previous\s*employer.*non-competition|non-solicitation/i, '_static.No'],
@@ -42,10 +55,24 @@ export const FIELD_MAP = [
   [/do\s*you\s*possess\s*a\s*bachelor['’]?s\s*degree\s*or\s*higher/i, '_static.Yes'],
   [/do\s*you\s*have\s*a\s*minimum\s*of\s*ten\s*\(10\)\s*years.*sourcing.*procurement.*logistics.*supply\s*chain.*engineering.*manufacturing/i, '_static.Yes'],
   [/do\s*you\s*have\s*experience\s*in\s*procurement.*molding\s*suppliers/i, '_static.Yes'],
-  [/please\s*select\s*your\s*sex/i, '_static.Male'],
+  [/please\s*select\s*your\s*sex|^sex$/i, '_static.Male'],
+  [/^gender$|^sex$/i, 'eeo.gender'],
+  [/hispanic\s*or\s*latino|^hispanic$/i, 'eeo.hispanic_latino'],
+  [/race\/ethnicity|^race ethnicity$|^race$|^ethnicity$/i, 'eeo.race'],
+  [/^veteran status$/i, 'eeo.veteran_status'],
   [/please\s*select\s*your\s*race-ethnicity/i, '_static.Asian \(United States of America\)'],
   [/please\s*indicate\s*whether\s*you\s*are\s*in\s*one\s*or\s*more\s*of\s*the\s*protected\s*veteran\s*categories/i, '_static.I am not a protected veteran.'],
+  [/i confirm that i understand and agree.*privacy statement/i, '_static.Yes'],
   [/yes,\s*i\s*have\s*read\s*and\s*consent\s*to\s*the\s*terms\s*and\s*conditions/i, '_static.Yes'],
+  [/i\s*certify\s*that\s*i\s*have\s*read.*foregoing\s*statement/i, '_static.Yes'],
+  [/type to add skills|enter a skill below/i, 'skills'],
+  [/relative of a current public official/i, '_static.No'],
+  [/relative of a current senior level person or senior commercial person/i, '_static.No'],
+  [/if yes.*relationship with this individual/i, '_static.N/A'],
+  [/if yes.*institution name and level/i, '_static.N/A'],
+  [/enter\s*n\/?a\s*if\s*not\s*applicable/i, '_static.N/A'],
+  [/please select one of the below options(?!\s*['']?\s*yes)/i, '_static.I am completing the application and anti-corruption questions on behalf of myself.'],
+  [/enter your name.*agency.*n\/?a/i, '_static.N/A'],
   [/country\s*(\/\s*territory\s*)?phone\s*code|^phoneNumber--countryPhoneCode/i, 'personal.country_phone_code'],
   [/extension|^phoneNumber--extension$/i, 'personal.phone_extension'],
   [/^phone\s*number$|^phoneNumber--phoneNumber$|^phone$/i, 'personal.phone'],
@@ -75,8 +102,22 @@ export const FIELD_MAP = [
   [/sponsor|visa/i, 'work_auth.sponsorship_needed'],
   [/authorized.*work|legally.*work|eligible.*work|work.*authorization/i, 'work_auth.authorized_us'],
 
+  // Availability & work type
+  [/when.*available.*start|available.*to.*start|when.*can.*you.*start|desired.*start.*date|earliest.*start/i, '_dynamic.today'],
+  [/work\s*types?|employment\s*types?|what.*schedule|shift\s*preference|available\s*for|^full[-\s]?time$/i, '_static.Full-time'],
+
   // EEO & Disclosures
-  [/gender/i, 'eeo.gender'],
+  [/please\s*select\s*your\s*gender/i, '_static.Male'],
+  [/please\s*select\s*your\s*sex/i, '_static.Male'],
+  [/please\s*select\s*your\s*race-ethnicity/i, 'eeo.race'],
+  [/ethnicity\s*single\s*selection/i, 'eeo.race'],
+  [/yes,\s*i\s*have\s*read\s*and\s*consent\s*to\s*the\s*terms\s*and\s*conditions/i, '_static.Yes'],
+  [/please\s*select\s*yes\s*if\s*hispanic/i, '_static.No'],
+  [/minimum\s*educational\s*requirements/i, '_static.Yes'],
+  [/highest\s*level\s*of\s*education\s*completed/i, '_static.Bachelor\'s Degree'],
+  [/please\s*select\s*the\s*veteran\s*status\s*which\s*most\s*accurately/i, 'eeo.veteran_status'],
+  [/please\s*select\s*the\s*race\s*which\s*most\s*accurately/i, 'eeo.race'],
+  [/^gender\s*$/i, 'eeo.gender'],
   [/hispanic|latino/i, 'eeo.hispanic_latino'],
   [/race|ethnicity/i, 'eeo.race'],
   [/veteran/i, 'eeo.veteran_status'],
@@ -103,7 +144,7 @@ export const FIELD_MAP = [
   [/degree/i, 'education.degree'],
   [/major|field\s*of\s*study/i, 'education.major'],
   [/university|school|college|institution/i, 'education.university'],
-  [/graduat|year/i, 'education.graduation_year'],
+  [/graduation\s*year|year\s*of\s*graduation|graduat(?:ion)?\s*(?:year|date)|when\s*(did|do|will)\s*you\s*(expect\s*to\s*)?graduat|expected\s*graduation|education\s*(end|to|completion)\s*(year|date)/i, 'education.to_year'],
   [/gpa|grade/i, 'education.gpa'],
 
   // Experience
@@ -130,6 +171,7 @@ export const FIELD_MAP = [
   [/preferred\s*(first\s*)?name/i, 'personal.first_name'],
 
   // Prior worker / employed before / candidateIsPreviousWorker (#hopz4)
+  [/prior\s*employment.*contractor|medtronic.*covidien|covidien.*subsidiar/i, '_static.No'],
   [/prior\s*worker|previously\s*worked|former\s*employee|employed.*in\s*the\s*past|self\s*identify.*prior|candidateIsPreviousWorker|^#?hopz4$/i, '_static.No'],
 
   // Referral source — filled only via workdaySource.mjs (DOM click, not profile.country_phone_code)
@@ -164,6 +206,12 @@ export async function loadProfile(profilePath) {
   }
 
   mergeWorkdayDefaultAnswers(profile);
+  await hydrateProfileFromApplyWizz(profile);
+
+  // Default: only fill mandatory (*) fields unless profile explicitly opts in
+  if (profile._fillOptionalFields !== true) {
+    profile._mandatoryOnlyFill = true;
+  }
 
   if (!profile.personal?.phone) {
     console.warn('⚠️  profile.personal.phone is missing in config/profile.yml — Workday phone fill will stop until it is set.');
@@ -174,6 +222,11 @@ export async function loadProfile(profilePath) {
 
 // ─── Get value from nested path ─────────────────────────────────────────────
 export function getNestedValue(obj, path) {
+  // graduation_year alias → to_year (Apply Wizz stores end year as to_year)
+  if (path === 'education.graduation_year' && obj?.education) {
+    const g = obj.education.graduation_year || obj.education.to_year;
+    if (g != null && g !== '') return g;
+  }
   return path.split('.').reduce((o, k) => o?.[k], obj);
 }
 
@@ -236,8 +289,12 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
   const overrideRules = loadTenantOverrideRules(tenant);
   for (const [regex, path] of overrideRules) {
     if (regex.test(cleanLabel)) {
+      if (path.startsWith('_dynamic.today')) {
+        return getTodayMMDDYYYY('Asia/Kolkata');
+      }
       if (path.startsWith('_static.')) {
-        return path.substring(8);
+        // Invented Yes/No/Male answers — never use. Apply Wizz or LLM must decide.
+        continue;
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
@@ -248,8 +305,11 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
 
   for (const [regex, path] of FIELD_MAP) {
     if (regex.test(cleanLabel)) {
+      if (path.startsWith('_dynamic.today')) {
+        return getTodayMMDDYYYY('Asia/Kolkata');
+      }
       if (path.startsWith('_static.')) {
-        return path.substring(8);
+        continue;
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
@@ -268,6 +328,7 @@ function inferDomFieldType(field = {}) {
   const inputType = String(field.inputType || '').toLowerCase();
 
   if (rawType === 'select' || rawType === 'custom-select' || role === 'combobox' || automationId.includes('select') || automationId.includes('prompt')) return 'dropdown/select';
+  if (rawType === 'checkbox-group') return 'multi-select (checkboxes)';
   if (rawType === 'checkbox' || role === 'checkbox' || inputType === 'checkbox') return 'checkbox';
   if (rawType === 'radio' || role === 'radio' || inputType === 'radio') return 'radio';
   if (rawType === 'file' || inputType === 'file') return 'file upload';
@@ -288,47 +349,146 @@ function isRequiredQuestionText(label = '', field = {}) {
 }
 
 function isSkipSocialLinkLabel(label = '') {
-  const text = String(label || '').trim();
-  if (!text) return false;
-  const lower = text.toLowerCase();
-  return /facebook|twitter|x\.com|social media|social profile|social link/i.test(lower);
+  return isSkippableUnimportantLabel(label);
 }
 
-function shouldPromptForUnknownField(label = '', field = {}) {
+function shouldPromptForUnknownField(label = '', field = {}, profile = null, step = '') {
   const text = String(label || '').trim();
   if (!text) return false;
-  const lower = text.toLowerCase();
-
+  if (isMandatoryField(text, field) || field?.required === true) return true;
   if (isSkipSocialLinkLabel(text)) return false;
-  if (/optional|voluntary|not required|if you would like|if applicable|additional attachment|cover letter|upload a file|drop files here|select files|employee\s*id.*if applicable/i.test(lower)) {
-    return false;
+
+  // Optional/non-required fields are never filled or escalated (unless opt-in).
+  if (profile?._fillOptionalFields === true) {
+    if (isSkippableUnimportantLabel(text, field)) return false;
+    return true;
   }
-  // Unknown Workday questions should always be asked in the terminal one-by-one.
-  return true;
+
+  return shouldIncludeInScan(text, field);
+}
+
+function normalizeOptionList(options = []) {
+  return options
+    .map((o) => (typeof o === 'string' ? o : o?.text))
+    .map((o) => String(o || '').replace(/\s+/g, ' ').trim())
+    .filter(Boolean);
+}
+
+function formatPromptFieldType(field = {}, inferredType = '') {
+  const raw = String(field?.fieldType || field?.type || '').toLowerCase();
+  const inferred = String(inferredType || '').toLowerCase();
+  if (raw === 'checkbox-group' || inferred.includes('multi-select')) {
+    return 'CHECKBOX (select all that apply)';
+  }
+  if (raw === 'radio' || inferred.includes('radio')) return 'RADIO';
+  if (raw === 'dropdown' || inferred.includes('dropdown') || inferred.includes('select')) return 'DROPDOWN';
+  if (raw === 'date' || inferred.includes('date')) return 'DATE INPUT';
+  if (raw === 'file' || inferred.includes('file')) return 'FILE UPLOAD';
+  if (raw === 'textarea' || inferred.includes('textarea')) return 'TEXT INPUT';
+  return 'INPUT (type your answer)';
+}
+
+function resolvePromptAnswer(rawAnswer, options = [], { multiSelect = false } = {}) {
+  const trimmed = String(rawAnswer || '').trim();
+  if (!trimmed) return '';
+
+  if (multiSelect && /[,;|]/.test(trimmed)) {
+    const parts = trimmed.split(/[,;|]/).map((p) => p.trim()).filter(Boolean);
+    const resolved = parts.map((part) => resolvePromptAnswer(part, options));
+    return resolved.filter(Boolean).join(', ');
+  }
+
+  if (/^\d+$/.test(trimmed)) {
+    const idx = Number(trimmed) - 1;
+    if (idx >= 0 && idx < options.length) return options[idx];
+  }
+  const lower = trimmed.toLowerCase();
+  const exact = options.find((opt) => opt.toLowerCase() === lower);
+  if (exact) return exact;
+  const partial = options.find((opt) => opt.toLowerCase().includes(lower) || lower.includes(opt.toLowerCase()));
+  return partial || trimmed;
+}
+
+/** Opt-in only: FORM_ANSWER_TERMINAL=1 restores stdin prompts for form answers. */
+export function isFormAnswerTerminalEnabled() {
+  return process.env.FORM_ANSWER_TERMINAL === '1' || process.env.OPENROUTER_FALLBACK_TERMINAL === '1';
+}
+
+function rememberResolvedAnswer(profile, key, value) {
+  if (!profile || value == null || value === '') return value;
+  if (!(profile._answerCache instanceof Map)) profile._answerCache = new Map();
+  profile._answerCache.set(key, value);
+  return value;
 }
 
 // ─── Human Terminal Prompt ──────────────────────────────────────────────────
-export async function askHuman(questionText, field = {}, { company, compliance } = {}) {
+/** LLM first; never blocks on stdin unless FORM_ANSWER_TERMINAL=1. */
+export async function safeAskHuman(questionText, field = {}, opts = {}) {
+  try {
+    const llmAnswer = await resolveUnknownWithLlm(questionText, field, opts);
+    if (llmAnswer) return llmAnswer;
+    if (!isFormAnswerTerminalEnabled()) {
+      console.log(`    ⚠️  UNRESOLVED "${String(questionText).slice(0, 70)}" — Apply Wizz/YAML/profile/LLM miss (no terminal)`);
+      return null;
+    }
+    return await askHuman(questionText, field, opts);
+  } catch (err) {
+    console.log(`    ⚠️  Unknown-field fallback skipped (${err.message?.slice(0, 70) || 'stdin unavailable'}) — continuing apply...`);
+    return null;
+  }
+}
+
+export async function askHuman(questionText, field = {}, { company, compliance, page, step } = {}) {
   const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
   try {
     process.stdin.resume();
     process.stdin.setEncoding('utf8');
-    const fieldType = inferDomFieldType(field);
+    const inferredType = inferDomFieldType(field);
+    const displayType = formatPromptFieldType(field, inferredType);
     const domCode = field?.id || field?.name || field?.automationId || field?.dataAutomationId || 'unknown';
-    const options = (field?.options || []).map(o => (typeof o === 'string' ? o : o?.text)).filter(Boolean);
-    console.log('\n──────────────────────────────────────────');
-    console.log(compliance ? '🔒 Unknown required compliance question' : '⚠ Unknown required question');
-    if (company) console.log(`Company:  ${company}`);
-    console.log(`Question: "${questionText}"`);
-    console.log(`DOM code / id: ${domCode}`);
-    console.log(`UI design: ${fieldType}`);
-    if (field?.role) console.log(`Role: ${field.role}`);
-    if (field?.placeholder) console.log(`Placeholder: ${field.placeholder}`);
-    if (options.length > 0) console.log(`Options: [${options.slice(0, 12).join(', ')}]`);
-    console.log('Type your answer below and press Enter to paste it into the live Workday page.');
-    console.log('──────────────────────────────────────────');
+    let options = normalizeOptionList(field?.options || []);
+    const isMultiSelect = displayType.includes('CHECKBOX');
+
+    if (page && (options.length === 0 || displayType === 'DROPDOWN')) {
+      const liveType = field?.fieldType || field?.type || inferredType;
+      const liveOptions = await collectLiveFieldOptions(page, questionText, liveType);
+      if (liveOptions.length > 0) options = liveOptions;
+    }
+
+    console.log('\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
+    console.log(compliance ? '🔒 LIVE COMPLIANCE QUESTION' : '❓ WORKDAY QUESTION (terminal)');
+    if (company) console.log(`Company:   ${company}`);
+    if (step) console.log(`Step:      ${step}`);
+    console.log(`Question:\n  ${questionText}`);
+    console.log(`Type:      ${displayType}`);
+    if (field?.required) console.log(`Required:  yes`);
+    if (field?.placeholder) console.log(`Hint:      ${field.placeholder}`);
+
+    if (options.length > 0) {
+      if (displayType === 'RADIO') {
+        console.log('Options (pick one):');
+      } else if (isMultiSelect) {
+        console.log('Options (checkbox — pick one or more, comma-separated):');
+      } else if (displayType === 'DROPDOWN') {
+        console.log('Dropdown options (includes submenu items when visible):');
+      } else {
+        console.log('Options:');
+      }
+      options.forEach((opt, i) => console.log(`  ${i + 1}. ${opt}`));
+      if (isMultiSelect) {
+        console.log('(Enter: 1,3 or type labels — e.g. Remote, Full-time)');
+      } else {
+        console.log('(Enter option number or type exact label text)');
+      }
+    } else {
+      console.log('Input:     type your answer below');
+    }
+
+    console.log(`DOM id:    ${domCode}`);
+    console.log('Saved to: profile.yml + qa-store + tenant YAML');
+    console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     const answer = await rl.question('> Your answer:\n');
-    return answer.trim();
+    return resolvePromptAnswer(answer, options, { multiSelect: isMultiSelect });
   } finally {
     rl.close();
   }
@@ -336,16 +496,23 @@ export async function askHuman(questionText, field = {}, { company, compliance }
 
 // ─── Phase 2: Resolve field with Q&A store + human fallback ─────────────────
 export async function resolveField(field, profile, qaStore, options = {}) {
-  const { skipPrompt = false, plan, company, resumePath, url, tenant } = options;
+  const { skipPrompt = true, plan, company, resumePath, url, tenant, page } = options;
   const store = qaStore || createQAStore();
   const fieldObj = typeof field === 'object' ? field : {};
   const rawLabel = typeof field === 'string' ? field : (field.label || field.id || field.name || '');
   if (!rawLabel) return null;
   if (isSkipSocialLinkLabel(rawLabel)) return null;
+  if (shouldSkipOptionalFill(rawLabel, fieldObj, profile)) return null;
 
   const resolvedTenant = tenant || (url ? getWorkdayTenant(url) : '');
+  if (url && profile && !profile._workdayPlatform) {
+    profile._workdayPlatform = getWorkdayPlatform(url);
+  }
   const normalized = normalizeLabel(rawLabel);
-  const settings = await loadSettings();
+  if (profile && !(profile._answerCache instanceof Map)) profile._answerCache = new Map();
+  if (profile?._answerCache?.has(normalized)) {
+    return profile._answerCache.get(normalized);
+  }
   const compliance = isComplianceSensitive(rawLabel);
 
   const dynamicDateAction = buildCurrentDateAction(rawLabel, {
@@ -360,92 +527,95 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     return dynamicDateAction.value;
   }
 
-  // 1. Q&A cache (profile qa_answers + data/qa-store.json) — fuzzy match, but
-  // do not reuse old salary numbers for different salary questions unless they
-  // are the same question or an exact tenant-scoped match.
-  const exactOnlySalaryQuestion = /(salary|compensation|pay|expected.*salary|annual.*salary|target.*pay|currency)/i.test(rawLabel);
-  const cached = await findBestMatch(rawLabel, profile, store, exactOnlySalaryQuestion ? 1 : settings.fuzzy_threshold, resolvedTenant);
-  if (cached?.answer) return cached.answer;
+  const stepName = options.step || profile?._currentStep || '';
+  const requiredUnknown = shouldPromptForUnknownField(rawLabel, fieldObj, profile, stepName)
+    || isMandatoryField(rawLabel, fieldObj)
+    || fieldObj.required === true;
 
-  // 1b. Referral source — always from profile/defaults, never terminal
-  if (/how\s*did\s*you\s*hear/i.test(normalized)) {
-    const fromProfile = profile?.personal?.source
-      || profile?.qa_answers?.['how did you hear about us']
-      || profile?.qa_answers?.['how did you hear'];
-    if (fromProfile) return fromProfile;
-    const defaultSource = lookupDefaultAnswer(rawLabel);
-    if (defaultSource) return defaultSource;
-  }
-
-  // 1c. Workday default application/disclosure answers (never for salary)
-  if (!isSalaryQuestion(rawLabel)) {
-    const defaultAns = lookupDefaultAnswer(rawLabel);
-    if (defaultAns && !/vibe philosophy|recruitment privacy statement.*vibe/i.test(rawLabel)) {
-      return defaultAns;
-    }
-  }
-
-  // 2. Static profile.yml (personal, education, work_auth, eeo) — never guess salary
-  if (!compliance && !isSalaryQuestion(rawLabel)) {
-    const direct = mapLabelToProfileValue(rawLabel, profile, { tenant: resolvedTenant, url });
-    if (direct != null && direct !== '') return direct;
-  }
-
-  if (plan?.fills) {
-    const match = plan.fills.find(f =>
-      f.id === (typeof field === 'object' ? field.id : undefined)
-      || (f.label && normalizeLabel(f.label) === normalized)
+  if (options.useQuestionEngine !== false) {
+    const engineHit = await resolveDynamicAnswer(
+      {
+        ...fieldObj,
+        label: rawLabel,
+        required: requiredUnknown,
+      },
+      profile,
+      {
+        stepName,
+        resumePath: resumePath || plan?.resume || profile._resumePath,
+        allowLlm: requiredUnknown,
+        qaStore: store,
+      },
     );
-    if (match?.value != null && match.value !== '' && !compliance) return match.value;
-  }
-
-  if (profile?._runtimeAnswers) {
-    const runtime = profile._runtimeAnswers[rawLabel] || profile._runtimeAnswers[normalized];
-    if (runtime != null && runtime !== '') return runtime;
-  }
-
-  // 3. Resume PDF inference (factual fields only — never salary/compensation)
-  if (!compliance && !isSalaryQuestion(rawLabel)) {
-    const resume = resumePath || plan?.resume || profile?._resumePath || DEFAULT_RESUME_PATH;
-    const fromResume = await inferFromResumeFile(rawLabel, resume, typeof field === 'object' ? field : {});
-    if (fromResume) {
-      console.log(`    📄 Resume answer for "${rawLabel}": "${fromResume.length > 60 ? fromResume.slice(0, 60) + '...' : fromResume}"`);
-      return fromResume;
+    if (engineHit?.answer) {
+      return rememberResolvedAnswer(profile, normalized, engineHit.answer);
     }
   }
 
-  const shouldPrompt = shouldPromptForUnknownField(rawLabel, fieldObj);
-  if (!shouldPrompt || skipPrompt) return null;
-
-  if (isSalaryQuestion(rawLabel)) {
-    console.log(`    💰 Salary question with no exact cached answer — asking in terminal before filling.`);
+  // Legacy path (scan-batch / callers that opt out of question engine only).
+  const resolved = await resolveClientAnswer({
+    ...fieldObj,
+    label: rawLabel,
+    required: requiredUnknown,
+  }, profile, {
+    page,
+    plan,
+    company,
+    resumePath,
+    url,
+    tenant: resolvedTenant,
+    step: stepName,
+    required: requiredUnknown,
+    forceLlm: requiredUnknown,
+  });
+  if (resolved?.answer) {
+    return rememberResolvedAnswer(profile, normalized, resolved.answer);
   }
 
-  // 4. Terminal prompt → persist tenant-scoped when applicable
-  const answer = await askHuman(rawLabel, fieldObj, { company, compliance });
-  if (answer && store && normalized) {
-    await store.set(normalized, {
-      normalized_label: normalized,
-      raw_label: rawLabel,
-      answer,
-      source: 'user_provided',
-      compliance_sensitive: compliance,
-    }, resolvedTenant);
-    if (!profile.qa_answers) profile.qa_answers = {};
-    profile.qa_answers[normalized] = answer;
-    await saveAnswerToYaml(rawLabel, answer).catch(() => {});
+  if (!requiredUnknown) return null;
+
+  if (isFormAnswerTerminalEnabled()) {
+    const answer = await safeAskHuman(rawLabel, fieldObj, {
+      company,
+      compliance,
+      page,
+      profile,
+      tenant: resolvedTenant,
+      step: stepName,
+      required: true,
+    });
+    if (answer && store && normalized) {
+      await store.set(normalized, {
+        normalized_label: normalized,
+        raw_label: rawLabel,
+        answer,
+        source: 'user_provided',
+        compliance_sensitive: compliance,
+      }, resolvedTenant);
+      if (!profile.qa_answers) profile.qa_answers = {};
+      profile.qa_answers[normalized] = answer;
+      await saveAnswerToYaml(rawLabel, answer).catch(() => {});
+    }
+    return rememberResolvedAnswer(profile, normalized, answer);
   }
-  return answer;
+
+  return null;
 }
 
 // ─── Pick resume based on JD keywords ───────────────────────────────────────
 export async function pickResume(jdText, resumesPath) {
+  const { findExistingResumeFile } = await import('./resumeParser.mjs');
   const raw = await readFile(resumesPath || resolve(process.cwd(), 'config', 'resumes.yml'), 'utf-8');
   const config = yaml.load(raw);
   const resumes = config.resumes || [];
   const defaultId = config.default || resumes[0]?.id;
 
-  if (resumes.length <= 1) return resumes[0]?.file || null;
+  const toAbs = (file) => findExistingResumeFile(file) || file;
+
+  if (resumes.length <= 1) {
+    const file = resumes[0]?.file || null;
+    return file ? toAbs(file) : null;
+  }
 
   const jdLower = (jdText || '').toLowerCase();
   let bestResume = null;
@@ -464,12 +634,12 @@ export async function pickResume(jdText, resumesPath) {
 
   if (bestResume && bestScore >= 2) {
     console.log(`  📄 Resume picked: ${bestResume.label} (${bestScore} keyword matches)`);
-    return bestResume.file;
+    return toAbs(bestResume.file);
   }
 
   const fallback = resumes.find(r => r.id === defaultId) || resumes[0];
   console.log(`  📄 Resume: ${fallback.label} (default)`);
-  return fallback.file;
+  return toAbs(fallback.file);
 }
 
 // ─── Generate fill plan from scan + profile ─────────────────────────────────
@@ -583,7 +753,7 @@ export async function generatePlan(scan, profile, { resumePath, jdText, url, qaS
         if (regex.test(label)) {
           let value;
           if (path.startsWith('_static.')) {
-            value = path.substring(8);
+            continue;
           } else {
             value = getNestedValue(profile, path);
           }
@@ -598,12 +768,17 @@ export async function generatePlan(scan, profile, { resumePath, jdText, url, qaS
 
     // Check profile.qa_answers then QA store if available
     if (!mapped && label) {
+      const ageYes = resolveMinimumAgeAnswer(label, profile);
+      if (ageYes) {
+        fills.push({ ...field, value: ageYes });
+        mapped = true;
+      }
       const normalized = normalizeLabel(label);
       const fromProfile = profile?.qa_answers?.[normalized];
-      if (fromProfile != null && fromProfile !== '') {
+      if (!mapped && fromProfile != null && fromProfile !== '') {
         fills.push({ ...field, value: Array.isArray(fromProfile) ? fromProfile : String(fromProfile) });
         mapped = true;
-      } else if (store) {
+      } else if (!mapped && store) {
         const stored = await store.get(normalized);
         if (stored != null) {
           const val = typeof stored === 'object' && stored.answer !== undefined ? stored.answer : String(stored);

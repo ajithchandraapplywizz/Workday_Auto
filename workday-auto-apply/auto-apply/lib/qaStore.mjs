@@ -9,6 +9,7 @@ import fs from 'fs/promises';
 import { dirname, resolve } from 'path';
 import yaml from 'js-yaml';
 import { fuzzyScore } from './fields.mjs';
+import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
 
 export const COMPLIANCE_PATTERNS = [
   /work\s*auth/i,
@@ -32,9 +33,142 @@ export function isComplianceSensitive(label) {
   return COMPLIANCE_PATTERNS.some((re) => re.test(text));
 }
 
-/** Salary/compensation questions must never be guessed from profile, resume, or fuzzy cache. */
+const COMPENSATION_RE = /(salary|compensation|pay|wage|remuneration|expected.*(?:salary|pay|comp)|desired.*(?:salary|pay|comp|amount)|annual.*(?:salary|pay|comp)|target.*pay|base\s*pay|hourly\s*(?:rate|wage)|minimum\s+hourly|currency|what\s*is\s*your\s*(?:desired|expected|minimum)\s*(?:salary|compensation|pay|amount|hourly|wage))/i;
+
+/** Salary/compensation questions — labels vary (salary vs compensation vs amount). */
 export function isSalaryQuestion(label) {
-  return /(salary|compensation|pay|expected.*salary|annual.*salary|target.*pay|currency)/i.test(String(label || ''));
+  return COMPENSATION_RE.test(String(label || ''));
+}
+
+/** Hourly wage / per-hour pay — must not use the yearly salary fact. */
+export function isHourlyWageQuestion(label = '') {
+  return /hourly|per\s*hour|minimum\s+hourly/i.test(String(label || ''));
+}
+
+export function isCompensationKey(key) {
+  return COMPENSATION_RE.test(String(key || ''));
+}
+
+const DEFAULT_COMPENSATION_ANSWER = '1000000';
+
+/**
+ * Cross-key lookup: "desired compensation" matches stored "desired salary" answers.
+ */
+export function lookupSemanticCompensationAnswer(rawLabel, profile = null, tenant = '') {
+  if (!isSalaryQuestion(rawLabel)) return null;
+
+  const norm = normalizeLabel(rawLabel);
+
+  if (isHourlyWageQuestion(rawLabel) && profile?.compensation_hourly) {
+    return String(profile.compensation_hourly);
+  }
+  if (profile?.compensation && !isHourlyWageQuestion(rawLabel)) return String(profile.compensation);
+  if (profile?.salary && !isHourlyWageQuestion(rawLabel)) return String(profile.salary);
+  if (profile?.experience?.desired_salary && !isHourlyWageQuestion(rawLabel)) {
+    return String(profile.experience.desired_salary);
+  }
+
+  let best = null;
+  let bestScore = 0;
+
+  const consider = (key, answer) => {
+    if (!answer || !isCompensationKey(key)) return;
+    const score = fuzzyScore(norm, normalizeLabel(key));
+    if (score > bestScore) {
+      bestScore = score;
+      best = String(answer);
+    }
+  };
+
+  if (profile?.qa_answers) {
+    for (const [key, val] of Object.entries(profile.qa_answers)) {
+      consider(key, val);
+    }
+  }
+
+  if (best && bestScore >= 0.45) return best;
+
+  for (const fallbackKey of ['desired salary', 'desired compensation', 'salary expectation', 'compensation']) {
+    const hit = profile?.qa_answers?.[fallbackKey];
+    if (hit) return String(hit);
+  }
+
+  return DEFAULT_COMPENSATION_ANSWER;
+}
+
+/**
+ * Cross-source semantic lookup:
+ * Apply Wizz API → concept synonyms → tenant YAML → profile qa → compensation DB.
+ */
+export async function lookupSemanticAnswer(rawLabel, profile = null, tenant = '', { threshold = 0.52 } = {}) {
+  const norm = normalizeLabel(rawLabel);
+  if (!norm) return null;
+
+  const ageYes = resolveMinimumAgeAnswer(rawLabel, profile);
+  if (ageYes) return { answer: ageYes, source: 'minimum_age', score: 1 };
+
+  const isOpenEnded = norm.length > 55
+    || /^(briefly|describe|explain|tell us|please explain|why (are|do|would)|cover letter)/i.test(String(rawLabel || '').trim());
+
+  try {
+    const { lookupApplyWizzAnswer } = await import('./applyWizzClient.mjs');
+    const fromApi = lookupApplyWizzAnswer(rawLabel, profile, { threshold });
+    if (fromApi?.answer) return { ...fromApi, source: fromApi.source || 'applywizz' };
+  } catch { /* optional module */ }
+
+  try {
+    const { resolveByConcept } = await import('./answerConcepts.mjs');
+    const fromConcept = resolveByConcept(rawLabel, profile);
+    if (fromConcept?.answer) {
+      return {
+        answer: fromConcept.answer,
+        source: fromConcept.source,
+        score: 0.95,
+        matchedKey: fromConcept.concept,
+      };
+    }
+  } catch { /* optional */ }
+
+  if (isSalaryQuestion(rawLabel)) {
+    const comp = lookupSemanticCompensationAnswer(rawLabel, profile, tenant);
+    if (comp) return { answer: comp, source: 'semantic_compensation', score: 1 };
+  }
+
+  // Essay / open-ended prompts: only concept/exact sources above — no fuzzy YAML reuse.
+  if (isOpenEnded) return null;
+
+  if (tenant) {
+    try {
+      const { lookupTenantAnswer } = await import('./tenantQuestionYaml.mjs');
+      const fromTenant = lookupTenantAnswer(tenant, rawLabel, { threshold });
+      if (fromTenant) return { answer: fromTenant, source: 'tenant_yaml', score: 1 };
+    } catch { /* ignore */ }
+  }
+
+  let best = null;
+  let bestScore = 0;
+  if (profile?.qa_answers) {
+    for (const [key, val] of Object.entries(profile.qa_answers)) {
+      if (val == null || val === '') continue;
+      const score = fuzzyScore(norm, normalizeLabel(key));
+      if (score > bestScore) {
+        bestScore = score;
+        best = { answer: String(val), source: 'profile_qa', score, matchedKey: key };
+      }
+    }
+  }
+  if (best && bestScore >= threshold) return best;
+  return null;
+}
+
+/**
+ * Personal skill / years-of-experience facts the LLM must not invent.
+ * Policy answers (work auth, relatives, EEO) are not high-risk.
+ */
+export function isHighRiskPersonalFactQuestion(label) {
+  const text = String(label || '');
+  if (isSalaryQuestion(text)) return true;
+  return /(how many years|years?\s+of\s+(experience|exp)|experience with|proficient (in|with)|expert (in|with)|certified (in|on)|certification|do you have .{0,40}experience)/i.test(text);
 }
 
 export function normalizeLabel(label) {
@@ -59,6 +193,7 @@ export function buildCacheKey(normalizedLabel, tenant = '') {
 }
 
 const DEFAULT_STORE_PATH = resolve(process.cwd(), 'data', 'qa-store.json');
+const SEED_STORE_PATH = resolve(process.cwd(), 'data', 'qa-store.seed.json');
 const DEFAULT_SETTINGS_PATH = resolve(process.cwd(), 'config', 'settings.yml');
 
 let cachedSettings = null;
@@ -98,8 +233,17 @@ export async function findBestMatch(rawLabel, profile, qaStore = null, threshold
   const normalized = normalizeLabel(rawLabel);
   if (!normalized) return null;
 
-  const requiresExactMatch = /(salary|compensation|pay|expected.*salary|annual.*salary|target.*pay|currency)/i.test(rawLabel);
+  // Cached YAML/LLM "No" must never win on 16+/18+ working-age questions.
+  const ageYes = resolveMinimumAgeAnswer(rawLabel, profile);
+  if (ageYes) return { answer: ageYes, source: 'minimum_age', score: 1 };
+
+  const requiresExactMatch = isSalaryQuestion(rawLabel);
   const exactThreshold = requiresExactMatch ? 1 : threshold;
+
+  if (requiresExactMatch) {
+    const semantic = lookupSemanticCompensationAnswer(rawLabel, profile, tenant);
+    if (semantic) return { answer: semantic, source: 'semantic_compensation', score: 1 };
+  }
 
   let bestTenant = null;
   let bestTenantScore = 0;
@@ -220,12 +364,22 @@ export class JsonQAStore {
     }
   }
 
-  async _load() {
+  async _loadSeed() {
     try {
-      const content = await fs.readFile(this.storePath, 'utf8');
+      const content = await fs.readFile(SEED_STORE_PATH, 'utf8');
       return JSON.parse(content);
     } catch {
       return {};
+    }
+  }
+
+  async _load() {
+    const seed = await this._loadSeed();
+    try {
+      const content = await fs.readFile(this.storePath, 'utf8');
+      return { ...seed, ...JSON.parse(content) };
+    } catch {
+      return seed;
     }
   }
 

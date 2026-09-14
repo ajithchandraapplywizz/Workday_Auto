@@ -12,10 +12,15 @@ targets.txt
 resumes/*.pdf
 data/applied.csv
 data/queue.csv
+data/today.csv
+data/jobs.csv
 data/learnings.json
 data/qa-store.json
+data/llm-qa-store.json
+data/required-fields-db.json
 
 # Generated files
+tests/reports/metrics.ndjson
 forms/*
 !forms/.gitkeep
 screenshots/*

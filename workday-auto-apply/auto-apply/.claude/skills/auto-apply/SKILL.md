@@ -1,6 +1,6 @@
 ---
 name: auto-apply
-description: Autonomous job application engine — scan forms, fill fields, submit applications, handle OTP
+description: Autonomous job application engine — scan forms, fill fields, submit applications
 user_invocable: true
 args: command
 argument-hint: "[apply <url> | scan <url> | fill <url> | queue add <url> | queue list | list | batch | status | setup]"
@@ -15,7 +15,7 @@ Determine the command from `{{command}}`:
 | Input | Action |
 |-------|--------|
 | (empty / no args) | Show help menu with all available commands |
-| `apply <url>` | Full pipeline: scan → plan → fill → submit → OTP |
+| `apply <url>` | Full pipeline: scan → plan → fill → submit |
 | `scan <url>` | Scan form fields → JSON |
 | `fill <url> [plan]` | Fill form (auto-generates plan if none given) |
 | `queue add <url> [company]` | Add URL to application queue |
@@ -40,7 +40,7 @@ node cli.mjs <command> [args]
 ### Before running any command, check prerequisites:
 
 1. Does `config/profile.yml` exist? If not, tell user to run `setup` or `/auto-apply setup`
-2. Is `.env` configured? Warn if OTP won't work without it
+2. Is `.env` configured with WORKDAY_EMAIL and WORKDAY_PASSWORD? Login is one-time email + password (no mailbox OTP; Zoho Mail can be added later)
 3. Are resume PDFs in `resumes/`? Warn if `config/resumes.yml` references missing files
 
 ### apply (Full Pipeline)
@@ -59,7 +59,6 @@ When user provides a URL (with or without `apply` prefix):
    - Fill every field
    - Verify all fields
    - Submit
-   - Handle OTP if needed
    - Take screenshots
    - Log to CSV
 3. Report the result to the user

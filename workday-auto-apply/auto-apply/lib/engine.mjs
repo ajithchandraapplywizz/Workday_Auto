@@ -12,19 +12,31 @@ import { chromium } from 'playwright';
 import { readFile, writeFile } from 'fs/promises';
 import { resolve, basename } from 'path';
 import { existsSync } from 'fs';
-import { discoverApplicationForm, detectATS } from './discovery.mjs';
+import {
+  discoverApplicationForm,
+  detectATS,
+  getWorkdayTenant,
+  detectWorkdayTenant,
+  isWorkdayJobPageMissing,
+  isWorkdayWizardVisible,
+  ensureWorkdayApplicationWizard,
+} from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
 import { recordResult } from './learner.mjs';
 import { isSubmitButton } from './scanner.mjs';
 import { handleWorkday } from './workday.mjs';
-import { loadProfile, mapLabelToProfileValue, resolveField } from './planner.mjs';
+import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
+import { peekClientAnswer } from './clientAnswer.mjs';
+import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
+import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { saveAnswerToYaml, normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
+import { isAutoApplyMode } from './openRouterLlm.mjs';
 import { detectWorkdayStep } from './stateDetector.mjs';
 import {
-  handleWorkdayFormFieldQuestions,
-  handleVoluntaryDisclosuresStep,
-  handleSelfIdentifyStep,
+  getApplicationQuestionsPageInfo,
+  countUnfilledMandatoryQuestions,
+  acknowledgeAllPageAgreements,
 } from './workdayQuestionFill.mjs';
 import {
   fillSourceFieldAuto,
@@ -32,8 +44,21 @@ import {
   isReferralSourceFullySelected,
   SOURCE_LABEL,
 } from './workdaySource.mjs';
-import { handleStep2MyExperience } from './workdayExperience.mjs';
+import { handleStep2MyExperience, fillEducationFieldOfStudy } from './workdayExperience.mjs';
 import { fillCityFromDom, getCityInputValue, cityValueMatches, CITY_LABEL, resolveCityValue } from './workdayCity.mjs';
+import { fillStateFromDom, stateValueMatches, STATE_LABEL, resolveStateValue } from './workdayState.mjs';
+import { applyTenantOverridesToProfile } from './tenantQuestionYaml.mjs';
+import {
+  harvestPageQuestions,
+  summarizeQuestionsByStep,
+  formatStepQuestionSummary,
+} from './workdayScanHarvest.mjs';
+import {
+  isSkippableUnimportantLabel,
+  isMandatoryField,
+  shouldSkipOptionalFill,
+  shouldIncludeInScan,
+} from './scanFieldFilter.mjs';
 import {
   attachFormMutationObserver,
   detachFormMutationObserver,
@@ -46,7 +71,13 @@ import {
   parseCountryPhoneCode,
   filterTrulyEmptyRequired,
   locateWorkdayFieldByLabel,
+  isFormFieldValueFilled,
 } from './workdayDom.mjs';
+import { runDynamicFieldLoop, resetPerApplicationSessionState } from './dynamicFieldEngine.mjs';
+import { validatePage } from './interaction/index.mjs';
+import { repairRequiredFieldsFromErrors, parseErrorFieldNames } from './workdayErrorRepair.mjs';
+import { bootstrapClientContext } from './profileBootstrap.mjs';
+import { disarmRiskyAddButtons, installScriptOnlyClickGuard, drainBlockedScriptClicks } from './safeClick.mjs';
 import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
 
@@ -56,30 +87,50 @@ function recordFilled(profile, label, value) {
   if (label) profile._filledValues[label] = value;
 }
 
-function isUnimportantWorkdayField(label) {
-  const n = String(label || '').toLowerCase();
-  return /middle name|local given|local family|local middle|phone extension|preferred name|suffix|prefix|address line 2|facebook|twitter|x\.com|social profile|social link/i.test(n);
-}
-
-function isRequiredQuestionLabel(label, field = {}) {
-  const text = String(label || '');
-  const lower = text.toLowerCase();
-  if (field.required || field.ariaRequired || field.required === true) return true;
-  if (/\*/.test(text)) return true;
-  if (/\brequired\b/i.test(lower) || /\bmandatory\b/i.test(lower) || /\bmust\s+be\s+filled\b/i.test(lower)) return true;
-  return false;
-}
-
-function shouldPromptForUnknownField(label = '', field = {}) {
-  const text = String(label || '').trim();
-  if (!text) return false;
-  const lower = text.toLowerCase();
-
-  if (/facebook|twitter|x\.com|social media|social profile|social link/i.test(lower)) return false;
-  if (/optional|voluntary|not required|if you would like|if applicable|additional attachment|cover letter|upload a file|drop files here|select files|employee\s*id.*if applicable/i.test(lower)) {
-    return false;
+function clearStaleFilledValuesFromErrors(profile, errors = []) {
+  if (!profile?._filledValues || !Array.isArray(errors) || errors.length === 0) return;
+  const blob = errors.join(' ').toLowerCase();
+  for (const key of Object.keys(profile._filledValues)) {
+    const norm = normalizeLabel(key);
+    if (!norm) continue;
+    if (blob.includes(norm.slice(0, Math.min(norm.length, 40)))) {
+      delete profile._filledValues[key];
+    }
   }
-  return true;
+}
+
+function shouldPromptForUnknownField(label = '', field = {}, profile = {}) {
+  return shouldIncludeInScan(String(label || '').trim(), field);
+}
+
+/**
+ * Stable identity for the page the wizard is currently on.
+ * Excludes timestamps so two scans of an unchanged page produce the same value.
+ * @returns {Promise<string>}
+ */
+async function computeStepFingerprint(page, stepName) {
+  const aq = stepName === 'Application Questions'
+    ? await getApplicationQuestionsPageInfo(page).catch(() => null)
+    : null;
+
+  const domSignature = await page.evaluate(() => {
+    const parts = [];
+    document.querySelectorAll('[data-automation-id*="formField"], fieldset, [role="group"]').forEach((el) => {
+      const label = (el.querySelector('label, legend')?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (label) parts.push(label.slice(0, 60));
+    });
+    return parts.sort().join('|').slice(0, 3000);
+  }).catch(() => '');
+
+  let path = '';
+  try {
+    path = new URL(page.url()).pathname;
+  } catch {
+    path = page.url();
+  }
+
+  const aqPart = aq ? `aq:${aq.current}/${aq.total}` : 'aq:-';
+  return `${path}::${stepName}::${aqPart}::${domSignature.length}::${domSignature}`;
 }
 
 async function locatePureDomDropdown(page, matchText) {
@@ -158,148 +209,193 @@ export async function interactAndRescan(page, actionFn) {
 export { detectWorkdayStep };
 
 // ─── Terminal Prompt Fallback for Unmapped Required Fields ─────────────────
-export async function promptUserInTerminal(label, fieldType, options = [], { company, compliance, domCode, role, placeholder } = {}) {
-  const rl = readline.createInterface({ input, output });
-  try {
-    process.stdin.resume();
-    process.stdin.setEncoding('utf8');
-    const inferredType = fieldType || 'input';
-    const domSig = domCode || 'unknown';
-    console.log('\n──────────────────────────────────────────');
-    console.log(compliance ? '🔒 Unknown required compliance question' : '⚠ Unknown required question');
-    if (company) console.log(`Company:  ${company}`);
-    console.log(`Question: "${label || '(untitled field)'}"`);
-    console.log(`DOM code / id: ${domSig}`);
-    console.log(`UI design: ${inferredType}`);
-    if (role) console.log(`Role: ${role}`);
-    if (placeholder) console.log(`Placeholder: ${placeholder}`);
-    if (options && options.length > 0) {
-      console.log(`Options: [${options.slice(0, 12).join(', ')}]`);
-    }
-    console.log('Type your answer below and press Enter to paste it into the live Workday page.');
-    console.log('(Your answer will be saved permanently for future applications.)');
-    console.log('──────────────────────────────────────────');
-    const answer = await rl.question('> Your answer:\n');
-    const trimmed = answer.trim();
-    if (trimmed) {
-      await saveAnswerToYaml(label, trimmed).catch(() => {});
-    }
-    return trimmed;
-  } catch {
-    return '';
-  } finally {
-    rl.close();
+export async function promptUserInTerminal(label, fieldType, options = [], { company, compliance, domCode, role, placeholder, page, profile } = {}) {
+  const answer = await safeAskHuman(label || '(untitled field)', {
+    type: fieldType,
+    fieldType,
+    role,
+    placeholder,
+    id: domCode,
+    options: (options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean),
+  }, { company, compliance, page, profile });
+  if (answer) {
+    await saveAnswerToYaml(label, answer).catch(() => {});
   }
+  return answer || '';
 }
 
-// ─── Workday "Add" Button Expander ──────────────────────────────────────────
-async function handleWorkdayAddButtons(page, stepName, profile) {
-  if (stepName === 'My Experience') {
-    const hasJobTitleInput = await page.locator('input[data-automation-id*="jobTitle"], input[id*="jobTitle"]')
-      .first()
-      .isVisible({ timeout: 500 })
-      .catch(() => false);
-    if (!hasJobTitleInput) {
-      const addExpBtn = await page.$('[data-automation-id="workExperienceSection"] button[data-automation-id="Add"], button:has-text("Add Work Experience"), button:has-text("Add Experience")');
-      if (addExpBtn && await addExpBtn.isVisible().catch(() => false)) {
-        console.log('    ➕ Expanding Work Experience section (clicking Add)...');
-        await interactAndRescan(page, async () => {
-          await addExpBtn.click({ force: true }).catch(() => addExpBtn.evaluate(el => el.click()));
-        });
+// ─── Workday Resume Upload (direct setInputFiles — never open OS file picker) ─
+async function findResumeFileInput(page) {
+  const scoreInput = (el) => el.evaluate((node) => {
+    let score = 0;
+    let current = node;
+    for (let depth = 0; depth < 16 && current; depth++, current = current.parentElement) {
+      const text = (current.textContent || '').toLowerCase().replace(/\s+/g, ' ');
+      const auto = (current.getAttribute?.('data-automation-id') || '').toLowerCase();
+      if (/cover\s*letter|additional\s*attachment|supporting\s*document/i.test(text)
+        || /coverletter|additionalattachment/i.test(auto)) {
+        return -100;
+      }
+      if (/resume\s*\/\s*cv|\bresume\b|\bcv\b/i.test(text) || /resume|\bcv\b/i.test(auto)) score += 50;
+      if (/upload a file|drop files here|select files|attachments?/i.test(text)) score += 10;
+      if (/file-?upload|fileupload|attachment/i.test(auto)) score += 20;
+    }
+    const accept = (node.getAttribute('accept') || '').toLowerCase();
+    if (/pdf|doc|\*/.test(accept) || !accept) score += 5;
+    return score;
+  }).catch(() => 0);
+
+  const selectors = [
+    '[data-automation-id*="file-upload"] input[type="file"]',
+    '[data-automation-id*="fileUpload"] input[type="file"]',
+    '[data-automation-id*="FileUpload"] input[type="file"]',
+    '[data-automation-id*="attachment"] input[type="file"]',
+    '[data-automation-id*="Attachments"] input[type="file"]',
+    '[data-automation-id*="resume"] input[type="file"]',
+    'input[type="file"][accept*="pdf"], input[type="file"][accept*=".pdf"]',
+    'input[type="file"]',
+  ];
+
+  let best = null;
+  let bestScore = -1;
+
+  for (const sel of selectors) {
+    const candidates = page.locator(sel);
+    const count = await candidates.count().catch(() => 0);
+    for (let i = 0; i < count; i++) {
+      const input = candidates.nth(i);
+      const score = await scoreInput(input);
+      if (score > bestScore) {
+        bestScore = score;
+        best = input;
       }
     }
-
-    const hasSchoolInput = await page.locator(
-      'input[data-automation-id*="school"], input[id*="school"], [data-automation-id*="education"] [role="combobox"], [data-automation-id*="education"] button[aria-haspopup="listbox"]'
-    ).first().isVisible({ timeout: 500 }).catch(() => false);
-    if (!hasSchoolInput) {
-      const addEduBtn = await page.$('button[data-automation-id*="Add"]:has-text("Education"), button:has-text("Add Education"), [data-automation-id="educationSection"] button[data-automation-id="Add"]');
-      if (addEduBtn && await addEduBtn.isVisible().catch(() => false)) {
-        console.log('    ➕ Expanding Education section (clicking Add)...');
-        await interactAndRescan(page, async () => {
-          await addEduBtn.click({ force: true }).catch(() => addEduBtn.evaluate(el => el.click()));
-        });
-      }
-    }
-
-    // Websites: handled in handleWebsitesSection() — never click Add / Add another here
+    if (best && bestScore >= 40) return best;
   }
+
+  if (best && bestScore >= 0) return best;
+  return null;
 }
 
-// ─── Workday Resume Upload with Async Verification ──────────────────────────
-async function handleWorkdayResumeUpload(page, resumePath) {
-  if (!resumePath) return false;
-  const absPath = resolve(process.cwd(), resumePath);
-  if (!existsSync(absPath)) {
-    console.log(`    ⚠️  Resume file not found at: ${absPath}`);
-    return false;
-  }
-
-  // Check if file is already uploaded
-  const existingFileItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [class*="file-upload-item"], [data-automation-id="delete-file"]');
-  if (existingFileItem && await existingFileItem.isVisible().catch(() => false)) {
-    const existingName = await existingFileItem.textContent().catch(() => '');
-    console.log(`    📎 Resume already uploaded: "${existingName.trim()}"`);
-    return true;
-  }
-
-  const fileInput = await page.$('input[type="file"]');
-  if (!fileInput) {
-    const resumeUploadSectionMatches = await page.evaluate(() => {
-      const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-      return /resume\s*\/\s*cv|resume|upload a file|drop files here|select files/i.test(text);
-    });
-    if (!resumeUploadSectionMatches) return false;
-
-    const resumeLabel = page.locator('label, legend').filter({ hasText: /resume|cv|upload a file|drop files here|select files/i }).first();
-    const controlled = resumeLabel.locator('..').locator('input[type="file"]').first();
-    if (await controlled.count().catch(() => 0) === 0) return false;
-    const fileElement = controlled;
-    console.log(`    📎 Uploading resume via labeled file control: ${basename(absPath)}...`);
-    await fileElement.setInputFiles(absPath);
-
-    console.log('    ⏳ Waiting for Workday file upload to complete...');
-    for (let i = 0; i < 20; i++) {
-      await page.waitForTimeout(1000);
-      const uploadedItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id="delete-file"]');
-      const successText = await page.evaluate(() => {
-        const body = document.body?.innerText || '';
-        return /successfully\s*uploaded/i.test(body) || /100%/i.test(body);
-      }).catch(() => false);
-      if (uploadedItem || successText) {
-        console.log('    ✅ Resume uploaded successfully (verified)!');
-        await waitForDomSettled(page);
-        await discoverWorkdayFields(page);
-        return true;
-      }
-    }
-    console.log('    ⚠️  Resume upload wait finished — continuing...');
-    return true;
-  }
-
-  console.log(`    📎 Uploading resume: ${basename(absPath)}...`);
-  await fileInput.setInputFiles(absPath);
-
-  // Wait for upload progress to finish and confirmation item to appear
+/**
+ * @param {import('playwright').Page} page
+ * @param {string} [expectedFileName]
+ * @returns {Promise<boolean>}
+ */
+async function waitForResumeUploadComplete(page, expectedFileName = '') {
+  const expectBase = expectedFileName
+    ? String(expectedFileName).replace(/\.[^.]+$/, '').slice(0, 24).toLowerCase()
+    : '';
   console.log('    ⏳ Waiting for Workday file upload to complete...');
-  for (let i = 0; i < 20; i++) {
-    await page.waitForTimeout(1000);
-    const uploadedItem = await page.$('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id="delete-file"]');
-    const successText = await page.evaluate(() => {
+  for (let i = 0; i < 30; i++) {
+    await page.waitForTimeout(700);
+    const state = await page.evaluate((needle) => {
+      const item = document.querySelector(
+        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+      );
+      const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+      const itemText = (item?.textContent || '').replace(/\s+/g, ' ').trim();
       const body = document.body?.innerText || '';
-      return /successfully\s*uploaded/i.test(body) || /100%/i.test(body);
-    }).catch(() => false);
+      const successBanner = /successfully\s*uploaded/i.test(body);
+      const nameHit = needle
+        ? itemText.toLowerCase().includes(needle) || (deleteBtn && body.toLowerCase().includes(needle))
+        : /\.pdf\b/i.test(itemText);
+      return {
+        hasItem: Boolean(item && (item.offsetParent !== null || item.getClientRects().length > 0)),
+        hasDelete: Boolean(deleteBtn),
+        successBanner,
+        nameHit,
+        itemText: itemText.slice(0, 80),
+      };
+    }, expectBase).catch(() => ({ hasItem: false, hasDelete: false, successBanner: false, nameHit: false, itemText: '' }));
 
-    if (uploadedItem || successText) {
-      console.log('    ✅ Resume uploaded successfully (verified)!');
+    if (state.hasItem || state.hasDelete || (state.successBanner && state.nameHit) || state.nameHit) {
+      console.log(`    ✅ Resume uploaded successfully${state.itemText ? `: "${state.itemText}"` : ''}`);
       await waitForDomSettled(page);
       await discoverWorkdayFields(page);
       return true;
     }
   }
+  console.log('    ⚠️  Resume upload not verified in DOM (no file chip / delete control)');
+  return false;
+}
 
-  console.log('    ⚠️  Resume upload wait finished — continuing...');
-  return true;
+/**
+ * Upload resume PDF from resumes/ into Workday file input (no OS picker).
+ * Re-resolves absolute path if the given path is stale/missing.
+ */
+async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
+  let absPath = findExistingResumeFile(resumePath)
+    || (resumePath && existsSync(resumePath) ? resumePath : null);
+
+  if (!absPath) {
+    absPath = await getResumePathForApply(profile || {}, { resume: resumePath });
+  }
+  if (!absPath || !existsSync(absPath)) {
+    console.log(`    ⚠️  Resume file not found (tried: ${resumePath || '(none)'}). Put a PDF in resumes/`);
+    return false;
+  }
+
+  const fileName = basename(absPath);
+
+  const already = await page.evaluate((needle) => {
+    const item = document.querySelector(
+      '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+    );
+    const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+    const text = ((item?.textContent || '') + ' ' + (document.body?.innerText || '')).toLowerCase();
+    if (item && (item.offsetParent !== null || item.getClientRects().length > 0)) {
+      if (!needle || text.includes(needle) || /\.pdf\b/i.test(item.textContent || '')) {
+        return (item.textContent || '').replace(/\s+/g, ' ').trim() || 'uploaded file';
+      }
+    }
+    if (deleteBtn && needle && text.includes(needle)) return needle;
+    return '';
+  }, fileName.replace(/\.[^.]+$/, '').slice(0, 24).toLowerCase()).catch(() => '');
+
+  if (already) {
+    console.log(`    📎 Resume already uploaded: "${already}"`);
+    if (profile) profile._resumePath = absPath;
+    return true;
+  }
+
+  const resumeUploadSectionMatches = await page.evaluate(() => {
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    return /resume\s*\/\s*cv|\bresume\b|\bcv\b|upload a file|drop files here|select files|attachments?/i.test(text);
+  });
+  if (!resumeUploadSectionMatches) {
+    console.log('    ℹ️  No resume upload section detected on this page');
+    return false;
+  }
+
+  let lastError = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const fileInput = await findResumeFileInput(page);
+    if (!fileInput) {
+      lastError = 'file input not found (will not open OS picker)';
+      console.log(`    ⚠️  Resume upload attempt ${attempt}/3: ${lastError}`);
+      await page.waitForTimeout(600);
+      continue;
+    }
+
+    try {
+      console.log(`    📎 Uploading resume: ${fileName} (attempt ${attempt}/3)...`);
+      await fileInput.setInputFiles(absPath);
+      const ok = await waitForResumeUploadComplete(page, fileName);
+      if (ok) {
+        if (profile) profile._resumePath = absPath;
+        return true;
+      }
+      lastError = 'upload not confirmed in DOM';
+    } catch (err) {
+      lastError = err.message?.slice(0, 120) || String(err);
+      console.log(`    ⚠️  Resume upload attempt ${attempt}/3 failed: ${lastError}`);
+      await page.waitForTimeout(700);
+    }
+  }
+
+  console.log(`    ⚠️  Resume section visible but upload did not complete (${lastError || 'unknown'})`);
+  return false;
 }
 
 // ─── Step 1 ("My Information") Handler ───────────────────────────────────────
@@ -356,7 +452,9 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   try {
     const previousWorkerGroup = page.getByRole('group', { name: /previously worked for or are you currently working for workday/i })
       .or(page.getByRole('radiogroup', { name: /previously worked for or are you currently working for workday/i }))
-      .or(page.locator('fieldset').filter({ hasText: /previously worked.*workday/i }))
+      .or(page.getByRole('group', { name: /prior employment.*contractor experience/i }))
+      .or(page.getByRole('radiogroup', { name: /prior employment.*contractor experience/i }))
+      .or(page.locator('fieldset').filter({ hasText: /previously worked.*workday|prior employment.*contractor experience|medtronic.*covidien/i }))
       .or(page.locator('[data-automation-id*="candidateIsPreviousWorker" i], [id*="candidateIsPreviousWorker" i]'))
       .first();
 
@@ -531,40 +629,73 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     }
 
     if (!citySuccess) {
-      const userCity = await promptUserInTerminal(CITY_LABEL, 'input', [], {
-        company: profile?._company || profile?.company || 'Workday',
-        compliance: false,
-        domCode: 'address--city',
-        role: 'textbox',
-      });
-      if (userCity) {
-        profile.personal = profile.personal || {};
-        profile.personal.city = userCity.trim();
-        profile.qa_answers = profile.qa_answers || {};
-        profile.qa_answers.city = userCity.trim();
-        await saveAnswerToYaml(CITY_LABEL, userCity.trim()).catch(() => {});
-        const retry = await fillCityFromDom(page, profile);
-        const domAfter = await getCityInputValue(page);
-        if (retry.success && cityValueMatches(domAfter, userCity)) {
-          console.log(`    ✅ City applied from terminal: "${domAfter}"`);
-          recordFilled(profile, CITY_LABEL, domAfter);
-          citySuccess = true;
-        }
-      }
-    }
-
-    if (!citySuccess) {
       console.log(`    ⚠️  City is required but could not be verified in DOM (wanted "${resolveCityValue(profile)}")`);
     }
   } catch (err) {
     console.log(`    ⚠️  City field warning: ${err.message?.substring(0, 100)}`);
   }
 
+  console.log('  🎯 [Field 5b] Resolving Address Line 1 (mandatory)...');
+  try {
+    const addressValue = profile?.personal?.address_line1
+      || profile?.qa_answers?.['address line 1']
+      || '';
+    if (!addressValue) {
+      console.log('    ⚠️  Address Line 1 has no Apply Wizz / profile value — leaving empty');
+    }
+    const addressInput = page.locator('input[data-automation-id*="addressLine1"], input#address--addressLine1, input[id*="addressLine1"]')
+      .or(page.getByLabel('Address Line 1', { exact: false }))
+      .first();
+    if (addressValue && await addressInput.isVisible({ timeout: 1500 }).catch(() => false)) {
+      const current = (await addressInput.inputValue().catch(() => '') || '').trim();
+      if (!current || current !== addressValue) {
+        await interactAndRescan(page, async () => {
+          await addressInput.scrollIntoViewIfNeeded().catch(() => {});
+          await addressInput.fill(addressValue);
+        });
+      }
+      const verified = (await addressInput.inputValue().catch(() => '') || '').trim();
+      if (verified === addressValue) {
+        console.log(`    ✅ Address Line 1 DOM verified: "${verified}"`);
+        profile.personal = profile.personal || {};
+        profile.personal.address_line1 = addressValue;
+        profile.qa_answers = profile.qa_answers || {};
+        profile.qa_answers['address line 1'] = addressValue;
+        await saveAnswerToYaml('Address Line 1', addressValue).catch(() => {});
+        recordFilled(profile, 'Address Line 1', addressValue);
+      } else {
+        console.log(`    ⚠️  Address Line 1 verify mismatch: wanted "${addressValue}", got "${verified}"`);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Address Line 1 warning: ${err.message?.substring(0, 100)}`);
+  }
+
+  console.log('  🎯 [Field 5c] Resolving State dropdown (mandatory — DOM verify)...');
+  try {
+    const stateValue = resolveStateValue(profile, profile?._tenant || getWorkdayTenant(page.url()));
+    if (stateValue) {
+      const stateResult = await fillStateFromDom(page, profile);
+      if (stateResult.success && stateValueMatches(stateResult.domValue, stateValue)) {
+        console.log(`    ✅ State DOM verified: "${stateResult.domValue}"`);
+        profile.personal = profile.personal || {};
+        profile.personal.state = stateValue;
+        profile.qa_answers = profile.qa_answers || {};
+        profile.qa_answers.state = stateValue;
+        await saveAnswerToYaml(STATE_LABEL, stateValue).catch(() => {});
+        recordFilled(profile, STATE_LABEL, stateValue);
+      } else {
+        console.log(`    ⚠️  State not verified in DOM (wanted "${stateValue}", got "${stateResult.domValue || '(empty)'}")`);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  State field warning: ${err.message?.substring(0, 100)}`);
+  }
+
   try {
     const textFields = [
       { label: 'Given Name', keys: ['personal.first_name', 'first_name'] },
       { label: 'Family Name', keys: ['personal.last_name', 'last_name'] },
-      { label: 'Address Line 1', keys: ['personal.address_line1', 'address_line1'] },
     ];
     for (const tf of textFields) {
       const inputEl = page.getByLabel(tf.label, { exact: false }).first();
@@ -584,8 +715,6 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       }
     }
   } catch {}
-
-  await fillWorkdayFieldsFromScan(page, profile, plan, 'My Information');
 
   try {
     const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
@@ -653,17 +782,28 @@ async function fillWorkdayField(page, field, mappedVal, profile) {
   }
 
   if (field.type === 'radio') {
+    let radioVal = String(mappedVal || '').trim();
+    if (!/^(yes|no|true|false)$/i.test(radioVal)) {
+      const fromClient = peekClientAnswer(label, profile);
+      if (fromClient && /^(yes|no)$/i.test(String(fromClient).trim())) {
+        radioVal = fromClient;
+      } else {
+        return false;
+      }
+    }
+    if (/^(true|false)$/i.test(radioVal)) radioVal = /^true$/i.test(radioVal) ? 'Yes' : 'No';
     try {
       if (field.name) {
-        await page.click(`input[name="${field.name}"][value="${mappedVal}"]`, { force: true });
+        await page.click(`input[name="${field.name}"][value="${radioVal}"]`, { force: true }).catch(() => {});
+        await page.click(`input[name="${field.name}"][value="${/^no$/i.test(radioVal) ? 'false' : 'true'}"]`, { force: true }).catch(() => {});
       } else {
-        await page.getByRole('radio', { name: new RegExp(`^${String(mappedVal).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).first().click({ force: true });
+        await page.getByRole('radio', { name: new RegExp(`^${radioVal.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') }).first().click({ force: true });
       }
     } catch {
-      await page.click(`label:has-text("${mappedVal}")`, { force: true }).catch(() => {});
+      await page.click(`label:has-text("${radioVal}")`, { force: true }).catch(() => {});
     }
-    console.log(`    ✅ Radio: ${label} ← "${mappedVal}"`);
-    recordFilled(profile, label, mappedVal);
+    console.log(`    ✅ Radio: ${label} ← "${radioVal}"`);
+    recordFilled(profile, label, radioVal);
     return true;
   }
 
@@ -706,6 +846,7 @@ async function fillWorkdayField(page, field, mappedVal, profile) {
 
 /**
  * Scan DOM/a11y fields, resolve answers from profile/qa_answers, prompt unknowns, fill, re-scan.
+ * Re-discovers from live DOM after every successful fill so newly revealed controls are seen.
  */
 async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
   const qaStore = createQAStore();
@@ -713,29 +854,53 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
   console.log(`  🔍 DOM scan: ${fields.length} visible field(s) on "${stepName}"`);
   let stepFilled = 0;
   const company = profile?._company || profile?.company;
+  const seenNorms = new Set();
+  const maxIters = Math.max(fields.length * 2, 24);
 
-  for (let i = 0; i < fields.length; i++) {
-    const field = fields[i];
-    if (field.disabled) continue;
-    if (field.type === 'file') continue;
+  for (let i = 0; i < maxIters; i++) {
+    if (i > 0 && i % 3 === 0) {
+      fields = await discoverWorkdayFields(page);
+    }
+    const field = fields.find((f) => {
+      if (f.disabled || f.type === 'file') return false;
+      const label = f.label || f.id;
+      const norm = normalizeLabel(label);
+      if (!norm || seenNorms.has(norm)) return false;
+      const mandatory = isMandatoryField(label, f) || f.required === true;
+      if (!mandatory) {
+        if (isSkippableUnimportantLabel(label, f)) return false;
+        if (shouldSkipOptionalFill(label, f, profile)) return false;
+        if (/how did you hear|previous(ly)? work|prior employment|contractor experience with|covidien|country.*phone code|phone number|postal code|city|given name|family name|address line/i.test(String(label)) && stepName === 'My Information') return false;
+      }
+      if (/vibe philosophy|recruitment privacy statement.*vibe/i.test(String(label))) return false;
+      return true;
+    });
+    if (!field) break;
 
     const label = field.label || field.id;
-    if (isUnimportantWorkdayField(label)) continue;
     const norm = normalizeLabel(label);
-    if (profile._filledValues && Object.keys(profile._filledValues).some(k => {
+    seenNorms.add(norm);
+
+    const sessionHit = profile._filledValues && Object.keys(profile._filledValues).some((k) => {
       const kn = normalizeLabel(k);
       return kn === norm || norm.includes(kn) || kn.includes(norm);
-    })) continue;
-    if (/how did you hear|previous(ly)? work|country.*phone code|phone number/i.test(String(label)) && stepName === 'My Information') continue;
-    if (/vibe philosophy|recruitment privacy statement.*vibe/i.test(String(label))) continue;
+    });
+    const liveValue = field.currentValue ?? field.value ?? '';
+    if (sessionHit && isFormFieldValueFilled(liveValue, label)) continue;
+    if (sessionHit && !isFormFieldValueFilled(liveValue, label) && profile._filledValues) {
+      for (const key of Object.keys(profile._filledValues)) {
+        const kn = normalizeLabel(key);
+        if (kn === norm || norm.includes(kn) || kn.includes(norm)) delete profile._filledValues[key];
+      }
+    }
 
-    const isRequired = isRequiredQuestionLabel(label, field);
     let mappedVal = await resolveField(field, profile, qaStore, {
-      skipPrompt: false,
+      skipPrompt: true,
       plan,
       company,
       resumePath: plan?.resume || profile?._resumePath,
       url: plan?.url || page.url(),
+      page,
     });
     if (/postal/i.test(String(label)) && mappedVal) {
       const countryHint = `${profile?.personal?.country_phone_code || ''} ${profile?.personal?.country || ''}`;
@@ -762,69 +927,243 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
   return stepFilled;
 }
 
+/**
+ * Central page workflow: scan → intent → evidence → validate → fill → verify → rescan.
+ */
+async function runWorkdayQuestionWorkflow(page, profile, plan, stepName, options = {}) {
+  console.log(`  🔄 Page workflow: "${stepName}" (orchestrator — all required questions)`);
+  const dynamicResult = await runDynamicFieldLoop(page, profile, plan, stepName, {
+    maxPasses: options.maxPasses ?? 18,
+    maxOuterPasses: options.maxOuterPasses ?? 4,
+  });
+  if (dynamicResult.humanRequired?.length) {
+    profile._stepBlocked = profile._stepBlocked || {};
+    profile._stepBlocked[stepName] = dynamicResult.humanRequired;
+  }
+  return dynamicResult;
+}
+
 // ─── Fill Current Workday Step ──────────────────────────────────────────────
 async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
-  console.log(`\n  📝 [Workday] Filling Step: "${stepName}"...`);
+  console.log(`\n  📝 [Workday] Filling Step: "${stepName}" (script-only: required fields)...`);
 
-  if (stepName === 'My Information') {
-    return await handleStep1MyInformation(page, profile, plan);
+  // Disarm Certifications / Languages / bare Add / chrome before any fill on this step.
+  await installScriptOnlyClickGuard(page);
+  const blocked = await disarmRiskyAddButtons(page);
+  if (blocked > 0) {
+    console.log(`    🚫 Disarmed ${blocked} non-required button(s) on "${stepName}"`);
   }
 
-  if (stepName === 'My Experience') {
-    await handleWorkdayAddButtons(page, stepName, profile);
-    const resumePath = plan?.resume || profile?.resume || profile?._resumePath;
-    if (resumePath) {
-      await handleWorkdayResumeUpload(page, resumePath);
-    }
-    await handleStep2MyExperience(page, profile);
-    const formFieldFilled = await handleWorkdayFormFieldQuestions(page, profile, stepName);
-    if (formFieldFilled > 0) {
-      console.log(`    📋 formField DOM: ${formFieldFilled} answer(s) applied from profile.yml / qa_answers`);
-    }
-    await fillWorkdayFieldsFromScan(page, profile, plan, stepName);
+  if (stepName === 'My Information') {
+    await handleStep1MyInformation(page, profile, plan);
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 16 });
     return;
   }
 
-  await handleWorkdayAddButtons(page, stepName, profile);
+  if (stepName === 'My Experience') {
+    // Section expansion is owned by handleStep2MyExperience(): it only clicks Add
+    // when Workday marks the section required, and never for optional sections.
+    const resumePath = await getResumePathForApply(profile, plan);
+    const needsResume = await page.evaluate(() => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
+    }).catch(() => false);
+    if (resumePath && needsResume) {
+      let uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+      if (!uploaded) {
+        console.log('    ↻ Resume upload retry after short wait...');
+        await page.waitForTimeout(800);
+        uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+      }
+      if (!uploaded) {
+        console.log('    ⚠️  Resume still not confirmed — continuing required fields only (check resumes/ PDF)');
+      }
+    } else if (needsResume && !resumePath) {
+      console.log('    ⚠️  Resume required but no PDF found in resumes/ folder');
+    }
+    await handleStep2MyExperience(page, profile);
+    await fillWorkdaySkillsSection(page, profile);
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 14 });
+    return;
+  }
 
-  const resumePath = plan?.resume || profile?.resume || profile?._resumePath;
+  const resumePath = await getResumePathForApply(profile, plan);
   const resumeSectionText = await page.evaluate(() => {
     const label = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
     return /resume\s*\/\s*cv|resume|upload a file|drop files here|select files/i.test(label);
   }).catch(() => false);
 
   if (resumeSectionText && resumePath && stepName !== 'My Experience') {
-    await handleWorkdayResumeUpload(page, resumePath);
+    await handleWorkdayResumeUpload(page, resumePath, profile);
   }
 
-  if (stepName === 'Voluntary Disclosures') {
-    await handleVoluntaryDisclosuresStep(page, profile);
+  await runWorkdayQuestionWorkflow(page, profile, plan, stepName, {
+    maxPasses: /application questions|voluntary disclosures/i.test(stepName) ? 20 : 16,
+  });
+
+  const agreementsChecked = await acknowledgeAllPageAgreements(page, profile, stepName);
+  if (agreementsChecked > 0) {
+    console.log(`    ☑️  Bottom-of-page agreements: ${agreementsChecked} checkbox(es) checked on "${stepName}"`);
+  }
+}
+
+/**
+ * Fill the current wizard step once (one retry only if required fields remain).
+ * Do not re-loop after important questions are already answered.
+ */
+async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint = '' } = {}) {
+  if (!(profile._filledFingerprints instanceof Set)) profile._filledFingerprints = new Set();
+
+  if (fingerprint && profile._filledFingerprints.has(fingerprint)) {
+    const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
+    if (remaining === 0) {
+      console.log(`  ⏭️  "${stepName}" already filled — skip re-fill (efficient)`);
+      return true;
+    }
+    console.log(`  ↻ "${stepName}" revisited with ${remaining} empty required — fill those only`);
+  }
+  if (fingerprint) profile._filledFingerprints.add(fingerprint);
+
+  // Single efficient fill pass (specialized handlers live inside fillCurrentWorkdayStep)
+  await fillCurrentWorkdayStep(page, stepName, profile, plan);
+
+  const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+  if (remaining === 0) {
+    console.log(`  ✓ "${stepName}" — all required fields filled (1 pass)`);
+    return true;
   }
 
-  if (stepName === 'Self Identify') {
-    const selfIdFilled = await handleSelfIdentifyStep(page, profile);
-    if (selfIdFilled > 0) {
-      console.log(`    📋 Self Identify: ${selfIdFilled} field(s) filled (name / date / disability)`);
+  // One targeted retry only — never multi-loop the whole step
+  console.log(`  ↻ ${remaining} required still empty — one quick retry then Save and Continue`);
+  await page.waitForTimeout(400);
+  await fillCurrentWorkdayStep(page, stepName, profile, plan);
+
+  const after = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+  if (after === 0) {
+    console.log(`  ✓ "${stepName}" — complete after retry`);
+  } else {
+    console.log(`  ⚠️  ${after} field(s) may still be empty — advancing with Save and Continue`);
+  }
+  return true;
+}
+
+/** Click Save and Continue / Next repeatedly until the wizard step changes. */
+async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
+  const before = stepName || await detectWorkdayStep(page);
+
+  const maxAdvance = 6;
+  let lastErrors = [];
+
+  for (let attempt = 0; attempt < maxAdvance; attempt++) {
+    if (attempt > 0) {
+      console.log(`  ↻ Advance retry ${attempt + 1}/${maxAdvance}...`);
+
+      // Workday named the offending fields — fix exactly those instead of
+      // re-filling the whole step.
+      const flagged = lastErrors.length ? parseErrorFieldNames(lastErrors) : [];
+      let repaired = 0;
+      if (flagged.some((n) => /field\s*of\s*study/i.test(n))) {
+        const fos = await fillEducationFieldOfStudy(page, profile?.education?.major || 'Computer Science').catch(() => false);
+        if (fos) repaired++;
+      }
+      if (lastErrors.length) {
+        repaired += await repairRequiredFieldsFromErrors(page, profile, before, lastErrors).catch(() => 0);
+      }
+
+      if (repaired > 0) {
+        console.log(`  🔧 Repaired ${repaired} flagged field(s) — skipping full re-fill`);
+      } else {
+        await fillCurrentWorkdayStep(page, before, profile, plan);
+      }
+      await page.waitForTimeout(800);
+    }
+
+    await acknowledgeAllPageAgreements(page, profile, before);
+
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+      const footer = document.querySelector('[data-automation-id="footerContainer"], footer');
+      footer?.scrollIntoView({ block: 'end' });
+    }).catch(() => {});
+    await page.waitForTimeout(300);
+
+    const result = await advanceWorkdayStepWithVerification(page, before);
+    if (result.transitioned) return result;
+    if (result.errors?.length) lastErrors = result.errors;
+    if (result.submitBlocked) {
+      // The only button left finishes the application — hand back to the Review flow.
+      return { ...result, transitioned: false, step: before, submitBlocked: true };
+    }
+
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+      const footer = document.querySelector('[data-automation-id="footerContainer"], footer');
+      footer?.scrollIntoView({ block: 'end' });
+    }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    const forced = await page.evaluate(() => {
+      const isVisible = (el) => {
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || el.getClientRects().length > 0);
+      };
+      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const targets = buttons.filter((btn) => {
+        if (!isVisible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
+        const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        return /save and continue|save & continue/i.test(t) || /^next$/i.test(t);
+      });
+      const btn = targets[targets.length - 1];
+      if (!btn) return null;
+      btn.scrollIntoView({ block: 'center' });
+      btn.click();
+      return (btn.textContent || '').replace(/\s+/g, ' ').trim();
+    });
+
+    if (forced) {
+      console.log(`  ➡️  Force-clicked "${forced}"`);
+      await waitForDomSettled(page);
+      await page.waitForTimeout(1500);
+      const after = await detectWorkdayStep(page);
+      const aqAfter = before === 'Application Questions' ? await getApplicationQuestionsPageInfo(page) : null;
+      const aqBefore = before === 'Application Questions' ? await getApplicationQuestionsPageInfo(page) : null;
+      if (after !== before || (aqAfter && aqBefore && aqAfter.current > aqBefore.current)) {
+        console.log(`  ✓ Step advanced after force-click: "${before}" → "${after}"`);
+        return { transitioned: true, step: after, hasSaveButton: true, hasErrors: false };
+      }
     }
   }
 
-  // Pure-DOM formField fill on every step — reads question text from page, answers from profile.yml
-  const formFieldFilled = await handleWorkdayFormFieldQuestions(page, profile, stepName);
-  if (formFieldFilled > 0) {
-    console.log(`    📋 formField DOM: ${formFieldFilled} answer(s) applied from profile.yml / qa_answers`);
-  }
-
-  await fillWorkdayFieldsFromScan(page, profile, plan, stepName);
+  return {
+    transitioned: false,
+    step: before,
+    hasSaveButton: false,
+    hasErrors: lastErrors.length > 0,
+    errors: lastErrors,
+    submitBlocked: false,
+  };
 }
 
 
 // ─── Workday Step Advance (Save and Continue) ───────────────────────────────
-async function advanceWorkdayStep(page) {
+async function advanceWorkdayStep(page, currentStep = '') {
+  const step = currentStep || await detectWorkdayStep(page);
+
+  if (step === 'Application Questions') {
+    const aqInfo = await getApplicationQuestionsPageInfo(page);
+    if (aqInfo && aqInfo.current < aqInfo.total) {
+      const moved = await advanceApplicationQuestionsPage(page);
+      if (moved) {
+        return { hasSaveButton: true, hasErrors: false, aqPageAdvanced: true };
+      }
+      console.log(`\n  ℹ️  Application Questions ${aqInfo.current} of ${aqInfo.total} — fill required fields, then Next`);
+      return { hasSaveButton: false, aqSubpagesRemain: true };
+    }
+  }
+
   const saveBtnSelectors = [
     'button:has-text("Save and Continue")',
     'button:has-text("Save & Continue")',
-    'button[data-automation-id*="next" i]',
-    'button[data-automation-id*="continue" i]',
     'button[data-automation-id="bottom-navigation-next-button"]',
     'button[data-automation-id="page-footer-next-button"]',
   ];
@@ -832,10 +1171,15 @@ async function advanceWorkdayStep(page) {
   let saveBtn = null;
   for (const sel of saveBtnSelectors) {
     const btn = await page.$(sel);
-    if (btn && await btn.isVisible().catch(() => false)) {
-      saveBtn = btn;
-      break;
+    if (!btn || !(await btn.isVisible().catch(() => false))) continue;
+    // On Review, the footer "next" button IS the Submit button — never click it here.
+    const text = ((await btn.textContent().catch(() => '')) || '').replace(/\s+/g, ' ').trim();
+    if (/submit|apply\s*now|send\s*application|complete\s*application/i.test(text)) {
+      console.log(`  🛑 Footer button is "${text}" — this submits the application, so it is left alone.`);
+      return { hasSaveButton: false, submitBlocked: true };
     }
+    saveBtn = btn;
+    break;
   }
 
   if (!saveBtn) {
@@ -854,9 +1198,13 @@ async function advanceWorkdayStep(page) {
 
   const errorMessages = await page.evaluate(() => {
     const errs = [];
+    const isSuccessNoise = (text) => /successfully\s*uploaded|successfully\s*saved|^\s*success[!.\s]*$/i.test(text);
     document.querySelectorAll('.error, .field-error, .error-message, .invalid-feedback, [class*="error"], [class*="Error"], [role="alert"], [data-automation-id*="error"]').forEach(el => {
       const text = (el.textContent || '').trim();
-      if (text && text.length < 200 && text.length > 2) errs.push(text);
+      if (!text || text.length < 3 || text.length > 200) return;
+      if (isSuccessNoise(text)) return;
+      if (/alert/i.test(el.getAttribute('role') || '') && /success|uploaded|complete/i.test(text)) return;
+      errs.push(text);
     });
     return [...new Set(errs)];
   });
@@ -875,9 +1223,19 @@ async function advanceWorkdayStep(page) {
  */
 async function advanceWorkdayStepWithVerification(page, previousStep) {
   const before = previousStep || await detectWorkdayStep(page);
-  const result = await advanceWorkdayStep(page);
+  const aqBefore = before === 'Application Questions' ? await getApplicationQuestionsPageInfo(page) : null;
+  const result = await advanceWorkdayStep(page, before);
   if (!result.hasSaveButton) return { ...result, transitioned: false, step: before };
   if (result.hasErrors) return { ...result, transitioned: false, step: before };
+
+  if (result.aqPageAdvanced) {
+    await waitForDomSettled(page);
+    const aqAfter = await getApplicationQuestionsPageInfo(page);
+    if (aqAfter && aqBefore && aqAfter.current > aqBefore.current) {
+      console.log(`  ✓ Application Questions sub-page: ${aqBefore.current} → ${aqAfter.current} of ${aqAfter.total}`);
+      return { ...result, transitioned: true, step: before, aqPageAdvanced: true };
+    }
+  }
 
   for (let i = 0; i < 5; i++) {
     await waitForDomSettled(page);
@@ -893,15 +1251,92 @@ async function advanceWorkdayStepWithVerification(page, previousStep) {
   return { ...result, transitioned: false, step: before };
 }
 
+/**
+ * Always ask before Submit unless --confirm-submit was passed.
+ * @returns {'submit'|'decline'|'skip'}
+ */
 async function confirmSubmitInTerminal(autoConfirm) {
-  if (autoConfirm) return true;
+  if (autoConfirm) {
+    console.log('  ✅ --confirm-submit — submitting without prompt');
+    return 'submit';
+  }
+  let rl;
+  try {
+    rl = readline.createInterface({ input, output });
+    process.stdin.resume();
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log('READY TO SUBMIT — Review is on screen');
+    console.log('   [Y] Yes  — submit this application');
+    console.log('   [N] No   — do not submit (stop batch here)');
+    console.log('   [S] Skip — do not submit, continue to the next URL');
+    console.log(`${'═'.repeat(60)}`);
+    while (true) {
+      const answer = await rl.question('\n> Submit? [Y/N/S]: ');
+      const choice = answer.trim().toLowerCase();
+      if (choice === 'y' || choice === 'yes') return 'submit';
+      if (choice === 'n' || choice === 'no') return 'decline';
+      if (choice === 's' || choice === 'skip') return 'skip';
+      console.log('   Type Y (submit), N (stop), or S (skip to next URL).');
+    }
+  } catch (err) {
+    console.log(`  ⚠️  Submit prompt unavailable (${err.message?.slice(0, 60) || 'no stdin'}) — not submitting.`);
+    return 'skip';
+  } finally {
+    rl?.close();
+  }
+}
+
+/**
+ * Scan-batch pause at Review — user decides next URL, submit, or stop batch.
+ * @returns {'next'|'submit'|'stop'}
+ */
+/**
+ * When the wizard cannot advance, let the user fix in browser or quit batch.
+ * @returns {'retry'|'quit'}
+ */
+export async function promptStuckStepDecision({ stepName = '', company = '' } = {}) {
+  if (!isFormAnswerTerminalEnabled() || isAutoApplyMode()) {
+    console.log(`  🤖 Auto mode — retrying stuck step "${stepName || 'unknown'}" without terminal`);
+    return 'retry';
+  }
   const rl = readline.createInterface({ input, output });
   try {
-    console.log('\n──────────────────────────────────────────');
-    console.log('Review step complete. Ready to submit.');
-    const answer = await rl.question('Should I submit the application? [y/N]\n> ');
-    console.log('──────────────────────────────────────────\n');
-    return /^y(es)?$/i.test(answer.trim());
+    process.stdin.resume();
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log('⚠️  APPLICATION INCOMPLETE — could not advance wizard step');
+    if (company) console.log(`   Company: ${company}`);
+    if (stepName) console.log(`   Stuck on: ${stepName}`);
+    console.log('\n   Fill missing required fields in the browser (or answer prompts above).');
+    console.log('   [R] or Enter — Retry fill + advance on this application');
+    console.log('   [Q] Quit — stop batch here (will NOT open next URL)');
+    console.log(`${'═'.repeat(60)}`);
+    const answer = await rl.question('\n> Your choice [R/q]: ');
+    const choice = answer.trim().toLowerCase();
+    if (choice === 'q' || choice === 'quit' || choice === 'stop') return 'quit';
+    return 'retry';
+  } finally {
+    rl.close();
+  }
+}
+
+export async function promptScanReviewDecision({ company = '', url = '' } = {}) {
+  const rl = readline.createInterface({ input, output });
+  try {
+    process.stdin.resume();
+    console.log(`\n${'═'.repeat(60)}`);
+    console.log('⏸️  SCAN PAUSED — Review step (browser left open for you)');
+    if (company) console.log(`   Company: ${company}`);
+    if (url) console.log(`   URL: ${url}`);
+    console.log('\n   Check the application in the browser, then choose:');
+    console.log('   [Y] or Enter — Next URL (do NOT submit, continue batch)');
+    console.log('   [S] Submit — submit this application, then continue batch');
+    console.log('   [Q] Quit — stop batch scan here');
+    console.log(`${'═'.repeat(60)}`);
+    const answer = await rl.question('\n> Your choice [Y/s/q]: ');
+    const choice = answer.trim().toLowerCase();
+    if (choice === 'q' || choice === 'quit' || choice === 'stop') return 'stop';
+    if (choice === 's' || choice === 'submit') return 'submit';
+    return 'next';
   } finally {
     rl.close();
   }
@@ -909,6 +1344,18 @@ async function confirmSubmitInTerminal(autoConfirm) {
 
 async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = {}) {
   console.log('\n📋 Review step — parsing DOM before submit.');
+
+  if (profile?._humanRequired?.length) {
+    console.log('\n  🛑 Cannot auto-submit — unresolved required field(s):');
+    for (const item of profile._humanRequired.slice(0, 8)) {
+      console.log(`     • [${item.section}] ${String(item.label || '').slice(0, 80)} (${item.field_type || 'field'})`);
+    }
+    if (profile._humanRequired.length > 8) {
+      console.log(`     … and ${profile._humanRequired.length - 8} more`);
+    }
+    return 'human-required';
+  }
+
   await takeScreenshot(page, 'workday-review-step');
   await attachFormMutationObserver(page);
   const review = await parseReviewDOM(page);
@@ -929,14 +1376,18 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
     }
   }
 
-  const ok = await confirmSubmitInTerminal(confirmSubmit);
-  if (!ok) {
-    console.log('  ✋ Submit cancelled — browser left open for manual review.');
-    return 'review-pending-confirmation';
+  const decision = await confirmSubmitInTerminal(confirmSubmit);
+  if (decision === 'decline') {
+    console.log('  ✋ N — not submitting. Stopping here.');
+    return 'review-declined';
+  }
+  if (decision === 'skip') {
+    console.log('  ⏭️  S — skipped (not submitted). Continuing to the next URL.');
+    return 'skipped';
   }
 
   console.log('🚀 Clicking final "Submit" button...');
-  await clickSubmitButton(page);
+  await clickSubmitButton(page, { allowSubmit: true });
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
@@ -954,7 +1405,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
 
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-    console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
+    console.log('Post-submit verification appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
     return 'needs-manual-verification';
   }
 
@@ -962,9 +1413,12 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
 }
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
-export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword, confirmSubmit = false } = {}) {
+export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false } = {}) {
   console.log(`\n${'═'.repeat(60)}`);
-  console.log(`STARTING WORKDAY WIZARD LOOP (DOM-first)`);
+  console.log(`STARTING WORKDAY WIZARD LOOP (script-only Playwright)`);
+  console.log(`  Policy: REQUIRED fields only — no optional / unimportant clicks`);
+  console.log(`  Allowed: scripted fills + Save and Continue / Next / Submit`);
+  console.log(`  Blocked: Certifications Add, bare Add, Help/Share, optional questions`);
   console.log(`${'═'.repeat(60)}`);
 
   if (!profile?.personal?.phone) {
@@ -972,68 +1426,158 @@ export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpP
     return 'incomplete';
   }
 
-  const maxSteps = 12;
+  // Fresh session markers for THIS job URL — never reuse prior page fingerprints/skips.
+  resetPerApplicationSessionState(profile);
+
+  // Browser refuses optional Add / chrome clicks even if a module tries.
+  await installScriptOnlyClickGuard(page);
+
+  const detected = detectWorkdayTenant(plan?.url || page.url());
+  const tenant = detected?.tenant || getWorkdayTenant(plan?.url || page.url());
+  // Hard lock: never fill optional fields unless explicitly opted in.
+  profile._fillOptionalFields = profile._fillOptionalFields === true;
+  profile._scriptOnly = true;
+
+  if (tenant) {
+    profile._tenant = tenant;
+    profile._workdayPlatform = detected?.platform || '';
+    applyTenantOverridesToProfile(profile, tenant);
+    if (detected?.platform) {
+      console.log(`  🌐 Workday tenant=${tenant} platform=${detected.platform} host=${detected.hostname}`);
+    }
+  }
+
+  await bootstrapClientContext(profile, plan);
+
+  const maxSteps = 40;
+  const maxNoProgress = 3;
   let currentIteration = 0;
-  let lastStep = '';
-  let sameStepCount = 0;
+  let lastFingerprint = '';
+  let noProgressCount = 0;
 
   while (currentIteration < maxSteps) {
     currentIteration++;
 
     const refreshed = await refreshWorkdayPageOnce(page);
-    const stepName = await detectWorkdayStep(page);
+    let stepName = await detectWorkdayStep(page);
+
+    if (stepName === 'Unknown' && !await isWorkdayWizardVisible(page)) {
+      console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply...');
+      const entry = await ensureWorkdayApplicationWizard(page, { mode: 'signin' });
+      if (entry.entered) {
+        console.log(`  ✅ Entered wizard via ${entry.method}`);
+        stepName = await detectWorkdayStep(page);
+      }
+    }
+
     if (refreshed) {
       console.log(`\n📍 [Wizard Step ${currentIteration}] Page refreshed; re-detected Page: "${stepName}"`);
     } else {
       console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
     }
 
-    if (stepName === lastStep) {
-      sameStepCount++;
-      if (sameStepCount >= 6) {
-        console.log(`  ⚠️  Stuck on "${stepName}" for 6 iterations — stopping.`);
-        return 'incomplete';
-      }
-    } else {
-      sameStepCount = 0;
-      lastStep = stepName;
-    }
-
     if (stepName === 'Review') {
       return await verifyAndSubmitReview(page, profile, { confirmSubmit });
     }
 
+    const fingerprint = await computeStepFingerprint(page, stepName);
+    const unfilledBefore = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
+
     await detachFormMutationObserver(page);
     await attachFormMutationObserver(page);
-    await discoverWorkdayFields(page);
+    const liveFields = await discoverWorkdayFields(page);
+    console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
 
-    await fillCurrentWorkdayStep(page, stepName, profile, plan);
+    await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
+
+    const blockedClicks = await drainBlockedScriptClicks(page);
+    if (blockedClicks.length) {
+      console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
+    }
+
     await takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`);
 
-    console.log('  ➡️  Save and Continue (important fields filled; skipping unimportant).');
-    const advanceResult = await advanceWorkdayStepWithVerification(page, stepName);
-
-    if (!advanceResult.hasSaveButton) {
-      const maybeReview = await detectWorkdayStep(page);
-      if (maybeReview === 'Review') {
-        return await verifyAndSubmitReview(page, profile, { confirmSubmit });
-      }
-      console.log('  ℹ️  No "Save and Continue" button found — checking next pass...');
+    const pageGate = await validatePage(page, profile, stepName).catch(() => null);
+    if (pageGate && !pageGate.ok) {
+      console.log(`  ⚠️  Page not ready for Next: ${pageGate.reason}`);
     }
 
-    if (advanceResult.hasErrors || !advanceResult.transitioned) {
-      const errs = (advanceResult.errors || []).join(' ');
-      if (/postal code must be 6 digits/i.test(errs)) {
-        const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode').or(page.getByLabel('Postal Code', { exact: false })).first();
-        if (await postalInput.isVisible().catch(() => false)) {
-          const pin = indiaSixDigitPostal(profile);
-          await postalInput.fill(pin);
-          console.log(`    📮 Retry postal as 6-digit PIN: ${pin}`);
-        }
-      }
-      await fillCurrentWorkdayStep(page, stepName, profile, plan);
-      await advanceWorkdayStepWithVerification(page, stepName);
+    const orch = profile._lastOrchestrator;
+    if (orch?.status === 'blocked') {
+      console.log(`  🛑 Not advancing — orchestrator blocked page ${orch.page}: ${orch.reason} (${orch.questionId || ''})`);
+      return {
+        status: 'blocked',
+        page: orch.page,
+        questionId: orch.questionId,
+        reason: orch.reason,
+        requiresReview: true,
+        step: stepName,
+      };
     }
+
+    console.log('  ➡️  Fill done — auto Save and Continue...');
+    let advanceResult;
+    try {
+      advanceResult = await clickSaveAndContinueAtAnyCost(page, stepName, profile, plan);
+    } catch (err) {
+      console.log(`  ⚠️  Save and Continue threw (${err.message?.slice(0, 120) || err}) — staying on this URL to repair`);
+      advanceResult = { transitioned: false, hasErrors: true, errors: [], submitBlocked: false };
+    }
+
+    if (advanceResult.transitioned) {
+      noProgressCount = 0;
+      lastFingerprint = fingerprint;
+      continue;
+    }
+
+    const maybeReview = await detectWorkdayStep(page);
+    if (maybeReview === 'Review' || advanceResult.submitBlocked) {
+      return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+    }
+
+    if (advanceResult.hasErrors) {
+      clearStaleFilledValuesFromErrors(profile, advanceResult.errors || []);
+      const repaired = await repairRequiredFieldsFromErrors(page, profile, stepName, advanceResult.errors || [])
+        .catch(() => 0);
+      if (repaired > 0) {
+        console.log(`  🔧 Repaired ${repaired} field(s) named in the validation errors — retrying Save and Continue`);
+        noProgressCount = 0;
+        lastFingerprint = fingerprint;
+        continue;
+      }
+    }
+
+    const unfilledAfter = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
+    const fingerprintAfter = await computeStepFingerprint(page, stepName);
+    const madeProgress = fingerprintAfter !== fingerprint
+      || fingerprint !== lastFingerprint
+      || (unfilledBefore > 0 && unfilledAfter < unfilledBefore);
+
+    lastFingerprint = fingerprint;
+
+    if (madeProgress) {
+      noProgressCount = 0;
+      console.log(`  ↻ Page changed but step did not advance — retrying Save and Continue (${unfilledAfter} required empty)`);
+      continue;
+    }
+
+    noProgressCount++;
+
+    if (noProgressCount === 1 && unfilledAfter > 0) {
+      const retryWorkflow = await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 12 }).catch(() => null);
+      if (retryWorkflow?.filled > 0) {
+        console.log(`  🔄 Question workflow filled ${retryWorkflow.filled} stuck field(s) — retrying Save and Continue`);
+        noProgressCount = 0;
+        continue;
+      }
+    }
+
+    if (noProgressCount >= maxNoProgress) {
+      console.log(`  ⛔ Still on "${stepName}" after ${maxNoProgress} failed advances — stopping this URL (no refill loop)`);
+      break;
+    }
+
+    console.log(`  ℹ️  No progress (${noProgressCount}/${maxNoProgress}) — one more fill + Save and Continue attempt...`);
   }
 
   const finalStep = await detectWorkdayStep(page);
@@ -1043,8 +1587,166 @@ export async function runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpP
   return 'incomplete';
 }
 
+/**
+ * Walk the full Workday wizard for scan-batch: harvest every step + AQ sub-pages.
+ * Fills known fields from profile (no terminal prompts) so Save and Continue works.
+ * Stops at Review — does not submit.
+ */
+export async function runWorkdayQuestionScanLoop(page, profile, plan = {}, {
+  company = '',
+  url = '',
+  interactive = true,
+  waitAtReview = true,
+} = {}) {
+  // Each scan URL is a new application layout — clear session fill/skip caches.
+  resetPerApplicationSessionState(profile);
+  await installScriptOnlyClickGuard(page);
+  profile._mandatoryOnlyScan = true;
+  profile._mandatoryOnlyFill = true;
+  profile._scriptOnly = true;
+  profile._fillOptionalFields = false;
 
-// Adaptive scan/fill loop — OTP handling disabled
+  if (interactive) {
+    delete profile._scanMode;
+    profile._scanInteractive = true;
+    console.log('\n  🔍 Interactive wizard scan — mandatory fields; Apply Wizz/YAML/LLM (no form terminal)...');
+  } else {
+    profile._scanMode = true;
+    delete profile._scanInteractive;
+    console.log('\n  🔍 Silent wizard scan — mandatory fields only; yaml/mjs (no terminal)...');
+  }
+
+  if (company) profile._company = company;
+  if (url) {
+    const detected = detectWorkdayTenant(url);
+    profile._tenant = detected?.tenant || getWorkdayTenant(url);
+    profile._workdayPlatform = detected?.platform || '';
+    if (detected?.platform) {
+      console.log(`  🌐 Workday tenant=${profile._tenant} platform=${detected.platform} host=${detected.hostname}`);
+    }
+  }
+
+  const steps = [];
+  const questions = [];
+  let stuckCount = 0;
+
+  for (let i = 0; i < 12; i++) {
+    await refreshWorkdayPageOnce(page);
+    let stepName = await detectWorkdayStep(page);
+
+    if (stepName === 'Unknown' && !await isWorkdayWizardVisible(page)) {
+      console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply...');
+      const entry = await ensureWorkdayApplicationWizard(page, { mode: 'signin' });
+      if (entry.entered) {
+        console.log(`  ✅ Entered wizard via ${entry.method}`);
+        stepName = await detectWorkdayStep(page);
+      }
+    }
+
+    profile._currentStep = stepName;
+    console.log(`\n  📍 [Scan ${i + 1}] Wizard step: "${stepName}"`);
+
+    if (stepName === 'Review') {
+      if (!steps.includes('Review')) steps.push('Review');
+      const reviewBatch = await harvestPageQuestions(page, { company, url, stepName: 'Review' });
+      questions.push(...reviewBatch);
+      console.log(`    📋 Harvested ${reviewBatch.length} field(s) on Review`);
+
+      await takeScreenshot(page, `scan-review-${(getWorkdayTenant(url) || company || 'tenant').replace(/[^a-z0-9]+/gi, '-')}`);
+
+      let reviewDecision = 'next';
+      if (waitAtReview) {
+        reviewDecision = await promptScanReviewDecision({ company, url });
+        console.log(`    ⏸️  Review decision: ${reviewDecision}`);
+      }
+
+      if (reviewDecision === 'submit') {
+        console.log('    🚀 Submitting application (your choice at Review)...');
+        const submitted = await clickSubmitButton(page, { allowSubmit: true });
+        await waitForDomSettled(page);
+        if (submitted) {
+          console.log('    ✅ Submit clicked — check browser for confirmation');
+        } else {
+          console.log('    ⚠️  Submit button not found — review manually in browser');
+        }
+      }
+
+      const byStep = summarizeQuestionsByStep(questions);
+      console.log(`\n  ✅ Scan complete: ${questions.length} question(s) across [${steps.join(' → ')}]`);
+      console.log(`     Breakdown: ${formatStepQuestionSummary(byStep)}`);
+
+      return {
+        steps,
+        questions,
+        byStep,
+        reachedReview: true,
+        reviewDecision,
+      };
+    }
+
+    if (!steps.includes(stepName)) steps.push(stepName);
+
+    const batch = await harvestPageQuestions(page, { company, url, stepName });
+    questions.push(...batch);
+    console.log(`    📋 Harvested ${batch.length} field(s) on "${stepName}"`);
+
+    await fillCurrentWorkdayStep(page, stepName, profile, plan);
+
+    if (stepName === 'Application Questions') {
+      for (let aqPass = 0; aqPass < 8; aqPass++) {
+        const aqInfo = await getApplicationQuestionsPageInfo(page);
+        if (!aqInfo || aqInfo.current >= aqInfo.total) break;
+        const moved = await advanceApplicationQuestionsPage(page);
+        if (!moved) break;
+        const subBatch = await harvestPageQuestions(page, { company, url, stepName });
+        questions.push(...subBatch);
+        console.log(`    📋 Harvested ${subBatch.length} field(s) on Application Questions page ${aqInfo.current + 1} of ${aqInfo.total}`);
+        await fillCurrentWorkdayStep(page, stepName, profile, plan);
+      }
+    }
+
+    let advanced = false;
+    const maxAdvanceAttempts = interactive ? 6 : 2;
+    for (let attempt = 0; attempt < maxAdvanceAttempts; attempt++) {
+      const advanceResult = await advanceWorkdayStepWithVerification(page, stepName);
+      if (advanceResult.transitioned) {
+        advanced = true;
+        stuckCount = 0;
+        break;
+      }
+      if (attempt < maxAdvanceAttempts - 1) {
+        console.log(`    ⚠️  Could not advance from "${stepName}" — fill retry ${attempt + 2}/${maxAdvanceAttempts}...`);
+        await fillCurrentWorkdayStep(page, stepName, profile, plan);
+      }
+    }
+    if (!advanced) {
+      stuckCount++;
+      const stillEmpty = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
+      console.log(`    ⚠️  Stuck on "${stepName}" (${stuckCount}/2) — ${stillEmpty} required field(s) still empty.`);
+      if (stuckCount < 2) {
+        await fillCurrentWorkdayStep(page, stepName, profile, plan);
+        continue;
+      }
+      console.log('    🛑 No progress — moving on instead of looping.');
+      break;
+    }
+  }
+
+  const byStep = summarizeQuestionsByStep(questions);
+  console.log(`\n  ✅ Scan complete: ${questions.length} question(s) across [${steps.join(' → ')}]`);
+  console.log(`     Breakdown: ${formatStepQuestionSummary(byStep)}`);
+
+  return {
+    steps,
+    questions,
+    byStep,
+    reachedReview: steps.includes('Review'),
+    reviewDecision: 'next',
+  };
+}
+
+
+// Adaptive scan/fill loop — login is email + password only (no mailbox OTP)
 export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode = 'signin' } = {}) {
   const maxIterations = 15;
   for (let iter = 0; iter < maxIterations; iter++) {
@@ -1114,23 +1816,15 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
     for (const f of visibleFields) {
       if (!f.label && !f.id && !f.name) continue;
       const label = (f.label || f.id || f.name).trim();
-      const mappedVal = mapLabelToProfileValue(label, profile);
+      if (shouldSkipOptionalFill(label, f, profile)) continue;
+      const mappedVal = mapLabelToProfileValue(label, profile)
+        || await resolveField({ label, type: f.type, required: f.required }, profile, createQAStore(), {
+          skipPrompt: true,
+          company,
+          page,
+          url: page.url(),
+        });
       if (!mappedVal) {
-        const shouldPrompt = shouldPromptForUnknownField(label, f);
-        if (shouldPrompt) {
-          const answer = await promptUserInTerminal(label, f.type, [], {
-            company,
-            domCode: f.id || f.name || f.selector || 'unknown',
-            role: f.role || (f.type === 'select' ? 'combobox' : undefined),
-            placeholder: f.placeholder,
-          });
-          if (answer) {
-            try {
-              const el = await findField(page, f);
-              if (el) { await el.fill(answer); anyAction = true; }
-            } catch (err) { console.log(`Could not fill required field "${label}": ${err.message?.slice(0,80)}`); }
-          }
-        }
         continue;
       }
 
@@ -1150,9 +1844,14 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
           if (res && res.success) { anyAction = true; console.log(`Selected: ${label} <- ${mappedVal}`); }
         } else if (f.type === 'file') {
           if (mappedVal) {
-            await el.setInputFiles(mappedVal).catch(() => {});
-            anyAction = true;
-            console.log(`Uploaded file for: ${label}`);
+            const fileAbs = findExistingResumeFile(mappedVal) || resolve(process.cwd(), mappedVal);
+            if (existsSync(fileAbs)) {
+              await el.setInputFiles(fileAbs).catch(() => {});
+              anyAction = true;
+              console.log(`Uploaded file for: ${label}`);
+            } else {
+              console.log(`File not found for ${label}: ${mappedVal}`);
+            }
           }
         } else {
           await el.click().catch(() => {});
@@ -1172,14 +1871,10 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
         'button:has-text("Sign In")',
         'button:has-text("Sign in")',
         'button:has-text("Create Account")',
-        'button:has-text("Create")',
         'button:has-text("Save and Continue")',
         'button:has-text("Save & Continue")',
-        'button:has-text("Submit")',
-        'button:has-text("Submit application")',
-        'input[type="submit"]',
-        'button[type="submit"]'
       ];
+      // Submit / bare Create / Add buttons are deliberately absent — never misclick.
       for (const sel of actions) {
         try {
           const btn = await page.$(sel);
@@ -1199,21 +1894,13 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
     // 5) Detect Review/Submission
     const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
     if (/review(\s*application)?|review and submit|review your application/i.test(bodyText)) {
-      console.log('Review page detected, attempting final submit...');
-      await clickSubmitButton(page).catch(() => {});
-      await page.waitForTimeout(4000);
-      const confirmText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-      if (/application\s*submitted|thank\s*you\s*for\s*applying|submission\s*complete/i.test(confirmText)) {
-        console.log('Submission confirmed.');
-        return 'submitted';
-      } else {
-        console.log('No clear submission confirmation detected after final submit attempt.');
-      }
+      console.log('Review page reached — stopping without submitting. Submit it yourself in the browser.');
+      return 'review-reached';
     }
 
     // 6) Detect verification prompts and exit for manual verification
     if (/verification\s*code|confirm.*email|check your email|enter.*code/i.test(bodyText)) {
-      console.log('Verification prompt detected, but OTP auto-handling is disabled in this build. Please verify manually if required.');
+      console.log('Verification prompt appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
       return 'needs-manual-verification';
     }
 
@@ -1228,7 +1915,19 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
 }
 
 // ─── Submit button finder ───────────────────────────────────────────────────
-async function clickSubmitButton(page) {
+/**
+ * Click the final Submit button. Submission is never automatic: the caller must
+ * pass `allowSubmit: true`, which only happens after the operator answered the
+ * Review prompt (or passed --confirm-submit).
+ * @param {import('playwright').Page} page
+ * @param {{allowSubmit?: boolean}} [options]
+ * @returns {Promise<boolean>}
+ */
+async function clickSubmitButton(page, { allowSubmit = false } = {}) {
+  if (!allowSubmit) {
+    console.log('  🛑 Submit blocked — no operator confirmation for this run. Nothing was submitted.');
+    return false;
+  }
   const submitSelectors = [
     'button:has-text("Submit application")',
     'button:has-text("Submit Application")',
@@ -1387,9 +2086,8 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false } = {}) {
   console.log(`📝 Fill mode: ${url}`);
-  if (otpEmail) console.log(`📧 OTP auto-fetch: ${otpEmail}`);
 
   const ats = detectATS(url);
   const ownBrowser = !existingBrowser;
@@ -1407,25 +2105,19 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
     if (!currentUrl || currentUrl === 'about:blank' || currentUrl.startsWith('data:')) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch { /* partial load OK */ }
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(800);
+      if (await isWorkdayJobPageMissing(page)) {
+        console.log('❌ Job page does not exist (dead/expired URL) — skipping');
+        return 'job_not_found';
+      }
     }
 
     // Handle Workday multi-step wizard
     if (ats === 'workday') {
-      const isAlreadyOnWizard = await page.$([
-        'button:has-text("Save and Continue")',
-        'button:has-text("Save & Continue")',
-        'button[data-automation-id="bottom-navigation-next-button"]',
-        'input[data-automation-id="legalNameSection_firstName"]',
-        '[data-automation-id*="wizardStep"]',
-      ].join(', ')).catch(() => null);
-
-      if (!isAlreadyOnWizard || !await isAlreadyOnWizard.isVisible().catch(() => false)) {
+      if (!await isWorkdayWizardVisible(page)) {
         const wdOk = await handleWorkday(page, {
-          email: workdayEmail || otpEmail,
+          email: workdayEmail,
           password: workdayPassword,
-          otpEmail,
-          otpPassword,
           mode,
         });
         if (!wdOk) {
@@ -1434,29 +2126,38 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
           return 'auth-failed';
         }
       }
+      if (!await isWorkdayWizardVisible(page)) {
+        const entry = await ensureWorkdayApplicationWizard(page, { mode });
+        if (entry.entered) {
+          console.log(`  ✅ Entered application wizard via ${entry.method}`);
+        }
+      }
+
       console.log('  ✅ Workday authentication confirmed — starting 5-step wizard loop...');
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
       await page.waitForTimeout(1000);
 
       // Load profile and execute complete 5-step wizard loop
       const profile = await loadProfile().catch(() => ({}));
-      const status = await runWorkdayWizardLoop(page, profile, plan, { otpEmail, otpPassword, confirmSubmit });
+      const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
-      await logToCSV(url, plan.company || '', plan.role || '', status, postSubmitSS, { ats });
+      const statusLabel = typeof status === 'object' && status?.status ? status.status : status;
+      await logToCSV(url, plan.company || '', plan.role || '', statusLabel, postSubmitSS, { ats });
 
       try {
         await recordResult(url, plan, status, fieldResults);
       } catch { /* non-critical */ }
 
       console.log(`\n${'─'.repeat(60)}`);
-      console.log(`🏁 Result: ${status}`);
+      console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status}`);
       console.log(`   Screenshots: screenshots/`);
       console.log(`   Report: data/applied.csv`);
       console.log(`${'─'.repeat(60)}`);
 
-      console.log(`\n   — Ctrl+C to keep it open longer.`);
-      await page.waitForTimeout(15000);
+      const holdMs = (statusLabel === 'skipped' || statusLabel === 'review-declined' || statusLabel === 'blocked') ? 2500 : 8000;
+      console.log(`\n   — Closing browser in ${Math.round(holdMs / 1000)}s...`);
+      await page.waitForTimeout(holdMs);
       await browser.close();
       return status;
     } else if (!existingPage) {
@@ -1538,14 +2239,14 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
 
         // ─── Route to the right handler ─────────────────────────────
         if (type === 'file') {
-          const filePath = resolve(process.cwd(), value);
+          const filePath = findExistingResumeFile(value) || resolve(process.cwd(), value);
           if (!existsSync(filePath)) {
             console.log(`  ❌ File not found: ${value}`);
             errors++;
             continue;
           }
           await el.setInputFiles(filePath);
-          console.log(`  📎 Uploaded: ${fieldName} ← ${basename(value)}`);
+          console.log(`  📎 Uploaded: ${fieldName} ← ${basename(filePath)}`);
           filled++;
 
         } else if (type === 'checkbox') {
@@ -1744,9 +2445,14 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
 
     // ─── SUBMIT + ERROR RETRY LOOP ──────────────────────────────────
     let status = 'filled-not-submitted';
-    for (let submitAttempt = 1; submitAttempt <= 3; submitAttempt++) {
-      console.log(`\n🚀 Submit attempt ${submitAttempt}/3...`);
-      const submitted = await clickSubmitButton(page);
+    // This fallback path never submits by itself — only --confirm-submit unlocks it.
+    const submitAttempts = confirmSubmit ? 3 : 0;
+    if (!submitAttempts) {
+      console.log('\n  🛑 Form filled but NOT submitted — review it in the browser (pass --confirm-submit to allow submitting here).');
+    }
+    for (let submitAttempt = 1; submitAttempt <= submitAttempts; submitAttempt++) {
+      console.log(`\n🚀 Submit attempt ${submitAttempt}/${submitAttempts}...`);
+      const submitted = await clickSubmitButton(page, { allowSubmit: true });
       if (!submitted) { status = 'no-submit-button'; break; }
 
       await page.waitForTimeout(3000);
@@ -1763,7 +2469,7 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
       if (errorMessages.length === 0) {
         const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
         if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-          console.log('Post-submit verification detected, but OTP handling is disabled. Please verify manually if required.');
+          console.log('Post-submit verification appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
           status = 'needs-manual-verification';
         } else { status = 'submitted'; }
         break;
@@ -1864,6 +2570,6 @@ export async function fillForm(url, plan, { otpEmail, otpPassword, workdayEmail,
     if (browser) {
       try { await browser.close(); } catch {}
     }
-    throw err;
+    return 'incomplete';
   }
 }

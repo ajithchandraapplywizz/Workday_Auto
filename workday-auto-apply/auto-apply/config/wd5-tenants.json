@@ -1,0 +1,870 @@
+{
+  "domain": "wd5",
+  "count": 144,
+  "tenants": [
+    {
+      "name": "Abcfinancial",
+      "slug": "abcfinancial",
+      "host": "abcfinancial.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/abcfinancial.yml"
+    },
+    {
+      "name": "Advanceauto",
+      "slug": "advanceauto",
+      "host": "advanceauto.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/advanceauto.yml"
+    },
+    {
+      "name": "Aero",
+      "slug": "aero",
+      "host": "aero.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/aero.yml"
+    },
+    {
+      "name": "Agilent",
+      "slug": "agilent",
+      "host": "agilent.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/agilent.yml"
+    },
+    {
+      "name": "Allegion",
+      "slug": "allegion",
+      "host": "allegion.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/allegion.yml"
+    },
+    {
+      "name": "Allina",
+      "slug": "allina",
+      "host": "allina.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/allina.yml"
+    },
+    {
+      "name": "Amcor",
+      "slug": "amcor",
+      "host": "amcor.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/amcor.yml"
+    },
+    {
+      "name": "Ameriprise",
+      "slug": "ameriprise",
+      "host": "ameriprise.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ameriprise.yml"
+    },
+    {
+      "name": "Aptiv",
+      "slug": "aptiv",
+      "host": "aptiv.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/aptiv.yml"
+    },
+    {
+      "name": "Ardentmills",
+      "slug": "ardentmills",
+      "host": "ardentmills.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ardentmills.yml"
+    },
+    {
+      "name": "Atcllc",
+      "slug": "atcllc",
+      "host": "atcllc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/atcllc.yml"
+    },
+    {
+      "name": "Athene",
+      "slug": "athene",
+      "host": "athene.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/athene.yml"
+    },
+    {
+      "name": "Avera",
+      "slug": "avera",
+      "host": "avera.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/avera.yml"
+    },
+    {
+      "name": "Bakertilly",
+      "slug": "bakertilly",
+      "host": "bakertilly.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/bakertilly.yml"
+    },
+    {
+      "name": "Blattner",
+      "slug": "blattner",
+      "host": "blattner.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/blattner.yml"
+    },
+    {
+      "name": "Bluescopenac",
+      "slug": "bluescopenac",
+      "host": "bluescopenac.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/bluescopenac.yml"
+    },
+    {
+      "name": "Borgwarner",
+      "slug": "borgwarner",
+      "host": "borgwarner.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/borgwarner.yml"
+    },
+    {
+      "name": "Brandeis",
+      "slug": "brandeis",
+      "host": "brandeis.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/brandeis.yml"
+    },
+    {
+      "name": "Breakthru",
+      "slug": "breakthru",
+      "host": "breakthru.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/breakthru.yml"
+    },
+    {
+      "name": "Bridgestone",
+      "slug": "bridgestone",
+      "host": "bridgestone.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/bridgestone.yml"
+    },
+    {
+      "name": "Bristolmyerssquibb",
+      "slug": "bristolmyerssquibb",
+      "host": "bristolmyerssquibb.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/bristolmyerssquibb.yml"
+    },
+    {
+      "name": "Burlington",
+      "slug": "burlington",
+      "host": "burlington.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/burlington.yml"
+    },
+    {
+      "name": "Cambridgeassociates",
+      "slug": "cambridgeassociates",
+      "host": "cambridgeassociates.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/cambridgeassociates.yml"
+    },
+    {
+      "name": "Campbellsoup",
+      "slug": "campbellsoup",
+      "host": "campbellsoup.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/campbellsoup.yml"
+    },
+    {
+      "name": "Canadiansolar",
+      "slug": "canadiansolar",
+      "host": "canadiansolar.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/canadiansolar.yml"
+    },
+    {
+      "name": "Cenhud",
+      "slug": "cenhud",
+      "host": "cenhud.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/cenhud.yml"
+    },
+    {
+      "name": "Chartermfg",
+      "slug": "chartermfg",
+      "host": "chartermfg.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/chartermfg.yml"
+    },
+    {
+      "name": "Childrensinstitute",
+      "slug": "childrensinstitute",
+      "host": "childrensinstitute.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/childrensinstitute.yml"
+    },
+    {
+      "name": "Choicehotels",
+      "slug": "choicehotels",
+      "host": "choicehotels.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/choicehotels.yml"
+    },
+    {
+      "name": "Clarios",
+      "slug": "clarios",
+      "host": "clarios.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/clarios.yml"
+    },
+    {
+      "name": "Clr",
+      "slug": "clr",
+      "host": "clr.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/clr.yml"
+    },
+    {
+      "name": "Coxhealth",
+      "slug": "coxhealth",
+      "host": "coxhealth.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/coxhealth.yml"
+    },
+    {
+      "name": "Crowdstrike",
+      "slug": "crowdstrike",
+      "host": "crowdstrike.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/crowdstrike.yml"
+    },
+    {
+      "name": "Deluxe",
+      "slug": "deluxe",
+      "host": "deluxe.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/deluxe.yml"
+    },
+    {
+      "name": "Dimensional",
+      "slug": "dimensional",
+      "host": "dimensional.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/dimensional.yml"
+    },
+    {
+      "name": "Dmainc",
+      "slug": "dmainc",
+      "host": "dmainc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/dmainc.yml"
+    },
+    {
+      "name": "Dtna",
+      "slug": "dtna",
+      "host": "dtna.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/dtna.yml"
+    },
+    {
+      "name": "Ebi",
+      "slug": "ebi",
+      "host": "ebi.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ebi.yml"
+    },
+    {
+      "name": "Edwards",
+      "slug": "edwards",
+      "host": "edwards.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/edwards.yml"
+    },
+    {
+      "name": "Ehealthinsurance",
+      "slug": "ehealthinsurance",
+      "host": "ehealthinsurance.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ehealthinsurance.yml"
+    },
+    {
+      "name": "Ensemblehp",
+      "slug": "ensemblehp",
+      "host": "ensemblehp.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ensemblehp.yml"
+    },
+    {
+      "name": "Ffive",
+      "slug": "ffive",
+      "host": "ffive.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ffive.yml"
+    },
+    {
+      "name": "Fifththird",
+      "slug": "fifththird",
+      "host": "fifththird.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/fifththird.yml"
+    },
+    {
+      "name": "Flagstar",
+      "slug": "flagstar",
+      "host": "flagstar.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/flagstar.yml"
+    },
+    {
+      "name": "Gartner",
+      "slug": "gartner",
+      "host": "gartner.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/gartner.yml"
+    },
+    {
+      "name": "Generac",
+      "slug": "generac",
+      "host": "generac.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/generac.yml"
+    },
+    {
+      "name": "Generalmotors",
+      "slug": "generalmotors",
+      "host": "generalmotors.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/generalmotors.yml"
+    },
+    {
+      "name": "Genevausa",
+      "slug": "genevausa",
+      "host": "genevausa.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/genevausa.yml"
+    },
+    {
+      "name": "Gentex",
+      "slug": "gentex",
+      "host": "gentex.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/gentex.yml"
+    },
+    {
+      "name": "Gfs",
+      "slug": "gfs",
+      "host": "gfs.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/gfs.yml"
+    },
+    {
+      "name": "Globusmedical",
+      "slug": "globusmedical",
+      "host": "globusmedical.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/globusmedical.yml"
+    },
+    {
+      "name": "Goodwillmiddletn",
+      "slug": "goodwillmiddletn",
+      "host": "goodwillmiddletn.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/goodwillmiddletn.yml"
+    },
+    {
+      "name": "Grammy",
+      "slug": "grammy",
+      "host": "grammy.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/grammy.yml"
+    },
+    {
+      "name": "Greenheckgroup",
+      "slug": "greenheckgroup",
+      "host": "greenheckgroup.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/greenheckgroup.yml"
+    },
+    {
+      "name": "Group1001Wd",
+      "slug": "group1001wd",
+      "host": "group1001wd.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/group1001wd.yml"
+    },
+    {
+      "name": "Gsk",
+      "slug": "gsk",
+      "host": "gsk.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/gsk.yml"
+    },
+    {
+      "name": "Hp",
+      "slug": "hp",
+      "host": "hp.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/hp.yml"
+    },
+    {
+      "name": "Hpinc",
+      "slug": "hpinc",
+      "host": "hpinc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/hpinc.yml"
+    },
+    {
+      "name": "Huntingtonhospital",
+      "slug": "huntingtonhospital",
+      "host": "huntingtonhospital.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/huntingtonhospital.yml"
+    },
+    {
+      "name": "Idexcorp",
+      "slug": "idexcorp",
+      "host": "idexcorp.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/idexcorp.yml"
+    },
+    {
+      "name": "Ilitch",
+      "slug": "ilitch",
+      "host": "ilitch.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ilitch.yml"
+    },
+    {
+      "name": "Insulet",
+      "slug": "insulet",
+      "host": "insulet.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/insulet.yml"
+    },
+    {
+      "name": "Interiorlogicgroup",
+      "slug": "interiorlogicgroup",
+      "host": "interiorlogicgroup.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/interiorlogicgroup.yml"
+    },
+    {
+      "name": "Jabil",
+      "slug": "jabil",
+      "host": "jabil.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/jabil.yml"
+    },
+    {
+      "name": "Jainglobal",
+      "slug": "jainglobal",
+      "host": "jainglobal.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/jainglobal.yml"
+    },
+    {
+      "name": "Jda",
+      "slug": "jda",
+      "host": "jda.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/jda.yml"
+    },
+    {
+      "name": "Jeffersonhealth",
+      "slug": "jeffersonhealth",
+      "host": "jeffersonhealth.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/jeffersonhealth.yml"
+    },
+    {
+      "name": "Kemper",
+      "slug": "kemper",
+      "host": "kemper.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/kemper.yml"
+    },
+    {
+      "name": "Keybank",
+      "slug": "keybank",
+      "host": "keybank.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/keybank.yml"
+    },
+    {
+      "name": "Kumc",
+      "slug": "kumc",
+      "host": "kumc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/kumc.yml"
+    },
+    {
+      "name": "Kyndryl",
+      "slug": "kyndryl",
+      "host": "kyndryl.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/kyndryl.yml"
+    },
+    {
+      "name": "Liberty",
+      "slug": "liberty",
+      "host": "liberty.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/liberty.yml"
+    },
+    {
+      "name": "Lifestance",
+      "slug": "lifestance",
+      "host": "lifestance.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/lifestance.yml"
+    },
+    {
+      "name": "Lnw",
+      "slug": "lnw",
+      "host": "lnw.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/lnw.yml"
+    },
+    {
+      "name": "Lumentum",
+      "slug": "lumentum",
+      "host": "lumentum.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/lumentum.yml"
+    },
+    {
+      "name": "Medline",
+      "slug": "medline",
+      "host": "medline.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/medline.yml"
+    },
+    {
+      "name": "Meijer",
+      "slug": "meijer",
+      "host": "meijer.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/meijer.yml"
+    },
+    {
+      "name": "Mii",
+      "slug": "mii",
+      "host": "mii.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/mii.yml"
+    },
+    {
+      "name": "Mimecast",
+      "slug": "mimecast",
+      "host": "mimecast.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/mimecast.yml"
+    },
+    {
+      "name": "Moog",
+      "slug": "moog",
+      "host": "moog.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/moog.yml"
+    },
+    {
+      "name": "Morningstar",
+      "slug": "morningstar",
+      "host": "morningstar.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/morningstar.yml"
+    },
+    {
+      "name": "Motorolasolutions",
+      "slug": "motorolasolutions",
+      "host": "motorolasolutions.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/motorolasolutions.yml"
+    },
+    {
+      "name": "Mtb",
+      "slug": "mtb",
+      "host": "mtb.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/mtb.yml"
+    },
+    {
+      "name": "Mydpr",
+      "slug": "mydpr",
+      "host": "mydpr.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/mydpr.yml"
+    },
+    {
+      "name": "Nationwidechildrens",
+      "slug": "nationwidechildrens",
+      "host": "nationwidechildrens.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/nationwidechildrens.yml"
+    },
+    {
+      "name": "Nebraskamed",
+      "slug": "nebraskamed",
+      "host": "nebraskamed.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/nebraskamed.yml"
+    },
+    {
+      "name": "Neurocrine",
+      "slug": "neurocrine",
+      "host": "neurocrine.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/neurocrine.yml"
+    },
+    {
+      "name": "Nphosting",
+      "slug": "nphosting",
+      "host": "nphosting.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/nphosting.yml"
+    },
+    {
+      "name": "Nvent",
+      "slug": "nvent",
+      "host": "nvent.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/nvent.yml"
+    },
+    {
+      "name": "Nvidia",
+      "slug": "nvidia",
+      "host": "nvidia.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/nvidia.yml"
+    },
+    {
+      "name": "O9Solutions",
+      "slug": "o9solutions",
+      "host": "o9solutions.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/o9solutions.yml"
+    },
+    {
+      "name": "Oceanspray",
+      "slug": "oceanspray",
+      "host": "oceanspray.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/oceanspray.yml"
+    },
+    {
+      "name": "Odl",
+      "slug": "odl",
+      "host": "odl.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/odl.yml"
+    },
+    {
+      "name": "Onemagnify",
+      "slug": "onemagnify",
+      "host": "onemagnify.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/onemagnify.yml"
+    },
+    {
+      "name": "Oregon",
+      "slug": "oregon",
+      "host": "oregon.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/oregon.yml"
+    },
+    {
+      "name": "Oumedicine",
+      "slug": "oumedicine",
+      "host": "oumedicine.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/oumedicine.yml"
+    },
+    {
+      "name": "Oxy",
+      "slug": "oxy",
+      "host": "oxy.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/oxy.yml"
+    },
+    {
+      "name": "Palomarhealth",
+      "slug": "palomarhealth",
+      "host": "palomarhealth.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/palomarhealth.yml"
+    },
+    {
+      "name": "Pentair",
+      "slug": "pentair",
+      "host": "pentair.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/pentair.yml"
+    },
+    {
+      "name": "Pfm",
+      "slug": "pfm",
+      "host": "pfm.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/pfm.yml"
+    },
+    {
+      "name": "Progleasing",
+      "slug": "progleasing",
+      "host": "progleasing.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/progleasing.yml"
+    },
+    {
+      "name": "Proofpoint",
+      "slug": "proofpoint",
+      "host": "proofpoint.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/proofpoint.yml"
+    },
+    {
+      "name": "Pru",
+      "slug": "pru",
+      "host": "pru.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/pru.yml"
+    },
+    {
+      "name": "Qtsdatacenters",
+      "slug": "qtsdatacenters",
+      "host": "qtsdatacenters.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/qtsdatacenters.yml"
+    },
+    {
+      "name": "Qualys",
+      "slug": "qualys",
+      "host": "qualys.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/qualys.yml"
+    },
+    {
+      "name": "Qvc",
+      "slug": "qvc",
+      "host": "qvc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/qvc.yml"
+    },
+    {
+      "name": "Rallyhouse",
+      "slug": "rallyhouse",
+      "host": "rallyhouse.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/rallyhouse.yml"
+    },
+    {
+      "name": "Redhat",
+      "slug": "redhat",
+      "host": "redhat.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/redhat.yml"
+    },
+    {
+      "name": "Rochester",
+      "slug": "rochester",
+      "host": "rochester.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/rochester.yml"
+    },
+    {
+      "name": "Rocket",
+      "slug": "rocket",
+      "host": "rocket.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/rocket.yml"
+    },
+    {
+      "name": "Rrhs",
+      "slug": "rrhs",
+      "host": "rrhs.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/rrhs.yml"
+    },
+    {
+      "name": "Ryancompanies",
+      "slug": "ryancompanies",
+      "host": "ryancompanies.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/ryancompanies.yml"
+    },
+    {
+      "name": "Sbasite",
+      "slug": "sbasite",
+      "host": "sbasite.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/sbasite.yml"
+    },
+    {
+      "name": "Sgadental",
+      "slug": "sgadental",
+      "host": "sgadental.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/sgadental.yml"
+    },
+    {
+      "name": "Shelterinsurance",
+      "slug": "shelterinsurance",
+      "host": "shelterinsurance.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/shelterinsurance.yml"
+    },
+    {
+      "name": "Shm",
+      "slug": "shm",
+      "host": "shm.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/shm.yml"
+    },
+    {
+      "name": "Skechers",
+      "slug": "skechers",
+      "host": "skechers.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/skechers.yml"
+    },
+    {
+      "name": "Southshorehealth",
+      "slug": "southshorehealth",
+      "host": "southshorehealth.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/southshorehealth.yml"
+    },
+    {
+      "name": "Standardtextile",
+      "slug": "standardtextile",
+      "host": "standardtextile.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/standardtextile.yml"
+    },
+    {
+      "name": "Synnex",
+      "slug": "synnex",
+      "host": "synnex.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/synnex.yml"
+    },
+    {
+      "name": "Tempus",
+      "slug": "tempus",
+      "host": "tempus.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/tempus.yml"
+    },
+    {
+      "name": "Theocc",
+      "slug": "theocc",
+      "host": "theocc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/theocc.yml"
+    },
+    {
+      "name": "Thinkbrg",
+      "slug": "thinkbrg",
+      "host": "thinkbrg.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/thinkbrg.yml"
+    },
+    {
+      "name": "Thrivent",
+      "slug": "thrivent",
+      "host": "thrivent.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/thrivent.yml"
+    },
+    {
+      "name": "Transamerica",
+      "slug": "transamerica",
+      "host": "transamerica.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/transamerica.yml"
+    },
+    {
+      "name": "Transunion",
+      "slug": "transunion",
+      "host": "transunion.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/transunion.yml"
+    },
+    {
+      "name": "Troweprice",
+      "slug": "troweprice",
+      "host": "troweprice.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/troweprice.yml"
+    },
+    {
+      "name": "Tysonfoods",
+      "slug": "tysonfoods",
+      "host": "tysonfoods.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/tysonfoods.yml"
+    },
+    {
+      "name": "Uchicago",
+      "slug": "uchicago",
+      "host": "uchicago.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/uchicago.yml"
+    },
+    {
+      "name": "Umusic",
+      "slug": "umusic",
+      "host": "umusic.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/umusic.yml"
+    },
+    {
+      "name": "Unisys",
+      "slug": "unisys",
+      "host": "unisys.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/unisys.yml"
+    },
+    {
+      "name": "Usc",
+      "slug": "usc",
+      "host": "usc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/usc.yml"
+    },
+    {
+      "name": "Velera",
+      "slug": "velera",
+      "host": "velera.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/velera.yml"
+    },
+    {
+      "name": "Vfc",
+      "slug": "vfc",
+      "host": "vfc.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/vfc.yml"
+    },
+    {
+      "name": "Vibrant",
+      "slug": "vibrant",
+      "host": "vibrant.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/vibrant.yml"
+    },
+    {
+      "name": "Visa",
+      "slug": "visa",
+      "host": "visa.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/visa.yml"
+    },
+    {
+      "name": "Vst",
+      "slug": "vst",
+      "host": "vst.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/vst.yml"
+    },
+    {
+      "name": "Washpost",
+      "slug": "washpost",
+      "host": "washpost.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/washpost.yml"
+    },
+    {
+      "name": "Wattswater",
+      "slug": "wattswater",
+      "host": "wattswater.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/wattswater.yml"
+    },
+    {
+      "name": "Wesleyan",
+      "slug": "wesleyan",
+      "host": "wesleyan.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/wesleyan.yml"
+    },
+    {
+      "name": "Westernalliancebank",
+      "slug": "westernalliancebank",
+      "host": "westernalliancebank.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/westernalliancebank.yml"
+    },
+    {
+      "name": "Wgu",
+      "slug": "wgu",
+      "host": "wgu.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/wgu.yml"
+    },
+    {
+      "name": "Workday",
+      "slug": "workday",
+      "host": "workday.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/workday.yml"
+    },
+    {
+      "name": "Xenergy",
+      "slug": "xenergy",
+      "host": "xenergy.wd5.myworkdayjobs.com",
+      "overrideFile": "config/tenant-overrides/xenergy.yml"
+    }
+  ]
+}

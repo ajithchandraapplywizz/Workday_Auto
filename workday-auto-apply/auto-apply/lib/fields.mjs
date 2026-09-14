@@ -5,6 +5,8 @@
  * native selects, custom selects, and every other pattern we've encountered.
  */
 
+import { isRiskyMisclickButton, safeClick, readButtonName } from './safeClick.mjs';
+
 // ─── Fuzzy text matching ────────────────────────────────────────────────────
 // Score how well two strings match (0 = no match, 1 = exact)
 export function fuzzyScore(needle, haystack) {
@@ -264,25 +266,23 @@ export async function handleHierarchicalDropdown(page, trigger, primaryText, sec
       if (!count) continue;
       const hit = c.first();
       const visible = await hit.isVisible({ timeout: 700 }).catch(() => false);
-      if (visible) {
-        await hit.click({ force: true });
-        return true;
-      }
+      if (!visible) continue;
+      const hitName = await readButtonName(hit);
+      if (isRiskyMisclickButton(hitName)) continue;
+      await hit.click({ force: true });
+      return true;
     }
 
     const fallback = page.locator('[role="option"], [data-automation-id="promptOption"], li, div').filter({ hasText: new RegExp(String(targetText).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
     if (await fallback.isVisible({ timeout: 700 }).catch(() => false)) {
-      await fallback.click({ force: true });
-      return true;
-    }
-
-    if (hint) {
-      const maybe = page.locator('button, [role="combobox"], [role="button"]').filter({ hasText: new RegExp(String(hint).replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
-      if (await maybe.isVisible({ timeout: 700 }).catch(() => false)) {
-        await maybe.click({ force: true });
+      const fbName = await readButtonName(fallback);
+      if (!isRiskyMisclickButton(fbName)) {
+        await fallback.click({ force: true });
+        return true;
       }
     }
 
+    // Never fall back to page-level buttons (Add Certificate, bare Add, Create, …).
     return false;
   }
 
@@ -325,11 +325,18 @@ export async function handleHierarchicalDropdown(page, trigger, primaryText, sec
 export async function clickVisiblePromptOption(page, needles = []) {
   const chosen = await page.evaluate((needlesIn) => {
     const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const riskyRe = /^(add|\+|add\s+another|create|delete|remove)$/i;
     const nodes = Array.from(document.querySelectorAll(
       '[role="option"], [data-automation-id="promptOption"], [role="treeitem"], [data-automation-id="menuItem"]'
     )).filter(el => {
       const style = window.getComputedStyle(el);
-      return style.display !== 'none' && style.visibility !== 'hidden' && (el.offsetWidth > 0 || el.getClientRects().length > 0);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (!(el.offsetWidth > 0 || el.getClientRects().length > 0)) return false;
+      const text = normalize(el.textContent);
+      // Never treat page Add buttons as prompt options
+      if (riskyRe.test(text)) return false;
+      if (el.tagName === 'BUTTON' && /^add\b/i.test(text)) return false;
+      return true;
     });
 
     const items = nodes.map(el => ({ el, text: normalize(el.textContent) })).filter(i => i.text);
@@ -447,6 +454,101 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
   }
 }
 
+/**
+ * Type a search term into a Workday dropdown/prompt, then click the matching option.
+ * Used for Field of Study, School, Degree, and other searchable lists.
+ */
+export async function typeAndClickOption(page, fieldLoc, searchText) {
+  const needle = String(searchText || '').replace(/\s+/g, ' ').trim();
+  if (!needle) return { ok: false, selected: '', method: 'empty' };
+
+  if (fieldLoc) {
+    const opener = fieldLoc.locator(
+      'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), [role="combobox"], button[aria-haspopup="listbox"], [data-automation-id="selectWidget"] button'
+    ).first();
+    if (await opener.isVisible({ timeout: 800 }).catch(() => false)) {
+      await opener.scrollIntoViewIfNeeded().catch(() => {});
+      await opener.click({ force: true }).catch(() => {});
+    } else {
+      await fieldLoc.click({ force: true }).catch(() => {});
+    }
+    await page.waitForTimeout(350);
+  }
+
+  const search = page.locator([
+    'input[role="searchbox"]:visible',
+    'input[type="search"]:visible',
+    '[data-automation-id*="searchBox"] input:visible',
+    '[data-automation-id*="promptSearch"] input:visible',
+    '[data-automation-id*="searchField"] input:visible',
+    'input[placeholder*="Search" i]:visible',
+    'input[aria-label*="Search" i]:visible',
+    'input[role="combobox"]:visible',
+  ].join(', ')).last();
+  if (await search.isVisible({ timeout: 900 }).catch(() => false)) {
+    await search.click({ force: true }).catch(() => {});
+    await search.fill('');
+    await search.pressSequentially(needle, { delay: 35 });
+  } else {
+    await page.keyboard.type(needle, { delay: 35 });
+  }
+
+  await page.waitForTimeout(400);
+  try {
+    await page.waitForFunction((n) => {
+      const q = String(n || '').toLowerCase();
+      return Array.from(document.querySelectorAll('[role="option"], [data-automation-id="promptOption"], [role="treeitem"]'))
+        .some((el) => (el.textContent || '').toLowerCase().includes(q) && (el.offsetParent !== null || el.getClientRects().length > 0));
+    }, needle, { timeout: 1500 });
+  } catch { /* list may still be open */ }
+
+  let selected = await clickVisiblePromptOption(page, [needle]);
+  if (!selected) {
+    const escaped = needle.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const re = new RegExp(escaped, 'i');
+    const opt = page.locator('[role="option"], [data-automation-id="promptOption"], [role="treeitem"]')
+      .filter({ hasText: re })
+      .first();
+    if (await opt.isVisible({ timeout: 1500 }).catch(() => false)) {
+      selected = (await opt.innerText().catch(() => needle)).replace(/\s+/g, ' ').trim() || needle;
+      await opt.click({ force: true }).catch(() => opt.evaluate((el) => el.click()));
+    } else {
+      const firstOpt = page.locator('[role="option"]:visible, [data-automation-id="promptOption"]:visible').first();
+      if (await firstOpt.isVisible({ timeout: 800 }).catch(() => false)) {
+        const text = (await firstOpt.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+        // Only accept the first option when it really matches — an unfiltered list
+        // would otherwise store a wrong value (e.g. "Other" → "Accounting").
+        if (text && !isRiskyMisclickButton(text) && fuzzyScore(needle, text) >= 0.8) {
+          selected = text;
+          await firstOpt.click({ force: true }).catch(() => firstOpt.evaluate((el) => el.click()));
+        }
+      }
+    }
+  }
+
+  await page.waitForTimeout(250);
+  // Only a confirm button *inside the open prompt* may be clicked. A page-level
+  // "Add" (Certifications, Languages, …) must never be touched from here.
+  const done = page.locator([
+    '[role="dialog"]:visible',
+    '[role="listbox"]:visible',
+    '[data-automation-id*="promptPopup"]:visible',
+    '[data-automation-id*="promptOption"]:visible',
+    '[data-automation-id*="popup"]:visible',
+    '[data-automation-id*="menuList"]:visible',
+  ].map((scope) => `${scope} button:visible`).join(', '))
+    .filter({ hasText: /^(done|ok|confirm)$/i })
+    .first();
+  if (await done.isVisible({ timeout: 800 }).catch(() => false)) {
+    await safeClick(done);
+  } else {
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+  await page.waitForTimeout(250);
+
+  return { ok: Boolean(selected), selected: selected || needle, method: 'type-and-click' };
+}
+
 // ─── Universal dropdown handler ─────────────────────────────────────────────
 export async function handleDropdown(page, element, value, label) {
   // If hierarchical array provided (e.g. ['Website', 'Workday.com'])
@@ -476,7 +578,7 @@ export async function handleDropdown(page, element, value, label) {
       await element.scrollIntoViewIfNeeded();
       await page.keyboard.press('Escape');
       await page.waitForTimeout(200);
-      await element.click();
+      await element.click({ force: true, timeout: 5000 });
       await page.waitForTimeout(200);
       await element.fill('');
       await page.waitForTimeout(100);

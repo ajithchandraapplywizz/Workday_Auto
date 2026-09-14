@@ -1,0 +1,136 @@
+# Wattswater — YAML keyed by tenant slug "wattswater" (any wd* platform)
+company: "Wattswater"
+tenant: wattswater
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Are you a former Watts Water Technology employee?"
+    normalized: "are you a former watts water technology employee"
+    fieldType: "radio"
+    required: false
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 18:32:25 GMT+0530 (India Standard Time)
+  - label: "Are you comfortable working in this type of environment?"
+    normalized: "are you comfortable working in this type of environment"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 18:34:19 GMT+0530 (India Standard Time)
+  - label: "Are you legally eligible to work in the country to which you are applying?"
+    normalized: "are you legally eligible to work in the country to which you are applying"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 18:32:46 GMT+0530 (India Standard Time)
+  - label: "Are you physically able meet the physical requirements as listed in the job description?"
+    normalized: "are you physically able meet the physical requirements as listed in the job description"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Full stack Intern developed websites and automation worked with agents Rags and LLM's"
+    last_seen_at: Fri Sep 11 2026 18:35:50 GMT+0530 (India Standard Time)
+  - label: "Are you willing and able to work nights and weekends as required to support business operations?"
+    normalized: "are you willing and able to work nights and weekends as required to support business operations"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "06/2026"
+    last_seen_at: Fri Sep 11 2026 18:35:30 GMT+0530 (India Standard Time)
+  - label: "Are you willing to participate in these standard pre-employment screens?"
+    normalized: "are you willing to participate in these standard preemployment screens"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "06/2026"
+    last_seen_at: Fri Sep 11 2026 18:33:17 GMT+0530 (India Standard Time)
+  - label: "Do you have relatives employed by Watts Water Technologies or any of its subsidiaries?"
+    normalized: "do you have relatives employed by watts water technologies or any of its subsidiaries"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 18:33:27 GMT+0530 (India Standard Time)
+  - label: "Do you possess the minimum number years of experience as listed in the job description?"
+    normalized: "do you possess the minimum number years of experience as listed in the job description"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 18:33:26 GMT+0530 (India Standard Time)
+  - label: "Do you possess the required degrees and/or professional certifications as listed in the job description?"
+    normalized: "do you possess the required degrees andor professional certifications as listed in the job description"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    options:
+      - "Yes"
+      - "No"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 18:36:11 GMT+0530 (India Standard Time)
+  - label: "Ethnicity:"
+    normalized: "ethnicity"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Hyderabad"
+    last_seen_at: Fri Sep 11 2026 18:36:21 GMT+0530 (India Standard Time)
+  - label: "Have you ever been employed by Watts Water Technologies or any of its subsidiaries?"
+    normalized: "have you ever been employed by watts water technologies or any of its subsidiaries"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 18:33:02 GMT+0530 (India Standard Time)
+  - label: "Hispanic or Latino?"
+    normalized: "hispanic or latino"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 18:36:33 GMT+0530 (India Standard Time)
+  - label: "Veteran Status:"
+    normalized: "veteran status"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "I AM NOT A PROTECTED VETERAN"
+    last_seen_at: Fri Sep 11 2026 18:36:30 GMT+0530 (India Standard Time)
+  - label: "What are your desired annual salary expectations for the position you are applying to?"
+    normalized: "what are your desired annual salary expectations for the position you are applying to"
+    fieldType: "text"
+    required: false
+    step: "Application Questions"
+    answer: "1000000"
+    last_seen_at: Fri Sep 11 2026 18:33:28 GMT+0530 (India Standard Time)
+  - label: "Will you now or in the future require visa sponsorship to work in the country or location to which you are applying?"
+    normalized: "will you now or in the future require visa sponsorship to work in the country or location to which you are applying"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 18:32:48 GMT+0530 (India Standard Time)
+  - label: "Yes, I have read and consent to the terms and conditions"
+    normalized: "yes i have read and consent to the terms and conditions"
+    fieldType: "checkbox"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Yes"
+    last_seen_at: 2026-09-11T13:06:35.454Z

@@ -7,7 +7,7 @@
  *   setup                    Interactive onboarding (creates profile.yml)
  *   scan  <url>              Scan form fields → forms/{slug}-scan.json
  *   fill  <url> [plan.json]  Fill form (auto-generates plan if no plan given)
- *   apply <url>              Full pipeline: scan → plan → fill → submit → OTP
+ *   apply <url>              Full pipeline: scan → plan → fill → submit
  *   batch [targets.txt]      Apply to all URLs in file (or process queue)
  *   queue add <url> [company] Add URL to application queue
  *   queue list               Show pending/applied/failed queue entries
@@ -23,7 +23,7 @@ import { scanForm, slugify } from './lib/scanner.mjs';
 import { fillForm } from './lib/engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './lib/planner.mjs';
 import { applyLearnings, getStats } from './lib/learner.mjs';
-import { extractJDText, detectATS, validateWorkdayUrl, readTargetsFile } from './lib/discovery.mjs';
+import { extractJDText, detectATS, validateWorkdayUrl, readJobLinksFile } from './lib/discovery.mjs';
 import { loadQueue, saveQueue, addToQueue, getPendingFromQueue } from './lib/reporter.mjs';
 import { 
   getTodayMMDDYYYY, 
@@ -31,6 +31,7 @@ import {
   getDynamicDateValueForField 
 } from './lib/date-utils.mjs';
 import { chromium } from 'playwright';
+import { runWd5BatchScan, showWd5CatalogPending } from './lib/wd5BatchScan.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -84,22 +85,32 @@ function resolveDynamicFields(plan) {
 // ─── Parse CLI args ─────────────────────────────────────────────────────────
 const [, , command, ...rawArgs] = process.argv;
 
-let otpEmail = process.env.EMAIL || '';
-let otpPassword = process.env.APP_PASSWORD || '';
 let workdayEmail = process.env.WORKDAY_EMAIL || '';
 let workdayPassword = process.env.WORKDAY_PASSWORD || '';
 let isSignup = false;
 let confirmSubmit = false;
+let scanBatchOffset = 0;
+let scanBatchLimit = 15;
+let batchLimitExplicit = false;
+let scanBatchSkipAuth = true;
+let scanBatchInteractive = true;
+let scanBatchWaitReview = true;
 const positionalArgs = [];
 
 for (let i = 0; i < rawArgs.length; i++) {
-  if (rawArgs[i] === '--otp-email' && rawArgs[i + 1]) otpEmail = rawArgs[++i];
-  else if (rawArgs[i] === '--otp-password' && rawArgs[i + 1]) otpPassword = rawArgs[++i];
-  else if (rawArgs[i] === '--workday-email' && rawArgs[i + 1]) workdayEmail = rawArgs[++i];
+  if (rawArgs[i] === '--workday-email' && rawArgs[i + 1]) workdayEmail = rawArgs[++i];
   else if (rawArgs[i] === '--workday-password' && rawArgs[i + 1]) workdayPassword = rawArgs[++i];
   else if (rawArgs[i] === '--signup') isSignup = true;
   else if (rawArgs[i] === '--signin') isSignup = false;
   else if (rawArgs[i] === '--confirm-submit') confirmSubmit = true;
+  else if (rawArgs[i] === '--offset' && rawArgs[i + 1]) scanBatchOffset = Number(rawArgs[++i]) || 0;
+  else if (rawArgs[i] === '--limit' && rawArgs[i + 1]) {
+    scanBatchLimit = Number(rawArgs[++i]) || 15;
+    batchLimitExplicit = true;
+  }
+  else if (rawArgs[i] === '--no-skip-auth') scanBatchSkipAuth = false;
+  else if (rawArgs[i] === '--no-interactive') scanBatchInteractive = false;
+  else if (rawArgs[i] === '--no-wait-review') scanBatchWaitReview = false;
   else positionalArgs.push(rawArgs[i]);
 }
 const mode = isSignup ? 'signup' : 'signin';
@@ -139,8 +150,6 @@ async function loadEnv() {
           const val = rawVal.trim().replace(/^['"](.*)['"]$/, '$1');
           if (val) {
             process.env[key] = val;
-            if (key === 'EMAIL' && !otpEmail) otpEmail = val;
-            if (key === 'APP_PASSWORD' && !otpPassword) otpPassword = val;
             if (key === 'WORKDAY_EMAIL' && !workdayEmail) workdayEmail = val;
             if (key === 'WORKDAY_PASSWORD' && !workdayPassword) workdayPassword = val;
           }
@@ -165,8 +174,6 @@ async function resolveAuthCredentials() {
 
   let resolvedWorkdayEmail = workdayEmail || process.env.WORKDAY_EMAIL || '';
   let resolvedWorkdayPassword = workdayPassword || process.env.WORKDAY_PASSWORD || '';
-  const resolvedOtpEmail = otpEmail || process.env.EMAIL || profile?.personal?.email || '';
-  const resolvedOtpPassword = otpPassword || process.env.APP_PASSWORD || '';
 
   if (mode === 'signin') {
     if (!resolvedWorkdayEmail || !resolvedWorkdayPassword) {
@@ -174,7 +181,7 @@ async function resolveAuthCredentials() {
       process.exit(1);
     }
   } else if (mode === 'signup') {
-    resolvedWorkdayEmail = resolvedWorkdayEmail || profile?.workday?.email || profile?.personal?.email || resolvedOtpEmail;
+    resolvedWorkdayEmail = resolvedWorkdayEmail || profile?.workday?.email || profile?.personal?.email || '';
     resolvedWorkdayPassword = resolvedWorkdayPassword || profile?.workday?.password || '';
   }
 
@@ -182,8 +189,6 @@ async function resolveAuthCredentials() {
     profile,
     workdayEmail: resolvedWorkdayEmail,
     workdayPassword: resolvedWorkdayPassword,
-    otpEmail: resolvedOtpEmail,
-    otpPassword: resolvedOtpPassword,
     mode,
   };
 }
@@ -291,7 +296,7 @@ education:
     const src = existsSync(envLocal) ? envLocal : existsSync(envExample) ? envExample : null;
     if (src) {
       await writeFile(envPath, await readFile(src, 'utf-8'));
-      console.log('📄 Copied .env.example → .env (edit with your Gmail App Password for OTP)');
+      console.log('📄 Copied .env.example → .env (edit WORKDAY_EMAIL and WORKDAY_PASSWORD)');
     }
   }
 
@@ -305,7 +310,7 @@ education:
 
   1. Edit config/profile.yml with your details
   2. Edit config/resumes.yml and add your PDF to resumes/
-  3. Edit .env with WORKDAY_EMAIL, WORKDAY_PASSWORD, and Gmail App Password (for OTP)
+  3. Edit .env with WORKDAY_EMAIL and WORKDAY_PASSWORD (one-time login; no mailbox OTP)
   4. Run: auto-apply apply <job-url>
 
 Or add URLs to queue:
@@ -335,8 +340,6 @@ async function cmdScan(url) {
   await scanForm(url, {
     workdayEmail: creds.workdayEmail,
     workdayPassword: creds.workdayPassword,
-    otpEmail: creds.otpEmail,
-    otpPassword: creds.otpPassword,
     mode: creds.mode,
   });
 }
@@ -361,8 +364,6 @@ async function cmdFill(url, planPath) {
     const scan = await scanForm(url, {
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
-      otpEmail: creds.otpEmail,
-      otpPassword: creds.otpPassword,
       mode: creds.mode,
     });
     const resumePath = await pickResume('', resolve(process.cwd(), 'config', 'resumes.yml')).catch(() => null);
@@ -385,8 +386,6 @@ async function cmdFill(url, planPath) {
 
   try {
     await fillForm(url, plan, {
-      otpEmail: creds.otpEmail,
-      otpPassword: creds.otpPassword,
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
@@ -443,8 +442,6 @@ async function cmdApply(url) {
       keepOpen: true,
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
-      otpEmail: creds.otpEmail,
-      otpPassword: creds.otpPassword,
       mode: creds.mode,
     });
 
@@ -483,8 +480,6 @@ async function cmdApply(url) {
       browser,
       context,
       page,
-      otpEmail: creds.otpEmail,
-      otpPassword: creds.otpPassword,
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
@@ -494,11 +489,13 @@ async function cmdApply(url) {
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ Pipeline complete: ${status}`);
     console.log(`${'═'.repeat(60)}\n`);
+    return status;
   } catch (err) {
     const timestamp = new Date().toISOString();
     console.error(`\n❌ [${timestamp}] Form fill error for ${url}: ${err.message}`);
     console.log('   Stopping pipeline. Exiting cleanly without reopening job link.\n');
     try { await browser.close(); } catch { }
+    return 'error';
   }
 }
 
@@ -565,51 +562,132 @@ async function cmdQueue(subcommand, ...args) {
   }
 }
 
+// ─── WD5 BATCH SCAN (DOM catalog, no apply) ─────────────────────────────────
+async function cmdScanBatch(file) {
+  const csvPath = file || resolve(process.cwd(), 'data', 'wd5.csv');
+  if (!existsSync(csvPath)) {
+    console.error(`❌ CSV not found: ${csvPath}`);
+    process.exit(1);
+  }
+  const creds = await resolveAuthCredentials();
+  await runWd5BatchScan({
+    csvPath,
+    offset: scanBatchOffset,
+    limit: scanBatchLimit,
+    skipOnAuthFail: scanBatchSkipAuth,
+    interactive: scanBatchInteractive,
+    waitAtReview: scanBatchWaitReview,
+    auth: {
+      workdayEmail: creds.workdayEmail,
+      workdayPassword: creds.workdayPassword,
+      mode: creds.mode,
+    },
+  });
+}
+
+async function cmdCatalogShow() {
+  const creds = await resolveAuthCredentials();
+  await showWd5CatalogPending(creds.profile);
+}
+
 // ─── BATCH ──────────────────────────────────────────────────────────────────
 async function cmdBatch(file) {
-  let urls;
-  if (file) {
-    const targets = await readTargetsFile(file);
-    urls = targets.map(t => t.url);
-    console.log(`📦 Batch apply: ${urls.length} Workday URL(s) from ${file}\n`);
-    if (urls.length === 0) {
-      console.log('No valid Workday URLs found in file.');
-      return;
+  let targets = [];
+  let source = '';
+
+  const todayCsv = resolve(process.cwd(), 'data', 'today.csv');
+  const jobsCsv = resolve(process.cwd(), 'data', 'jobs.csv');
+  const filePath = file
+    ? (existsSync(file) ? file : resolve(process.cwd(), file))
+    : (existsSync(todayCsv) ? todayCsv : existsSync(jobsCsv) ? jobsCsv : '');
+
+  if (file || filePath) {
+    const csvPath = filePath || file;
+    if (!existsSync(csvPath)) {
+      console.error(`❌ File not found: ${csvPath}`);
+      process.exit(1);
     }
+    targets = await readJobLinksFile(csvPath);
+    source = csvPath;
   } else {
     const pending = await getPendingFromQueue();
-    if (pending.length === 0) {
-      console.log('📋 No pending URLs. Add some with: node cli.mjs queue add <url>');
-      console.log('   Or specify a file: node cli.mjs batch targets.txt');
-      return;
-    }
-    urls = pending.map(e => e.url);
-    console.log(`📦 Batch apply: ${urls.length} pending URLs from queue\n`);
+    targets = pending.map((e) => ({ url: e.url, company: e.company }));
+    source = 'queue';
   }
 
+  if (targets.length === 0) {
+    console.log('📋 No Workday URLs found.');
+    console.log('   Drop today\'s 24h dump at data/today.csv (or pass the path):');
+    console.log('   node cli.mjs batch data/today.csv --limit 15');
+    return;
+  }
+
+  const offset = scanBatchOffset;
+  const limit = batchLimitExplicit && scanBatchLimit > 0 ? scanBatchLimit : targets.length;
+  const slice = targets.slice(offset, offset + limit);
+
+  console.log(`📦 Batch apply: ${slice.length} of ${targets.length} URL(s) from ${source}`);
+  if (offset || limit < targets.length) {
+    console.log(`   Window: offset=${offset} limit=${limit} (next: --offset ${offset + slice.length})`);
+  }
+  console.log('   At Review: [Y] submit  [N] stop batch  [S] skip to next URL\n');
+
   const results = [];
-  for (let i = 0; i < urls.length; i++) {
+  let stopped = false;
+  for (let i = 0; i < slice.length; i++) {
+    const url = slice[i].url;
     console.log(`\n${'═'.repeat(60)}`);
-    console.log(`[${i + 1}/${urls.length}] ${urls[i]}`);
+    console.log(`[${offset + i + 1}/${targets.length}] ${slice[i].company || ''} ${url}`);
     console.log(`${'═'.repeat(60)}`);
 
     try {
-      await cmdApply(urls[i]);
-      results.push({ url: urls[i], status: 'done' });
+      let status = 'incomplete';
+      for (let attempt = 1; attempt <= 3; attempt++) {
+        status = await cmdApply(url);
+        if (status === 'submitted' || status === 'skipped' || status === 'review-declined') break;
+        if (status === 'auth-failed' || status === 'job_not_found') break;
+        if (status === 'incomplete' || status === 'error' || !status) {
+          console.log(`\n  ↻ This job is not at Review yet (attempt ${attempt}/3). Staying on this URL — not opening the next link.`);
+          if (attempt < 3) continue;
+        }
+        break;
+      }
+      results.push({ url, status: status || 'done' });
+      if (status === 'review-declined') {
+        console.log('\n🛑 N — batch stopped. Remaining URLs were not opened.');
+        stopped = true;
+        break;
+      }
+      if (status === 'incomplete' || status === 'error') {
+        console.log('\n🛑 Form on this URL is not complete through Review. Next link will not be opened.');
+        console.log('   Re-run the same URL after the remaining required fields are filled.');
+        stopped = true;
+        break;
+      }
     } catch (err) {
       console.error(`❌ Failed: ${err.message}`);
-      results.push({ url: urls[i], status: 'error', error: err.message });
+      results.push({ url, status: 'error', error: err.message });
+      console.log('\n🛑 Staying on this URL after a crash — next link will not be opened.');
+      stopped = true;
+      break;
     }
   }
 
   console.log(`\n${'═'.repeat(60)}`);
   console.log('📊 Batch Summary');
   console.log(`${'═'.repeat(60)}`);
-  const ok = results.filter(r => r.status === 'done').length;
-  const fail = results.filter(r => r.status === 'error').length;
-  console.log(`  ✅ Success: ${ok}`);
-  console.log(`  ❌ Failed: ${fail}`);
-  console.log(`  Total: ${results.length}`);
+  const submitted = results.filter((r) => r.status === 'submitted').length;
+  const skipped = results.filter((r) => r.status === 'skipped').length;
+  const declined = results.filter((r) => r.status === 'review-declined').length;
+  const fail = results.filter((r) => r.status === 'error' || r.status === 'auth-failed' || r.status === 'job_not_found').length;
+  console.log(`  ✅ Submitted: ${submitted}`);
+  console.log(`  ⏭️  Skipped:   ${skipped}`);
+  console.log(`  ✋ Stopped:   ${declined}${stopped ? ' (N at Review)' : ''}`);
+  console.log(`  ❌ Failed:    ${fail}`);
+  console.log(`  Total this window: ${results.length}`);
+  if (!stopped && offset + slice.length < targets.length) {
+    console.log(`\n  Next batch:\n  node cli.mjs batch "${source}" --offset ${offset + slice.length} --limit ${limit}`);
+  }
 }
 
 // ─── STATUS ─────────────────────────────────────────────────────────────────
@@ -785,8 +863,10 @@ Usage:
   node cli.mjs setup                     Set up your profile
   node cli.mjs scan <url>                  Scan Workday form fields → JSON
   node cli.mjs fill <url> [plan.json]      Fill form (auto-plan if no plan given)
-  node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit
-  node cli.mjs batch [targets.txt]         Apply to all Workday URLs in file (or queue)
+  node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit (asks Y/N/S)
+  node cli.mjs batch [data/today.csv]      Apply every Workday URL in today's CSV (or queue)
+  node cli.mjs scan-batch [data/wd5.csv]   Scan DOM questions from wd5.csv (batch)
+  node cli.mjs catalog-show                List unanswered questions per company YAML
   node cli.mjs queue add <url> [company]   Add Workday URL to application queue
   node cli.mjs queue list                  Show queue entries
   node cli.mjs queue remove <url>          Remove URL from queue
@@ -796,15 +876,28 @@ Usage:
 
 Options:
   --signin / --signup          Workday auth mode (default: signin — tries login, then Create Account if no account exists on that tenant)
-  --confirm-submit             Pause for operator confirmation before final Submit
+  --confirm-submit             Auto-submit at Review (skips Y/N/S prompt)
+  --offset <n>                 Batch start index (default 0)
+  --limit <n>                  Batch window size (apply: all unless set; scan-batch: 15)
   --workday-email <email>      Workday account email (or WORKDAY_EMAIL in .env)
   --workday-password <password> Workday password (or WORKDAY_PASSWORD in .env)
+
+Env (Apply Wizz client — optional, one fetch per run):
+  APPLYWIZZ_ID=AWL-34133
+  or APPLYWIZZ_API_URL=https://www.apply-wizz.me/api/get-client-details?applywizz_id=AWL-34133
 
 Scope: Workday career sites only (myworkdayjobs.com). Headed browser always.
 
 Examples:
   node cli.mjs apply https://company.wd5.myworkdayjobs.com/en-US/company/job/123
-  node cli.mjs batch targets.txt
+  node cli.mjs batch data/today.csv
+  node cli.mjs batch data/today.csv --offset 0 --limit 15
+  At Review: [Y] submit  [N] do not submit / stop batch  [S] skip to next URL
+  node cli.mjs scan-batch data/wd5.csv --offset 0 --limit 15
+  (dead job URLs + login fail + browser crash: skipped automatically; --no-skip-auth to stop on login fail)
+  (scan-batch interactive by default; --no-interactive to disable)
+  (questions + answers saved to config/tenant-overrides/{tenant}.yml per company)
+  node cli.mjs catalog-show
 `);
 }
 
@@ -818,6 +911,8 @@ async function main() {
     case 'fill': await cmdFill(positionalArgs[0], positionalArgs[1]); break;
     case 'apply': await cmdApply(positionalArgs[0]); break;
     case 'batch': await cmdBatch(positionalArgs[0]); break;
+    case 'scan-batch': await cmdScanBatch(positionalArgs[0]); break;
+    case 'catalog-show': await cmdCatalogShow(); break;
     case 'queue': await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;
     case 'list': await cmdList(); break;
     case 'status': await cmdStatus(); break;

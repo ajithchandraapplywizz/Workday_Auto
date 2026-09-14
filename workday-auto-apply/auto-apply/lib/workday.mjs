@@ -5,8 +5,10 @@
  * 1. Detects Workday login page
  * 2. Creates account (or logs in if credentials exist)
  * 3. Fills email + auto-generates password
- * 4. Handles email verification for account
- * 5. Navigates to the application form
+ * 4. Navigates to the application form
+ *
+ * Login is email + password only. Mailbox OTP is not connected
+ * (Zoho Mail can be wired later if a tenant ever requires a code).
  */
 
 import {
@@ -17,7 +19,13 @@ import {
   clickGatewayCreateAccount,
   prescanGatewayElements,
   handleAdaptiveGateway,
+  isWorkdayWizardVisible,
+  clickContinueApplicationIfPresent,
+  ensureWorkdayApplicationWizard,
 } from './discovery.mjs';
+
+const MAILBOX_NOT_CONNECTED =
+  'Mailbox OTP is not connected (Zoho Mail can be added later). Login is email + password only.';
 
 /**
  * Classify a failed Workday login attempt from visible page text.
@@ -62,6 +70,17 @@ async function finishSuccessfulLogin(page, mode) {
   await page.waitForTimeout(3000);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   Logged in — already on application wizard.');
+    return true;
+  }
+
+  const continued = await clickContinueApplicationIfPresent(page);
+  if (continued && await isWorkdayWizardVisible(page)) {
+    console.log('   Logged in — resumed draft via Continue Application.');
+    return true;
+  }
+
   const hasApplyBtn = await page.$([
     'a[data-automation-id="adventureButton"]',
     'a[data-automation-id="applyButton"]',
@@ -69,11 +88,15 @@ async function finishSuccessfulLogin(page, mode) {
     '[data-automation-id="jobPostingApplyButton"]',
     'a:has-text("Apply for this job")',
     'button:has-text("Apply for this job")',
+    'a:has-text("Continue Application")',
+    'button:has-text("Continue Application")',
   ].join(', ')).catch(() => null);
 
   if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
-    console.log('   Logged in, on JD page — clicking Apply to enter application wizard...');
-    await discoverApplicationForm(page, page.url(), { mode });
+    console.log('   Logged in, on JD page — entering application wizard...');
+    await ensureWorkdayApplicationWizard(page, { mode });
+  } else if (!continued) {
+    await clickContinueApplicationIfPresent(page);
   }
 
   return true;
@@ -82,12 +105,12 @@ async function finishSuccessfulLogin(page, mode) {
 /**
  * Create account on this tenant, then sign in (or continue if already on the form).
  * @param {import('playwright').Page} page
- * @param {{ email: string, password: string, otpEmail?: string, otpPassword?: string, mode?: string }} opts
+ * @param {{ email: string, password: string, mode?: string }} opts
  * @returns {Promise<boolean>}
  */
-async function fallbackCreateAccountAndLogin(page, { email, password, otpEmail, otpPassword, mode = 'signin' }) {
+async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin' }) {
   console.log('   No account on this tenant — clicking Create Account and registering...');
-  const createdPassword = await workdayCreateAccount(page, email, otpEmail, otpPassword, password);
+  const createdPassword = await workdayCreateAccount(page, email, password);
   if (!createdPassword) {
     console.log('   ❌ Account creation failed during signin fallback.');
     return false;
@@ -232,7 +255,7 @@ export async function workdayLogin(page, email, password) {
 }
 
 // ─── Create Workday account ─────────────────────────────────────────────────
-export async function workdayCreateAccount(page, email, otpEmail, otpPassword, givenPassword) {
+export async function workdayCreateAccount(page, email, givenPassword) {
   console.log('   Creating Workday account...');
 
   // 1. If on two-button page or Sign In tab, click "Create Account" button/link (not nav bar)
@@ -302,8 +325,8 @@ export async function workdayCreateAccount(page, email, otpEmail, otpPassword, g
 
   // Check for email verification
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-  if (/verif|confirm|code|check your email/i.test(bodyText)) {
-    console.log('   Email verification required for account — OTP auto-handling is disabled. Please verify manually if required.');
+  if (/verif|check your email|code was sent/i.test(bodyText) && /email/i.test(bodyText)) {
+    console.log(`   Email verification screen appeared — ${MAILBOX_NOT_CONNECTED}`);
   }
 
   return password;
@@ -337,29 +360,26 @@ export async function isWorkdaySignInPage(page) {
 }
 
 // ─── Full Workday flow ──────────────────────────────────────────────────────
-export async function handleWorkday(page, { email, password, otpEmail, otpPassword, mode = 'signin' } = {}) {
-  // Check if already on application form wizard before doing any discovery
-  const isAlreadyOnWizard = await page.$([
-    'button:has-text("Save and Continue")',
-    'button:has-text("Save & Continue")',
-    'button[data-automation-id="bottom-navigation-next-button"]',
-    'input[data-automation-id="legalNameSection_firstName"]',
-    'input[data-automation-id="phone-number"]',
-    '[data-automation-id*="wizardStep"]',
-  ].join(', ')).catch(() => null);
-
-  if (isAlreadyOnWizard && await isAlreadyOnWizard.isVisible().catch(() => false)) {
+export async function handleWorkday(page, { email, password, mode = 'signin' } = {}) {
+  if (await isWorkdayWizardVisible(page)) {
     console.log('   Already on Workday application form wizard — skipping discovery.');
     return true;
   }
 
   if (!await isWorkdayLogin(page)) {
-    await discoverApplicationForm(page, page.url(), { mode });
+    const entry = await ensureWorkdayApplicationWizard(page, { mode });
+    if (entry.entered) {
+      console.log(`   Entered application wizard (${entry.method}).`);
+    }
   }
 
-  // If already past login and on form/wizard, authentication is already confirmed
-  if (!await isWorkdayLogin(page)) {
+  if (await isWorkdayWizardVisible(page)) {
     console.log('   Already authenticated on Workday application form.');
+    return true;
+  }
+
+  if (!await isWorkdayLogin(page)) {
+    console.log('   Already authenticated on Workday (pre-wizard page).');
     return true;
   }
 
@@ -379,8 +399,6 @@ export async function handleWorkday(page, { email, password, otpEmail, otpPasswo
         return fallbackCreateAccountAndLogin(page, {
           email,
           password,
-          otpEmail,
-          otpPassword,
           mode,
         });
       }
@@ -401,7 +419,7 @@ export async function handleWorkday(page, { email, password, otpEmail, otpPasswo
   if (mode === 'signup') {
     if (email) {
       console.log(`   Creating new Workday account for ${email}...`);
-      const newPassword = await workdayCreateAccount(page, email, otpEmail, otpPassword, password);
+      const newPassword = await workdayCreateAccount(page, email, password);
       if (newPassword) {
         console.log('   Checking page state after account creation...');
         await page.waitForTimeout(3000);

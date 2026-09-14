@@ -1,0 +1,289 @@
+# umiami — YAML keyed by tenant slug "umiami" (any wd* platform)
+company: "umiami"
+tenant: umiami
+last_scanned_at: 2026-09-10T10:32:50.650Z
+scan_urls:
+  - "https://umiami.wd1.myworkdayjobs.com/en-US/UMCareerStaff/job/Miami%2C-FL/Clinical-Research-Coordinator-3_R100100034/apply"
+  - "https://umiami.wd1.myworkdayjobs.com/en-US/UMCareerStaff/job/Miami-FL/Epic-Principal-Trainer--Ambulatory-Kaleidoscope_R100100654"
+# UMiami-only address + experience + education (does not affect other tenants)
+personal:
+  state: "Telangana"
+  city: "Hyderabad"
+  postal_code: "500001"
+  country: "India"
+experience:
+  from_date: "05/2025"
+  to_date: "06/2026"
+  location: "Hyderabad"
+  description: "AI Annotations Intern — developed websites and automation, worked with agents, RAGs and LLMs"
+education:
+  from_year: "2022"
+  to_year: "2026"
+field_overrides:
+  - ["how did you hear about us", "_static.Indeed"]
+  - ["phone device type", "_static.Mobile"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["^location$", "experience.location"]
+  - ["^state$", "personal.state"]
+  - ["^country$", "personal.country"]
+  - ["postal code", "personal.postal_code"]
+  - ["role description", "experience.description"]
+  - ["school or university", "_static.Other"]
+  - ["degree", "_static.Bachelor of Science in Computer Engineering (BSCPE)"]
+  - ["field of study", "_static.Computer Engineering"]
+  - ["overall result", "education.gpa"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["legally authorized to work", "_static.Yes"]
+  - ["require sponsorship", "_static.No"]
+  - ["please select your gender", "_static.Male"]
+  - ["hispanic or latino", "_static.No"]
+  - ["protected veteran", "_static.I am not a protected veteran."]
+  - ["yes, i have read and consent to the terms and conditions", "_static.Yes"]
+scanned_questions:
+  - label: "Are you 16 years of age or older?"
+    normalized: "are you 16 years of age or older"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Are you currently employed by the University of Miami or University of Miami Health System?"
+    normalized: "are you currently employed by the university of miami or university of miami health system"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Are you currently involved in any proceeding that could affect your license / certification?"
+    normalized: "are you currently involved in any proceeding that could affect your license certification"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Are you currently subject to any non-compete agreement, restrictive covenant, or other contractual obligation (such as a non-solicitation or confidentiality agreement) that would restrict or limit your ability to perform the duties of the position if hired?"
+    normalized: "are you currently subject to any non compete agreement restrictive covenant or other contractual obligation such as a non solicitation or confidentiality agreement that would restrict or limit your ability to perform the duties of the position if hired"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Company*"
+    normalized: "company"
+    fieldType: "text"
+    required: true
+    step: "My Experience"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Date"
+    normalized: "date"
+    fieldType: "date"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "09/10/2026"
+    last_seen_at: Thu Sep 10 2026 16:01:53 GMT+0530 (India Standard Time)
+  - label: "Degree"
+    normalized: "degree"
+    fieldType: "dropdown"
+    required: true
+    step: "My Experience"
+    answer: "Bachelor of Science in Computer Engineering (BSCPE)"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Do you have a license or certification relevant to this application?"
+    normalized: "do you have a license or certification relevant to this application"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Do you have any relatives employed at the University of Miami?"
+    normalized: "do you have any relatives employed at the university of miami"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Do you have or have you ever had any restrictions on your professional license / certification?"
+    normalized: "do you have or have you ever had any restrictions on your professional license certification"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Ethnicity/Race? (Select all that apply)"
+    normalized: "ethnicity race select all that apply"
+    fieldType: "checkbox-group"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "Asian (United States of America)"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Field of Study"
+    normalized: "field of study"
+    fieldType: "searchable"
+    required: true
+    step: "My Experience"
+    answer: "Computer Engineering"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "From*"
+    normalized: "from"
+    fieldType: "text"
+    required: false
+    step: "My Experience"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Gender?"
+    normalized: "gender"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "Male"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Given Name(s)"
+    normalized: "given names"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Have you attended the University of Miami as student on or after 1/1/2015?"
+    normalized: "have you attended the university of miami as student on or after 1 1 2015"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Have you ever been excluded, sanctioned, disciplined, or had a license or certification revoked by any federal entity, state entity, or licensing board?"
+    normalized: "have you ever been excluded sanctioned disciplined or had a license or certification revoked by any federal entity state entity or licensing board"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Have you previously been employed by the University of Miami or the University of Miami Hospital?"
+    normalized: "have you previously been employed by the university of miami or the university of miami hospital"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Hispanic or Latino?"
+    normalized: "hispanic or latino"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "How Did You Hear About Us?"
+    normalized: "how did you hear about us"
+    fieldType: "dropdown"
+    required: true
+    step: "My Information"
+    options:
+      - "India (+91)"
+      - "Employee"
+      - "Indeed"
+      - "Linkedln"
+      - "Online Advertisement"
+      - "Other"
+      - "Print Advertisement"
+      - "Professional Conference"
+      - "Professional Network"
+      - "Search Firm"
+      - "Social Network"
+      - "Student - Graduate or Professional"
+      - "Student - Undergraduate"
+      - "UM Transition Services"
+      - "University of Miami Career Site"
+    answer: "Indeed"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Job Title"
+    normalized: "job title"
+    fieldType: "text"
+    required: true
+    step: "My Experience"
+    answer: "Full stack Intern"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Language"
+    normalized: "language"
+    fieldType: "dropdown"
+    required: true
+    step: "Self Identify"
+    answer: "English"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Name"
+    normalized: "name"
+    fieldType: "text"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "John Cena"
+    last_seen_at: Thu Sep 10 2026 16:01:53 GMT+0530 (India Standard Time)
+  - label: "Phone Device Type"
+    normalized: "phone device type"
+    fieldType: "dropdown"
+    required: true
+    step: "My Information"
+    options:
+      - "India (+91)"
+      - "Landline"
+      - "Mobile"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "Phone Number"
+    normalized: "phone number"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "State"
+    normalized: "state"
+    fieldType: "dropdown"
+    required: true
+    step: "My Information"
+    answer: "Telangana"
+    last_seen_at: Thu Sep 10 2026 17:30:00 GMT+0530 (India Standard Time)
+  - label: "Please check one of the boxes below:"
+    normalized: "please check one of the boxes below"
+    fieldType: "radio"
+    required: true
+    step: "Self Identify"
+    answer: "No, I do not have a disability and have not had one in the past"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Protected Veteran: Please select"
+    normalized: "protected veteran please select"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "I am not a protected veteran."
+    last_seen_at: Thu Sep 10 2026 16:01:49 GMT+0530 (India Standard Time)
+  - label: "School or University*"
+    normalized: "school or university"
+    fieldType: "text"
+    required: true
+    step: "My Experience"
+    answer: "Other"
+    last_seen_at: 2026-09-10T10:50:41.060Z
+  - label: "University of Miami policy prohibits employees from conducting business (not related to regular employment) with the University itself. Do you own or have ownership interest in a business that sells products or services to the University?"
+    normalized: "university of miami policy prohibits employees from conducting business not related to regular employment with the university itself do you own or have ownership interest in a business that sells products or services to the university"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "What is your current salary?"
+    normalized: "what is your current salary"
+    fieldType: "text"
+    required: true
+    step: "Application Questions"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "What is your desired salary?"
+    normalized: "what is your desired salary"
+    fieldType: "text"
+    required: true
+    step: "Application Questions"
+    last_seen_at: Thu Sep 10 2026 15:30:00 GMT+0530 (India Standard Time)
+  - label: "Yes, I have read and consent to the terms and conditions"
+    normalized: "yes i have read and consent to the terms and conditions"
+    fieldType: "checkbox"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Yes"
+    last_seen_at: Thu Sep 10 2026 16:01:25 GMT+0530 (India Standard Time)

@@ -70,6 +70,38 @@ const CURRENT_DATE_PATTERNS = [
   /date\s+submitted/i,
 ];
 
+const AVAILABILITY_START_PATTERNS = [
+  /when.*available.*start/i,
+  /available.*to.*start/i,
+  /when.*can.*you.*start/i,
+  /when.*could.*you.*start/i,
+  /earliest.*(?:date|day).*start/i,
+  /date.*you.*(?:can|could).*start/i,
+  /desired.*start.*date/i,
+  /target.*start.*date/i,
+  /availability.*start/i,
+  /start.*availability/i,
+  /available.*start.*date/i,
+  /when.*are.*you.*available/i,
+];
+
+/** Job-application availability / start-date questions → fill with today's date. */
+export function isAvailabilityStartDateLabel(label = '', metadata = {}) {
+  const source = [
+    label,
+    metadata.placeholder,
+    metadata.name,
+    metadata.question,
+    metadata.automationId,
+  ].filter(Boolean).join(' ');
+
+  if (!source.trim()) return false;
+  if (/^from$|^to$|date\s+of\s+birth|birth\s+date|graduation|employment\s+history|work\s+experience/i.test(source)) {
+    return false;
+  }
+  return AVAILABILITY_START_PATTERNS.some((pattern) => pattern.test(source));
+}
+
 export function isCurrentDateQuestionLabel(label = '', metadata = {}) {
   const source = [
     label,
@@ -106,7 +138,8 @@ export function isCurrentDateQuestionLabel(label = '', metadata = {}) {
 }
 
 export function buildCurrentDateAction(label = '', metadata = {}, referenceDate = new Date()) {
-  if (!isCurrentDateQuestionLabel(label, metadata)) return null;
+  const isAvailabilityStart = isAvailabilityStartDateLabel(label, metadata);
+  if (!isAvailabilityStart && !isCurrentDateQuestionLabel(label, metadata)) return null;
   const timeZone = metadata.timeZone || 'Asia/Kolkata';
   const answer = getTodayMMDDYYYY(timeZone, referenceDate);
   const rawLabel = String(label).trim();
@@ -120,7 +153,7 @@ export function buildCurrentDateAction(label = '', metadata = {}, referenceDate 
         normalized_label: rawLabel.toLowerCase().replace(/\*+/g, '').replace(/\s+/g, ' ').trim(),
         raw_label: rawLabel,
         answer,
-        source: 'auto_generated',
+        source: isAvailabilityStart ? 'availability_start_today' : 'auto_generated',
         compliance_sensitive: false,
       },
     },

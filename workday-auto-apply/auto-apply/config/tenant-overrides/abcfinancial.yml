@@ -1,3 +1,64 @@
+company: "ABC Fitness"
+tenant: abcfinancial
+host: "abcfinancial.wd5.myworkdayjobs.com"
+last_scanned_at: "2026-09-11T08:09:35Z"
+
+scan_urls:
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Alberta/Lead-QA-Engineer--Automation_REQ-1483"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Australia/Product-Implementation-Manager---Enterprise_REQ-1513"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Australia/Senior-Customer-Success-Manager_REQ-1476"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Australia/Senior-Customer-Success-Manager_REQ-1525"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Brazil/Analista-de-Onboarding_REQ-1522"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Brazil/Application-Security-Engineer--Secure-SDLC-_REQ-1469"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Brazil/Representante-de-Desenvolvimento-de-Vendas_REQ-1227"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Hyderabad-Office-India/Lead-Software-Developer_REQ-1385"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Hyderabad-Office-India/Principal-BI-Engineer_REQ-1498"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Hyderabad-Office-India/Principal-Engineer---MCP-ACP-Layer--API---AI-Orchestration--1_REQ-1340"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Hyderabad-Office-India/Senior-Data-Engineer_REQ-1486"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/India/Lead-Data-Engineer_REQ-1514"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/AI-Platform-Administrator_REQ-1487"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/Director--Product-Operations_REQ-1523"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/Director-of-Product--API---AI-Orchestration_REQ-1505"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/Lead-Product-Manager--Strategic-Accounts_REQ-1511"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/Product-Launch-Manager_REQ-1530"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Ontario-Canada/Workday-Financial-Analyst_REQ-1520"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Director--Data-Engineering_REQ-1406"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Lead-Software-Developer_REQ-1519"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Manager--Customer-Success_REQ-1470"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Principal-Site-Reliability-Engineer_REQ-1484"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Principal-Software-Developer_REQ-1518"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Poland/Senior-Talent-Acquisition-Partner---Poland_REQ-1499"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Director--Strategic-Solutions-Sales_REQ-1474"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Enterprise-Onboarding-Project-Manager_REQ-1515"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Manager--Financial-Planning---Analysis_REQ-1195"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Outbound-Sales-Development-Representative_REQ-1448"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Senior-Manager--Global-Payment-Partnerships_REQ-1408"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/VP--GTM-Enablement_REQ-1482"
+  - "https://abcfinancial.wd5.myworkdayjobs.com/en-US/ABCFinancialServices/job/Remote-United-States/Vice-President-of-Pricing-Strategy---Monetization_REQ-1374"
+
 field_overrides:
-  - ["do you have any relatives that are currently employed by abc fitness", "_static.No"]
-  - ["are you currently or have you ever worked at an abc customer site", "_static.No"]
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+
+scanned_questions: []
+
+status:
+  scan_status: "in_progress"
+  needs_human: false
+  notes: "URLs collected; starting application harvest on REQ -1385"
+  site_id: "ABCFinancialServices"

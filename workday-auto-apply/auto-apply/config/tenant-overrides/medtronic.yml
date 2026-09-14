@@ -1,0 +1,178 @@
+# medtronic — YAML keyed by tenant slug "medtronic" (any wd* platform)
+company: "medtronic"
+tenant: medtronic
+last_scanned_at: 2026-09-10T07:40:46.383Z
+scan_urls:
+  - "https://medtronic.wd1.myworkdayjobs.com/en-US/MedtronicCareers/job/Minneapolis-Minnesota-United-States-of-America/Principal-Software-Test-Engineer----CRDN_R76025"
+  - "https://medtronic.wd1.myworkdayjobs.com/en-US/MedtronicCareers/job/Tempe-Arizona-United-States-of-America/Senior-Quality-Systems-Specialist_R76546-1"
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["prior employment.*medtronic|covidien|contractor experience with medtronic", "_static.No"]
+  - ["minimum educational requirements", "_static.Yes"]
+  - ["highest level of education completed", "_static.Bachelor's Degree"]
+  - ["please select your gender", "_static.Male"]
+  - ["please select yes if hispanic", "_static.No"]
+  - ["please select the veteran status which most accurately", "eeo.veteran_status"]
+  - ["please select the race which most accurately", "eeo.race"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Address Line 1"
+    normalized: "address line 1"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Are you currently working for, or have you ever worked for, Medtronic, Covidien, or any of its subsidiaries?"
+    normalized: "are you currently working for or have you ever worked for medtronic covidien or any of its subsidiaries"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "City*"
+    normalized: "city"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Do you have a Lean Sigma Green Belt certification (or higher)?"
+    normalized: "do you have a lean sigma green belt certification or higher"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "Do you have the Minimum Educational Requirements listed for this position?"
+    normalized: "do you have the minimum educational requirements listed for this position"
+    fieldType: "dropdown"
+    required: true
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "Do you have the Minimum Educational Requirements listed in the Job Description?"
+    normalized: "do you have the minimum educational requirements listed in the job description"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    options:
+      - "Female"
+      - "Male"
+      - "Wish To Not Disclose"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Family Name"
+    normalized: "family name"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Given Name(s)"
+    normalized: "given names"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Have you had any prior employment or contractor experience with Medtronic, Covidien, or any of their subsidiaries?"
+    normalized: "have you had any prior employment or contractor experience with medtronic covidien or any of their subsidiaries"
+    fieldType: "radio"
+    required: true
+    step: "My Information"
+    options:
+      - "Yes"
+      - "No"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "I consent"
+    normalized: "i consent"
+    fieldType: "checkbox"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "YES"
+    last_seen_at: Thu Sep 10 2026 13:12:35 GMT+0530 (India Standard Time)
+  - label: "Phone Device Type"
+    normalized: "phone device type"
+    fieldType: "dropdown"
+    required: true
+    step: "My Information"
+    options:
+      - "Medtronic Career Site"
+      - "India (+91)"
+      - "Fax"
+      - "Land Line"
+      - "Mobile"
+      - "Other"
+      - "Pager"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Phone Number"
+    normalized: "phone number"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Please check one of the boxes below:"
+    normalized: "please check one of the boxes below"
+    fieldType: "radio"
+    required: true
+    step: "Review"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "Please select the race which most accurately describes how you identify yourself"
+    normalized: "please select the race which most accurately describes how you identify yourself"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "Asian"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "Please select the veteran status which most accurately describes how you identify yourself"
+    normalized: "please select the veteran status which most accurately describes how you identify yourself"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "No, I am not a veteran"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "Please select Yes if Hispanic/Latino accurately describes how you identify yourself"
+    normalized: "please select yes if hispanic latino accurately describes how you identify yourself"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 13:00:00 GMT+0530 (India Standard Time)
+  - label: "Please select Yes if Hispanic/Latino accurately describes how you identify yourself"
+    normalized: "please select yes if hispaniclatino accurately describes how you identify yourself"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "No"
+    last_seen_at: Thu Sep 10 2026 13:12:31 GMT+0530 (India Standard Time)
+  - label: "Please select your gender"
+    normalized: "please select your gender"
+    fieldType: "dropdown"
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Male"
+    last_seen_at: Thu Sep 10 2026 13:12:27 GMT+0530 (India Standard Time)
+  - label: "Postal Code"
+    normalized: "postal code"
+    fieldType: "text"
+    required: true
+    step: "My Information"
+    last_seen_at: 2026-09-10T07:43:00.171Z
+  - label: "What is your highest level of Education completed?"
+    normalized: "what is your highest level of education completed"
+    fieldType: "dropdown"
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "Bachelor's Degree"
+    last_seen_at: 2026-09-10T07:43:00.171Z

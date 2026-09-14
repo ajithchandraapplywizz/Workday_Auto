@@ -14,7 +14,11 @@ import {
 
 const SOURCE_LABEL = 'How Did You Hear About Us?';
 
-const KNOWN_JOB_BOARD_CHILDREN = ['LinkedIn', 'Indeed', 'Glassdoor', 'Monster', 'CareerBuilder', 'ZipRecruiter', 'Dice'];
+const KNOWN_JOB_BOARD_CHILDREN = [
+  'LinkedIn', 'Indeed', 'Glassdoor', 'Monster', 'CareerBuilder', 'Careerbuilder',
+  'ZipRecruiter', 'Dice', 'DICE', 'Google', 'Handshake', 'Ladders', 'Hired',
+  'SimplyHired', 'Snagajob', 'Talnet', 'Afrotech', 'Careerbuilder',
+];
 
 /** Values that belong on phone/country fields, not the referral source dropdown. */
 export function isInvalidSourceAnswer(value) {
@@ -186,17 +190,27 @@ export async function locateReferralSourceControl(page) {
 
     const isPhoneBlob = (blob) => /countryphonecode|country-phone|phonetype|phone-number|phonenumber--phone|country\/territory\s*phone/i.test(blob);
 
+    const isLabelLike = (el) => {
+      const blob = `${el.id || ''} ${el.getAttribute('data-automation-id') || ''} ${el.getAttribute('role') || ''}`.toLowerCase();
+      return el.tagName === 'LABEL'
+        || /promptselectionlabel|rich\s*text|formfield.*label/i.test(blob)
+        || (blob.includes('label') && !blob.includes('listbox') && el.getAttribute('role') !== 'combobox');
+    };
+
     const pickTrigger = (root) => {
       if (!root) return null;
       const triggers = root.querySelectorAll(
-        'button[aria-haspopup="listbox"], [role="combobox"], input[role="combobox"], select, [data-automation-id="selectWidget"] button, [data-automation-id*="multiSelect"] button, [data-automation-id*="select"] button, [data-automation-id*="prompt"]'
+        'button[aria-haspopup="listbox"], [role="combobox"], input[role="combobox"], select, [data-automation-id="selectWidget"] button, [data-automation-id*="multiSelect"] button, [data-automation-id*="select"] button, [data-automation-id*="prompt"] button, [data-automation-id*="prompt"] [role="combobox"]'
       );
       for (const trigger of triggers) {
         const blob = `${trigger.id || ''} ${trigger.getAttribute('data-automation-id') || ''} ${trigger.getAttribute('name') || ''}`.toLowerCase();
         if (isPhoneBlob(blob)) continue;
+        if (isLabelLike(trigger)) continue;
         return trigger;
       }
-      if (root.matches?.('button, [role="combobox"], input, select') && !isPhoneBlob(`${root.id} ${root.getAttribute('data-automation-id')}`)) {
+      if (root.matches?.('button, [role="combobox"], input, select')
+        && !isPhoneBlob(`${root.id} ${root.getAttribute('data-automation-id')}`)
+        && !isLabelLike(root)) {
         return root;
       }
       return null;
@@ -248,7 +262,51 @@ export async function locateReferralSourceControl(page) {
   if (!markerId) return null;
   const loc = page.locator(`[data-wd-source-target="${markerId}"]`).first();
   await loc.scrollIntoViewIfNeeded().catch(() => {});
-  return loc;
+  return await ensureSourceTrigger(page, loc);
+}
+
+/**
+ * If DOM scan marked a label, resolve to the real combobox/button in the same field.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} trigger
+ */
+async function ensureSourceTrigger(page, trigger) {
+  const meta = await trigger.evaluate((el) => ({
+    tag: el.tagName,
+    role: el.getAttribute('role') || '',
+    automationId: el.getAttribute('data-automation-id') || '',
+    id: el.id || '',
+    hasPopup: el.getAttribute('aria-haspopup') || '',
+  })).catch(() => null);
+
+  if (!meta) return trigger;
+
+  const labelLike = meta.tag === 'LABEL'
+    || /promptselectionlabel|richtext/i.test(meta.automationId)
+    || (/label/i.test(meta.automationId) && meta.role !== 'combobox' && meta.hasPopup !== 'listbox');
+
+  if (!labelLike && (meta.role === 'combobox' || meta.hasPopup === 'listbox' || meta.tag === 'BUTTON')) {
+    return trigger;
+  }
+
+  const field = trigger.locator('xpath=ancestor::*[contains(@data-automation-id,"formField")][1]');
+  const combobox = field.locator(
+    'button[aria-haspopup="listbox"], [role="combobox"], [data-automation-id="selectWidget"] button, [data-automation-id*="multiSelect"] button'
+  ).first();
+
+  if (await combobox.count().catch(() => 0)) {
+    await combobox.scrollIntoViewIfNeeded().catch(() => {});
+    return combobox;
+  }
+
+  const bySourceId = page.locator(
+    '#source--source button[aria-haspopup="listbox"], #source--source [role="combobox"], [data-automation-id="source--source"] button[aria-haspopup="listbox"]'
+  ).first();
+  if (await bySourceId.isVisible({ timeout: 800 }).catch(() => false)) {
+    return bySourceId;
+  }
+
+  return trigger;
 }
 
 /**
@@ -336,6 +394,70 @@ async function collectReferralSourceOptions(page) {
 }
 
 /**
+ * Scroll virtualized listbox and collect all visible referral options.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string[]>}
+ */
+async function collectReferralSourceOptionsWithScroll(page) {
+  const seen = new Set();
+  const out = [];
+
+  const addBatch = (batch) => {
+    for (const o of batch) {
+      const key = normalizeKey(o);
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      out.push(o);
+    }
+  };
+
+  addBatch(await collectReferralSourceOptions(page));
+
+  const listbox = page.locator('[role="listbox"]:visible').last();
+  if (await listbox.count().catch(() => 0) === 0) {
+    return out;
+  }
+
+  for (let i = 0; i < 14; i++) {
+    await listbox.evaluate((el) => { el.scrollTop += 220; }).catch(() => {});
+    await page.keyboard.press('ArrowDown').catch(() => {});
+    await page.waitForTimeout(180);
+    const before = out.length;
+    addBatch(await collectReferralSourceOptions(page));
+    if (out.length === before && i > 4) break;
+  }
+
+  return out;
+}
+
+/**
+ * Pick the best leaf from a Job Board submenu when preferred children are missing.
+ * @param {string[]} submenuOptions
+ * @param {string[]} preferredChildren
+ * @returns {string|null}
+ */
+export function pickBestSubmenuLeaf(submenuOptions, preferredChildren = []) {
+  if (!submenuOptions?.length) return null;
+
+  for (const pref of preferredChildren) {
+    const match = matchPreferredToDomOption(pref, submenuOptions, { strict: false, threshold: 0.35 });
+    if (match && !isHierarchicalParentOption(match)) return match;
+  }
+
+  for (const alias of KNOWN_JOB_BOARD_CHILDREN) {
+    const match = matchPreferredToDomOption(alias, submenuOptions, { strict: false, threshold: 0.35 });
+    if (match && !isHierarchicalParentOption(match)) return match;
+  }
+
+  for (const opt of submenuOptions) {
+    if (isPhoneCodeDropdownOption(opt) || isHierarchicalParentOption(opt)) continue;
+    if (opt.length > 2 && opt.length < 80) return opt;
+  }
+
+  return submenuOptions[0] || null;
+}
+
+/**
  * Click a visible list option using Playwright (triggers Workday React handlers).
  * @param {import('playwright').Page} page
  * @param {string} optionText
@@ -395,6 +517,22 @@ async function clickSourceListOption(page, optionText) {
     }
   }
 
+  // Fuzzy fallback across all visible options (Careerbuilder vs CareerBuilder, DICE vs Dice)
+  const visibleOptions = await collectReferralSourceOptionsWithScroll(page);
+  const fuzzyMatch = matchPreferredToDomOption(target, visibleOptions, { strict: false, threshold: 0.38 });
+  if (fuzzyMatch && normalizeKey(fuzzyMatch) !== normalizeKey(target)) {
+    const fuzzyRe = new RegExp(fuzzyMatch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
+    for (const base of locators) {
+      const hit = base.filter({ hasText: fuzzyRe }).first();
+      if (await hit.isVisible({ timeout: 400 }).catch(() => false)) {
+        await hit.scrollIntoViewIfNeeded().catch(() => {});
+        await hit.click({ force: true });
+        await page.waitForTimeout(450);
+        return normalizeOptionText(await hit.innerText().catch(() => fuzzyMatch));
+      }
+    }
+  }
+
   return null;
 }
 
@@ -418,7 +556,7 @@ async function openSourceDropdown(page, trigger) {
  * @returns {Promise<string[]>}
  */
 async function collectSubmenuOptions(page, topLevelKeys) {
-  const all = await collectReferralSourceOptions(page);
+  const all = await collectReferralSourceOptionsWithScroll(page);
   const diff = all.filter((o) => !topLevelKeys.has(normalizeKey(o)));
 
   if (diff.length > 0) return diff;
@@ -582,6 +720,20 @@ async function tryHierarchicalSource(page, trigger, parent, childCandidates, top
     console.log(`    ↳ Child "${childClicked}" not verified (DOM: "${display || '(empty)'}")`);
   }
 
+  const fallbackChild = pickBestSubmenuLeaf(childOptions, tryChildren);
+  if (fallbackChild) {
+    console.log(`    ↳ Fallback child from submenu: "${fallbackChild}"`);
+    const childClicked = await clickSourceListOption(page, fallbackChild);
+    if (childClicked) {
+      await page.waitForTimeout(600);
+      const display = await getReferralSourceDisplay(page);
+      if (displayMatchesExpected(display, childClicked) || isReferralSourceFullySelected(display)) {
+        console.log(`    ✓ DOM verified (fallback): "${display}"`);
+        return childClicked;
+      }
+    }
+  }
+
   return null;
 }
 
@@ -610,7 +762,11 @@ async function tryFlatSource(page, trigger, value) {
  * @returns {Promise<{ success: boolean, selected?: string, domOptions?: string[] }>}
  */
 export async function fillHowDidYouHearFromDom(page, profile = {}) {
-  const trigger = await locateReferralSourceControl(page);
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(200);
+
+  let trigger = await locateReferralSourceControl(page);
+  trigger = trigger ? await ensureSourceTrigger(page, trigger) : null;
   if (!trigger || !(await trigger.isVisible({ timeout: 2000 }).catch(() => false))) {
     console.log('    ⚠️  Referral source control not found on page.');
     return { success: false, domOptions: [] };
@@ -620,10 +776,10 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
   console.log(`    🎯 Source control located: ${controlId || '(referral source)'}`);
 
   await openSourceDropdown(page, trigger);
-  let topLevelOptions = await collectReferralSourceOptions(page);
+  let topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
   if (topLevelOptions.length === 0) {
     await openSourceDropdown(page, trigger);
-    topLevelOptions = await collectReferralSourceOptions(page);
+    topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
   }
 
   console.log(`    📋 Source options (DOM): [${topLevelOptions.slice(0, 10).join(', ')}${topLevelOptions.length > 10 ? ', ...' : ''}]`);
@@ -678,12 +834,14 @@ export async function applySourceTerminalAnswer(page, profile, userAnswer) {
 
   if (isHierarchicalParentOption(answer)) {
     console.log(`    ℹ️  "${answer}" is a parent category — drilling down to child (LinkedIn/Indeed/Glassdoor from defaults)...`);
-    const trigger = await locateReferralSourceControl(page);
+    let trigger = await locateReferralSourceControl(page);
+    trigger = trigger ? await ensureSourceTrigger(page, trigger) : null;
     if (!trigger) return { success: false };
 
     await openSourceDropdown(page, trigger);
-    const topLevelOptions = await collectReferralSourceOptions(page);
-    const parentMatch = matchPreferredToDomOption(answer, topLevelOptions, { strict: true });
+    const topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
+    const parentMatch = matchPreferredToDomOption(answer, topLevelOptions, { strict: true })
+      || matchParentInDom(answer, topLevelOptions);
     if (!parentMatch) return { success: false };
 
     const topLevelKeys = new Set(topLevelOptions.map(normalizeKey));
@@ -692,10 +850,11 @@ export async function applySourceTerminalAnswer(page, profile, userAnswer) {
     return selected ? { success: true, selected } : { success: false };
   }
 
-  const trigger = await locateReferralSourceControl(page);
+  let trigger = await locateReferralSourceControl(page);
+  trigger = trigger ? await ensureSourceTrigger(page, trigger) : null;
   if (!trigger) return { success: false };
 
-  const topLevelOptions = await collectReferralSourceOptions(page);
+  const topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
   const topLevelKeys = new Set(topLevelOptions.map(normalizeKey));
 
   for (const [parentPref, childPref] of WORKDAY_SOURCE_HIERARCHICAL_PREFERENCES) {
@@ -744,6 +903,7 @@ export async function fillSourceFieldAuto(page, profile = {}) {
     await page.waitForTimeout(400);
     trigger = await locateReferralSourceControl(page);
   }
+  if (trigger) trigger = await ensureSourceTrigger(page, trigger);
 
   if (!trigger) {
     console.log('    ⚠️  Source control not found — scanned labels for "How did you hear"');
@@ -799,9 +959,89 @@ export async function fillSourceFieldAuto(page, profile = {}) {
     }
   }
 
+  // 4) Pick ANY valid parent → ANY child (user preference: any dropdown selection is fine)
+  console.log('    🎲 Source fallback: picking any parent + child from live DOM...');
+  const anyResult = await tryPickAnyHierarchicalSource(page, trigger);
   display = await getReferralSourceDisplay(page);
-  console.log(`    ⚠️  Source auto-fill incomplete (DOM: "${display || '(empty)'}") — no terminal prompt (parallel mode)`);
+  if (anyResult?.success && isReferralSourceFullySelected(display)) {
+    const selected = anyResult.selected || display;
+    console.log(`    ✅ Source pick-any: "${selected}"`);
+    return { success: true, selected, domOptions: result.domOptions || [] };
+  }
+
+  display = await getReferralSourceDisplay(page);
+  console.log(`    ⚠️  Source auto-fill incomplete (DOM: "${display || '(empty)'}") — continuing apply`);
   return { success: false, domOptions: result.domOptions || [], selected: display || undefined };
+}
+
+/**
+ * Last resort: open source dropdown, click first valid parent, then first valid child.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} trigger
+ */
+async function tryPickAnyHierarchicalSource(page, trigger) {
+  if (!trigger) {
+    trigger = await locateReferralSourceControl(page);
+    if (trigger) trigger = await ensureSourceTrigger(page, trigger);
+  }
+  if (!trigger) return { success: false };
+
+  const isSkippableOption = (text) => {
+    const t = normalizeOptionText(text);
+    if (!t || /^select(\s+one)?\.?$/i.test(t)) return true;
+    if (isPhoneCodeDropdownOption(t)) return true;
+    if (/required|search/i.test(t)) return true;
+    return false;
+  };
+
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForTimeout(250);
+  await openSourceDropdown(page, trigger);
+
+  const topLevel = await collectReferralSourceOptionsWithScroll(page);
+  const topLevelKeys = new Set(topLevel.map(normalizeKey));
+  const parents = topLevel.filter((o) => !isSkippableOption(o));
+  if (parents.length === 0) return { success: false };
+
+  for (const parent of parents) {
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(250);
+    trigger = await locateReferralSourceControl(page);
+    if (trigger) trigger = await ensureSourceTrigger(page, trigger);
+    if (!trigger) continue;
+
+    await openSourceDropdown(page, trigger);
+    const parentClicked = await clickSourceListOption(page, parent);
+    if (!parentClicked) continue;
+    console.log(`    🎲 Picked parent: "${parentClicked}"`);
+    await page.waitForTimeout(850);
+
+    let childOptions = await collectSubmenuOptions(page, topLevelKeys);
+    if (childOptions.length === 0) {
+      await page.keyboard.press('ArrowRight').catch(() => {});
+      await page.waitForTimeout(450);
+      childOptions = await collectSubmenuOptions(page, topLevelKeys);
+    }
+
+    const flatDisplay = await getReferralSourceDisplay(page);
+    if (childOptions.length === 0 && isReferralSourceFullySelected(flatDisplay)) {
+      return { success: true, selected: flatDisplay };
+    }
+
+    const children = childOptions.filter((o) => !isSkippableOption(o));
+    for (const child of children) {
+      const childClicked = await clickSourceListOption(page, child);
+      if (!childClicked) continue;
+      console.log(`    🎲 Picked child: "${childClicked}"`);
+      await page.waitForTimeout(550);
+      const display = await getReferralSourceDisplay(page);
+      if (isReferralSourceFullySelected(display)) {
+        return { success: true, selected: display };
+      }
+    }
+  }
+
+  return { success: false };
 }
 
 export { SOURCE_LABEL };

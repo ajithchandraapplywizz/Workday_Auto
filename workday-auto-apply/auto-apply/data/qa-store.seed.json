@@ -1,0 +1,68 @@
+{
+  "please select the veteran status which most accurately describes how you identify yourself": {
+    "normalized_label": "please select the veteran status which most accurately describes how you identify yourself",
+    "raw_label": "Please select the veteran status which most accurately describes how you identify yourself",
+    "answer": "No, I am not a veteran",
+    "source": "seed"
+  },
+  "please select the race which most accurately describes how you identify yourself": {
+    "normalized_label": "please select the race which most accurately describes how you identify yourself",
+    "raw_label": "Please select the race which most accurately describes how you identify yourself",
+    "answer": "Asian",
+    "source": "seed"
+  },
+  "address line 1": {
+    "normalized_label": "address line 1",
+    "raw_label": "Address Line 1",
+    "answer": "Hyderabad",
+    "source": "seed"
+  },
+  "type to add skills": {
+    "normalized_label": "type to add skills",
+    "raw_label": "Type to Add Skills",
+    "answer": "Python, JavaScript, AI Development",
+    "source": "seed"
+  },
+  "i certify that i have read fully understand and accept all terms of the foregoing statement": {
+    "normalized_label": "i certify that i have read fully understand and accept all terms of the foregoing statement",
+    "raw_label": "I certify that I have read, fully understand and accept all terms of the foregoing statement.",
+    "answer": "Yes",
+    "source": "seed"
+  },
+  "are you a relative of a current public official": {
+    "normalized_label": "are you a relative of a current public official",
+    "raw_label": "Are you a relative of a current Public Official?",
+    "answer": "No",
+    "source": "seed"
+  },
+  "are you a relative of a current senior level person or senior commercial person for a company other than state street": {
+    "normalized_label": "are you a relative of a current senior level person or senior commercial person for a company other than state street",
+    "raw_label": "Are you a relative of a current senior level person or senior commercial person for a company other than State Street?",
+    "answer": "No",
+    "source": "seed"
+  },
+  "if yes what is your relationship with this individual enter n a if not applicable": {
+    "normalized_label": "if yes what is your relationship with this individual enter n a if not applicable",
+    "raw_label": "If yes, what is your relationship with this individual? Enter N/A if not applicable.",
+    "answer": "N/A",
+    "source": "seed"
+  },
+  "if yes please list the institution name and level of the individual enter n a if not applicable": {
+    "normalized_label": "if yes please list the institution name and level of the individual enter n a if not applicable",
+    "raw_label": "If yes, please list the institution name and level of the individual. Enter N/A if not applicable.",
+    "answer": "N/A",
+    "source": "seed"
+  },
+  "please select one of the below options": {
+    "normalized_label": "please select one of the below options",
+    "raw_label": "Please select one of the below options:",
+    "answer": "I am completing the application and anti-corruption questions on behalf of myself.",
+    "source": "seed"
+  },
+  "enter your name required and the name of your agency if applicable or n a": {
+    "normalized_label": "enter your name required and the name of your agency if applicable or n a",
+    "raw_label": "Enter your name (required) and the name of your agency (if applicable) or N/A.",
+    "answer": "N/A",
+    "source": "seed"
+  }
+}

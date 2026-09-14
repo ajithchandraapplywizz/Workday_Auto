@@ -1,0 +1,200 @@
+# cumminggroup — YAML keyed by tenant slug "cumminggroup" (any wd* platform)
+company: "cumminggroup"
+tenant: cumminggroup
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Are you a former worker ?"
+    normalized: "are you a former worker"
+    fieldType: "radio"
+    field_type_code: 3
+    required: false
+    answer: "Yes"
+    last_seen_at: Sun Sep 13 2026 14:41:28 GMT+0530 (India Standard Time)
+  - label: "Are you an existing Cumming Group or Cumming Group Affiliate Employee ?"
+    normalized: "are you an existing cumming group or cumming group affiliate employee"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "Yes"
+      - "No"
+    answer: "No"
+    last_seen_at: Sat Sep 12 2026 17:32:55 GMT+0530 (India Standard Time)
+  - label: "Are you eligible to work in the country in which this position is located?"
+    normalized: "are you eligible to work in the country in which this position is located"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "Yes"
+      - "No"
+    answer: "Yes"
+    last_seen_at: Sat Sep 12 2026 17:33:01 GMT+0530 (India Standard Time)
+  - label: "Are you open to relocation?"
+    normalized: "are you open to relocation"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Application Questions"
+    options:
+      - "Yes"
+      - "No"
+    answer: "Yes"
+    last_seen_at: Sat Sep 12 2026 17:32:48 GMT+0530 (India Standard Time)
+  - label: "Company"
+    normalized: "company"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Work Experience"
+    options:
+      - "Student spot"
+      - "MM/YYYY"
+    answer: "MM/YYYY"
+    last_seen_at: 2026-09-13T09:12:03.110Z
+  - label: "Country"
+    normalized: "country"
+    fieldType: "select"
+    field_type_code: 2
+    required: false
+    answer: "Yes"
+    last_seen_at: Sun Sep 13 2026 14:41:33 GMT+0530 (India Standard Time)
+  - label: "Degree"
+    normalized: "degree"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Education"
+    options:
+      - "Accounting"
+    answer: "Accounting"
+    last_seen_at: Sat Sep 12 2026 17:05:52 GMT+0530 (India Standard Time)
+  - label: "Field of Study"
+    normalized: "field of study"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Education"
+    options:
+      - "Accounting"
+    answer: "Accounting"
+    last_seen_at: Sat Sep 12 2026 17:06:01 GMT+0530 (India Standard Time)
+  - label: "From"
+    normalized: "from"
+    fieldType: "monthyear"
+    field_type_code: 1
+    required: false
+    step: "Work Experience"
+    options:
+      - "5/2025"
+    answer: "5/2025"
+    last_seen_at: Sat Sep 12 2026 17:31:51 GMT+0530 (India Standard Time)
+  - label: "I confirm I understand and agree with the above statement"
+    normalized: "i confirm i understand and agree with the above statement"
+    fieldType: "checkbox"
+    field_type_code: 4
+    required: false
+    step: "Voluntary Disclosures"
+    answer: "Yes"
+    last_seen_at: Sat Sep 12 2026 17:40:03 GMT+0530 (India Standard Time)
+  - label: "Job Title"
+    normalized: "job title"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Work Experience"
+    options:
+      - "Full stack Intern"
+      - "MM/YYYY"
+    answer: "MM/YYYY"
+    last_seen_at: Sun Sep 13 2026 14:42:02 GMT+0530 (India Standard Time)
+  - label: "legalName--firstName"
+    normalized: "legalnamefirstname"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    answer: "John Cena"
+    last_seen_at: Sun Sep 13 2026 14:41:36 GMT+0530 (India Standard Time)
+  - label: "Location"
+    normalized: "location"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Work Experience"
+    options:
+      - "Hybrid"
+    answer: "Hybrid"
+    last_seen_at: Sat Sep 12 2026 17:05:08 GMT+0530 (India Standard Time)
+  - label: "Phone Device Type"
+    normalized: "phone device type"
+    fieldType: "select"
+    field_type_code: 2
+    required: false
+    answer: "Mobile"
+    last_seen_at: Sun Sep 13 2026 14:41:40 GMT+0530 (India Standard Time)
+  - label: "Race"
+    normalized: "race"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: true
+    step: "Voluntary Disclosures"
+    answer: "Asian (United States of America)"
+    last_seen_at: Sat Sep 12 2026 21:49:45 GMT+0530 (India Standard Time)
+  - label: "School or University"
+    normalized: "school or university"
+    fieldType: "dropdown"
+    field_type_code: 2
+    required: false
+    step: "Education"
+    options:
+      - "Accounting"
+      - "Other"
+    answer: "Other"
+    last_seen_at: Sat Sep 12 2026 22:37:06 GMT+0530 (India Standard Time)
+  - label: "To"
+    normalized: "to"
+    fieldType: "monthyear"
+    field_type_code: 1
+    required: false
+    step: "Work Experience"
+    options:
+      - "6/2026"
+    answer: "6/2026"
+    last_seen_at: Sat Sep 12 2026 22:41:08 GMT+0530 (India Standard Time)
+  - label: "To (Actual or Expected)"
+    normalized: "to actual or expected"
+    fieldType: "year"
+    field_type_code: 1
+    required: false
+    step: "Education"
+    options:
+      - "2/2024"
+    answer: "2/2024"
+    last_seen_at: Sat Sep 12 2026 22:41:28 GMT+0530 (India Standard Time)
+  - label: "What is your desired salary expectations?"
+    normalized: "what is your desired salary expectations"
+    fieldType: "text"
+    field_type_code: 1
+    required: false
+    step: "Application Questions"
+    answer: "1000000"
+    last_seen_at: Sat Sep 12 2026 17:32:49 GMT+0530 (India Standard Time)

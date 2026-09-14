@@ -1,0 +1,134 @@
+# Workday — YAML keyed by tenant slug "workday" (any wd* platform)
+company: "Workday"
+tenant: workday
+field_overrides:
+  - ["how did you hear about us", "personal.source"]
+  - ["phone device type", "_static.Mobile"]
+  - ["have you previously been employed", "_static.No"]
+  - ["have you ever been employed", "_static.No"]
+  - ["do you have any relatives", "_static.No"]
+  - ["do you have a relative", "_static.No"]
+  - ["are you currently or have you ever worked", "_static.No"]
+  - ["contract worker or consultant", "_static.No"]
+  - ["job title", "experience.current_title"]
+  - ["company", "experience.current_company"]
+  - ["location", "experience.location"]
+  - ["from", "experience.from_date"]
+  - ["to", "experience.to_date"]
+  - ["school or university", "education.university"]
+  - ["degree", "education.degree"]
+  - ["field of study", "education.field_of_study_hierarchy"]
+  - ["city", "personal.city"]
+scanned_questions:
+  - label: "Are you (i) a current or recent former (within the preceding 24 months) employee of Ernst & Young, LLP, Workday’s independent auditors, or (ii) a current or former (at any time) partner or principal of Ernst & Young, LLP?"
+    normalized: "are you i a current or recent former within the preceding 24 months employee of ernst young llp workdays independent auditors or ii a current or former at any time partner or principal of ernst young llp"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:55 GMT+0530 (India Standard Time)
+  - label: "Are you a current citizen, national or resident of any of the following countries/regions: Iran, Cuba, North Korea, Syria, Crimea, Donetsk People’s Republic (DNR), Luhansk People’s Republic (LNR) regions of Ukraine?"
+    normalized: "are you a current citizen national or resident of any of the following countriesregions iran cuba north korea syria crimea donetsk peoples republic dnr luhansk peoples republic lnr regions of ukraine"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:44 GMT+0530 (India Standard Time)
+  - label: "Are you a current or former employee of the United States government?"
+    normalized: "are you a current or former employee of the united states government"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:42 GMT+0530 (India Standard Time)
+  - label: "Are you authorized to work in the country where this job is located?"
+    normalized: "are you authorized to work in the country where this job is located"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 15:46:37 GMT+0530 (India Standard Time)
+  - label: "Are you related to a current Workday employee?"
+    normalized: "are you related to a current workday employee"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:46 GMT+0530 (India Standard Time)
+  - label: "Are you subject to any non-compete or non-solicitation restrictions at your current or most recent employer?"
+    normalized: "are you subject to any noncompete or nonsolicitation restrictions at your current or most recent employer"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:33 GMT+0530 (India Standard Time)
+  - label: "Date"
+    normalized: "date"
+    fieldType: "date"
+    required: false
+    step: "Self Identify"
+    answer: "09/10/2026"
+    last_seen_at: Thu Sep 10 2026 11:26:55 GMT+0530 (India Standard Time)
+  - label: "Do you consent to recorded Workday interviews?"
+    normalized: "do you consent to recorded workday interviews"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: 2026-09-11T10:17:17.386Z
+  - label: "Do you now or in the future require any immigration filing or visa sponsorship to maintain work authorization, including sponsorship by Workday, renewal/extension of open work permit, permanent residency, etc.?"
+    normalized: "do you now or in the future require any immigration filing or visa sponsorship to maintain work authorization including sponsorship by workday renewalextension of open work permit permanent residency etc"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:39 GMT+0530 (India Standard Time)
+  - label: "I acknowledge that I have read, understood and reviewed the above questions, and I have answered them truthfully and accurately. I further understand, and agree, that any offer of employment (or job transfer or promotion) I may receive from Workday is conditioned upon the truth of the information and statements I have made and that, in the event it is subsequently discovered that any of the information I have submitted or provided as part of my application for employment (or job transfer or promotion) is inaccurate or misleading, then regardless of when or how discovered, any such offer of employment may be rescinded and, in the event I have already commenced employment, such employment may be immediately terminated for cause, to the fullest extent permitted by applicable law. Please enter \"yes\" if you acknowledge. (Required)”NOTE: Workday will not consider any applications with \"No\" selected."
+    normalized: "i acknowledge that i have read understood and reviewed the above questions and i have answered them truthfully and accurately i further understand and agree that any offer of employment or job transfer or promotion i may receive from workday is conditioned upon the truth of the information and statements i have made and that in the event it is subsequently discovered that any of the information i have submitted or provided as part of my application for employment or job transfer or promotion is inaccurate or misleading then regardless of when or how discovered any such offer of employment may be rescinded and in the event i have already commenced employment such employment may be immediately terminated for cause to the fullest extent permitted by applicable law please enter yes if you acknowledge requirednote workday will not consider any applications with no selected"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes"
+    last_seen_at: Fri Sep 11 2026 15:46:58 GMT+0530 (India Standard Time)
+  - label: "In your current job, do you use or work on the Workday system?"
+    normalized: "in your current job do you use or work on the workday system"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No, I do not use the Workday system in my current job"
+    last_seen_at: Fri Sep 11 2026 15:46:35 GMT+0530 (India Standard Time)
+  - label: "Name"
+    normalized: "name"
+    fieldType: "text"
+    required: false
+    step: "Self Identify"
+    answer: "John Cena"
+    last_seen_at: Thu Sep 10 2026 11:26:54 GMT+0530 (India Standard Time)
+  - label: "Please enter today's date:"
+    normalized: "please enter todays date"
+    fieldType: "date"
+    required: false
+    step: "Application Questions"
+    answer: "09/10/2026"
+    last_seen_at: Thu Sep 10 2026 11:34:58 GMT+0530 (India Standard Time)
+  - label: "Please enter your name:"
+    normalized: "please enter your name"
+    fieldType: "text"
+    required: false
+    step: "Application Questions"
+    answer: "John Cena"
+    last_seen_at: Thu Sep 10 2026 11:26:26 GMT+0530 (India Standard Time)
+  - label: "To the best of your knowledge, are you related to an employee of a customer, or a government official, who has direct business interactions with Workday?"
+    normalized: "to the best of your knowledge are you related to an employee of a customer or a government official who has direct business interactions with workday"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "No"
+    last_seen_at: Fri Sep 11 2026 15:46:53 GMT+0530 (India Standard Time)
+  - label: "Would you consider relocating for this role?"
+    normalized: "would you consider relocating for this role"
+    fieldType: "dropdown"
+    required: false
+    step: "Application Questions"
+    answer: "Yes, I would consider relocating for this role"
+    last_seen_at: Fri Sep 11 2026 15:46:31 GMT+0530 (India Standard Time)
