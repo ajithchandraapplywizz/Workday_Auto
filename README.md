@@ -17,7 +17,7 @@
 
 ## Overview
 
-The system implements a **scan → resolve → fill → verify → advance** loop across Workday’s multi-step application wizard. Field detection is DOM-native (labels, `aria-*`, spinbuttons, comboboxes). Answers are sourced from committed defaults, local profile configuration, and a persistent Q&A cache—minimizing interactive prompts during batch and parallel execution.
+The system implements **scan → intent → evidence → validate → fill → verify → rescan → advance** on every wizard page (`runWorkdayPageWorkflow`). Field detection is DOM-native. Answers come from **Apply Wizz API/YAML first**, then verified Q&A memory (intent-matched), resume facts, then LLM analysis against that evidence—**no mid-run human prompts** in normal apply mode and no keyword-only matching.
 
 Design principles:
 
