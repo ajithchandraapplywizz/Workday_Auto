@@ -111,7 +111,7 @@ Save and Continue
   |-- Review --> parse and cross-check summary
   |
   v
-Submit and detect confirmation/OTP state
+Submit and detect confirmation state
   |
   v
 Take screenshot, write data/applied.csv, update queue/learnings
@@ -143,14 +143,14 @@ config/profile.yml + config/resumes.yml + .env
 |---|---|
 | `cli.mjs` | Command dispatch, credentials, browser lifecycle, orchestration |
 | `discovery.mjs` | Workday URL validation, target parsing, Apply/gateway discovery |
-| `workday.mjs` | Workday sign-in, account creation, verification handling |
+| `workday.mjs` | Workday sign-in and account creation (email + password only) |
 | `scanner.mjs` | Generic DOM field extraction and scan output |
 | `workdayDom.mjs` | Workday-specific field discovery, required checks, review parsing |
 | `stateDetector.mjs` | Detects the current wizard step from rendered DOM/a11y content |
 | `planner.mjs` | Maps labels to profile values and produces fill decisions |
 | `qaStore.mjs` | Normalization, fuzzy matching, local JSON/YAML persistence, Supabase store scaffold |
 | `fields.mjs` | Locating fields and interacting with dropdowns/typeaheads |
-| `engine.mjs` | Wizard loop, filling, verification, submit and OTP path |
+| `engine.mjs` | Wizard loop, filling, verification, and submit path |
 | `learner.mjs` | Records results and learned option corrections |
 | `reporter.mjs` | Screenshots, CSV application log, queue management |
 
