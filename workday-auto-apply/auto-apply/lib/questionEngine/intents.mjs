@@ -52,17 +52,118 @@ const HIGH_RISK = new Set([
   'eeo_disability',
 ]);
 
+export function isSignatureOrFullNameQuestion(label = '') {
+  const s = String(label || '').toLowerCase();
+  if (/parent|guardian|representative|supervisor/i.test(s)) return false;
+  // Short-form label patterns
+  if (/please\s+sign|electronic\s+signature|typed\s+name|sign\s*\(\s*type\s*name\s*\)|type\s+(your\s+)?(full\s+)?name|enter\s+(your\s+)?(full\s+)?name|your\s+typed\s+name|please\s+enter\s+your\s+name|\bsignature\b/i.test(s)) return true;
+  // Long-form legal acknowledgement paragraphs that require typing your name as a signature
+  if (/sign\s+to\s+acknowledge|sign.*understand|read.*sign.*acknowledge|please\s+read.*sign/i.test(s)) return true;
+  if (/\bsign\b.{0,80}\btype\s*(your)?(full\s+)?name\b/i.test(s)) return true;
+  return false;
+}
+
+/**
+ * True for fields that ask the applicant to enter today's date (companion to signature blocks).
+ */
+export function isTodaysDateField(label = '') {
+  const s = String(label || '').toLowerCase();
+  // Never steal a label that is a signature field (sign + name) — those stay as identity_name
+  if (isSignatureOrFullNameQuestion(label)) return false;
+  return /enter\s+(the|today'?s?)\s*date|please\s+enter\s+(the\s+)?date|today'?s?\s*date|^date:?\s*\*?$|signature\s*date|date\s*(?:of\s*)?signature|date\s*signed/i.test(s);
+}
+
+export function isShiftOrScheduleQuestion(label = '') {
+  const s = String(label || '').toLowerCase();
+  if (/when|what\s*date|start\s*date/i.test(s)) return false;
+  // "Date Available to Work" is a calendar field, not shift checkboxes.
+  if (/date\s+available|available\s+(on|date)\b|^date\s*available/i.test(s)) return false;
+  return /\b(shift|shifts|work\s*schedule|hours\s*available|schedule\s*preference|available\s*to\s*work|work\s*types?|indicate\s+availability|please\s+indicate\s+availability)\b/i.test(s)
+    && !/how\s*many\s*hours/i.test(s);
+}
+
+/** Checkbox groups for shifts / work availability (not Yes/No). */
+export function isAvailabilityCheckboxQuestion(label = '') {
+  const s = String(label || '').toLowerCase();
+  if (/date\s+available|available\s+(on|date)\b|^date\s*available/i.test(s)) return false;
+  return isShiftOrScheduleQuestion(label)
+    || /\bplease\s+indicate\s+availability\b/i.test(s)
+    || (/\bavailable\s*to\s*work\b/i.test(s) && !/date/i.test(s));
+}
+
+/**
+ * Map stored Yes/schedule answers onto live checkbox labels (comma-separated for multi-select).
+ * @param {string} label
+ * @param {string|string[]} answer
+ * @param {string[]} options
+ * @returns {string|null}
+ */
+export function resolveWorkScheduleCheckboxAnswer(label, answer, options = []) {
+  const opts = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!opts.length) return null;
+  const raw = Array.isArray(answer) ? answer.join(', ') : String(answer || '').trim();
+  if (!raw) return null;
+
+  const yn = /^yes$/i.test(raw);
+  const picks = raw.split(/[,;|]/).map((p) => p.trim()).filter(Boolean);
+  const matched = picks.flatMap((pick) => {
+    const needle = pick.toLowerCase();
+    return opts.filter((o) => o.toLowerCase() === needle || o.toLowerCase().includes(needle) || needle.includes(o.toLowerCase()));
+  });
+  if (matched.length) return [...new Set(matched)].join(', ');
+
+  if (yn || /flexible|any|all/i.test(raw)) {
+    const flexible = opts.find((o) => /\b(any|all|flexible|open|no\s*preference)\b/i.test(o));
+    if (flexible) return flexible;
+    const day = opts.find((o) => /\b(day|1st|first|morning|standard|regular|full[-\s]?time)\b/i.test(o));
+    if (day) return day;
+    if (isAvailabilityCheckboxQuestion(label) && opts.length <= 8) return opts.join(', ');
+    const one = pickShiftOption(opts);
+    return one || null;
+  }
+
+  const one = pickShiftOption(opts);
+  return one || null;
+}
+
+export function pickShiftOption(options = []) {
+  if (!options?.length) return '';
+  const flexible = options.find((o) => /\b(any|all|flexible|open|no\s*preference)\b/i.test(o));
+  if (flexible) return flexible;
+  const day = options.find((o) => /\b(day|1st|first|morning|standard|regular)\b/i.test(o));
+  if (day) return day;
+  const any = options.find((o) => !/prn|per\s*diem|part[\s-]time|night|grave|3rd|third/i.test(o));
+  if (any) return any;
+  return options[0];
+}
+
+export function isSpecificManagerOrLocationQuestion(label = '') {
+  const s = String(label || '').toLowerCase();
+  return /specific\s+(location|manager|branch|department|facility|shift)\b/i.test(s)
+    || /manager\s+(or\s+location\s+)?you\s+would\s+like/i.test(s)
+    || /location\s+or\s+manager/i.test(s);
+}
+
 /**
  * @param {string} label
  * @param {object} [field]
  * @returns {string}
  */
 export function classifyQuestionIntent(label = '', field = {}) {
-  const text = String(label || field.label || '').replace(/\s+/g, ' ').trim();
+  const text = String(label || '').replace(/\s+/g, ' ').trim();
   if (!text) return 'unknown';
+
+  if (isSignatureOrFullNameQuestion(text)) return 'identity_name';
+  if (isTodaysDateField(text)) return 'date';
+  if (isShiftOrScheduleQuestion(text)) return 'work_schedule';
+  if (isSpecificManagerOrLocationQuestion(text)) return 'location_preference';
 
   if (isMinimumAgeQuestion(text)) return 'minimum_age';
   if (isProceedQuestion(text)) return 'proceed_confirmation';
+  if (isGenericTotalYearsQuestion(text)) return 'years_experience';
+  if (isYearsQuantityQuestion(text)) return 'technology_years_experience';
+  if (isHourlyWageQuestion(text)) return 'salary_hourly';
+  if (isSalaryQuestion(text)) return 'salary';
   if (/authoriz(ed|ation)\s+to\s+work|legally\s+authoriz|eligible\s+to\s+work|work\s+authorization|right\s+to\s+work/i.test(text)
     && !/sponsor/i.test(text)) {
     return 'work_authorization';

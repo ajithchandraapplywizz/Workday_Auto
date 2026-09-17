@@ -309,7 +309,21 @@ export async function discoverFormFieldQuestions(page) {
       return 1;
     }
 
-    document.querySelectorAll('[data-wd-q-id]').forEach((el) => el.removeAttribute('data-wd-q-id'));
+    /** Persist markers across rescans — random ids caused orchestrator duplicate-fill loops. */
+    function ensureMarkerId(el, label, disambiguator = '') {
+      if (!el) return '';
+      const existing = el.getAttribute('data-wd-q-id');
+      if (existing) return existing;
+      const base = norm(label).slice(0, 36).replace(/\s+/g, '-') || 'field';
+      let markerId = `wdq-${base}${disambiguator ? `-${disambiguator}` : ''}`.replace(/[^a-z0-9_-]/gi, '') || 'wdq-field';
+      let n = 0;
+      while (document.querySelector(`[data-wd-q-id="${CSS.escape(markerId)}"]`) && n < 24) {
+        n += 1;
+        markerId = `wdq-${base}-${n}`.replace(/[^a-z0-9_-]/gi, '');
+      }
+      el.setAttribute('data-wd-q-id', markerId);
+      return markerId;
+    }
 
     function readValueFromWidget(widget) {
       if (!widget) return '';
@@ -599,6 +613,9 @@ export async function discoverFormFieldQuestions(page) {
         label = 'Please enter your name:';
       } else if (/please\s+enter\s+today['’]?s\s+date/i.test(label)) {
         label = "Please enter today's date:";
+      } else if (/sign\s+to\s+acknowledge|read.*sign.*acknowledge|please\s+read.*carefully.*sign/i.test(label)) {
+        // Long legal acknowledgement paragraph — normalize to short signature-field label
+        label = 'Please sign (type name) and enter the date:';
       }
       if (/indicates a required field|application questions \d+ of/i.test(label)) continue;
       if (/recruitment privacy statement.*vibe philosophy/i.test(label)) continue;
@@ -646,11 +663,12 @@ export async function discoverFormFieldQuestions(page) {
         }
       }
       const hasRequiredMarker = Boolean(
-        field.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"]')
+        field.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]')
         || field.getAttribute('aria-required') === 'true'
         || combo?.getAttribute('aria-required') === 'true'
         || textInput?.getAttribute('aria-required') === 'true'
         || textInput?.required
+        || field.querySelector('[style*="color: rgb(19"], [style*="color: rgb(2"], [style*="color:red"], [style*="color: red"]')
       );
       const required = labelHadRequiredAsterisk
         || /\*/.test(containerText.slice(0, Math.max(containerText.indexOf(label) + label.length, label.length + 2)))
@@ -667,10 +685,13 @@ export async function discoverFormFieldQuestions(page) {
 
       const selectWidget = field.querySelector('[data-automation-id="selectOne"], [data-automation-id="selectWidget"]');
       const selectOneIndex = selectWidget ? selectOneIndexForWidget(selectWidget) : null;
-      const formFieldIndex = (fieldType === 'dropdown' || fieldType === 'select') ? formFieldIndexFor(field) : null;
+      const formFieldIndex = (fieldType === 'dropdown' || fieldType === 'select') ? formFieldIndexFor(field) : -1;
       const fieldTypeCode = fieldTypeToCode(fieldType);
-      const markerId = `wdq-${Math.random().toString(36).slice(2, 9)}`;
-      field.setAttribute('data-wd-q-id', markerId);
+      const selectIdx = selectOneIndex != null && selectOneIndex >= 0 ? selectOneIndex : -1;
+      const markerDisambig = formFieldIndex >= 0
+        ? String(formFieldIndex)
+        : (selectIdx >= 0 ? `s${selectIdx}` : '');
+      const markerId = ensureMarkerId(field, label, markerDisambig);
 
       results.push({
         label,
@@ -715,8 +736,9 @@ export async function discoverFormFieldQuestions(page) {
       const containerText = (fieldRoot?.textContent || widget.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500);
       const currentValue = readValueFromWidget(widget);
       const hasRequiredMarker = Boolean(
-        fieldRoot?.querySelector('.required, .asterisk, [aria-required="true"]')
+        fieldRoot?.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [class*="required" i], [class*="asterisk" i]')
         || widget.querySelector('[aria-required="true"]')
+        || fieldRoot?.querySelector('[style*="color: rgb(19"], [style*="color: rgb(2"], [style*="color:red"], [style*="color: red"]')
       );
       const labelHadRequiredAsterisk = /\*/.test(containerText)
         && containerText.includes(label)
@@ -727,10 +749,9 @@ export async function discoverFormFieldQuestions(page) {
       const required = labelHadRequiredAsterisk
         || /\*/.test(containerText.slice(0, Math.max(0, containerText.indexOf(label)) + label.length + 4))
         || hasRequiredMarker
-        || /veteran status|race which most accurately|gender|hispanic/i.test(label);
+        || /race which most accurately|gender|hispanic/i.test(label);
 
-      const markerId = `wdq-${Math.random().toString(36).slice(2, 9)}`;
-      (fieldRoot || widget).setAttribute('data-wd-q-id', markerId);
+      const markerId = ensureMarkerId(fieldRoot || widget, label, `s${selectOneIndex}`);
 
       results.push({
         label,
@@ -809,8 +830,18 @@ export async function discoverFormFieldQuestions(page) {
       );
 
       seen.add(key);
-      const markerId = `wdq-${Math.random().toString(36).slice(2, 9)}`;
-      groupRoot.setAttribute('data-wd-q-id', markerId);
+      const markerId = ensureMarkerId(groupRoot, label, typeAttr || tag || 'ctrl');
+
+      const walkCheckboxOptions = fieldType === 'checkbox-group'
+        ? Array.from(groupRoot.querySelectorAll('input[type="checkbox"]')).map((cb) => {
+          const id = cb.id;
+          const lab = id ? groupRoot.querySelector(`label[for="${CSS.escape(id)}"]`) : cb.closest('label');
+          return {
+            text: (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
+            checked: Boolean(cb.checked),
+          };
+        }).filter((o) => o.text)
+        : [];
 
       results.push({
         label,
@@ -826,7 +857,7 @@ export async function discoverFormFieldQuestions(page) {
         labelCandidates: candidates.map((c) => c.text).slice(0, 8),
         elementText: cleanLabelText(control.textContent || control.getAttribute('aria-label') || ''),
         wdQId: markerId,
-        options: [],
+        options: walkCheckboxOptions,
         source: 'full_control_walk',
       });
     }
@@ -878,11 +909,9 @@ export const discoverApplicationQuestionFields = discoverFormFieldQuestions;
  * @returns {Promise<object[]>}
  */
 export async function discoverWorkdayFields(page) {
-  const [domFields, a11yFields, formQuestions] = await Promise.all([
-    discoverFields(page, FORM_ROOT_SELECTOR).catch(() => []),
-    parseStepFromA11y(page).catch(() => []),
-    discoverFormFieldQuestions(page).catch(() => []),
-  ]);
+  const domFields = await discoverFields(page, FORM_ROOT_SELECTOR).catch(() => []);
+  const a11yFields = await parseStepFromA11y(page).catch(() => []);
+  const formQuestions = await discoverFormFieldQuestions(page).catch(() => []);
 
   const formAsFields = (formQuestions || []).map((q) => ({
     label: q.label,
@@ -1246,7 +1275,7 @@ export async function locateWorkdayFieldByLabel(page, labelPattern, options = {}
  * @returns {{ searchTerm: string, optionText: string }}
  */
 export function parseCountryPhoneCode(profileValue) {
-  const raw = String(profileValue || 'India (+91)').trim();
+  const raw = String(profileValue || 'United States of America (+1)').trim();
   const withoutCode = raw.replace(/\s*\(\s*\+?\d+\s*\)\s*$/, '').replace(/\s*\+\d+\s*$/, '').trim();
   const searchTerm = (withoutCode || raw).toLowerCase();
   return {

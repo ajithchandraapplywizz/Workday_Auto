@@ -32,6 +32,16 @@ export function getTodayISODate(timeZone = 'Asia/Kolkata', referenceDate = new D
   return `${values.year}-${values.month}-${values.day}`;
 }
 
+export function buildLlmDateContext(timeZone = 'Asia/Kolkata', referenceDate = new Date()) {
+  const today = getTodayISODate(timeZone, referenceDate);
+  const todayDisplay = getTodayMMDDYYYY(timeZone, referenceDate);
+  return `Today's date is ${todayDisplay} (${today}) in timezone ${timeZone}. `
+    + 'For availability, notice-period, or relative-timing questions, compare any supplied calendar date with today: '
+    + 'a date before today means "Immediately"; a future date means the calendar interval from today '
+    + '(for example, 21/09/2026 from 14/09/2026 is "1 week"). '
+    + 'If the field is an actual date input, return the required date value instead of a relative interval.';
+}
+
 export function validateMMDDYYYY(value) {
   return /^\d{2}\/\d{2}\/\d{4}$/.test(String(value || '').trim());
 }
@@ -56,6 +66,8 @@ const DISALLOWED_DATE_PATTERNS = [
   /previous\s+date/i,
   /dob/i,
   /birthday/i,
+  /please\s+sign|electronic\s+signature|typed\s+name|sign\s*\(\s*type\s*name\s*\)|type\s+(?:your\s+)?(?:full\s+)?name/i,
+  /sign\s+to\s+acknowledge/i,
 ];
 
 const CURRENT_DATE_PATTERNS = [
@@ -68,9 +80,18 @@ const CURRENT_DATE_PATTERNS = [
   /submitted\s+(?:on|date)/i,
   /application\s+submitted/i,
   /date\s+submitted/i,
+  /signature\s*date/i,
+  /date\s*(?:of\s*)?signature/i,
+  /date\s*signed/i,
+  /^date:?\s*\*?$/i,
+  // Standalone date companion field for signature blocks (label = just the date part, not the full paragraph)
+  /^enter\s+the\s+date:?\s*$/i,
+  /^please\s+enter\s+the\s+date:?\s*$/i,
 ];
 
 const AVAILABILITY_START_PATTERNS = [
+  /date\s+available\s+to\s+work/i,
+  /date\s+available\b/i,
   /when.*available.*start/i,
   /available.*to.*start/i,
   /when.*can.*you.*start/i,
@@ -131,6 +152,13 @@ export function isCurrentDateQuestionLabel(label = '', metadata = {}) {
   if (
     /^date$/i.test(bareDate)
     && /self[-\s]?identif|cc-305|voluntary self-identification of disability|omb control number/i.test(source)
+  ) {
+    return true;
+  }
+  // Bare "Date" label in a signature / acknowledgement context → today's date
+  if (
+    /^date:?$/i.test(bareDate)
+    && /sign|acknowledge|certif|consent|agreement/i.test(source)
   ) {
     return true;
   }

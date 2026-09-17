@@ -71,36 +71,30 @@ flowchart LR
 | Voluntary Disclosures | `workdayQuestionFill.mjs` | EEO / compliance fields from profile |
 | Review & Submit | `engine.mjs` | Gap fill, cross-check, submission |
 
-### Answer resolution
+### Answer resolution (intent + evidence + validation)
 
 ```mermaid
 flowchart TD
-    Q[Field detected in DOM] --> L1{workdayDefaults.mjs}
-    L1 -->|match| F[Apply to control]
-    L1 -->|miss| L2{config/profile.yml}
-    L2 -->|match| F
-    L2 -->|miss| L3{data/qa-store.json}
-    L3 -->|fuzzy match| F
-    L3 -->|miss| L4{URL parameters · resume inference}
-    L4 -->|match| F
-    L4 -->|miss| L5[Interactive fallback]
-    L5 --> F
-    F --> V{DOM verification}
-    V -->|pass| N[Next field]
-    V -->|fail| R[Retry strategies]
-    R --> F
+    Q[Field scanned in DOM] --> I[classifyQuestionIntent]
+    I --> E1[Apply Wizz API + profile/qa YAML]
+    E1 -->|miss| E2[Verified Q&A memory same intent]
+    E2 -->|miss| E3[Resume / profile facts]
+    E3 -->|miss| E4[LLM vs client evidence + live options]
+    E4 --> V[validateBeforeFill + exact option map]
+    V -->|ok| F[interactField]
+    V -->|fail| B[requiresReview / blocked]
+    F --> DOM[DOM verify + rescan page]
 ```
 
 **Precedence (highest to lowest):**
 
-1. `lib/workdayDefaults.mjs` — committed tenant-agnostic defaults and hierarchical source preferences.
-2. `config/profile.yml` — operator profile (`personal`, `experience`, `education`, `eeo`, `work_auth`, `qa_answers`).
-3. `data/qa-store.json` — fuzzy-matched answers from prior runs (local, gitignored).
-4. Job URL query parameters (e.g. `?source=web_LinkedIn`).
-5. Resume PDF inference (non-salary factual fields).
-6. Terminal prompt — persisted to profile and Q&A store on first encounter.
+1. **Apply Wizz** client API + hydrated `config/profile.yml` / `qa_answers` / tenant YAML.
+2. **Verified local Q&A** — reuse only when semantic **intent** matches (not label fuzzy match alone).
+3. **Resume PDF** — factual fields tied to intent (never invented compliance/salary).
+4. **LLM** (OpenRouter) — selects from evidence-backed options; no fabrication.
+5. **Blocked** — missing or low-confidence evidence stops the step (optional `FORM_ANSWER_TERMINAL=1` for dev only).
 
-Referral source (`How did you hear about us?`) is resolved automatically via `fillSourceFieldAuto()` and does not block on terminal input under normal operation.
+Referral source (`How did you hear about us?`) is filled via `fillSourceFieldAuto()` using configured hierarchy, separate from the question-engine pipeline.
 
 ### Referral source interaction
 
@@ -277,8 +271,6 @@ workday-auto-apply/auto-apply/
 └── data/                        Runtime artifacts (gitignored)
 ```
 
-Internal handoff documentation: `workday-auto-apply/SESSION-CHECKPOINT.md`.
-
 ---
 
 ## Security & data handling
@@ -316,7 +308,7 @@ git commit -m "description"
 git push origin main
 ```
 
-Extended architecture notes: `workday-auto-apply/auto-apply/README.md` · `workday-auto-apply/CODEBASE-ANALYSIS.md`.
+App-specific notes: `workday-auto-apply/auto-apply/README.md`.
 
 ---
 

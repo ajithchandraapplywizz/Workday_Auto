@@ -6,6 +6,7 @@
 
 import { normalizeLabel } from './qaStore.mjs';
 import { getTodayMMDDYYYY, isCurrentDateQuestionLabel } from './date-utils.mjs';
+import { isMinimumAgeQuestion } from './minimumAge.mjs';
 
 /** Default leaf answer for "How did you hear about us?" — used when profile has no override. */
 export const WORKDAY_DEFAULT_SOURCE = 'LinkedIn';
@@ -172,7 +173,11 @@ const SHIFT_QUESTION_RE = /what\s+shifts?|which\s+shifts?|shifts?\s+(can|could|a
  * @returns {boolean}
  */
 export function isAdverseHistoryQuestion(label = '') {
-  return ADVERSE_HISTORY_RE.test(String(label || ''));
+  const s = String(label || '');
+  if (/please\s+sign|electronic\s+signature|typed\s+name|sign\s*\(\s*type\s*name\s*\)|type\s+(your\s+)?(full\s+)?name|\bsignature\b/i.test(s)) {
+    return false;
+  }
+  return ADVERSE_HISTORY_RE.test(s);
 }
 
 /**
@@ -215,11 +220,14 @@ export function isShiftAvailabilityQuestion(label = '') {
  */
 export function isYesNoQuestionLabel(label = '') {
   const raw = String(label || '').replace(/\*+/g, '').trim();
-  if (/\b(how many|how much|which|what|when|where|why|describe|explain|list)\b|select\s+all/i.test(raw)) {
+  if (/\b(how many|how much|how soon|how long|which|what|when|where|why|describe|explain|list)\b|select\s+all/i.test(raw)) {
     return false;
   }
   if (/government\s+employment|entered into any agreement|non-?compet|acceptance of employment/i.test(raw)) {
     return true;
+  }
+  if (/available\s*to\s*work|indicate\s+availability|which\s+shift|work\s+schedule|work\s+types?/i.test(raw)) {
+    return false;
   }
   let text = raw.replace(/^\s*\d+[.)]\s*/, '').trim();
   const inner = text.match(/\b((?:have|has|had|are|is|was|were|do|does|did|will|would|can|could)\b[^?]{6,240}\?)/i);
@@ -300,11 +308,11 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (isWorkEligibilityQuestion(label)) return 'Yes';
   if (isAdverseHistoryQuestion(label)) return 'No';
   if (isPriorAssociationQuestion(label)) return 'No';
-  if (/(?:are\s+you|at\s+least|over|older\s+than|age\s+of)\s*(?:the\s+age\s+of\s*)?(1[68])|1[68]\s*years?\s*old/i.test(String(label || ''))
-    && !/volunteer|related\s+to|felony|sponsor/i.test(String(label || ''))) {
+  if (isMinimumAgeQuestion(label)) return 'Yes';
+  const t = String(label || '');
+  if (/perform\s+the\s+essential\s+functions|essential\s+functions\s+of\s+the\s+job|essential\s+job\s+functions/i.test(t)) {
     return 'Yes';
   }
-  const t = String(label || '');
   if (/sponsor|visa|authorized to work|legally authorized|work authorization/i.test(t)) return null;
   if (/government\s+employment|federal\s+government|state,?\s+local.{0,40}government|u\.s\.?\s+armed\s+services|post-government\s+employment|government entity|political party|royal family|candidate for political/i.test(t)
     && !/years of|experience in|authorized|sponsor/i.test(t)) {

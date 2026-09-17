@@ -62,14 +62,6 @@ test-tele.js
 Thumbs.db
 *.log
 **/*.log
-# Project planning / documentation - keep local
-CODEBASE-ANALYSIS.md
-FLOW-REPORT.md
-SESSION-CHECKPOINT.md
-WORKFLOW-MAP.md
-WORKFLOW.md
-workday-cascading-dropdown-master-prompt.md
-
 # Cursor local configuration
 .cursor/
 

@@ -26,8 +26,15 @@ import { pickNearestSelectOption, resolveUnknownWithLlm, isPersonalIdentityQuest
 import { pickCompensationFromOptions, compensationInputValue } from './compensationPick.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
 import { saveAnswerToTenantYaml, lookupTenantAnswer } from './tenantQuestionYaml.mjs';
-import { peekClientAnswer } from './clientAnswer.mjs';
+import { peekClientAnswer, resolveClientAnswer } from './clientAnswer.mjs';
 import { resolveDynamicAnswer } from './questionEngine/index.mjs';
+import {
+  isSignatureOrFullNameQuestion,
+  isTodaysDateField,
+  pickShiftOption,
+  isAvailabilityCheckboxQuestion,
+  resolveWorkScheduleCheckboxAnswer,
+} from './questionEngine/intents.mjs';
 import {
   fillWorkdayCustomDropdown,
   markDropdownByLabel,
@@ -996,13 +1003,32 @@ async function resolveDropdownAnswer(page, profile, questionLabel, q, stepName) 
     },
     profile,
     {
+      page,
       stepName,
       pageNumber: 1,
       resumePath: profile?._resumePath,
       allowLlm: true,
     },
   );
-  return hit?.answer || null;
+  let answer = hit?.answer || null;
+  if (!answer) {
+    answer = await matchQuestionToAnswer(questionLabel, profile);
+  }
+  if (!answer) {
+    const direct = await resolveClientAnswer(
+      {
+        ...q,
+        label: questionLabel,
+        fieldType: q.fieldType || 'dropdown',
+        options: q.options || [],
+        required: q.required ?? true,
+      },
+      profile,
+      { page, resumePath: profile?._resumePath, forceLlm: true },
+    );
+    answer = direct?.answer || null;
+  }
+  return answer;
 }
 
 /**
@@ -1109,6 +1135,8 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
   let unfilled = 0;
   for (const q of questions) {
     const questionLabel = extractQuestionLabel(q.label);
+    if (profile?._workdaySkillsFilled === true
+      && /type\s*to\s*add\s*skills|enter\s+a\s*skill\s*below/i.test(questionLabel)) continue;
     if (shouldSkipOptionalFill(questionLabel, q, profile, stepName)) continue;
     const expected = peekExpectedAnswer(questionLabel, profile, tenant);
     if (!isQuestionDomFilled(q, questionLabel, expected, profile)) unfilled++;
@@ -1339,7 +1367,7 @@ export async function advanceApplicationQuestionsPage(page) {
   return false;
 }
 
-function parseCheckboxGroupAnswers(answer, options = []) {
+function parseCheckboxGroupAnswers(answer, options = [], label = '') {
   const list = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
   if (Array.isArray(answer)) {
     return answer.map((part) => String(part).trim()).filter(Boolean);
@@ -1349,6 +1377,14 @@ function parseCheckboxGroupAnswers(answer, options = []) {
     const lower = raw.toLowerCase();
     const hits = list.filter((opt) => lower.includes(opt.toLowerCase()));
     if (hits.length) return hits;
+    if (isYesNoAnswer(raw) && !list.some((o) => isYesNoAnswer(o))) {
+      const mapped = resolveWorkScheduleCheckboxAnswer(label, raw, list);
+      if (mapped) {
+        return mapped.split(/[,;|]/).map((part) => part.trim()).filter(Boolean);
+      }
+      const best = list.find((o) => /full[-\s]?time|regular/i.test(o)) || pickShiftOption(list);
+      if (best) return [best];
+    }
   }
   return raw.split(/[,;|]/).map((part) => String(part).trim()).filter(Boolean);
 }
@@ -1420,11 +1456,12 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
   // offering Full Time / Part Time / Per Diem stays a single-choice work-type group.
   const groupOptions = await readCheckboxGroupOptions(fieldBox);
   const employmentTypeOptions = groupOptions.some((o) => /part[-\s]?time|per\s*diem|contingent/i.test(o));
-  const shiftGroup = isShiftAvailabilityQuestion(label) && !employmentTypeOptions;
+  const availabilityGroup = isAvailabilityCheckboxQuestion(label);
+  const shiftGroup = (isShiftAvailabilityQuestion(label) || availabilityGroup) && !employmentTypeOptions;
   const workTypeGroup = !shiftGroup && (isWorkTypeCheckboxLabel(label) || isWorkTypeContainerText(label));
   const salaryGroup = !shiftGroup && isSalaryQuestion(label);
 
-  let desired = parseCheckboxGroupAnswers(answer, groupOptions);
+  let desired = parseCheckboxGroupAnswers(answer, groupOptions, label);
   if (salaryGroup && !desired.length) {
     const picked = pickCompensationFromOptions(groupOptions, profile, answer);
     if (picked) desired = [picked];
@@ -1484,6 +1521,9 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
           if (!hay) return false;
           if (mode === 'worktype' && /part\s*time/.test(hay)) return false;
           if (hay === needle || hay.includes(needle) || needle.includes(hay)) return true;
+          const hayCompact = hay.replace(/\s+/g, '').replace(/-/g, '');
+          const needleCompact = needle.replace(/\s+/g, '').replace(/-/g, '');
+          if (hayCompact === needleCompact) return true;
           // "Full Time" must still match a "Full-time" target.
           return squash(hay) === squash(needle);
         });
@@ -1548,16 +1588,31 @@ export async function matchQuestionToAnswer(label, profile, qaStore = null) {
   const settings = await loadSettings();
   const norm = normalizeLabel(label);
 
+  if (isSignatureOrFullNameQuestion(label) || isSignatureOrFullNameQuestion(norm)) {
+    const fullName = profile?.personal?.full_name
+      || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim()
+      || profile?.client?.name
+      || `${profile?.client?.first_name || ''} ${profile?.client?.last_name || ''}`.trim()
+      || profile?._applyWizzProfile?.full_name
+      || profile?._applyWizzProfile?.client_name
+      || '';
+    if (fullName) return fullName;
+  }
+
   const dynamicDateAction = buildCurrentDateAction(label, {
     label,
     question: label,
-    containerText: 'Voluntary Self-Identification of Disability CC-305 current value is MM/DD/YYYY',
+    containerText: /voluntary|disability|cc-305/i.test(label) ? 'Voluntary Self-Identification of Disability CC-305 current value is MM/DD/YYYY' : '',
     timeZone: 'Asia/Kolkata',
   });
   if (dynamicDateAction) {
     console.log(`[date] Detected dynamic current-date field`);
     console.log(`[date] Generated value: ${dynamicDateAction.value}`);
     return dynamicDateAction.value;
+  }
+
+  if (isTodaysDateField(label) || isTodaysDateField(norm)) {
+    return getTodayMMDDYYYY('Asia/Kolkata');
   }
 
   if (/please\s+enter\s+your\s+name/i.test(norm)) {
@@ -1757,8 +1812,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     marked = await page.evaluate((id) => {
       const el = document.querySelector(`[data-wd-q-id="${id}"]`);
       if (!el) return false;
+      const box = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el;
       document.querySelectorAll('[data-auto-fill-target]').forEach((node) => node.removeAttribute('data-auto-fill-target'));
-      el.setAttribute('data-auto-fill-target', '1');
+      box.setAttribute('data-auto-fill-target', '1');
       return true;
     }, fieldMetadata.wdQId).catch(() => false);
   }
@@ -1785,6 +1841,10 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
 
       if (/non\s*disclosure/i.test(A) && /non\s*disclosure/i.test(B)) return true;
       if (/mutual\s*arbitration/i.test(A) && /mutual\s*arbitration/i.test(B)) return true;
+      const sigA = /(sign\s+to\s+acknowledge|sign.*understand|read.*sign.*acknowledge|please\s+read.*sign|please\s+sign|type\s+name)/i.test(A);
+      const sigB = /(sign\s+to\s+acknowledge|sign.*understand|read.*sign.*acknowledge|please\s+read.*sign|please\s+sign|type\s+name)/i.test(B);
+      if (sigA && sigB) return true;
+
       if (/please\s+enter\s+your\s+name/i.test(A) && /please\s+enter\s+your\s+name/i.test(B)) return true;
       if (/today.*date|please\s+enter\s+today/i.test(A) && /today.*date|please\s+enter\s+today/i.test(B)) return true;
       if (A === 'name' && B === 'name') return true;
@@ -1802,6 +1862,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (/^name$/i.test(short)) raw = 'Name';
       else if (/^date$/i.test(short)) raw = 'Date';
       else if (/^language$/i.test(short)) raw = 'Language';
+      else if (/sign\s+to\s+acknowledge|read.*sign.*acknowledge|please\s+read.*carefully.*sign|please\s+sign\s*\(\s*type\s*name\s*\)/i.test(raw)) {
+        raw = 'Please sign (type name) and enter the date:';
+      }
       else {
         const question = raw.match(/[^.?!]*\?/);
         if (question && question[0].length >= 15) raw = question[0].trim();
@@ -1824,6 +1887,33 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     }
     return false;
   }, normTarget);
+
+  if (!marked && resolveMinimumAgeAnswer(questionLabel, profile)) {
+    marked = await page.evaluate(() => {
+      document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
+      for (const field of document.querySelectorAll('[data-automation-id*="formField"], fieldset')) {
+        const blob = (field.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/at least 18|18 years|16 years|years of age/i.test(blob)) continue;
+        field.setAttribute('data-auto-fill-target', '1');
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+  }
+
+  if (!marked && isAvailabilityCheckboxQuestion(questionLabel)) {
+    marked = await page.evaluate(() => {
+      document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
+      for (const field of document.querySelectorAll('[data-automation-id*="formField"], fieldset')) {
+        const blob = (field.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!/available\s*to\s*work|indicate\s+availability/i.test(blob)) continue;
+        if (!field.querySelector('input[type="checkbox"]')) continue;
+        field.setAttribute('data-auto-fill-target', '1');
+        return true;
+      }
+      return false;
+    }).catch(() => false);
+  }
 
   if (!marked) return false;
 
@@ -2064,6 +2154,18 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     }).catch(() => {});
   }
 
+  if (!ok && resolveMinimumAgeAnswer(questionLabel, profile)) {
+    const ageAnswer = 'Yes';
+    const ageRe = /^\s*yes\b/i;
+    const ageRadio = page.getByRole('radio', { name: ageRe }).first();
+    if (await ageRadio.isVisible({ timeout: 800 }).catch(() => false)) {
+      await ageRadio.click({ force: true });
+      ok = true;
+    } else {
+      ok = await fillDropdownInFieldBox(page, page.locator('[data-automation-id*="formField"]').filter({ hasText: /18 years|at least 18/i }).first(), questionLabel, ageAnswer);
+    }
+  }
+
   return ok;
 }
 
@@ -2181,6 +2283,7 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         },
         profile,
         {
+          page,
           stepName: stepName || profile?._currentStep || '',
           pageNumber: 1,
           resumePath: profile?._resumePath,
@@ -2189,10 +2292,27 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         },
       );
       let answer = resolved?.answer || null;
-    if (!answer) {
-      console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
-      continue;
-    }
+      if (!answer) {
+        answer = await matchQuestionToAnswer(questionLabel, profile, qaStore);
+      }
+      if (!answer) {
+        const directClient = await resolveClientAnswer(
+          {
+            ...q,
+            label: questionLabel,
+            fieldType: q.fieldType,
+            options: q.options,
+            required: q.required ?? true,
+          },
+          profile,
+          { page, resumePath: profile?._resumePath, forceLlm: true },
+        );
+        answer = directClient?.answer || null;
+      }
+      if (!answer) {
+        console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
+        continue;
+      }
 
     answer = adjustAnswerForFieldType(questionLabel, answer, q, profile) || answer;
     if (!answer) {
@@ -2757,37 +2877,73 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
 }
 
 /**
+ * Resolve veteran dropdown target from Apply Wizz / profile / safe defaults.
+ * Voluntary Disclosures standard: prefer exact Workday option "I am not a veteran".
+ * @param {object} [profile]
+ * @param {string} [explicit]
+ * @returns {string}
+ */
+export function resolveVeteranVoluntaryAnswer(profile = null, explicit = '') {
+  const fromExplicit = String(explicit || '').trim();
+  if (fromExplicit) return fromExplicit;
+
+  // Supabase cached answers first
+  const fromSupabase = profile?._supabaseQa?.['veteran status']
+    || profile?._supabaseQa?.['veteran_status']
+    || profile?._supabaseQa?.['please select the veteran status which most accurately describes how you identify yourself']
+    || profile?._supabaseQa?.['please select your veteran status'];
+  if (fromSupabase) return String(fromSupabase).trim();
+
+  const fromProfile = String(
+    profile?.eeo?.veteran_status
+    || profile?._applyWizzQa?.['veteran status']
+    || peekExpectedAnswer('Please select the veteran status which most accurately describes how you identify yourself.', profile)
+    || peekExpectedAnswer('Please select your veteran status.', profile)
+    || peekExpectedAnswer('Veteran status', profile)
+    || ''
+  ).trim();
+  if (fromProfile) return fromProfile;
+
+  return 'I am not a veteran';
+}
+
+/**
  * Fill veteran status on Voluntary Disclosures. Opens the dropdown and clicks
- * "I am not a veteran" when that is the stored profile answer.
+ * "I am not a veteran" / "I am not a protected veteran" (or Apply Wizz / Supabase / profile equivalent).
  * @param {import('playwright').Page} page
  * @param {string} [veteran]
  * @param {object} [profile]
  * @returns {Promise<boolean>}
  */
 export async function fillVeteranStatusDropdown(page, veteran = '', profile = null) {
-  const stored = String(
-    veteran
-    || profile?.eeo?.veteran_status
-    || peekExpectedAnswer('Please select the veteran status which most accurately describes how you identify yourself.', profile)
-    || peekExpectedAnswer('Please select your veteran status.', profile)
-    || peekExpectedAnswer('Veteran status', profile)
-    || ''
-  ).trim();
-  if (!stored) return false;
+  const stored = resolveVeteranVoluntaryAnswer(profile, veteran);
 
   const clickText = veteranStatusKind(stored) === 'not_protected'
     ? 'I am not a protected veteran'
-    : /not a veteran/i.test(stored)
+    : veteranStatusKind(stored) === 'not_veteran' || /not a veteran/i.test(stored)
       ? 'I am not a veteran'
       : stored;
+  const alreadySelected = await page.locator('[data-wd-eeo-target="1"] [data-automation-id="selectedItem"], [data-wd-eeo-target="1"] [data-automation-id="promptSelectedItem"]')
+    .filter({ visible: true })
+    .first()
+    .innerText()
+    .catch(() => '');
+  if (alreadySelected.trim() && !/^select(\s+one)?\.?$/i.test(alreadySelected.trim())
+    && veteranStatusKind(alreadySelected) === veteranStatusKind(clickText)) {
+    recordField(profile, 'Veteran status', alreadySelected.trim());
+    return true;
+  }
   const labels = [
     'Please select the veteran status which most accurately describes how you identify yourself.',
     'Please select the veteran status which most accurately describes your status.',
     'Please indicate whether you are in one or more of the protected veteran categories.',
     'Please select your veteran status.',
     'Please select veterans status.',
+    'Protected Veteran Status',
     'Veteran status',
     'Veterans status',
+    'Veteran Status',
+    'Veteran',
   ];
 
   for (const label of labels) {
@@ -2852,10 +3008,16 @@ async function clickVeteranPromptOption(page, wanted) {
     ));
     const hit = nodes.find((el) => {
       const t = (el.getAttribute('data-automation-label') || el.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/^i am not a veteran$/i.test(text)) {
-        return /i am not a veteran/i.test(t) && !/protected/i.test(t);
+      if (/not.*protected/i.test(String(text))) {
+        if (/not.*protected.*veteran|not a protected veteran/i.test(t)) return true;
+        if (/i am not a veteran|not a veteran/i.test(t)) return true;
       }
-      return t.toLowerCase() === String(text).toLowerCase();
+      if (/not.*veteran/i.test(String(text))) {
+        if (/i am not a veteran|not a veteran/i.test(t)) return true;
+        if (/not.*protected.*veteran|not a protected veteran/i.test(t)) return true;
+      }
+      return t.toLowerCase() === String(text).toLowerCase()
+        || t.toUpperCase() === String(text).toUpperCase();
     });
     if (!hit) return false;
     hit.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
@@ -2878,8 +3040,11 @@ async function clickVeteranRadioOrCheckbox(page, wanted) {
         || '';
       const t = labelled.replace(/\s+/g, ' ').trim();
       if (!/veteran/i.test(t)) return false;
-      if (/^i am not a veteran$/i.test(text) || /not a veteran/i.test(text)) {
-        return /i am not a veteran|not a veteran/i.test(t) && !/protected/i.test(t);
+      if (/not.*protected/i.test(String(text))) {
+        return /not.*protected.*veteran|not a protected veteran|not a veteran/i.test(t);
+      }
+      if (/^i am not a veteran$/i.test(String(text)) || /not a veteran/i.test(String(text))) {
+        return /i am not a veteran|not a veteran|not.*protected.*veteran/i.test(t);
       }
       return t.toLowerCase().includes(String(text).toLowerCase());
     });

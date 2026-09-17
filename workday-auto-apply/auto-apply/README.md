@@ -108,8 +108,6 @@ auto-apply/
 └── data/                       applied.csv, qa-store (gitignored)
 ```
 
-Deep specs: `../ProjectDocs/` and `AGENTS.md` at repo root (Local Phase only).
-
 ---
 
 ## Safety

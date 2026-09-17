@@ -4,9 +4,11 @@
  */
 
 import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured } from '../applyWizzClient.mjs';
-import { peekClientAnswer } from '../clientAnswer.mjs';
+import { peekClientAnswer, acceptClientValue, resolveClientAnswer } from '../clientAnswer.mjs';
+import { lookupSupabaseAnswerSync, upsertSupabaseAnswer, recordSupabaseAnswerInMemory } from '../supabaseClient.mjs';
 import { resolveMinimumAgeAnswer } from '../minimumAge.mjs';
 import { findBestMatch, normalizeLabel, isComplianceSensitive } from '../qaStore.mjs';
+import { isApiOnlyAnswerMode } from '../apiOnlyProfile.mjs';
 import {
   lookupSensitiveSafeAnswer,
   isYesNoQuestionLabel,
@@ -14,10 +16,21 @@ import {
   extractYesNoAnswer,
   isWorkEligibilityQuestion,
 } from '../workdayDefaults.mjs';
-import { analyzeUnknownQuestionsBatch, isOpenRouterEnabled } from '../openRouterLlm.mjs';
+import { analyzeUnknownQuestionsBatch, isOpenRouterEnabled, openRouterChat } from '../openRouterLlm.mjs';
+import { resolveExperienceQuestionAnswer } from '../experienceAnswer.mjs';
 import { normalizeDiscoveredField } from '../interaction/fieldSchema.mjs';
-import { validateBeforeFill } from '../orchestrator/preFillValidator.mjs';
-import { classifyQuestionIntent, isHighRiskIntent, intentsAreCompatible } from './intents.mjs';
+import {
+  classifyQuestionIntent,
+  isHighRiskIntent,
+  intentsAreCompatible,
+  isSignatureOrFullNameQuestion,
+  isShiftOrScheduleQuestion,
+  pickShiftOption,
+  isSpecificManagerOrLocationQuestion,
+  isTodaysDateField,
+  isAvailabilityCheckboxQuestion,
+  resolveWorkScheduleCheckboxAnswer,
+} from './intents.mjs';
 import { mapToExactOption, answerTypeFromField } from './optionMap.mjs';
 import { buildAnswerRecord, reviewRecord, REASON, SOURCE } from './answerRecord.mjs';
 import {
@@ -29,6 +42,16 @@ import {
   explicitYears,
   profileMentionsTopic,
 } from './profileFacts.mjs';
+import { buildLlmDateContext, isAvailabilityStartDateLabel, getTodayMMDDYYYY } from '../date-utils.mjs';
+import { validateBeforeFill } from '../orchestrator/preFillValidator.mjs';
+import { collectLiveFieldOptions } from '../workdayDom.mjs';
+
+function isAvailabilityDropdown(field, intent) {
+  const type = String(field?.fieldType || field?.elementType || '').toLowerCase();
+  return intent === 'availability'
+    && optionsOf(field).length > 0
+    && /dropdown|select|radio|combobox/.test(type);
+}
 
 function optionsOf(field) {
   return (field.options || [])
@@ -37,9 +60,28 @@ function optionsOf(field) {
     .filter(Boolean);
 }
 
+/** Pull checkbox/dropdown/radio labels from the live page when the scan had none. */
+async function hydrateFieldOptionsFromPage(page, field = {}) {
+  if (!page) return field;
+  const existing = optionsOf(field);
+  if (existing.length) return field;
+  const ft = String(field.fieldType || field.elementType || '').toLowerCase();
+  if (!/checkbox-group|multi-checkbox|dropdown|select|radio|combobox/.test(ft)) return field;
+  const live = await collectLiveFieldOptions(page, field.label || '', ft).catch(() => []);
+  if (!live.length) return field;
+  const opts = live.map((text) => ({ text }));
+  const raw = { ...(field._raw || {}), options: opts };
+  return {
+    ...field,
+    options: live,
+    _raw: raw,
+  };
+}
+
 function finish(field, intent, answer, source, reasonCode, confidence) {
   const answerType = answerTypeFromField(field);
-  if ((isYesNoQuestionLabel(field.label) || intent === 'yes_no') && !isYesNoAnswer(answer)) {
+  const scheduleCheckbox = intent === 'work_schedule' || isAvailabilityCheckboxQuestion(field.label);
+  if ((isYesNoQuestionLabel(field.label) || intent === 'yes_no') && !scheduleCheckbox && !isYesNoAnswer(answer)) {
     const yn = extractYesNoAnswer(answer);
     if (!yn) {
       const safe = lookupSensitiveSafeAnswer(field.label);
@@ -82,8 +124,67 @@ function deterministicSpecial(field, profile) {
   const label = field.label || '';
   const intent = classifyQuestionIntent(label, field);
 
+  if (isSignatureOrFullNameQuestion(label) || intent === 'identity_name') {
+    const p = profile.personal || {};
+    const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || '';
+    if (fullName) {
+      return finish(field, 'identity_name', fullName, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+    }
+    // Fallback: use ApplyWizz profile name keys
+    const nameFromApi = profile._applyWizzRaw?.full_name
+      || profile._applyWizzRaw?.name
+      || profile._applyWizzRaw?.first_name && `${profile._applyWizzRaw.first_name} ${profile._applyWizzRaw.last_name || ''}`.trim()
+      || '';
+    if (nameFromApi) {
+      return finish(field, 'identity_name', nameFromApi, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.98);
+    }
+  }
+
+  // Today's date for signature-companion date fields
+  if (isTodaysDateField(label) || intent === 'date') {
+    const today = new Date();
+    const mm = String(today.getMonth() + 1).padStart(2, '0');
+    const dd = String(today.getDate()).padStart(2, '0');
+    const yyyy = today.getFullYear();
+    const todayStr = `${mm}/${dd}/${yyyy}`;
+    return finish(field, 'date', todayStr, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+  }
+
+  if (isAvailabilityStartDateLabel(label, field._raw || field)) {
+    const todayStr = getTodayMMDDYYYY('Asia/Kolkata');
+    return finish(field, 'availability', todayStr, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+  }
+
+  if (isShiftOrScheduleQuestion(label) || intent === 'work_schedule' || isAvailabilityCheckboxQuestion(label)) {
+    const opts = optionsOf(field);
+    const el = String(field.elementType || field.fieldType || '').toLowerCase();
+    if (/multi-checkbox|checkbox-group/.test(el) && opts.length) {
+      const mapped = resolveWorkScheduleCheckboxAnswer(label, 'Yes', opts);
+      if (mapped) {
+        return finish(field, 'work_schedule', mapped, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.95);
+      }
+    }
+    if (opts.length) {
+      const picked = pickShiftOption(opts);
+      if (picked) {
+        return finish(field, 'work_schedule', picked, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.95);
+      }
+    } else if (!/multi-checkbox|checkbox-group/.test(el)) {
+      return finish(field, 'work_schedule', 'Flexible', SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.90);
+    }
+  }
+
+  if (isSpecificManagerOrLocationQuestion(label) || intent === 'location_preference') {
+    const opts = optionsOf(field);
+    if (opts.length) {
+      const picked = opts.find((o) => /\b(no\s*preference|any|all|none|n\/?a)\b/i.test(o)) || opts[0];
+      return finish(field, 'location_preference', picked, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.92);
+    }
+    return finish(field, 'location_preference', 'N/A', SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
+  }
+
   const safe = lookupSensitiveSafeAnswer(label);
-  if (safe && !isWorkEligibilityQuestion(label) && intent !== 'years_experience' && intent !== 'technology_years_experience') {
+  if (safe && !isWorkEligibilityQuestion(label) && intent !== 'years_experience' && intent !== 'technology_years_experience' && intent !== 'criminal_history' && intent !== 'identity_name' && intent !== 'date') {
     return finish(field, intent, safe, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.94);
   }
 
@@ -107,7 +208,7 @@ function deterministicSpecial(field, profile) {
     if (!val) return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
     return finish(field, intent, val, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.98);
   }
-  if (intent === 'clearance' || intent === 'professional_license') {
+  if (intent === 'clearance' || intent === 'professional_license' || intent === 'criminal_history') {
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
   const eeoKind = {
@@ -118,7 +219,10 @@ function deterministicSpecial(field, profile) {
     eeo_disability: 'disability',
   }[intent];
   if (eeoKind) {
-    const val = explicitEeo(profile, eeoKind);
+    let val = explicitEeo(profile, eeoKind);
+    if (!val && eeoKind === 'veteran') {
+      val = profile?.eeo?.veteran_status || 'I am not a veteran';
+    }
     if (!val) return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
     return finish(field, intent, val, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.97);
   }
@@ -157,6 +261,29 @@ function deterministicSpecial(field, profile) {
 }
 
 /**
+ * Phase 2 fallback: Apply Wizz + Playwright live options + per-field LLM.
+ * @returns {object|null} answer record
+ */
+export async function llmAnswerWithPlaywrightContext(field, profile = {}, opts = {}) {
+  const label = field?.label || '';
+  if (!label) return null;
+  const intent = classifyQuestionIntent(label, field);
+
+  const hit = await resolveClientAnswer(field, profile, {
+    page: opts.page || null,
+    forceLlm: true,
+    required: field.required !== false,
+    options: optionsOf(field),
+    fieldType: field.fieldType || field.elementType || '',
+    resumePath: opts.resumePath || profile._resumePath,
+    step: opts.stepName || profile._currentStep || '',
+    tenant: opts.tenant || profile._tenant || '',
+  });
+  if (!hit?.answer) return null;
+  return finish(field, intent, hit.answer, SOURCE.LLM, REASON.SEMANTIC_PROFILE_MATCH, 0.78);
+}
+
+/**
  * Resolve one normalized field without LLM.
  * @returns {object|null} answer record or null if still unknown
  */
@@ -168,20 +295,67 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
   const special = deterministicSpecial(field, profile);
   if (special) return special;
 
+  // Apply Wizz stores a calendar date, while this control expects a relative
+  // option such as Immediately or 1 week. Let the LLM map date to live options.
+  // ─── Tier 1: Supabase Direct Answer ──────────────────────────────
+  const fromSupabase = lookupSupabaseAnswerSync(label, profile, {
+    options: optionsOf(field),
+    fieldType: field.fieldType || field.elementType || '',
+  });
+  if (fromSupabase?.answer) {
+    let candidate = fromSupabase.answer;
+    const opts = optionsOf(field);
+    const el = String(field.elementType || field.fieldType || '').toLowerCase();
+    if (/multi-checkbox|checkbox-group/.test(el) && opts.length) {
+      const remapped = resolveWorkScheduleCheckboxAnswer(label, candidate, opts);
+      if (remapped) candidate = remapped;
+    }
+    if (isAvailabilityStartDateLabel(label, field._raw || field) && !/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(candidate).trim())) {
+      candidate = getTodayMMDDYYYY('Asia/Kolkata');
+    }
+    const supabaseAccepted = acceptClientValue(label, candidate, {
+      options: opts,
+      fieldType: field.fieldType || field.elementType || '',
+      profile,
+    });
+    if (supabaseAccepted) {
+      return finish(
+        field,
+        intent,
+        supabaseAccepted,
+        'supabase',
+        REASON.EXPLICIT_PROFILE_MATCH,
+        0.98,
+      );
+    }
+  }
+
+  // Apply Wizz stores a calendar date, while this control expects a relative
+  // option such as Immediately or 1 week. Let the LLM map date to live options.
+  if (isAvailabilityDropdown(field, intent)) return null;
+
+  // ─── Tier 2: ApplyWizz API Profile Facts ─────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
     options: optionsOf(field),
     fieldType: field.fieldType || field.elementType || '',
     threshold: 0.62,
   });
   if (fromApi?.answer) {
-    return finish(
-      field,
-      intent,
-      fromApi.answer,
-      SOURCE.APPLYWIZZ,
-      /fuzzy|substring/.test(String(fromApi.source || '')) ? REASON.SEMANTIC_PROFILE_MATCH : REASON.EXPLICIT_PROFILE_MATCH,
-      /fuzzy|substring/.test(String(fromApi.source || '')) ? 0.86 : 0.97,
-    );
+    const apiAccepted = acceptClientValue(label, fromApi.answer, {
+      options: optionsOf(field),
+      fieldType: field.fieldType || field.elementType || '',
+      profile,
+    });
+    if (apiAccepted) {
+      return finish(
+        field,
+        intent,
+        apiAccepted,
+        SOURCE.APPLYWIZZ,
+        /fuzzy|substring/.test(String(fromApi.source || '')) ? REASON.SEMANTIC_PROFILE_MATCH : REASON.EXPLICIT_PROFILE_MATCH,
+        /fuzzy|substring/.test(String(fromApi.source || '')) ? 0.86 : 0.97,
+      );
+    }
   }
 
   const peeked = peekClientAnswer(label, profile, {
@@ -195,6 +369,29 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
     return finish(field, intent, peeked, inferSource(label, profile, peeked), REASON.EXPLICIT_PROFILE_MATCH, 0.93);
   }
 
+  // ─── Tier 3: Resume Parsing Facts ─────────────────────────────────
+  const fromExperience = resolveExperienceQuestionAnswer(label, profile, {
+    options: optionsOf(field),
+    fieldType: field.fieldType || field.elementType || '',
+  });
+  if (fromExperience?.answer) {
+    const expAccepted = acceptClientValue(label, fromExperience.answer, {
+      options: optionsOf(field),
+      fieldType: field.fieldType || field.elementType || '',
+      profile,
+    });
+    if (expAccepted) {
+      return finish(
+        field,
+        intent,
+        expAccepted,
+        `experience/${fromExperience.source || 'resume'}`,
+        REASON.EXPLICIT_PROFILE_MATCH,
+        0.92,
+      );
+    }
+  }
+
   if (isHighRiskIntent(intent) || isComplianceSensitive(label)) {
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType });
   }
@@ -203,6 +400,7 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
 }
 
 async function resolveVerifiedMemory(field, profile, qaStore) {
+  if (isApiOnlyAnswerMode()) return null;
   const label = field.label || '';
   const intent = classifyQuestionIntent(label, field);
   const match = await findBestMatch(label, profile, qaStore, 0.92).catch(() => null);
@@ -223,7 +421,7 @@ async function resolveVerifiedMemory(field, profile, qaStore) {
  */
 export async function answerPageQuestions(fields = [], profile = {}, opts = {}) {
   if (isApplyWizzConfigured()) {
-    await hydrateProfileFromApplyWizz(profile);
+    if (!profile._applyWizzHydrated) await hydrateProfileFromApplyWizz(profile);
   } else if (!profile._applyWizzWarned) {
     profile._applyWizzWarned = true;
     console.log(`  ⚠️  ${applyWizzStatus(profile).missing}`);
@@ -233,16 +431,26 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
   const answers = [];
   const unknown = [];
 
-  for (const field of fields) {
+  for (let field of fields) {
     if (!field?.label || field.elementType === 'button' || field.elementType === 'file') {
       continue;
     }
+    field = await hydrateFieldOptionsFromPage(opts.page, field);
     const intent = classifyQuestionIntent(field.label, field);
+    const availabilityDropdown = isAvailabilityDropdown(field, intent);
     let record = resolveFieldWithoutLlm(field, profile);
-    if (!record) {
-      record = await resolveVerifiedMemory(field, profile, opts.qaStore);
+    const hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '' && !record.requiresReview);
+    if (!hasResolvedAnswer) {
+      const mem = availabilityDropdown ? null : await resolveVerifiedMemory(field, profile, opts.qaStore);
+      if (mem && !mem.requiresReview && mem.answer != null && String(mem.answer).trim() !== '') {
+        record = mem;
+      }
     }
-    if (record) {
+    if (record && !record.requiresReview && record.answer != null && String(record.answer).trim() !== '') {
+      answers.push(record);
+      continue;
+    }
+    if (record && record.requiresReview && (isHighRiskIntent(intent) || isComplianceSensitive(field.label))) {
       answers.push(record);
       continue;
     }
@@ -265,23 +473,44 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
     const byId = new Map(batch.map((row) => [row.questionId, row]));
     for (const item of unknown) {
       const llm = byId.get(item.questionId);
-      if (!llm || llm.requiresReview || !llm.answer) {
-        const ambiguous = /ambiguous|unclear|meaning/i.test(String(llm?.reason || ''));
-        answers.push(reviewRecord(item.field, item.intent, ambiguous ? REASON.AMBIGUOUS_QUESTION : REASON.UNKNOWN_INFORMATION, {
-          answerType: answerTypeFromField(item.field),
-          confidence: llm?.confidence || 0,
-          source: SOURCE.LLM,
-        }));
+      if (llm?.answer && !llm.requiresReview) {
+        answers.push(finish(
+          item.field,
+          item.intent,
+          llm.answer,
+          SOURCE.LLM,
+          REASON.SEMANTIC_PROFILE_MATCH,
+          Math.max(Number(llm.confidence) || 0, 0.75),
+        ));
         continue;
       }
-      answers.push(finish(
-        item.field,
-        item.intent,
-        llm.answer,
-        SOURCE.LLM,
-        REASON.SEMANTIC_PROFILE_MATCH,
-        llm.confidence,
-      ));
+      const playwrightLlm = await llmAnswerWithPlaywrightContext(item.field, profile, {
+        page: opts.page,
+        resumePath: opts.resumePath,
+        stepName: opts.stepName,
+      });
+      if (playwrightLlm?.answer && !playwrightLlm.requiresReview) {
+        console.log(`    🤖 [LLM+DOM] "${item.label.slice(0, 55)}" ← "${String(playwrightLlm.answer).slice(0, 40)}"`);
+        answers.push(playwrightLlm);
+        continue;
+      }
+      if (llm?.answer) {
+        answers.push(finish(
+          item.field,
+          item.intent,
+          llm.answer,
+          SOURCE.LLM,
+          REASON.SEMANTIC_PROFILE_MATCH,
+          Math.max(Number(llm.confidence) || 0, 0.70),
+        ));
+        continue;
+      }
+      const ambiguous = /ambiguous|unclear|meaning/i.test(String(llm?.reason || ''));
+      answers.push(reviewRecord(item.field, item.intent, ambiguous ? REASON.AMBIGUOUS_QUESTION : REASON.UNKNOWN_INFORMATION, {
+        answerType: answerTypeFromField(item.field),
+        confidence: llm?.confidence || 0,
+        source: SOURCE.LLM,
+      }));
     }
   }
 
@@ -310,25 +539,29 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
   if (!label) return null;
 
   if (isApplyWizzConfigured()) {
-    await hydrateProfileFromApplyWizz(profile);
+    if (!profile._applyWizzHydrated) await hydrateProfileFromApplyWizz(profile);
   } else if (!profile._applyWizzWarned) {
     profile._applyWizzWarned = true;
     console.log(`  ⚠️  ${applyWizzStatus(profile).missing}`);
   }
 
-  const normalized = normalizeDiscoveredField(
+  let normalized = normalizeDiscoveredField(
     { ...rawField, label },
     { pageNumber: opts.pageNumber || 1, stepName: opts.stepName || profile._currentStep || '' },
   );
+  normalized = await hydrateFieldOptionsFromPage(opts.page, normalized);
   const intent = classifyQuestionIntent(normalized.label, normalized);
+  const availabilityDropdown = isAvailabilityDropdown(normalized, intent);
   const qaStore = opts.qaStore;
 
   let record = resolveFieldWithoutLlm(normalized, profile);
-  if (!record) {
-    record = await resolveVerifiedMemory(normalized, profile, qaStore);
+  const hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
+  if (!hasResolvedAnswer) {
+    record = availabilityDropdown ? null : await resolveVerifiedMemory(normalized, profile, qaStore);
   }
 
-  if (!record && opts.allowLlm !== false && isOpenRouterEnabled()) {
+  const hasMemoryAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
+  if (!hasMemoryAnswer && opts.allowLlm !== false && isOpenRouterEnabled()) {
     const unknown = {
       questionId: normalized.questionId,
       label: normalized.label,
@@ -340,6 +573,7 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
     };
     const batch = await analyzeUnknownQuestionsBatch([unknown], profile, {
       resumePath: opts.resumePath || profile._resumePath,
+      page: opts.page || null,
     });
     const llm = batch[0];
     if (llm?.answer && !llm.requiresReview) {
@@ -349,8 +583,108 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
         llm.answer,
         SOURCE.LLM,
         REASON.SEMANTIC_PROFILE_MATCH,
-        llm.confidence ?? 0.82,
+        Math.max(Number(llm.confidence) || 0, 0.75),
       );
+    }
+  }
+
+  const hasLlmBatchAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
+  if (!hasLlmBatchAnswer && opts.allowLlm !== false) {
+    record = await llmAnswerWithPlaywrightContext(normalized, profile, {
+      page: opts.page,
+      resumePath: opts.resumePath || profile._resumePath,
+      stepName: opts.stepName,
+    });
+  }
+
+  // ─── Layer 4: Live Best-Fit Fallback for Required Degree Dropdown ───────
+  if (
+    !record
+    && intent === 'education_degree'
+    && normalized.required === true
+  ) {
+    const liveOptions = optionsOf(normalized);
+    if (!liveOptions.length) {
+      return reviewRecord(normalized, intent, REASON.NO_VALID_OPTION, {
+        answerType: answerTypeFromField(normalized),
+        confidence: 0,
+        source: SOURCE.LLM,
+      });
+    }
+
+    if (opts.allowLlm !== false && isOpenRouterEnabled()) {
+      const classification = profile._degreeClassification || {};
+      const canonicalDegree = classification.canonical_degree || profile.education?.degree || profile.education?.level || '';
+      const major = profile.education?.field_of_study || profile.education?.major || '';
+      const sourceRaw = classification.source_raw || '';
+      const educationSummary = [
+        canonicalDegree ? `Degree: ${canonicalDegree}` : '',
+        major ? `Major/Field of Study: ${major}` : '',
+        sourceRaw ? `Raw Education: ${sourceRaw}` : '',
+      ].filter(Boolean).join(', ') || 'Not specified';
+
+      const prompt = `Given this candidate's full education record (${educationSummary}) and this exact list of real dropdown options:
+${liveOptions.map((opt, i) => `${i + 1}. "${opt}"`).join('\n')}
+
+Instruction:
+Pick the single closest matching option. You must return one of the given options verbatim, or 'NONE' if nothing is even loosely related. Do not fabricate or alter any option. Respond with ONLY the exact option string or NONE.`;
+
+      try {
+        const completion = await openRouterChat({
+          messages: [{ role: 'user', content: prompt }],
+          temperature: 0.0,
+          max_tokens: 150,
+        });
+        let rawAnswer = completion?.choices?.[0]?.message?.content?.trim() || '';
+        rawAnswer = rawAnswer.replace(/^["'`]+|["'`]+$/g, '').trim();
+
+        const exactOption = liveOptions.find((opt) => opt.toLowerCase() === rawAnswer.toLowerCase());
+        if (exactOption && exactOption !== 'NONE') {
+          console.log(`    🎓 [Layer 4 Best-Fit] "${normalized.label.slice(0, 45)}" ← "${exactOption}"`);
+          record = finish(
+            normalized,
+            intent,
+            exactOption,
+            SOURCE.LLM,
+            REASON.SEMANTIC_PROFILE_MATCH,
+            0.88,
+          );
+          if (profile._applyWizzId) {
+            recordSupabaseAnswerInMemory(profile, normalized.label, exactOption);
+            await upsertSupabaseAnswer({
+              applywizzId: profile._applyWizzId,
+              question: normalized.label,
+              questionNormalized: normalizeLabel(normalized.label),
+              answer: exactOption,
+              fieldType: normalized.fieldType || normalized.elementType || 'dropdown',
+              options: liveOptions,
+              source: 'ai',
+              company: opts.tenant || profile._tenant || '',
+            }).catch((err) => {
+              console.log(`  ⚠️ Failed to cache Layer 4 degree answer to Supabase: ${err.message?.slice(0, 100)}`);
+            });
+          }
+        } else {
+          return reviewRecord(normalized, intent, REASON.NO_VALID_OPTION, {
+            answerType: answerTypeFromField(normalized),
+            confidence: 0,
+            source: SOURCE.LLM,
+          });
+        }
+      } catch (err) {
+        console.log(`  ⚠️ Layer 4 degree matching failed: ${err.message?.slice(0, 100)}`);
+        return reviewRecord(normalized, intent, REASON.NO_VALID_OPTION, {
+          answerType: answerTypeFromField(normalized),
+          confidence: 0,
+          source: SOURCE.LLM,
+        });
+      }
+    } else {
+      return reviewRecord(normalized, intent, REASON.NO_VALID_OPTION, {
+        answerType: answerTypeFromField(normalized),
+        confidence: 0,
+        source: SOURCE.UNKNOWN,
+      });
     }
   }
 
