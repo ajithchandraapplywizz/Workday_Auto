@@ -13,8 +13,7 @@
 import { typeAndClickOption, clickVisiblePromptOption, fuzzyScore } from './fields.mjs';
 import { resolveField } from './planner.mjs';
 import { resolveDynamicAnswer } from './questionEngine/index.mjs';
-import { createQAStore, saveAnswerToYaml, isComplianceSensitive, normalizeLabel } from './qaStore.mjs';
-import { saveAnswerToTenantYaml, lookupTenantAnswer } from './tenantQuestionYaml.mjs';
+import { createQAStore, isComplianceSensitive, normalizeLabel } from './qaStore.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
 import { pickNearestSelectOption } from './openRouterLlm.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
@@ -210,7 +209,7 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
   }
 
   if (!answer) {
-    answer = lookupTenantAnswer(tenant, label) || profile?.qa_answers?.[normalizeLabel(label)];
+    answer = profile?.qa_answers?.[normalizeLabel(label)];
     if (Array.isArray(answer)) answer = answer[answer.length - 1];
   }
 
@@ -406,16 +405,6 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
     profile.qa_answers[normalizeLabel(descriptor.label)] = answer;
     if (!profile._filledValues) profile._filledValues = {};
     profile._filledValues[descriptor.label] = answer;
-    await saveAnswerToYaml(descriptor.label, answer).catch(() => {});
-    if (tenant) {
-      await saveAnswerToTenantYaml(tenant, {
-        label: descriptor.label,
-        answer,
-        fieldType: descriptor.fieldType,
-        options: descriptor.options || [],
-        step: stepName,
-      }).catch(() => {});
-    }
   }
 
   await page.evaluate(() => {
