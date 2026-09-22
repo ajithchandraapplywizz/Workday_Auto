@@ -16,19 +16,17 @@ import { normalizeDiscoveredFields } from './fieldSchema.mjs';
 export async function discoverPage(page, meta = {}) {
   await waitForDomSettled(page, { timeout: 2000 }).catch(() => {});
 
-  const [formQuestions, domFields, chrome] = await Promise.all([
-    discoverFormFieldQuestions(page).catch(() => []),
-    discoverWorkdayFields(page).catch(() => []),
-    page.evaluate(() => {
-      const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
-        .filter((el) => el.offsetParent || el.getClientRects().length)
-        .map((el) => (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80));
-      const iframes = Array.from(document.querySelectorAll('iframe'))
-        .map((el) => el.getAttribute('title') || el.getAttribute('name') || el.src || '')
-        .filter(Boolean);
-      return { dialogs, iframes };
-    }).catch(() => ({ dialogs: [], iframes: [] })),
-  ]);
+  const formQuestions = await discoverFormFieldQuestions(page).catch(() => []);
+  const domFields = await discoverWorkdayFields(page).catch(() => []);
+  const chrome = await page.evaluate(() => {
+    const dialogs = Array.from(document.querySelectorAll('[role="dialog"], [aria-modal="true"]'))
+      .filter((el) => el.offsetParent || el.getClientRects().length)
+      .map((el) => (el.getAttribute('aria-label') || el.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 80));
+    const iframes = Array.from(document.querySelectorAll('iframe'))
+      .map((el) => el.getAttribute('title') || el.getAttribute('name') || el.src || '')
+      .filter(Boolean);
+    return { dialogs, iframes };
+  }).catch(() => ({ dialogs: [], iframes: [] }));
 
   const merged = [];
   const seen = new Set();

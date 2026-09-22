@@ -10,6 +10,7 @@ import { dirname, resolve } from 'path';
 import yaml from 'js-yaml';
 import { fuzzyScore } from './fields.mjs';
 import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
+import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
 
 export const COMPLIANCE_PATTERNS = [
   /work\s*auth/i,
@@ -62,11 +63,13 @@ export function lookupSemanticCompensationAnswer(rawLabel, profile = null, tenan
   if (isHourlyWageQuestion(rawLabel) && profile?.compensation_hourly) {
     return String(profile.compensation_hourly);
   }
-  if (profile?.compensation && !isHourlyWageQuestion(rawLabel)) return String(profile.compensation);
-  if (profile?.salary && !isHourlyWageQuestion(rawLabel)) return String(profile.salary);
-  if (profile?.experience?.desired_salary && !isHourlyWageQuestion(rawLabel)) {
-    return String(profile.experience.desired_salary);
-  }
+  const unwrapComp = (val) => {
+    if (val == null) return null;
+    if (typeof val === 'object') return val.target || val.amount || val.value || val.annual || null;
+    return String(val);
+  };
+  const compVal = unwrapComp(profile?.compensation) || unwrapComp(profile?.salary) || unwrapComp(profile?.experience?.desired_salary);
+  if (compVal && !isHourlyWageQuestion(rawLabel)) return String(compVal);
 
   let best = null;
   let bestScore = 0;
@@ -115,6 +118,10 @@ export async function lookupSemanticAnswer(rawLabel, profile = null, tenant = ''
     const fromApi = lookupApplyWizzAnswer(rawLabel, profile, { threshold });
     if (fromApi?.answer) return { ...fromApi, source: fromApi.source || 'applywizz' };
   } catch { /* optional module */ }
+
+  // API-only runs may use Apply Wizz, profile facts, and the LLM, but never
+  // fall through to tenant YAML or the local Q&A database.
+  if (isApiOnlyAnswerMode()) return null;
 
   try {
     const { resolveByConcept } = await import('./answerConcepts.mjs');
@@ -168,17 +175,31 @@ export async function lookupSemanticAnswer(rawLabel, profile = null, tenant = ''
 export function isHighRiskPersonalFactQuestion(label) {
   const text = String(label || '');
   if (isSalaryQuestion(text)) return true;
-  return /(how many years|years?\s+of\s+(experience|exp)|experience with|proficient (in|with)|expert (in|with)|certified (in|on)|certification|do you have .{0,40}experience)/i.test(text);
+  return /(how many years|years?\s+of\s+(experience|exp)|experience with|proficient (in|with)|expert (in|with)|certified (in|on)|certification|do you have .{0,40}experience|licen[cs]e\s*number|clearance|security\s*clearance|passport|ssn|social\s*security)/i.test(text);
 }
 
 export function normalizeLabel(label) {
   if (!label) return '';
-  return label
+  let norm = label
     .toLowerCase()
     .replace(/[^\w\s]/g, '')     // strip punctuation
     .replace(/\s+/g, ' ')
     .trim();
+
+  // Spelling-variant normalization (British / American & common Workday terms)
+  norm = norm
+    .replace(/\bauthoris(ed|ing|ation|e)\b/g, 'authoriz$1')
+    .replace(/\borganis(ed|ing|ation|e)\b/g, 'organiz$1')
+    .replace(/\brecognis(ed|ing|ation|e)\b/g, 'recogniz$1')
+    .replace(/\bsummaris(ed|ing|ation|e)\b/g, 'summariz$1')
+    .replace(/\bcolour\b/g, 'color')
+    .replace(/\bselect\s+one\b/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return norm;
 }
+
 
 export function buildScopedLabel(label, tenant = '') {
   const base = normalizeLabel(label);
@@ -236,6 +257,14 @@ export async function findBestMatch(rawLabel, profile, qaStore = null, threshold
   // Cached YAML/LLM "No" must never win on 16+/18+ working-age questions.
   const ageYes = resolveMinimumAgeAnswer(rawLabel, profile);
   if (ageYes) return { answer: ageYes, source: 'minimum_age', score: 1 };
+
+  if (isApiOnlyAnswerMode()) {
+    const semantic = isSalaryQuestion(rawLabel)
+      ? lookupSemanticCompensationAnswer(rawLabel, profile, tenant)
+      : null;
+    if (semantic) return { answer: semantic, source: 'applywizz_compensation', score: 1 };
+    return null;
+  }
 
   const requiresExactMatch = isSalaryQuestion(rawLabel);
   const exactThreshold = requiresExactMatch ? 1 : threshold;
@@ -309,6 +338,7 @@ export async function findBestMatch(rawLabel, profile, qaStore = null, threshold
 }
 
 export async function saveAnswerToYaml(rawLabel, answer, profilePath) {
+  if (isApiOnlyAnswerMode()) return;
   try {
     const pPath = profilePath || resolve(process.cwd(), 'config', 'profile.yml');
     let content = '';
@@ -450,3 +480,71 @@ export function createQAStore(options = {}) {
   const storePath = options.storePath || process.env.QA_STORE_PATH || DEFAULT_STORE_PATH;
   return new JsonQAStore(storePath);
 }
+
+const DEFAULT_MANUAL_REVIEW_PATH = resolve(process.cwd(), 'data', 'manual-review.json');
+
+let manualReviewWriteQueue = Promise.resolve();
+
+/**
+ * Log unverified or invalid fields to the local manual-review queue (data/manual-review.json).
+ */
+export async function appendManualReviewRecord({
+  candidateId = '',
+  tenant = '',
+  questionLabel = '',
+  controlType = '',
+  visibleOptions = [],
+  tierAttempted = '',
+  attemptedValue = '',
+  reason = '',
+  step = '',
+  filePath = DEFAULT_MANUAL_REVIEW_PATH,
+} = {}) {
+  const record = {
+    timestamp: new Date().toISOString(),
+    candidate_id: candidateId || process.env.APPLYWIZZ_ID || 'default_candidate',
+    workday_tenant: tenant || 'global',
+    question_label: questionLabel,
+    control_type: controlType,
+    visible_options: Array.isArray(visibleOptions) ? visibleOptions : [],
+    tier_attempted: tierAttempted || 'none',
+    attempted_value: attemptedValue || '',
+    reason: reason || 'unresolved',
+    step: step || '',
+  };
+
+  return manualReviewWriteQueue = manualReviewWriteQueue.then(async () => {
+    try {
+      await fs.mkdir(dirname(filePath), { recursive: true });
+      let records = [];
+      try {
+        const existing = await fs.readFile(filePath, 'utf8');
+        records = JSON.parse(existing);
+        if (!Array.isArray(records)) records = [];
+      } catch {
+        records = [];
+      }
+
+      const existingIdx = records.findIndex(
+        (r) => r.candidate_id === record.candidate_id &&
+               r.workday_tenant === record.workday_tenant &&
+               r.question_label === record.question_label
+      );
+
+      if (existingIdx >= 0) {
+        records[existingIdx] = { ...records[existingIdx], ...record, timestamp: new Date().toISOString() };
+      } else {
+        records.push(record);
+      }
+
+      await fs.writeFile(filePath, JSON.stringify(records, null, 2), 'utf8');
+      console.log(`  📋 [MANUAL REVIEW] Logged question to manual review: "${(questionLabel || '').slice(0, 50)}" (${record.workday_tenant})`);
+    } catch (err) {
+      console.error(`  ⚠️  Failed to write manual review record: ${err.message}`);
+    }
+
+    return record;
+  }).catch(() => record);
+}
+
+

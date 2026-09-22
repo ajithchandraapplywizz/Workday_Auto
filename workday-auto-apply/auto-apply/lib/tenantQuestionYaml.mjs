@@ -72,8 +72,11 @@ function normalizeTenantQuestionKey(label = '') {
  * Lookup answer from tenant-only DB (config/tenant-overrides/{tenant}.yml scanned_questions).
  * Never mixes answers across tenants.
  */
+import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
+
 /** Optional per-tenant experience overrides (e.g. umiami.yml `experience:` block). */
 export function getTenantExperienceOverrides(tenant) {
+  if (isApiOnlyAnswerMode()) return null;
   const doc = loadTenantDocSync(tenant);
   const exp = doc?.experience;
   if (!exp || typeof exp !== 'object') return null;
@@ -82,6 +85,7 @@ export function getTenantExperienceOverrides(tenant) {
 
 /** Optional per-tenant personal overrides (e.g. umiami.yml `personal:` block). */
 export function getTenantPersonalOverrides(tenant) {
+  if (isApiOnlyAnswerMode()) return null;
   const doc = loadTenantDocSync(tenant);
   const personal = doc?.personal;
   if (!personal || typeof personal !== 'object') return null;
@@ -90,6 +94,7 @@ export function getTenantPersonalOverrides(tenant) {
 
 /** Optional per-tenant education overrides (e.g. umiami.yml `education:` block). */
 export function getTenantEducationOverrides(tenant) {
+  if (isApiOnlyAnswerMode()) return null;
   const doc = loadTenantDocSync(tenant);
   const education = doc?.education;
   if (!education || typeof education !== 'object') return null;
@@ -101,6 +106,7 @@ export function getTenantEducationOverrides(tenant) {
  * Does not affect other tenants — only runs when a tenant YAML defines these blocks.
  */
 export function applyTenantOverridesToProfile(profile, tenant) {
+  if (isApiOnlyAnswerMode()) return profile;
   if (!profile || !tenant) return profile;
   const doc = loadTenantDocSync(tenant);
   if (!doc) return profile;
@@ -124,6 +130,7 @@ export function applyTenantOverridesToProfile(profile, tenant) {
 }
 
 export function lookupTenantAnswer(tenant, label, { threshold = 0.72 } = {}) {
+  if (isApiOnlyAnswerMode()) return null;
   const ageYes = resolveMinimumAgeAnswer(label);
   if (ageYes) return ageYes;
 

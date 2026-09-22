@@ -53,8 +53,9 @@ const HIGH_RISK = new Set([
 ]);
 
 export function isSignatureOrFullNameQuestion(label = '') {
-  const s = String(label || '').toLowerCase();
+  const s = String(label || '').toLowerCase().trim();
   if (/parent|guardian|representative|supervisor/i.test(s)) return false;
+  if (/^(legal\s*)?name$|^full\s*name$|^candidate\s*name$/i.test(s)) return true;
   // Short-form label patterns
   if (/please\s+sign|electronic\s+signature|typed\s+name|sign\s*\(\s*type\s*name\s*\)|type\s+(your\s+)?(full\s+)?name|enter\s+(your\s+)?(full\s+)?name|your\s+typed\s+name|please\s+enter\s+your\s+name|\bsignature\b/i.test(s)) return true;
   // Long-form legal acknowledgement paragraphs that require typing your name as a signature
@@ -76,54 +77,8 @@ export function isTodaysDateField(label = '') {
 export function isShiftOrScheduleQuestion(label = '') {
   const s = String(label || '').toLowerCase();
   if (/when|what\s*date|start\s*date/i.test(s)) return false;
-  // "Date Available to Work" is a calendar field, not shift checkboxes.
-  if (/date\s+available|available\s+(on|date)\b|^date\s*available/i.test(s)) return false;
-  return /\b(shift|shifts|work\s*schedule|hours\s*available|schedule\s*preference|available\s*to\s*work|work\s*types?|indicate\s+availability|please\s+indicate\s+availability)\b/i.test(s)
+  return /\b(shift|shifts|work\s*schedule|hours\s*available|schedule\s*preference|available\s*to\s*work|work\s*types?)\b/i.test(s)
     && !/how\s*many\s*hours/i.test(s);
-}
-
-/** Checkbox groups for shifts / work availability (not Yes/No). */
-export function isAvailabilityCheckboxQuestion(label = '') {
-  const s = String(label || '').toLowerCase();
-  if (/date\s+available|available\s+(on|date)\b|^date\s*available/i.test(s)) return false;
-  return isShiftOrScheduleQuestion(label)
-    || /\bplease\s+indicate\s+availability\b/i.test(s)
-    || (/\bavailable\s*to\s*work\b/i.test(s) && !/date/i.test(s));
-}
-
-/**
- * Map stored Yes/schedule answers onto live checkbox labels (comma-separated for multi-select).
- * @param {string} label
- * @param {string|string[]} answer
- * @param {string[]} options
- * @returns {string|null}
- */
-export function resolveWorkScheduleCheckboxAnswer(label, answer, options = []) {
-  const opts = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
-  if (!opts.length) return null;
-  const raw = Array.isArray(answer) ? answer.join(', ') : String(answer || '').trim();
-  if (!raw) return null;
-
-  const yn = /^yes$/i.test(raw);
-  const picks = raw.split(/[,;|]/).map((p) => p.trim()).filter(Boolean);
-  const matched = picks.flatMap((pick) => {
-    const needle = pick.toLowerCase();
-    return opts.filter((o) => o.toLowerCase() === needle || o.toLowerCase().includes(needle) || needle.includes(o.toLowerCase()));
-  });
-  if (matched.length) return [...new Set(matched)].join(', ');
-
-  if (yn || /flexible|any|all/i.test(raw)) {
-    const flexible = opts.find((o) => /\b(any|all|flexible|open|no\s*preference)\b/i.test(o));
-    if (flexible) return flexible;
-    const day = opts.find((o) => /\b(day|1st|first|morning|standard|regular|full[-\s]?time)\b/i.test(o));
-    if (day) return day;
-    if (isAvailabilityCheckboxQuestion(label) && opts.length <= 8) return opts.join(', ');
-    const one = pickShiftOption(opts);
-    return one || null;
-  }
-
-  const one = pickShiftOption(opts);
-  return one || null;
 }
 
 export function pickShiftOption(options = []) {
@@ -156,6 +111,15 @@ export function classifyQuestionIntent(label = '', field = {}) {
   if (isSignatureOrFullNameQuestion(text)) return 'identity_name';
   if (isTodaysDateField(text)) return 'date';
   if (isShiftOrScheduleQuestion(text)) return 'work_schedule';
+  if (/limitation.*(hour|schedule|available)|restriction.*(hour|schedule|available)|limitations?\s+to\s+(the\s+)?hours/i.test(text)) {
+    return 'availability_limitations';
+  }
+  if (/able\s+to\s+commute|commute\s+to\s+(the\s+)?(site|location|office|job)|reliable\s+(transportation|commute)/i.test(text)) {
+    return 'commute_ability';
+  }
+  if (/highest\s*(level|degree).*(education|completed)|education\s*level/i.test(text)) {
+    return 'education_degree';
+  }
   if (isSpecificManagerOrLocationQuestion(text)) return 'location_preference';
 
   if (isMinimumAgeQuestion(text)) return 'minimum_age';

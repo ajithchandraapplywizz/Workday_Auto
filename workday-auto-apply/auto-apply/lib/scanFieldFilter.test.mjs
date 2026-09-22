@@ -36,6 +36,20 @@ test('optional skip-list labels stay skipped when Workday did not mark them requ
   assert.equal(isSkippableUnimportantLabel('Type to add skills'), true);
 });
 
+test('Self Identify CC-305 Language/Name/Date are never skipped as optional Languages', () => {
+  const cc305 = { stepName: 'Self Identify', containerText: 'Voluntary Self-Identification of Disability CC-305 OMB Control Number' };
+  assert.equal(shouldIncludeInScan('Language', cc305, 'Self Identify'), true);
+  assert.equal(shouldIncludeInScan('Name', cc305, 'Self Identify'), true);
+  assert.equal(shouldIncludeInScan('Date', cc305, 'Self Identify'), true);
+  assert.equal(isSkippableUnimportantLabel('Language', cc305, 'Self Identify'), false);
+  assert.equal(isMandatoryField('Language', cc305, 'Self Identify'), true);
+});
+
+test('My Experience optional Languages row stays skipped', () => {
+  assert.equal(isSkippableUnimportantLabel('Languages', { stepName: 'My Experience' }), true);
+  assert.equal(shouldIncludeInScan('Languages', { stepName: 'My Experience' }), false);
+});
+
 test('required hourly and essay questions stay in the scan', () => {
   const hourly = 'What is your minimum hourly wage requirement for this position?*';
   const essay = 'Please describe your experience in hospital revenue integrity, coding, or healthcare revenue cycle operations.*';

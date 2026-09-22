@@ -5,10 +5,19 @@ package-lock.json
 # User data (never commit)
 .env
 .env.*
-config/profile.yml
-config/settings.yml
-config/resumes.yml
+*.env*
+**/*.env*
+
+# YAML files (ignore all yml/yaml files)
+*.yml
+*.yaml
+**/*.yml
+**/*.yaml
+!**/*.example.yml
+!**/*.example.yaml
+
 targets.txt
+sync_ids.txt
 resumes/*.pdf
 data/applied.csv
 data/queue.csv
@@ -18,6 +27,12 @@ data/learnings.json
 data/qa-store.json
 data/llm-qa-store.json
 data/required-fields-db.json
+data/application-clients.json
+data/client-resumes/
+data/manual-review.json
+data/workday200.csv
+data/*.csv
+data/*.json
 
 # Generated files
 tests/reports/metrics.ndjson
@@ -25,6 +40,7 @@ forms/*
 !forms/.gitkeep
 screenshots/*
 !screenshots/.gitkeep
+runs/
 
 # OS
 .DS_Store

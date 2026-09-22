@@ -2,14 +2,14 @@
  * workdaySkills.mjs — Workday "Type to Add Skills" multi-select.
  *
  * Optional Skills: never fill.
- * Required Skills: parse the resume, add exactly 2 skills, type + click autocomplete.
+ * Required Skills: parse the resume, add exactly 1 skill, type + click autocomplete.
  */
 
 import { waitForDomSettled } from './workdayDom.mjs';
 import { WORKDAY_DEFAULT_SKILLS } from './workdayDefaults.mjs';
 import { extractResumeSkillNames, getResumePathForApply, loadResumeText } from './resumeParser.mjs';
 
-const REQUIRED_SKILL_COUNT = 2;
+const REQUIRED_SKILL_COUNT = 1;
 
 function norm(text) {
   return String(text || '').replace(/\s+/g, ' ').trim();
@@ -24,12 +24,25 @@ export function parseSkillsList(answer) {
     .filter(Boolean);
 }
 
+export function isEducationOrInvalidSkill(skill = '') {
+  const s = String(skill || '').trim().toLowerCase();
+  if (!s || s.length < 2 || s.length > 35) return true;
+  if (/\b(master|bachelor|phd|doctorate|doctor|associate|degree|diploma)\b/i.test(s)) return true;
+  if (/\b(m\.?s\.?|b\.?s\.?|m\.?a\.?|b\.?a\.?|b\.?tech|m\.?tech|m\.?b\.?a)\b/i.test(s)) return true;
+  if (/\b(university|college|school|academy|institute|graduat|education|student)\b/i.test(s)) return true;
+  if (/\b(major|minor|field of study|coursework|curriculum|academic)\b/i.test(s)) return true;
+  if (/\b(computer science|information technology)\b/i.test(s) && /\b(master|bachelor|degree|major)\b/i.test(s)) return true;
+  if (s === 'computer science') return true;
+  if (/^master\s*of/i.test(s) || /^bachelor\s*of/i.test(s) || /^science$/i.test(s)) return true;
+  return false;
+}
+
 function uniqueSkills(list = []) {
   const out = [];
   const seen = new Set();
   for (const raw of list) {
     const skill = norm(raw);
-    if (!skill) continue;
+    if (!skill || isEducationOrInvalidSkill(skill)) continue;
     const key = skill.toLowerCase();
     if (seen.has(key)) continue;
     seen.add(key);
@@ -39,7 +52,7 @@ function uniqueSkills(list = []) {
 }
 
 /**
- * Two skills only: profile/resume first, then two safe defaults if the PDF is empty.
+ * One skill only: resume/profile first, then one safe default if the PDF is empty.
  * @param {object} profile
  * @returns {Promise<string[]>}
  */
@@ -139,6 +152,7 @@ export async function fillWorkdaySkillsField(page, skillsInput, profile = {}) {
   }).catch(() => []);
 
   if (alreadySelected.length >= REQUIRED_SKILL_COUNT) {
+    profile._workdaySkillsFilled = true;
     console.log(`    ✓ Skills already has ${alreadySelected.length} chip(s) — enough`);
     return true;
   }
@@ -175,7 +189,9 @@ export async function fillWorkdaySkillsField(page, skillsInput, profile = {}) {
     await page.waitForTimeout(250);
   }
 
-  return added > 0;
+  const complete = added >= REQUIRED_SKILL_COUNT;
+  if (complete) profile._workdaySkillsFilled = true;
+  return complete;
 }
 
 export async function isSkillsFieldRequired(page) {

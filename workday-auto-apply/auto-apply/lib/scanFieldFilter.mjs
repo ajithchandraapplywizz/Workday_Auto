@@ -48,7 +48,7 @@ const SKIP_LABEL_PATTERNS = [
   /^(awards?|honors?|achievements?)$/i,
   /^(publications?|patents?)$/i,
   /^affiliations?$/i,
-  /^references?$/i,
+  /^references?(\s*\d+)?$/i,
   /^volunteer(\s+(experience|work|name|organization|hours|activities?))?$/i,
   /social\s*networks?/i,
   // Extra optional chrome — script-only skips these
@@ -60,6 +60,24 @@ const SKIP_LABEL_PATTERNS = [
   /dateSection(Month|Year|Day)/i,
   /^dateSection/i,
 ];
+
+/**
+ * OFCCP Self Identify (CC-305) required widgets — never treat as optional My Experience "Languages".
+ * @param {string} label
+ * @param {object} [field]
+ * @param {string} [stepName]
+ */
+export function isCc305SelfIdentifyField(label = '', field = {}, stepName = '') {
+  const plain = String(label || '').replace(/\*+/g, '').trim();
+  const step = String(stepName || field?.stepName || '');
+  const blob = `${step} ${field?.containerText || ''}`.toLowerCase();
+  const onSelfIdentify = /self\s*identify|cc-305|voluntary self-identification of disability|omb control number/i.test(blob);
+  if (!onSelfIdentify && !/self\s*identify/i.test(step)) return false;
+  if (/^(language|name|date)$/i.test(plain)) return true;
+  if (/please check one of the boxes below/i.test(plain)) return true;
+  if (/disability/i.test(plain) && /check one|boxes below/i.test(String(label || ''))) return true;
+  return false;
+}
 
 function isOptionalIfApplicableLabel(label = '') {
   const lower = String(label || '').toLowerCase();
@@ -93,12 +111,17 @@ export function hasRequiredSignal(label = '', field = {}) {
   return false;
 }
 
-export function isSkippableUnimportantLabel(label = '', field = {}) {
+export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return true;
+  if (isCc305SelfIdentifyField(label, field, stepName)) return false;
   if (hasRequiredSignal(text, field)) return false;
   if (isMinimumAgeQuestion(text)) return false;
   const lower = text.toLowerCase();
+  if (/^languages?$/i.test(lower)) {
+    const ctx = `${field?.containerText || ''} ${field?.stepName || stepName || ''}`.toLowerCase();
+    if (/self\s*identify|cc-305|omb control number/i.test(ctx)) return false;
+  }
   const looksLikeQuestion = /\?/.test(text)
     || /^(are you|have you|do you|will you|please (select|indicate|confirm|choose))/i.test(text);
   if (SKIP_LABEL_PATTERNS.some((re) => re.test(lower))) return true;
@@ -120,26 +143,32 @@ export function isSkippableUnimportantLabel(label = '', field = {}) {
  * True when Workday marks the field mandatory (red *, aria-required, or DOM required flag).
  * Does not treat instructional "required field" page text as mandatory by itself.
  */
-export function isMandatoryField(label = '', field = {}) {
+export function isMandatoryField(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
   if (isMinimumAgeQuestion(text)) return true;
+  if (isCc305SelfIdentifyField(label, field, stepName)) return true;
+  const plain = text.replace(/\*+$/, '').trim();
+  if (/^(race|ethnicity|gender|sex|hispanic|veteran(\s*status)?)$/i.test(plain)) return true;
+  if (/voluntary disclosures/i.test(stepName || field?.stepName || '') && /gender|sex|race|ethnic|veteran|hispanic|latino/i.test(text)) return true;
   return hasRequiredSignal(text, field);
 }
 
 /**
  * Include in scan harvest / terminal prompt / scan fill.
  */
-export function shouldIncludeInScan(label = '', field = {}) {
+export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
+  if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   if (isMinimumAgeQuestion(text)) return true;
-  if (isMandatoryField(text, field)) return true;
+  if (isMandatoryField(text, field, stepName)) return true;
   // Allow short EEO labels (Race, Sex) that are otherwise under the length floor
   const plain = text.replace(/\*+$/, '').trim();
   const shortEeo = /^(race|ethnicity|gender|sex|hispanic|veteran(\s*status)?)$/i.test(plain);
-  if (!shortEeo && text.length < 4) return false;
-  if (isSkippableUnimportantLabel(text, field)) return false;
+  if (shortEeo) return true;
+  if (text.length < 4) return false;
+  if (isSkippableUnimportantLabel(text, field, stepName)) return false;
 
   // Never catalog unknown optional fields
   return false;
@@ -148,7 +177,7 @@ export function shouldIncludeInScan(label = '', field = {}) {
 /** Skip fill/prompt for optional fields (default). Set profile._fillOptionalFields = true to fill everything. */
 export function shouldSkipOptionalFill(label = '', field = {}, profile = {}, stepName = '') {
   if (profile?._fillOptionalFields === true) return false;
-  return !shouldIncludeInScan(label, field);
+  return !shouldIncludeInScan(label, field, stepName);
 }
 
 /** @deprecated Use shouldSkipOptionalFill */

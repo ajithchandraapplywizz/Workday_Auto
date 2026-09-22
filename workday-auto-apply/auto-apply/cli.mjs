@@ -22,8 +22,9 @@ import { existsSync } from 'fs';
 import { scanForm, slugify } from './lib/scanner.mjs';
 import { fillForm } from './lib/engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './lib/planner.mjs';
+import { isApiOnlyAnswerMode } from './lib/apiOnlyProfile.mjs';
 import { applyLearnings, getStats } from './lib/learner.mjs';
-import { extractJDText, detectATS, validateWorkdayUrl, readJobLinksFile } from './lib/discovery.mjs';
+import { extractJDText, detectATS, validateWorkdayUrl, readJobLinksFile, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './lib/discovery.mjs';
 import { loadQueue, saveQueue, addToQueue, getPendingFromQueue } from './lib/reporter.mjs';
 import { 
   getTodayMMDDYYYY, 
@@ -111,6 +112,9 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--no-skip-auth') scanBatchSkipAuth = false;
   else if (rawArgs[i] === '--no-interactive') scanBatchInteractive = false;
   else if (rawArgs[i] === '--no-wait-review') scanBatchWaitReview = false;
+  else if ((rawArgs[i] === '--client' || rawArgs[i] === '--applywizz-id') && rawArgs[i + 1]) {
+    process.env.APPLYWIZZ_ID = rawArgs[++i];
+  }
   else positionalArgs.push(rawArgs[i]);
 }
 const mode = isSignup ? 'signup' : 'signin';
@@ -165,23 +169,27 @@ async function resolveAuthCredentials() {
   await loadEnv();
 
   let profile = null;
-  const profilePath = findFilePath('config/profile.yml');
-  if (existsSync(profilePath)) {
-    try {
-      profile = await loadProfile(profilePath);
-    } catch { /* ignore parsing errors */ }
+  try {
+    const profilePath = findFilePath('config/profile.yml');
+    profile = await loadProfile(existsSync(profilePath) ? profilePath : null);
+  } catch (err) {
+    console.warn(`  ⚠️ Profile load warning: ${err.message}`);
   }
 
-  let resolvedWorkdayEmail = workdayEmail || process.env.WORKDAY_EMAIL || '';
+  // Prioritize explicit WORKDAY_EMAIL (env or CLI flag) when provided (e.g. for testing); otherwise default to candidate's profile email.
+  const applyWizzEmail = String(profile?.personal?.email || profile?.personal?.company_email || '').trim();
+  let resolvedWorkdayEmail = workdayEmail || process.env.WORKDAY_EMAIL || applyWizzEmail || '';
   let resolvedWorkdayPassword = workdayPassword || process.env.WORKDAY_PASSWORD || '';
 
   if (mode === 'signin') {
     if (!resolvedWorkdayEmail || !resolvedWorkdayPassword) {
-      console.error('\n❌ Error: Set WORKDAY_EMAIL and WORKDAY_PASSWORD in .env file\n');
+      console.error('\n❌ Error: Missing credentials. Either:');
+      console.error('   1. Set APPLYWIZZ_ID in .env (client profile provides email) and WORKDAY_PASSWORD in .env');
+      console.error('   2. Or set WORKDAY_EMAIL and WORKDAY_PASSWORD in .env\n');
       process.exit(1);
     }
   } else if (mode === 'signup') {
-    resolvedWorkdayEmail = resolvedWorkdayEmail || profile?.workday?.email || profile?.personal?.email || '';
+    resolvedWorkdayEmail = resolvedWorkdayEmail || profile?.workday?.email || profile?.personal?.email || profile?.personal?.company_email || '';
     resolvedWorkdayPassword = resolvedWorkdayPassword || profile?.workday?.password || '';
   }
 
@@ -337,10 +345,17 @@ async function cmdScan(url) {
   }
   assertWorkdayUrl(url);
   const creds = await resolveAuthCredentials();
+  const profile = creds.profile || await loadProfile().catch(() => ({}));
+  if (url) {
+    profile._canonicalJobUrl = url;
+    profile._jobUrl = url;
+    profile._company = extractWorkdayCompanyName(url);
+  }
   await scanForm(url, {
     workdayEmail: creds.workdayEmail,
     workdayPassword: creds.workdayPassword,
     mode: creds.mode,
+    profile,
   });
 }
 
@@ -365,9 +380,21 @@ async function cmdFill(url, planPath) {
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
+      profile,
     });
-    const resumePath = await pickResume('', resolve(process.cwd(), 'config', 'resumes.yml')).catch(() => null);
+
+    if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
+      console.log('\n❌ Workday authentication could not be completed.');
+      return 'auth-failed';
+    }
+
+    const resumesYml = findFilePath('config/resumes.yml');
+    let resumePath = null;
+    if (existsSync(resumesYml)) {
+      resumePath = await pickResume('', resumesYml);
+    }
     if (resumePath) profile._resumePath = resumePath;
+
     plan = await generatePlan(scan, profile, { resumePath, url });
 
     const slug = slugify(url);
@@ -401,13 +428,13 @@ async function cmdFill(url, planPath) {
 // ─── APPLY (full pipeline) ──────────────────────────────────────────────────
 async function cmdApply(url) {
   if (!url) {
-    console.log('Usage: node cli.mjs apply <url> [--signup|--signin] [--confirm-submit]');
+    console.log('Usage: node cli.mjs apply <url> [--client <id>] [--signup|--signin] [--confirm-submit]');
     process.exit(1);
   }
   assertWorkdayUrl(url);
 
   const profilePath = findFilePath('config/profile.yml');
-  if (!existsSync(profilePath)) {
+  if (!isApiOnlyAnswerMode() && !existsSync(profilePath)) {
     console.log('❌ No config/profile.yml found. Run: node cli.mjs setup');
     process.exit(1);
   }
@@ -415,8 +442,14 @@ async function cmdApply(url) {
   const creds = await resolveAuthCredentials();
   const profile = creds.profile || await loadProfile(profilePath);
 
+  const company = extractWorkdayCompanyName(url);
+  profile._canonicalJobUrl = url;
+  profile._jobUrl = url;
+  if (company) profile._company = company;
+
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`🚀 AUTO-APPLY: ${url} (Mode: ${creds.mode})`);
+  if (company) console.log(`🏢 Company: ${company}`);
   console.log(`${'═'.repeat(60)}\n`);
 
   const ats = detectATS(url);
@@ -426,7 +459,8 @@ async function cmdApply(url) {
     process.exit(1);
   }
 
-  const browser = await chromium.launch({ headless: false });
+  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+  const browser = await chromium.launch({ headless: isHeadless });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -443,7 +477,26 @@ async function cmdApply(url) {
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
+      profile,
     });
+
+    const roleTitle = await extractJobRoleFromDom(page, url);
+    if (roleTitle) {
+      profile._jobTitle = roleTitle;
+      profile._roleTitle = roleTitle;
+      console.log(`💼 Role: ${roleTitle}`);
+    }
+
+    if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
+      // Check if wizard is reachable via Continue Application or reload before failing
+      const wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+      if (!wizardNow) {
+        console.log('\n❌ Workday authentication could not be completed (account requires email verification or credentials invalid).');
+        console.log('   Stopping pipeline cleanly.\n');
+        try { await browser.close(); } catch {}
+        return 'auth-failed';
+      }
+    }
 
     console.log('\n── Step 2: Load profile & pick resume ──');
     let jdText = '';
@@ -460,6 +513,11 @@ async function cmdApply(url) {
 
     console.log('\n── Step 3: Generate fill plan ──');
     let plan = await generatePlan(scan, profile, { resumePath, jdText, url });
+    if (profile._company) plan.company = profile._company;
+    if (profile._jobTitle) {
+      plan.jobTitle = profile._jobTitle;
+      plan.role = profile._jobTitle;
+    }
 
     const slug = slugify(url);
     const planPath = resolve(process.cwd(), 'forms', `${slug}-plan.json`);
@@ -480,6 +538,7 @@ async function cmdApply(url) {
       browser,
       context,
       page,
+      profile,
       workdayEmail: creds.workdayEmail,
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,

@@ -58,6 +58,27 @@ export function getWorkdayPlatform(url) {
 }
 
 /**
+ * Extract company name from Workday career URL.
+ * Rule: Starting word before the first '.' in the hostname (e.g., motorolasolutions.wd5... -> motorolasolutions).
+ * Everything after '.' is discarded.
+ * @param {string} url
+ * @returns {string}
+ */
+export function extractWorkdayCompanyName(url) {
+  if (!url) return '';
+  try {
+    const raw = String(url).trim();
+    const hostname = raw.includes('://')
+      ? new URL(raw).hostname
+      : raw.split('/')[0];
+    const firstPart = (hostname.split('.')[0] || '').toLowerCase().trim();
+    return firstPart;
+  } catch {
+    return '';
+  }
+}
+
+/**
  * @param {string} line
  * @returns {{ url: string, company?: string }|null}
  */
@@ -190,6 +211,22 @@ const CONTINUE_APPLICATION_SELECTORS = [
 
 /** True when the multi-step application wizard is visible (not JD / login). */
 export async function isWorkdayWizardVisible(page) {
+  const url = page.url();
+  if (/\/login(?:\?|$)/i.test(url)) return false;
+
+  // If on login, registration, or Social SSO screen, it is NOT the wizard
+  const isAuth = await page.$([
+    'input[data-automation-id="password"]:visible',
+    'input[type="password"]:visible',
+    'input[data-automation-id="verifyPassword"]:visible',
+    'button[data-automation-id="SignInWithEmailButton"]:visible',
+    'button[data-automation-id="signInSubmitButton"]:visible',
+    'button[data-automation-id="createAccountSubmitButton"]:visible',
+    'button[data-automation-id="createAccountLink"]:visible',
+    'button[data-automation-id="signInLink"]:visible',
+  ].join(', ')).catch(() => null);
+  if (isAuth) return false;
+
   const el = await page.$(WORKDAY_WIZARD_SELECTORS).catch(() => null);
   return Boolean(el && await el.isVisible().catch(() => false));
 }
@@ -268,7 +305,7 @@ export async function clickContinueApplicationIfPresent(page) {
  * Enter the application wizard from JD / draft / apply URL (DOM-only).
  * @returns {Promise<{ entered: boolean, method: string }>}
  */
-export async function ensureWorkdayApplicationWizard(page, { mode = 'signin' } = {}) {
+export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', profile = null, applywizzId = null } = {}) {
   if (await isWorkdayWizardVisible(page)) {
     return { entered: true, method: 'already-on-wizard' };
   }
@@ -282,7 +319,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin' } =
     }
   }
 
-  await discoverApplicationForm(page, page.url(), { mode });
+  await discoverApplicationForm(page, page.url(), { mode, profile, applywizzId });
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
   await page.waitForTimeout(1000);
 
@@ -413,7 +450,25 @@ export async function prescanGatewayElements(page) {
 // ─── Adaptive Gateway Handler post-Apply ───────────────────────────────────
 export async function handleAdaptiveGateway(page, mode = 'signin') {
   console.log(`   Scanning page & gateway elements post-apply (mode: "${mode}")...`);
-  await page.waitForTimeout(1000);
+
+  // Wait for gateway or form elements to hydrate before scanning
+  try {
+    await page.waitForSelector([
+      'button[data-automation-id="SignInWithEmailButton"]',
+      'button:has-text("Sign in with email")',
+      'input[data-automation-id="password"]',
+      'input[type="password"]',
+      'input[data-automation-id="email"]',
+      'input[type="email"]',
+      'button[data-automation-id="createAccountTab"]',
+      'button[data-automation-id="createAccountLink"]',
+      'button:has-text("Create Account")',
+      'button[data-automation-id="bottom-navigation-next-button"]',
+      'button:has-text("Save and Continue")',
+      'button:has-text("Save & Continue")',
+    ].join(', '), { timeout: 10000 });
+  } catch {}
+  await page.waitForTimeout(500);
 
   const scan = await prescanGatewayElements(page);
   console.log('   Pre-scan elements:', JSON.stringify(scan));
@@ -425,7 +480,14 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
   // 1. Social SSO Screen with "Sign in with email"
   if (scan.hasSignInWithEmailBtn) {
     console.log('   🔗 Pre-scan: Detected Social SSO gateway — clicking "Sign in with email"...');
-    const ssoBtns = await page.$$('button:has-text("Sign in with email"), a:has-text("Sign in with email"), button:has-text("Continue with email"), a:has-text("Continue with email"), [data-automation-id*="email"]');
+    const ssoBtns = await page.$$([
+      'button[data-automation-id="SignInWithEmailButton"]',
+      'button:has-text("Sign in with email")',
+      'a:has-text("Sign in with email")',
+      'button:has-text("Continue with email")',
+      'a:has-text("Continue with email")',
+      '[data-automation-id*="email" i]'
+    ].join(', '));
     for (const btn of ssoBtns) {
       if (await btn.isVisible().catch(() => false)) {
         if (await isInNavOrHeader(btn)) continue;
@@ -514,6 +576,14 @@ export async function clickGatewayCreateAccount(page) {
     return true;
   }
 
+  // If currently on Social SSO, click "Sign in with email" first
+  const ssoBtn = await page.$('button[data-automation-id="SignInWithEmailButton"]:visible, button:has-text("Sign in with email"):visible');
+  if (ssoBtn) {
+    console.log('   Clicking "Sign in with email" before switching to Create Account...');
+    await ssoBtn.click({ force: true }).catch(() => ssoBtn.evaluate(e => e.click()));
+    await page.waitForTimeout(1500);
+  }
+
   const buttons = await page.$$([
     '[role="dialog"] button[data-automation-id="createAccountLink"]',
     '[role="dialog"] button:has-text("Create Account")',
@@ -540,8 +610,64 @@ export async function clickGatewayCreateAccount(page) {
   return false;
 }
 
+/**
+ * Extract job role/title from Workday job page DOM or URL fallback.
+ * @param {import('playwright').Page} page
+ * @param {string} [fallbackUrl]
+ * @returns {Promise<string>}
+ */
+export async function extractJobRoleFromDom(page, fallbackUrl = '') {
+  let role = '';
+  try {
+    if (page && typeof page.evaluate === 'function') {
+      role = await page.evaluate(() => {
+        const selectors = [
+          'h1[data-automation-id="jobPostingHeader"]',
+          '[data-automation-id="jobPostingHeader"]',
+          '[data-automation-id="jobTitle"]',
+          'h1[data-automation-id*="job" i]',
+          '[data-automation-id="jobPostingPage"] h1',
+          'main h1',
+          'article h1',
+          'h1',
+          '[role="heading"][aria-level="1"]',
+        ];
+        for (const sel of selectors) {
+          const el = document.querySelector(sel);
+          if (el) {
+            const txt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (txt && txt.length > 2 && txt.length < 200 && !/^(sign in|create account|apply|my information|my experience|application questions|review)/i.test(txt)) {
+              return txt;
+            }
+          }
+        }
+        return '';
+      }).catch(() => '');
+    }
+  } catch {}
+
+  if (role) return role;
+
+  const targetUrl = fallbackUrl || (page && typeof page.url === 'function' ? page.url() : '');
+  if (targetUrl) {
+    try {
+      const pathname = new URL(targetUrl).pathname;
+      const parts = pathname.split('/').filter(Boolean);
+      const slug = parts[parts.length - 1] || '';
+      if (slug) {
+        const cleaned = slug
+          .replace(/_[A-Za-z0-9-]+$/, '')
+          .replace(/[-_]+/g, ' ')
+          .trim();
+        if (cleaned) return cleaned;
+      }
+    } catch {}
+  }
+  return '';
+}
+
 // ─── Workday form discovery (JD → Apply → auth gateway) ─────────────────────
-export async function discoverApplicationForm(page, originalUrl, { mode = 'signin' } = {}) {
+export async function discoverApplicationForm(page, originalUrl, { mode = 'signin', profile = null, applywizzId = null } = {}) {
   const currentUrl = page.url();
 
   if (!isWorkdayUrl(currentUrl) && !isWorkdayUrl(originalUrl)) {
@@ -624,10 +750,40 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
     if (applyBtn) {
       const text = (await applyBtn.textContent().catch(() => '')).trim();
       console.log(`   Found initial Workday Apply button: "${text || 'Apply'}" — clicking...`);
+
+      // Determine company & job role
+      const effectiveUrl = originalUrl || page.url();
+      const company = extractWorkdayCompanyName(effectiveUrl);
+      const role = await extractJobRoleFromDom(page, effectiveUrl);
+      if (profile) {
+        if (company && !profile._company) profile._company = company;
+        if (role && !profile._jobTitle) profile._jobTitle = role;
+        if (role && !profile._roleTitle) profile._roleTitle = role;
+      }
+
+      let hasPriorApp = false;
+      const clientAwlId = String(
+        applywizzId
+        || profile?._applyWizzId
+        || profile?.applywizz_id
+        || profile?.client_id
+        || process.env.APPLYWIZZ_ID
+        || '',
+      ).trim();
+
+      if (clientAwlId && company) {
+        try {
+          const { hasPriorApplicationForCompany } = await import('./applicationHistory.mjs');
+          hasPriorApp = await hasPriorApplicationForCompany(clientAwlId, company, profile, effectiveUrl);
+        } catch {
+          hasPriorApp = false;
+        }
+      }
+
       await applyBtn.click({ force: true }).catch(() => applyBtn.evaluate(el => el.click()));
       await page.waitForTimeout(2000);
 
-      // Check for popup choices — explicitly click "Apply Manually"
+      // Popup choices: if client previously applied to this company, click "Use My Last Application", else "Apply Manually"
       const manualApplySelectors = [
         '[data-automation-id="applyManually"]',
         'a[data-automation-id="applyManually"]',
@@ -639,24 +795,70 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         'div:has-text("Apply Manually")',
       ];
 
-      console.log('   Waiting for "Apply Manually" popup option...');
-      let manualClicked = false;
-      for (let attempt = 0; attempt < 8; attempt++) {
-        for (const sel of manualApplySelectors) {
-          try {
-            const opt = await page.$(sel);
-            if (opt && await opt.isVisible().catch(() => false)) {
-              const optText = (await opt.textContent().catch(() => '')).trim();
-              console.log(`   Selecting Workday apply option: "${optText || 'Apply Manually'}"...`);
-              await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
-              manualClicked = true;
-              await page.waitForTimeout(2000);
-              break;
-            }
-          } catch {}
+      const previousAppSelectors = [
+        '[data-automation-id="useMyLastApplication"]',
+        '[data-automation-id="useMyPreviousApplication"]',
+        'a[data-automation-id="useMyLastApplication"]',
+        'button[data-automation-id="useMyLastApplication"]',
+        'a:has-text("Use My Last Application")',
+        'button:has-text("Use My Last Application")',
+        'a:has-text("Use My Previous Application")',
+        'button:has-text("Use My Previous Application")',
+        'span:has-text("Use My Last Application")',
+        'span:has-text("Use My Previous Application")',
+        'div:has-text("Use My Last Application")',
+        'div:has-text("Use My Previous Application")',
+        '[data-automation-id*="lastApplication" i]',
+        '[data-automation-id*="previousApplication" i]',
+      ];
+
+      let optionClicked = false;
+
+      if (hasPriorApp) {
+        console.log(`   Client "${clientAwlId}" has applied to "${company}" previously — selecting "Use My Last Application"...`);
+        for (let attempt = 0; attempt < 8; attempt++) {
+          for (const sel of previousAppSelectors) {
+            try {
+              const opt = await page.$(sel);
+              if (opt && await opt.isVisible().catch(() => false)) {
+                const optText = (await opt.textContent().catch(() => '')).trim();
+                console.log(`   ✅ Selecting Workday apply option: "${optText || 'Use My Last Application'}"...`);
+                await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
+                optionClicked = true;
+                await page.waitForTimeout(2000);
+                break;
+              }
+            } catch {}
+          }
+          if (optionClicked) break;
+          await page.waitForTimeout(500);
         }
-        if (manualClicked) break;
-        await page.waitForTimeout(500);
+        if (!optionClicked) {
+          console.log(`   ℹ️  "Use My Last Application" popup option not found — falling back to "Apply Manually"...`);
+        }
+      } else {
+        console.log(`   Client "${clientAwlId || 'unknown'}" is new to "${company}" — selecting "Apply Manually"...`);
+      }
+
+      if (!optionClicked) {
+        console.log('   Waiting for "Apply Manually" popup option...');
+        for (let attempt = 0; attempt < 8; attempt++) {
+          for (const sel of manualApplySelectors) {
+            try {
+              const opt = await page.$(sel);
+              if (opt && await opt.isVisible().catch(() => false)) {
+                const optText = (await opt.textContent().catch(() => '')).trim();
+                console.log(`   Selecting Workday apply option: "${optText || 'Apply Manually'}"...`);
+                await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
+                optionClicked = true;
+                await page.waitForTimeout(2000);
+                break;
+              }
+            } catch {}
+          }
+          if (optionClicked) break;
+          await page.waitForTimeout(500);
+        }
       }
 
       // 3. Post-Apply Gateway Handling with adaptive element pre-scan

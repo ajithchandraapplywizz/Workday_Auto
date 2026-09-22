@@ -99,6 +99,10 @@ export function matchDemographicOption(answer, options = []) {
       const fallback = cleaned.filter((o) => veteranStatusKind(o) === 'not_protected');
       if (fallback.length === 1) return fallback[0];
     }
+    if (wantVet === 'not_protected') {
+      const fallback = cleaned.filter((o) => veteranStatusKind(o) === 'not_veteran');
+      if (fallback.length === 1) return fallback[0];
+    }
   }
 
   const yn = extractYesNoAnswer(wanted);
@@ -139,8 +143,11 @@ function normLabel(s) {
  * blob (which mentions veteran/ethnicity/gender) cannot attach every dropdown
  * to the first widget.
  */
-export async function markDropdownByLabel(page, labelText = '') {
-  return page.evaluate((target) => {
+export async function markDropdownByLabel(page, targetArg = '') {
+  const target = typeof targetArg === 'string'
+    ? { label: targetArg, questionId: '' }
+    : { label: targetArg?.label || '', questionId: targetArg?.questionId || targetArg?._raw?.wdQId || '' };
+  return page.evaluate((tgt) => {
     function norm(s) {
       return String(s || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
     }
@@ -159,14 +166,14 @@ export async function markDropdownByLabel(page, labelText = '') {
       const t = clean(text);
       if (!t) return [];
       const found = [];
-      const re = /please select the veteran status[^.?!]{0,160}[.?!]?|please indicate whether you are in one or more of the protected veteran[^.?!]{0,80}[.?!]?|please select your (?:veteran|veterans) status[^.?!]{0,80}[.?!]?|please select the (?:ethnicity|race|gender|sex)[^.?!]{0,160}[.?!]?|please select your (?:gender|sex|race|ethnicity)[^.?!]{0,80}[.?!]?|are you hispanic[^.?!]{0,60}[.?!]?|[^.!?]{8,220}\?/gi;
+      const re = /please select the veteran status[^.?!]{0,160}[.?!]?|please indicate whether you are in one or more of the protected veteran[^.?!]{0,80}[.?!]?|please select your (?:veteran|veterans) status[^.?!]{0,80}[.?!]?|please select the (?:ethnicity|race|gender|sex)[^.?!]{0,160}[.?!]?|please select your (?:gender|sex|race|ethnicity)[^.?!]{0,80}[.?!]?|are you hispanic[^.?!]{0,60}[.?!]?|[^.!?]{8,600}\?/gi;
       let m;
       while ((m = re.exec(t))) {
         const s = clean(m[0]);
         if (s && !found.some((x) => norm(x) === norm(s))) found.push(s);
       }
       if (found.length) return found;
-      if (t.length >= 3 && t.length <= 80) return [t];
+      if (t.length >= 3) return [t];
       return [];
     }
     function isNestedSelectWidget(widget) {
@@ -197,8 +204,36 @@ export async function markDropdownByLabel(page, labelText = '') {
     document.querySelectorAll('[data-wd-eeo-target]').forEach((el) => el.removeAttribute('data-wd-eeo-target'));
     document.querySelectorAll('[data-wd-eeo-target-root]').forEach((el) => el.removeAttribute('data-wd-eeo-target-root'));
 
-    const wantKind = kind(target);
-    const wantNorm = norm(target);
+    const targetLabel = tgt.label || '';
+    const targetQId = tgt.questionId || '';
+    const wantKind = kind(targetLabel);
+    const wantNorm = norm(targetLabel);
+
+    // 0. Direct match by persistent data-wd-q-id marker
+    if (targetQId) {
+      const markedContainer = document.querySelector(`[data-wd-q-id="${CSS.escape(targetQId)}"]`);
+      if (markedContainer) {
+        const directWidget = markedContainer.querySelector('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]');
+        if (directWidget && !isNestedSelectWidget(directWidget)) {
+          directWidget.setAttribute('data-wd-eeo-target', '1');
+          return { found: true, current: readValue(directWidget), score: 300 };
+        }
+      }
+    }
+
+    // Direct match: find container by label text first
+    const containers = Array.from(document.querySelectorAll('[data-automation-id*="formField"], [data-automation-id*="question"], [data-automation-id*="secondaryQuestionnaire"], [data-wd-q-id], fieldset, [role="group"]'));
+    for (const c of containers) {
+      const cText = norm(c.textContent);
+      if (wantNorm && (cText.includes(wantNorm.slice(0, 40)) || wantNorm.includes(cText.slice(0, 40)))) {
+        const directWidget = c.querySelector('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]');
+        if (directWidget && !isNestedSelectWidget(directWidget)) {
+          directWidget.setAttribute('data-wd-eeo-target', '1');
+          return { found: true, current: readValue(directWidget), score: 200 };
+        }
+      }
+    }
+
     const widgets = Array.from(document.querySelectorAll(
       '[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], [data-automation-id="multiSelectContainer"], button[aria-haspopup="listbox"], [role="combobox"]',
     )).filter((w) => !isNestedSelectWidget(w));
@@ -286,7 +321,7 @@ export async function markDropdownByLabel(page, labelText = '') {
     if (!best || bestScore < 30) return { found: false, current: '', score: bestScore };
     best.setAttribute('data-wd-eeo-target', '1');
     return { found: true, current: readValue(best), score: bestScore };
-  }, String(labelText || ''));
+  }, target);
 }
 
 async function readVisibleOptions(page) {
@@ -453,11 +488,12 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
   const widgetKind = inferWidgetKind(field._raw || field);
   const wanted = String(answer || '').trim();
   const label = String(field.label || field._raw?.label || '').replace(/\*+/g, '').trim();
+  const targetObj = { label, questionId: field.questionId || field._raw?.wdQId || '' };
   if (!wanted) {
     return { success: false, verifiedValue: '', options: [], reason: 'missing_answer', widgetKind };
   }
 
-  const mark = await markDropdownByLabel(page, label);
+  const mark = await markDropdownByLabel(page, targetObj);
   if (!mark?.found) {
     return { success: false, verifiedValue: '', options: [], reason: 'field_not_found', widgetKind };
   }
@@ -471,8 +507,8 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
   const typeNeedle = veteranStatusKind(wanted) === 'not_veteran'
     ? 'I am not a veteran'
     : wanted;
-  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    await markDropdownByLabel(page, label);
+  for (let attempt = 1; attempt <= 1; attempt++) {
+    await markDropdownByLabel(page, targetObj);
     await clickMarkedWidget(page);
     lastOptions = await collectOpenOptions(page);
     if (!lastOptions.length) {
@@ -482,7 +518,6 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
     }
     const pick = matchDemographicOption(wanted, lastOptions);
     if (!pick) {
-      if (attempt < MAX_ATTEMPTS) continue;
       await page.keyboard.press('Escape').catch(() => {});
       return {
         success: false,

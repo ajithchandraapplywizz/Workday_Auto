@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { acceptClientValue, peekClientAnswer } from './clientAnswer.mjs';
+import { acceptClientValue, peekClientAnswer, priorEmployerAnswer } from './clientAnswer.mjs';
 import { lookupDefaultAnswer } from './workdayDefaults.mjs';
 import { isDescribeExperienceQuestion, isProceedQuestion, isYearsQuantityQuestion } from './experienceAnswer.mjs';
 
@@ -41,6 +41,19 @@ test('Yes/No questions reject a degree or other invented fact', () => {
       fieldType: 'dropdown',
     }),
     'No',
+  );
+});
+
+test('named prior-employer questions use resume/company evidence', () => {
+  const profile = {
+    experience: { current_company: 'CHS Inc via Vizcloud' },
+    _resumeText: 'AI Platform Engineer at CHS Inc via Vizcloud',
+  };
+  assert.equal(priorEmployerAnswer('Have you ever been employed by CHS Inc?', profile), 'Yes');
+  assert.equal(priorEmployerAnswer('Have you ever been employed by Cambia?', profile), 'No');
+  assert.equal(
+    peekClientAnswer('Have you ever been employed by CHS Inc?', profile, { options: ['Yes', 'No'], fieldType: 'custom-dropdown' }),
+    'Yes',
   );
 });
 

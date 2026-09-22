@@ -21,6 +21,52 @@ export function fuzzyScore(needle, haystack) {
 }
 
 /**
+ * Token Set Ratio (similar to fuzzball / python-Levenshtein token_set_ratio).
+ * Returns score from 0 to 100.
+ */
+export function tokenSetRatio(s1 = '', s2 = '') {
+  const str1 = String(s1 || '').toLowerCase().trim();
+  const str2 = String(s2 || '').toLowerCase().trim();
+  if (!str1 || !str2) return 0;
+  if (str1 === str2) return 100;
+
+  const set1 = new Set(str1.split(/\s+/).filter(Boolean));
+  const set2 = new Set(str2.split(/\s+/).filter(Boolean));
+
+  const intersection = [...set1].filter(x => set2.has(x)).sort();
+  const diff1to2 = [...set1].filter(x => !set2.has(x)).sort();
+  const diff2to1 = [...set2].filter(x => !set1.has(x)).sort();
+
+  const sortedIntersect = intersection.join(' ');
+  const combined1 = [sortedIntersect, diff1to2.join(' ')].filter(Boolean).join(' ').trim();
+  const combined2 = [sortedIntersect, diff2to1.join(' ')].filter(Boolean).join(' ').trim();
+
+  // Simple Levenshtein distance on token combinations
+  const levenshtein = (a, b) => {
+    const matrix = [];
+    for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+    for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+    for (let i = 1; i <= b.length; i++) {
+      for (let j = 1; j <= a.length; j++) {
+        if (b.charAt(i - 1) === a.charAt(j - 1)) matrix[i][j] = matrix[i - 1][j - 1];
+        else matrix[i][j] = Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+      }
+    }
+    const maxLen = Math.max(a.length, b.length);
+    return maxLen === 0 ? 100 : Math.round((1 - matrix[b.length][a.length] / maxLen) * 100);
+  };
+
+  const scores = [
+    levenshtein(sortedIntersect, combined1),
+    levenshtein(sortedIntersect, combined2),
+    levenshtein(combined1, combined2)
+  ];
+
+  return Math.max(...scores);
+}
+
+
+/**
  * If a locator resolved to a <label> or wrapper (Workday often has label.for
  * pointing at a missing id), walk to the actual input/combobox.
  * @param {import('playwright').ElementHandle} handle
@@ -327,7 +373,7 @@ export async function clickVisiblePromptOption(page, needles = []) {
     const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
     const riskyRe = /^(add|\+|add\s+another|create|delete|remove)$/i;
     const nodes = Array.from(document.querySelectorAll(
-      '[role="option"], [data-automation-id="promptOption"], [role="treeitem"], [data-automation-id="menuItem"]'
+      '[role="option"], [data-automation-id="promptOption"], [role="treeitem"], [data-automation-id="menuItem"], [role="listbox"] [role="checkbox"], [data-automation-id="promptOption"] [role="checkbox"]'
     )).filter(el => {
       const style = window.getComputedStyle(el);
       if (style.display === 'none' || style.visibility === 'hidden') return false;
@@ -388,14 +434,24 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
       await page.waitForTimeout(300);
     }
 
-    // 2. Locate search input or use trigger if it's already an input
-    const searchInput = page.locator('input[role="searchbox"], input[type="search"], [data-automation-id*="search" i], input[aria-label*="Search" i]')
+    // 2. Wait for search input or prompt options to mount in DOM
+    await page.waitForSelector(
+      'input[data-automation-id="searchBox"], input[role="searchbox"], [data-automation-id*="search" i], [data-automation-id="promptOption"], [role="option"]',
+      { timeout: 2000 }
+    ).catch(() => {});
+
+    // Locate search input or use trigger if it's already an input
+    const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], input[type="search"], [data-automation-id*="search" i], [data-uxi-element-id*="searchBox" i], input[aria-label*="Search" i]')
       .filter({ has: page.locator(':visible') })
       .first();
 
-    const isSearchBoxVisible = await searchInput.isVisible().catch(() => false);
+    const isSearchBoxVisible = await searchInput.isVisible({ timeout: 400 }).catch(() => false);
     if (isSearchBoxVisible) {
+      await searchInput.scrollIntoViewIfNeeded().catch(() => {});
+      await searchInput.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(80);
       await searchInput.fill('');
+      await page.waitForTimeout(50);
       await searchInput.pressSequentially(searchTerm, { delay: 40 });
     } else {
       let isInput = false;
@@ -404,10 +460,15 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
       } catch {}
 
       if (isInput) {
+        await trigger.click({ force: true }).catch(() => {});
+        await page.waitForTimeout(80);
         await trigger.fill('');
+        await page.waitForTimeout(50);
         await trigger.pressSequentially(searchTerm, { delay: 40 });
       } else {
-        await page.keyboard.type(searchTerm, { delay: 40 });
+        // Wait for dropdown animation to settle before sending raw keystrokes
+        await page.waitForTimeout(300);
+        await page.keyboard.type(searchTerm, { delay: 50 });
       }
     }
 
@@ -417,22 +478,22 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
         const n = String(needle || '').toLowerCase();
         return Array.from(document.querySelectorAll('[role="option"], [data-automation-id="promptOption"]'))
           .some(el => (el.textContent || '').toLowerCase().includes(n) && el.offsetParent !== null);
-      }, searchTerm, { timeout: 6000 });
-    } catch { /* list may still be unfiltered; Enter often still selects the top match */ }
+      }, searchTerm, { timeout: 4000 });
+    } catch { /* list may still be unfiltered; Enter or direct click handles selection */ }
 
-    // Workday country codes: type query then Enter (same as manual use)
-    if (options.confirmWithEnter !== false) {
-      await page.keyboard.press('Enter');
-      await page.waitForTimeout(400);
-      return { success: true, method: 'searchable-dropdown-enter' };
-    }
-
-    // 3. Select matching option from open list (DOM text, not vision)
+    // 3. Try to select exact matching option from open list first (DOM text)
     const clicked = await clickVisiblePromptOption(page, [optionText, searchTerm]);
     if (clicked) {
       await page.keyboard.press('Enter').catch(() => {});
       await page.waitForTimeout(300);
-      return { success: true, method: 'searchable-dropdown' };
+      return { success: true, method: 'searchable-dropdown-option-clicked', option: clicked };
+    }
+
+    // If options.confirmWithEnter is requested and option wasn't directly clickable, press Enter
+    if (options.confirmWithEnter !== false) {
+      await page.keyboard.press('Enter');
+      await page.waitForTimeout(400);
+      return { success: true, method: 'searchable-dropdown-enter' };
     }
 
     const optEscaped = optionText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -738,3 +799,75 @@ export async function verifyDropdownFilled(page, element, expectedValue) {
 
   return false;
 }
+
+/**
+ * Locate the option whose visible text best matches the target value.
+ * Uses tokenSetRatio with threshold >= 85 by default.
+ * @param {string} targetValue
+ * @param {Array<string|object>} options
+ * @param {number} threshold
+ * @returns {{ matched: boolean, bestMatch: string, bestScore: number, option: any }}
+ */
+export function findBestOptionMatch(targetValue, options = [], threshold = 85) {
+  const target = String(targetValue || '').trim();
+  if (!target || !Array.isArray(options) || options.length === 0) {
+    return { matched: false, bestMatch: '', bestScore: 0, option: null };
+  }
+
+  let bestMatch = '';
+  let bestScore = -1;
+  let bestOption = null;
+
+  for (const opt of options) {
+    const text = typeof opt === 'string' ? opt : (opt?.text ?? opt?.value ?? opt?.label ?? '');
+    const cleanText = String(text || '').replace(/\s+/g, ' ').trim();
+    if (!cleanText) continue;
+
+    // Direct exact check
+    if (cleanText.toLowerCase() === target.toLowerCase()) {
+      return { matched: true, bestMatch: cleanText, bestScore: 100, option: opt };
+    }
+
+    const score = tokenSetRatio(target, cleanText);
+    if (score > bestScore) {
+      bestScore = score;
+      bestMatch = cleanText;
+      bestOption = opt;
+    }
+  }
+
+  // Degree semantic bucket matching fallback when target is a verbose degree string
+  if (bestScore < threshold) {
+    const tLower = target.toLowerCase();
+    const isDegreeTarget = /master|bachelor|ph\.?d|doctor|associate|high\s*school/i.test(tLower);
+    if (isDegreeTarget) {
+      for (const opt of options) {
+        const text = typeof opt === 'string' ? opt : (opt?.text ?? opt?.value ?? opt?.label ?? '');
+        const cleanText = String(text || '').replace(/\s+/g, ' ').trim();
+        if (!cleanText || /none\s+of\s+the\s+above|not\s+applicable/i.test(cleanText)) continue;
+        const optLower = cleanText.toLowerCase();
+
+        if (/master|ms\b|m\.s\./i.test(tLower) && !/bachelor/i.test(tLower) && /master/i.test(optLower)) {
+          return { matched: true, bestMatch: cleanText, bestScore: 95, option: opt };
+        }
+        if (/bachelor|b\.?tech|btech|bs\b/i.test(tLower) && !/master/i.test(tLower) && /bachelor/i.test(optLower)) {
+          return { matched: true, bestMatch: cleanText, bestScore: 95, option: opt };
+        }
+        if (/doctor|ph\.?d/i.test(tLower) && /doctor|ph\.?d/i.test(optLower)) {
+          return { matched: true, bestMatch: cleanText, bestScore: 95, option: opt };
+        }
+        if (/associate/i.test(tLower) && /associate/i.test(optLower)) {
+          return { matched: true, bestMatch: cleanText, bestScore: 95, option: opt };
+        }
+      }
+    }
+  }
+
+  return {
+    matched: bestScore >= threshold,
+    bestMatch,
+    bestScore: Math.max(0, bestScore),
+    option: bestOption,
+  };
+}
+

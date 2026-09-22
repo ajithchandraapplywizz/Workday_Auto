@@ -32,7 +32,10 @@ export function isNaIfApplicableQuestion(label = '') {
     || /or\s+n\/?a\s*[\.\*]*$/i.test(raw.trim())
     || /if yes.*relationship with this individual/i.test(norm)
     || /if yes.*institution name and level/i.test(norm)
-    || /enter your name.*agency.*n\/?a/i.test(norm);
+    || /enter your name.*agency.*n\/?a/i.test(norm)
+    || /timekeepers?\s+only.*please\s+enter\s+n\/?a/i.test(raw)
+    || /n\/?a\s+if\s+not\s+applicable.*timekeeper/i.test(raw)
+    || /amount\s+of\s+hours.*billed.*past\s+year/i.test(norm);
 }
 
 export const WORKDAY_SOURCE_FALLBACK_OPTIONS = [
@@ -149,6 +152,7 @@ const ADVERSE_HISTORY_RE = new RegExp([
   'failed\\s+a\\s*(drug|background)|positive\\s+drug',
   'professional\\s+(misconduct|conduct)',
   'breach\\s+of\\s+(contract|duty|confidentiality)',
+  'export\\s+control|export\\s+license|citizen.*(?:iran|cuba|north\\s*korea|syria)',
 ].join('|'), 'i');
 
 const PRIOR_ASSOCIATION_RE = new RegExp([
@@ -156,13 +160,18 @@ const PRIOR_ASSOCIATION_RE = new RegExp([
   'volunteered\\s+(at|for|with)',
   '(worked|employed|placed)\\s+.*(through|via|by)\\s+(an?\\s+)?(outside|external|staffing|temp\\w*|third[-\\s]?party|contract)\\s+agency',
   'have\\s+you\\s+ever\\s+(worked|been\\s+employed|been\\s+an\\s+employee|applied|interviewed|been\\s+a\\s+(patient|student|contractor|intern))',
+  'have\\s+you\\s+(ever\\s+)?(previously\\s+)?(applied|interviewed|submitted\\s+an\\s+application|filed\\s+an\\s+application)',
   'are\\s+you\\s+(currently\\s+)?(related\\s+to|a\\s+relative\\s+of)',
   'do\\s+you\\s+have\\s+(a\\s+)?(relative|family\\s+member)s?\\s+(who|that|currently)',
+  'do\\s+any\\s+of\\s+your\\s+(friends|relatives|family\\s+members?)',
+  'friends?\\s+or\\s+relatives?\\s+(work|employed|currently)',
+  'previously\\s+interviewed\\s+(at|with)',
+  'been\\s+employed\\s+by\\s+\\w+\\s+previously|previously\\s+been\\s+employed',
 ].join('|'), 'i');
 
-const WORK_ELIGIBILITY_RE = /\b(eligible|legally\s+(eligible|authorized|entitled)|authorized|permitted)\s+(to\s+(work|be\s+employed)|for\s+employment)\s+(lawfully\s+)?(in|within|for)\b/i;
+const WORK_ELIGIBILITY_RE = /\b(eligible|legally\s+(eligible|authori[sz]ed|entitled)|authori[sz]ed|permitted)\s+(to\s+(work|be\s+employed)|for\s+employment)(\s+(lawfully|legally))?(\s+(in|within|for))?\b/i;
 
-const SCHEDULE_QUESTION_RE = /what\s+schedule|schedule\s+(can|could|are)\s+you|schedule\s+(preference|availability)|which\s+schedule|hours?\s+(are\s+you\s+)?available|employment\s+type/i;
+const SCHEDULE_QUESTION_RE = /what\s+schedule|schedule\s+(can|could|are)\s+you|schedule\s+(preference|availability)|which\s+schedule|hours?\s+(are\s+you\s+)?available|employment\s+type|are\s+you\s+available\s+to\s+work|please\s+indicate\s+availability|indicate\s+your\s+availability/i;
 
 // "Shift preference" is deliberately absent — that one belongs to the work-type group.
 const SHIFT_QUESTION_RE = /what\s+shifts?|which\s+shifts?|shifts?\s+(can|could|are)\s+you|shift\s+availability|available\s+shifts?/i;
@@ -175,6 +184,9 @@ const SHIFT_QUESTION_RE = /what\s+shifts?|which\s+shifts?|shifts?\s+(can|could|a
 export function isAdverseHistoryQuestion(label = '') {
   const s = String(label || '');
   if (/please\s+sign|electronic\s+signature|typed\s+name|sign\s*\(\s*type\s*name\s*\)|type\s+(your\s+)?(full\s+)?name|\bsignature\b/i.test(s)) {
+    return false;
+  }
+  if (/acknowledge|attest|certif|read.*reviewed.*truthfully|truthfully and accurately|conditional on the truth/i.test(s)) {
     return false;
   }
   return ADVERSE_HISTORY_RE.test(s);
@@ -225,9 +237,6 @@ export function isYesNoQuestionLabel(label = '') {
   }
   if (/government\s+employment|entered into any agreement|non-?compet|acceptance of employment/i.test(raw)) {
     return true;
-  }
-  if (/available\s*to\s*work|indicate\s+availability|which\s+shift|work\s+schedule|work\s+types?/i.test(raw)) {
-    return false;
   }
   let text = raw.replace(/^\s*\d+[.)]\s*/, '').trim();
   const inner = text.match(/\b((?:have|has|had|are|is|was|were|do|does|did|will|would|can|could)\b[^?]{6,240}\?)/i);
@@ -295,7 +304,19 @@ export function selectionMatchesAnswer(actual, expected) {
   if (expectedYesNo) return leadingYesNo(a) === expectedYesNo;
   if (leadingYesNo(a)) return false;
 
-  return a.includes(e) || e.includes(a);
+  if (a.includes(e) || e.includes(a)) return true;
+
+  // Handle degree equivalencies (e.g. "master's degree" vs "master of science/masters/ms")
+  const degA = /master|\bms\b/i.test(a) ? 'master' : /bachelor|\bbs\b|\bb\.?tech\b/i.test(a) ? 'bachelor' : /doctor|\bph\.?d\b/i.test(a) ? 'doctor' : null;
+  const degE = /master|\bms\b/i.test(e) ? 'master' : /bachelor|\bbs\b|\bb\.?tech\b/i.test(e) ? 'bachelor' : /doctor|\bph\.?d\b/i.test(e) ? 'doctor' : null;
+  if (degA && degE && degA === degE) return true;
+
+  // Handle salary/currency numeric variations (e.g., "90000" vs "90000 USD" or "$90,000")
+  const numA = a.replace(/,/g, '').match(/\b(\d{4,7})\b/);
+  const numE = e.replace(/,/g, '').match(/\b(\d{4,7})\b/);
+  if (numA && numE && numA[1] === numE[1]) return true;
+
+  return false;
 }
 
 /**
@@ -310,9 +331,6 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (isPriorAssociationQuestion(label)) return 'No';
   if (isMinimumAgeQuestion(label)) return 'Yes';
   const t = String(label || '');
-  if (/perform\s+the\s+essential\s+functions|essential\s+functions\s+of\s+the\s+job|essential\s+job\s+functions/i.test(t)) {
-    return 'Yes';
-  }
   if (/sponsor|visa|authorized to work|legally authorized|work authorization/i.test(t)) return null;
   if (/government\s+employment|federal\s+government|state,?\s+local.{0,40}government|u\.s\.?\s+armed\s+services|post-government\s+employment|government entity|political party|royal family|candidate for political/i.test(t)
     && !/years of|experience in|authorized|sponsor/i.test(t)) {
@@ -327,6 +345,115 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (/family or household|board of directors|government official|related to an employee/i.test(t)) {
     return 'No';
   }
+  if (/export\s+control|export\s+license|citizen.*(?:iran|cuba|north\s*korea|syria)|resident\s+of\s+(?:iran|cuba|north\s*korea|syria)/i.test(t)) {
+    return 'No';
+  }
+  if (/read,?\s*reviewed\s*and\s*answered\s*the\s*above\s*questions\s*truthfully|select\s*["']?yes["']?\s*if\s*you\s*acknowledge/i.test(t)) {
+    return 'Yes';
+  }
+  if (/regarding\s+future\s+positions(\s+at\s+\w+)?,\s*please\s+select/i.test(t)) {
+    return 'Yes';
+  }
+  // "Can you perform the essential functions of the job, with or without a reasonable accommodation?"
+  if (/perform\s+(the\s+)?essential\s+functions(\s+of\s+the\s+job)?/i.test(t)) {
+    return 'Yes';
+  }
+  // "Can you travel if a job requires it?" / "Are you willing to travel?"
+  if (/can\s+you\s+travel\s+if|willing\s+to\s+travel|able\s+to\s+travel\s+(if|when|as|for)/i.test(t)) {
+    return 'Yes';
+  }
+  // "May we contact your current or most recent employer?"
+  if (/may\s+we\s+contact\s+your\s+(current|most\s+recent)\s+employer/i.test(t)) {
+    return 'Yes';
+  }
+  // "Are you local to the area in which this job has been advertised?"
+  if (/local\s+to\s+the\s+area|are\s+you\s+local\s+to/i.test(t)) {
+    return 'No';
+  }
+  // "Do you hold any FINRA licenses?" / "Do you have any FINRA licenses?"
+  if (/finra\s+(licenses?|series\s+\d)/i.test(t)) {
+    return 'No';
+  }
+  // "Have you previously interviewed at [Company]?"
+  if (/previously\s+interviewed\s+(at|with)/i.test(t)) {
+    return 'No';
+  }
+  // "Are there any limitations to the hours you may be available, as required by the job?" / schedule restrictions
+  if (/limitation.*(hour|schedule|available)|restriction.*(hour|schedule|available)|limitations?\s+to\s+(the\s+)?hours/i.test(t)) {
+    return 'No';
+  }
+  // "Are you able to commute to the site?" / "Do you have reliable transportation?"
+  if (/able\s+to\s+commute|commute\s+to\s+(the\s+)?(site|location|office|job)|reliable\s+(transportation|commute)/i.test(t)) {
+    return 'Yes';
+  }
+  // "Will you work overtime?" / "Are you willing to work overtime?"
+  if (/willing.*work\s*overtime|able.*work\s*overtime|will\s+you\s+work\s+overtime/i.test(t)) {
+    return 'Yes';
+  }
+  return null;
+}
+
+/**
+ * Maps arbitrary degree text ("Master of Science in Computer Science Java Python...", "MS", "B.Tech")
+ * to a canonical degree category: 'master', 'bachelor', 'doctorate', 'associate', 'high_school'.
+ */
+export function canonicalDegreeBucket(degreeText = '') {
+  const s = String(degreeText || '').toLowerCase().trim();
+  if (!s) return null;
+  if (/master|m\.?s\.?(?!\s*degree|\s*in\s*arts)|\bmsc\b|\bms\b|post[\s-]?grad/i.test(s) && !/bachelor|b\.?s\.?|undergrad/i.test(s)) {
+    return 'master';
+  }
+  if (/bachelor|b\.?tech\b|\bbtech\b|\bbsc\b|\bb\.?s\.?\b|undergrad/i.test(s) && !/master|ms\b/i.test(s)) {
+    return 'bachelor';
+  }
+  if (/doctor|ph\.?d|doctoral/i.test(s)) {
+    return 'doctorate';
+  }
+  if (/associate/i.test(s)) {
+    return 'associate';
+  }
+  if (/high\s*school|ged|secondary/i.test(s)) {
+    return 'high_school';
+  }
+  return null;
+}
+
+/**
+ * Matches a candidate degree to the best option in a Workday education dropdown list.
+ */
+export function matchDegreeToOptions(degreeText = '', options = []) {
+  if (!degreeText || !options?.length) return null;
+  const bucket = canonicalDegreeBucket(degreeText);
+  if (!bucket) return null;
+
+  const optStrings = options.map((o) => (typeof o === 'string' ? o : o?.text || o?.value || '')).filter(Boolean);
+
+  // Filter out negative / catch-all options like "None of the Above"
+  const validOpts = optStrings.filter((o) => !/none\s+of\s+the\s+above|not\s+applicable|n\/?a/i.test(o));
+
+  if (bucket === 'master') {
+    const hit = validOpts.find((o) => /master/i.test(o))
+      || validOpts.find((o) => /graduate\s+degree/i.test(o));
+    if (hit) return hit;
+  }
+  if (bucket === 'bachelor') {
+    const hit = validOpts.find((o) => /bachelor/i.test(o))
+      || validOpts.find((o) => /undergraduate\s+degree/i.test(o));
+    if (hit) return hit;
+  }
+  if (bucket === 'doctorate') {
+    const hit = validOpts.find((o) => /doctor|ph\.?d/i.test(o));
+    if (hit) return hit;
+  }
+  if (bucket === 'associate') {
+    const hit = validOpts.find((o) => /associate/i.test(o));
+    if (hit) return hit;
+  }
+  if (bucket === 'high_school') {
+    const hit = validOpts.find((o) => /high\s*school|ged|secondary/i.test(o));
+    if (hit) return hit;
+  }
+
   return null;
 }
 
@@ -568,16 +695,8 @@ export const WORKDAY_DEFAULT_QA = [
     answer: 'Yes',
   },
   {
-    question: 'Please enter your name:',
-    answer: 'John Cena',
-  },
-  {
     question: 'Please check one of the boxes below:',
     answer: 'No, I do not have a disability and have not had one in the past',
-  },
-  {
-    question: 'Name',
-    answer: 'John Cena',
   },
   {
     question: 'Language',
@@ -655,6 +774,59 @@ export const WORKDAY_DEFAULT_QA = [
     question: 'Are you a Career Returner?  *A Career Returner applies to any individual who has taken career break for 12 months plus*',
     answer: 'No',
   },
+  // Common application questions across Workday tenants
+  {
+    question: 'Have you previously interviewed at this company?',
+    answer: 'No',
+  },
+  {
+    question: 'Have you ever filed an application with us before?',
+    answer: 'No',
+  },
+  {
+    question: 'Do any of your friends or relatives work here?',
+    answer: 'No',
+  },
+  {
+    question: 'May we contact your current or most recent employer?',
+    answer: 'Yes',
+  },
+  {
+    question: 'Can you travel if a job requires it?',
+    answer: 'Yes',
+  },
+  {
+    question: 'Are you willing to travel?',
+    answer: 'Yes',
+  },
+  {
+    question: 'Are you local to the area in which this job has been advertised?',
+    answer: 'No',
+  },
+  {
+    question: 'Do you hold any FINRA licenses?',
+    answer: 'No',
+  },
+  {
+    question: 'Do you have any FINRA licenses?',
+    answer: 'No',
+  },
+  {
+    question: 'After reviewing the job description for the position for which you are applying, can you perform the essential functions of the job, with or without a reasonable accommodation?',
+    answer: 'Yes',
+  },
+  {
+    question: 'Are you available to work:',
+    answer: WORKDAY_DEFAULT_SCHEDULE,
+  },
+  {
+    question: 'Please indicate availability:',
+    answer: WORKDAY_DEFAULT_SCHEDULE,
+  },
+  {
+    question: 'Please provide the amount of hours that you have billed this past year. (Timekeepers only. Please enter N/A if not applicable.)',
+    answer: WORKDAY_NA_ANSWER,
+  },
 ];
 
 /** Patterns used to fill dropdowns on Application Questions / Voluntary Disclosures steps */
@@ -693,6 +865,18 @@ export function lookupDefaultAnswer(label) {
   const norm = normalizeLabel(label);
   if (!norm) return null;
 
+  // High-trust fields — must come from profile/Supabase, never from a hardcoded default.
+  // Returning null here forces the caller to fall through to resolveField where the
+  // provenance gate audits every answer.
+  if (
+    /sponsor|require.*visa|visa.*sponsor|immigration.*sponsor|visa.*status/i.test(label)
+    || /do you have.*relative|relative.*work.*(?:our|this|the)\s+company|relatives.*employed/i.test(label)
+    || /high\s*school\s*diploma|g\.e\.d|minimum.*educational.*requirement|possess.*diploma/i.test(label)
+    || /available.*to.*start|when.*available.*start|when.*can.*you.*start|earliest.*start|availability.*start|desired.*start.*date/i.test(label)
+  ) {
+    return null;
+  }
+
   if (/(salary|compensation|pay|expected.*salary|annual.*salary|target.*pay|currency)/i.test(norm)) {
     return null;
   }
@@ -702,6 +886,10 @@ export function lookupDefaultAnswer(label) {
 
   if (isShiftAvailabilityQuestion(label)) return WORKDAY_DEFAULT_SHIFTS.join(', ');
   if (isScheduleAvailabilityQuestion(label)) return WORKDAY_DEFAULT_SCHEDULE;
+  // Short-label availability questions: "Are you available to work:" / "Please indicate availability:"
+  if (/^are\s+you\s+available\s+to\s+work[:\s]*$/i.test(String(label || '').trim())) return WORKDAY_DEFAULT_SCHEDULE;
+  if (/^please\s+indicate\s+availability[:\s]*$/i.test(String(label || '').trim())) return WORKDAY_DEFAULT_SCHEDULE;
+  if (/indicate\s+(your\s+)?availability[:\s]*$/i.test(String(label || '').trim())) return WORKDAY_DEFAULT_SCHEDULE;
 
   if (/external\s*career\s*site\s*sources/i.test(norm) || /anthropic/i.test(norm)) {
     return ['External Career Site Sources', 'Anthropic'];
@@ -728,8 +916,12 @@ export function lookupDefaultAnswer(label) {
   if (/type to add skills|^skills$/i.test(norm) || /enter a skill below/i.test(norm)) {
     return WORKDAY_DEFAULT_SKILLS.join(', ');
   }
+  // Availability / start-date questions: do NOT return today's date here.
+  // The profile stores available_to_start (e.g. 09/20/2026). Returning today
+  // from a defaults lookup would overwrite it before the profile is consulted.
+  // resolveField handles these via isAvailabilityStartDateLabel with profile-first logic.
   if (/desired\s*start\s*date|available\s*to\s*start|when.*available.*start|when.*can.*you.*start|earliest.*start|availability.*start/i.test(norm)) {
-    return getTodayMMDDYYYY('Asia/Kolkata');
+    return null;
   }
   if (/work\s*types?|employment\s*types?|schedule\s*preference|shift\s*preference|hours?\s*per\s*week|available\s*for|^full[-\s]?time$/i.test(norm)) {
     return 'Full-time';
@@ -816,8 +1008,11 @@ export function lookupDefaultAnswer(label) {
   if (/mass general brigham affiliate|worked at one of the mass general/i.test(norm)) {
     return 'No';
   }
+  // Sponsorship and visa labels must come from the profile/Supabase chain, not
+  // from a hardcoded default. The provenance gate blocks them downstream anyway,
+  // but returning null here is cleaner and avoids the 'No' assumption.
   if (/require sponsorship for employment visa/i.test(norm)) {
-    return 'No';
+    return null;
   }
   if (/target salary/i.test(norm)) {
     return null;
@@ -835,7 +1030,7 @@ export function lookupDefaultAnswer(label) {
     return 'Yes';
   }
   if (/require any immigration filing or visa sponsorship/i.test(norm)) {
-    return 'No';
+    return null;
   }
   if (/current or former employee of the united states government/i.test(norm)) {
     return 'No';
@@ -880,12 +1075,18 @@ export function lookupDefaultAnswer(label) {
   });
   if (exactMatch) return exactMatch.answer;
 
+  // Fuzzy word-overlap fallback: skip for high-trust labels (sponsorship, diploma,
+  // relatives, start-date) to prevent them from being answered by a coincidental
+  // word match in WORKDAY_DEFAULT_QA.
+  const HIGH_TRUST_RE = /sponsor|visa|diploma|high\s*school|g\.e\.d|minimum.*education|educational.*requirement|relative|prior.*worker|start\s*date|available.*start/i;
   for (const { question, answer } of WORKDAY_DEFAULT_QA) {
     const qn = normalizeLabel(question);
     if (qn.length < 12 || norm.length < 12) continue;
     if (/please select one of the below options/i.test(qn) && /affiliate|mass general|18 years|authorized to work/i.test(norm)) {
       continue;
     }
+    // Skip any QA pair whose question or label involves high-trust domains.
+    if (HIGH_TRUST_RE.test(qn) || HIGH_TRUST_RE.test(norm)) continue;
     const qWords = new Set(qn.split(' ').filter(w => w.length > 4));
     const overlap = [...qWords].filter(w => norm.includes(w)).length;
     if (overlap >= 3 && overlap >= Math.min(3, Math.max(2, Math.ceil(qWords.size * 0.35)))) {

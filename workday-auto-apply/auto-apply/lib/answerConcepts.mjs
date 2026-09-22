@@ -36,7 +36,7 @@ export const ANSWER_CONCEPTS = [
     id: 'education_start',
     match: [
       /education\s*(start|from|begin)/i,
-      /when\s*(did|do)\s*you\s*(start|begin).*school|college|university|degree/i,
+      /when\s*(did|do)\s*you\s*(start|begin).*(school|college|university|degree)/i,
       /attended\s*from/i,
     ],
     keys: ['education from', 'from year', 'school start'],
@@ -87,6 +87,7 @@ export const ANSWER_CONCEPTS = [
     match: [
       /available\s*to\s*start/i,
       /when\s*(are|can)\s*you\s*start/i,
+      /how\s*soon\s*can\s*you\s*start/i,
       /desired\s*start/i,
       /earliest\s*start/i,
       /start\s*date/i,

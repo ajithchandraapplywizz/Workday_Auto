@@ -211,6 +211,56 @@ export function discoverFieldsInDOM(container = document) {
     return el.value ?? el.textContent?.trim() ?? '';
   }
 
+  function detectControlTypeInDOM(el) {
+    if (!el) return 'free-text';
+    const tag = (el.tagName || '').toLowerCase();
+    const role = (el.getAttribute?.('role') || '').toLowerCase();
+    const autoId = (el.getAttribute?.('data-automation-id') || '').toLowerCase();
+    const ariaHasPopup = (el.getAttribute?.('aria-haspopup') || '').toLowerCase();
+    const placeholder = (el.getAttribute?.('placeholder') || el.placeholder || '').toLowerCase();
+    const type = (el.type || '').toLowerCase();
+
+    // 1. native-select
+    if (tag === 'select') return 'native-select';
+
+    // 2. custom-dropdown (combobox / listbox / select widget)
+    if (
+      role === 'combobox' ||
+      ariaHasPopup === 'listbox' ||
+      ariaHasPopup === 'true' ||
+      autoId === 'select-widget' ||
+      autoId === 'selectwidget' ||
+      autoId === 'selectone' ||
+      autoId === 'select-one' ||
+      Boolean(el.closest?.('[data-automation-id="select-widget"], [data-automation-id="selectWidget"], [data-automation-id="selectOne"]'))
+    ) {
+      return 'custom-dropdown';
+    }
+
+    // 3. checkbox-group
+    if (role === 'checkbox' || type === 'checkbox') {
+      return 'checkbox-group';
+    }
+
+    // 4. radio-group
+    if (role === 'radio' || role === 'radiogroup' || type === 'radio') {
+      return 'radio-group';
+    }
+
+    // 5. date-picker
+    const isDatePlaceholder = /(mm\/dd\/yyyy|dd\/mm\/yyyy|yyyy\/mm\/dd|mm\/yyyy|dd-mm-yyyy|mm-dd-yyyy|\bmm\b.*\byyyy\b)/i.test(placeholder);
+    const hasCalendarAdjacent = Boolean(
+      el.parentElement?.querySelector?.('button[aria-label*="calendar" i], button[data-automation-id*="date" i], svg[data-icon="calendar"], [data-automation-id*="dateSection"]')
+    );
+    const isDateAutoId = autoId.includes('date') || autoId.includes('datesection');
+    if (type === 'date' || isDatePlaceholder || hasCalendarAdjacent || isDateAutoId) {
+      return 'date-picker';
+    }
+
+    // 6. free-text
+    return 'free-text';
+  }
+
   function classifyFieldType(el) {
     const role = el.getAttribute('role');
     if (role === 'combobox') return 'select';
@@ -238,6 +288,7 @@ export function discoverFieldsInDOM(container = document) {
     const label = getLabelText(el) || '';
     const id = el.id || '';
     const name = el.name || '';
+    const controlType = detectControlTypeInDOM(el);
 
     let selector = '';
     if (el.id) selector = `#${CSS.escape(el.id)}`;
@@ -255,6 +306,7 @@ export function discoverFieldsInDOM(container = document) {
       required: isRequired(el),
       value: getCurrentValue(el),
       type,
+      controlType,
       disabled: Boolean(el.disabled || el.readOnly),
     };
 
@@ -263,6 +315,23 @@ export function discoverFieldsInDOM(container = document) {
         value: o.value,
         text: o.textContent.trim(),
       })).filter(o => o.value !== '');
+    }
+
+    if (controlType === 'checkbox-group') {
+      const group = el.closest('fieldset, [role="group"], [data-automation-id*="formField"], [data-automation-id*="question"]') || el.parentElement;
+      if (group) {
+        const cbs = group.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+        if (cbs.length > 0) {
+          field.options = Array.from(cbs).map(cb => {
+            const lbl = cb.id ? document.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+            return {
+              value: cb.value || '',
+              text: (lbl ? lbl.textContent.trim() : cb.getAttribute('aria-label') || cb.value || '').replace(/\s+/g, ' ').trim(),
+              checked: Boolean(cb.checked || cb.getAttribute('aria-checked') === 'true')
+            };
+          }).filter(o => o.text);
+        }
+      }
     }
 
     if (type === 'radio' && el.name) {
@@ -312,7 +381,7 @@ export async function discoverFields(pageOrContainer = (typeof document !== 'und
 }
 
 // ─── Scan a form ────────────────────────────────────────────────────────────
-export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, mode = 'signin' } = {}) {
+export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, mode = 'signin', profile = null } = {}) {
   console.log(`🔍 Scanning: ${url}`);
   const outDir = formsDir || resolve(process.cwd(), 'forms');
   await mkdir(outDir, { recursive: true });
@@ -336,9 +405,9 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     const ats = detectATS(url);
     let formUrl = url;
 
-    // Step 1: Discover application form (clicks Apply -> Apply Manually on Workday)
+    // Step 1: Discover application form (clicks Apply -> Use My Last Application / Apply Manually on Workday)
     console.log(`   Discovering application form for ${ats}...`);
-    const foundForm = await discoverApplicationForm(page, url, { mode });
+    const foundForm = await discoverApplicationForm(page, url, { mode, profile });
     if (foundForm) formUrl = foundForm;
 
     // Step 2: Authenticate if Workday
@@ -360,6 +429,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           field_count: 0,
           fields: [],
           submit_buttons: [],
+          authFailed: true,
         };
       }
 
@@ -448,3 +518,71 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     throw err;
   }
 }
+
+/**
+ * Detect explicit control type for an element or scanned field object.
+ * Returns: 'native-select' | 'custom-dropdown' | 'checkbox-group' | 'radio-group' | 'date-picker' | 'free-text'
+ */
+export function detectControlType(elOrField = {}) {
+  if (!elOrField) return 'free-text';
+
+  // If already tagged, respect it
+  if (elOrField.controlType) return elOrField.controlType;
+
+  const tag = String(elOrField.tagName || elOrField.tag || '').toLowerCase();
+  const role = String(elOrField.role || (typeof elOrField.getAttribute === 'function' ? elOrField.getAttribute('role') : '') || '').toLowerCase();
+  const autoId = String(
+    elOrField.automationId ||
+    elOrField.dataAutomationId ||
+    (typeof elOrField.getAttribute === 'function' ? elOrField.getAttribute('data-automation-id') : '') ||
+    ''
+  ).toLowerCase();
+  const ariaHasPopup = String(
+    (typeof elOrField.getAttribute === 'function' ? elOrField.getAttribute('aria-haspopup') : elOrField.ariaHasPopup) || ''
+  ).toLowerCase();
+  const placeholder = String(
+    elOrField.placeholder ||
+    (typeof elOrField.getAttribute === 'function' ? elOrField.getAttribute('placeholder') : '') ||
+    ''
+  ).toLowerCase();
+  const type = String(
+    elOrField.type ||
+    elOrField.inputType ||
+    (typeof elOrField.getAttribute === 'function' ? elOrField.getAttribute('type') : '') ||
+    ''
+  ).toLowerCase();
+
+  if (tag === 'select' || type === 'select-one') return 'native-select';
+
+  if (
+    role === 'combobox' ||
+    role === 'listbox' ||
+    ariaHasPopup === 'listbox' ||
+    ariaHasPopup === 'true' ||
+    autoId.includes('select-widget') ||
+    autoId.includes('selectwidget') ||
+    autoId.includes('selectone') ||
+    autoId.includes('select-one') ||
+    autoId.includes('prompt') ||
+    (typeof elOrField.closest === 'function' && Boolean(elOrField.closest('[data-automation-id="select-widget"], [data-automation-id="selectWidget"], [data-automation-id="selectOne"]')))
+  ) {
+    return 'custom-dropdown';
+  }
+
+  if (role === 'checkbox' || type === 'checkbox' || type === 'checkbox-group') {
+    return 'checkbox-group';
+  }
+
+  if (role === 'radio' || role === 'radiogroup' || type === 'radio' || type === 'radio-group') {
+    return 'radio-group';
+  }
+
+  const isDatePlaceholder = /(mm\/dd\/yyyy|dd\/mm\/yyyy|yyyy\/mm\/dd|mm\/yyyy|dd-mm-yyyy|mm-dd-yyyy|\bmm\b.*\byyyy\b)/i.test(placeholder);
+  const isDateAutoId = autoId.includes('date') || autoId.includes('datesection');
+  if (type === 'date' || isDatePlaceholder || isDateAutoId) {
+    return 'date-picker';
+  }
+
+  return 'free-text';
+}
+

@@ -927,6 +927,17 @@ export async function fillSourceFieldAuto(page, profile = {}) {
     return { success: true, selected: current };
   }
 
+  // Referral source is intentionally not a client fact. Pick a valid live
+  // dropdown path first so stale profile/YAML values cannot be submitted.
+  console.log('    🎲 Source fallback: picking a live dropdown option...');
+  const randomResult = await tryPickAnyHierarchicalSource(page, trigger);
+  display = await getReferralSourceDisplay(page);
+  if (randomResult?.success && isReferralSourceFullySelected(display)) {
+    const selected = randomResult.selected || display;
+    console.log(`    ✅ Source pick-any: "${selected}"`);
+    return { success: true, selected, domOptions: [] };
+  }
+
   // 1) Hierarchical + flat attempts from workdayDefaults.mjs
   let result = await fillHowDidYouHearFromDom(page, profile);
   let display = await getReferralSourceDisplay(page);
@@ -1000,7 +1011,9 @@ async function tryPickAnyHierarchicalSource(page, trigger) {
 
   const topLevel = await collectReferralSourceOptionsWithScroll(page);
   const topLevelKeys = new Set(topLevel.map(normalizeKey));
-  const parents = topLevel.filter((o) => !isSkippableOption(o));
+  const parents = topLevel
+    .filter((o) => !isSkippableOption(o))
+    .sort(() => Math.random() - 0.5);
   if (parents.length === 0) return { success: false };
 
   for (const parent of parents) {
@@ -1017,6 +1030,7 @@ async function tryPickAnyHierarchicalSource(page, trigger) {
     await page.waitForTimeout(850);
 
     let childOptions = await collectSubmenuOptions(page, topLevelKeys);
+    childOptions = childOptions.sort(() => Math.random() - 0.5);
     if (childOptions.length === 0) {
       await page.keyboard.press('ArrowRight').catch(() => {});
       await page.waitForTimeout(450);

@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Allied Solutions Application Questions Fixture</title>
+</head>
+<body>
+  <div data-automation-id="applicationQuestionsPage">
+    <!-- Relatives Checkbox/Radio -->
+    <div data-automation-id="formField-relatives">
+      <label data-automation-id="formLabel">Do you have relatives who work for our company?</label>
+      <input type="radio" name="relatives" id="relatives-yes" value="Yes" />
+      <label for="relatives-yes">Yes</label>
+      <input type="radio" name="relatives" id="relatives-no" value="No" />
+      <label for="relatives-no">No</label>
+    </div>
+
+    <!-- Diploma with G.E.D. -->
+    <div data-automation-id="formField-diploma">
+      <label data-automation-id="formLabel">Do you possess a high school diploma, G.E.D. or equivalent from an accredited institution?</label>
+      <button aria-haspopup="listbox" data-automation-id="selectOne">Select One</button>
+    </div>
+
+    <!-- Sponsorship with e.g. -->
+    <div data-automation-id="formField-sponsorship">
+      <label data-automation-id="formLabel">Will you now or in the future require sponsorship for employment visa status (e.g., H-1B visa status)?</label>
+      <button aria-haspopup="listbox" data-automation-id="selectOne">Select One</button>
+    </div>
+
+    <!-- Start Date -->
+    <div data-automation-id="formField-startDate">
+      <label data-automation-id="formLabel">Availability/Start Date:*</label>
+      <input role="spinbutton" aria-label="Month" data-automation-id="dateSectionMonth-input" value="09" />
+      <input role="spinbutton" aria-label="Day" data-automation-id="dateSectionDay-input" value="20" />
+      <input role="spinbutton" aria-label="Year" data-automation-id="dateSectionYear-input" value="2026" />
+    </div>
+
+    <!-- Salary -->
+    <div data-automation-id="formField-salary">
+      <label data-automation-id="formLabel">What is your desired salary range for the position you are applying to? (Please state either annual or hourly range)*</label>
+      <textarea data-automation-id="textArea"></textarea>
+    </div>
+    <!-- Unseen label: both e.g. and G.E.D. combined — proves fix is general, not special-cased -->
+    <div data-automation-id="formField-proofLabel">
+      <label data-automation-id="formLabel">Do you hold a qualifying credential (e.g., a high school diploma, G.E.D. or equivalent) recognized in your country?</label>
+      <button aria-haspopup="listbox" data-automation-id="selectOne">Select One</button>
+    </div>
+  </div>
+</body>
+</html>

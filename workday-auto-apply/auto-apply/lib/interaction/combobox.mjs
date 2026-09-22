@@ -2,12 +2,24 @@ import { waitForDomSettled } from '../workdayDom.mjs';
 import { delegateDropdown, delegateExistingFill } from './_delegate.mjs';
 import { fillWorkdayCustomDropdown } from './workdayCustomDropdown.mjs';
 import { okResult, failResult } from './_result.mjs';
+import { matchOptionSafely, fillSelectVerified } from './selectVerified.mjs';
 
 /**
  * Custom Workday combobox / selectOne. Opens the live list, picks an exact option, verifies.
  * Does not invent an option.
  */
 export async function fillCombobox(page, field, answer, ctx = {}) {
+  const options = (field.options || []).map((o) => (typeof o === 'string' ? o : o?.text || '')).filter(Boolean);
+  if (options.length) {
+    const safeMatch = matchOptionSafely(answer, options);
+    if (!safeMatch.match) {
+      return failResult(field, `option_not_in_list:${safeMatch.reason || 'not_found'}`, { recoverable: false });
+    }
+  }
+
+  const verifiedResult = await fillSelectVerified(page, field, answer, ctx);
+  if (verifiedResult.success) return verifiedResult;
+
   const custom = await fillWorkdayCustomDropdown(page, field, answer);
   if (custom.success) return okResult(field, custom.verifiedValue, custom.attempts || 1);
 

@@ -19,3 +19,4 @@ export function failResult(field, reason, { recoverable = true, attempts = 1, ve
     verifiedValue,
   };
 }
+

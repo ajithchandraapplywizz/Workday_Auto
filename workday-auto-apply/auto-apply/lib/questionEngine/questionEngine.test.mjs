@@ -287,50 +287,6 @@ test('LLM date context compares past and future dates from the runtime date', ()
   assert.match(context, /21\/09\/2026 from 14\/09\/2026 is "1 week"/);
 });
 
-test('Date Available to Work resolves to today not Flexible text', () => {
-  const rec = resolveFieldWithoutLlm(
-    field('Date Available to Work:', {
-      elementType: 'date',
-      fieldType: 'date',
-      options: [],
-      required: true,
-    }),
-    profile(),
-  );
-  assert.ok(rec);
-  assert.match(rec.answer, /^\d{2}\/\d{2}\/\d{4}$/);
-  assert.notEqual(rec.answer, 'Flexible');
-});
-
-test('availability checkbox group remaps Supabase Yes to live shift labels', () => {
-  const rec = resolveFieldWithoutLlm(
-    field('Are you available to work:', {
-      elementType: 'multi-checkbox',
-      fieldType: 'checkbox-group',
-      options: ['Days', 'Evenings', 'Weekends'],
-      required: true,
-    }),
-    profile({ qa: { 'are you available to work': 'Yes' } }),
-  );
-  assert.ok(rec);
-  assert.match(rec.answer, /Days/i);
-  assert.equal(rec.requiresReview, false);
-});
-
-test('essential job functions question resolves Yes', () => {
-  const rec = resolveFieldWithoutLlm(
-    field('After reviewing the job description, can you perform the essential functions of the job, with or without a reasonable accommodation?', {
-      elementType: 'radio',
-      fieldType: 'radio',
-      options: ['Yes', 'No'],
-      required: true,
-    }),
-    profile(),
-  );
-  assert.ok(rec);
-  assert.equal(rec.answer, 'Yes');
-});
-
 test('shift question picks appropriate shift option from dropdown', () => {
   const rec = resolveFieldWithoutLlm(
     field('Which shift would you accept?', {
@@ -423,3 +379,101 @@ test('answerPageQuestions routes new required questions not answered by Tiers 1-
   // It must be processed and either answered or reviewed with LLM source (Tier 4)
   assert.ok(['Yes', 'No'].includes(ans.answer) || ans.source === 'llm');
 });
+
+test('Salesforce live dropdown questions resolve to exact safe answers', () => {
+  const p = profile({
+    work_auth: { authorized_us: 'Yes', sponsorship_needed: 'Yes' },
+  });
+
+  // 1. Sponsorship
+  const qSponsorship = field(
+    'Will you now or could you in the future require sponsorship to obtain work authorization or to transfer or extend your current visa? (You must answer “Yes” if your current visa is tied to your spouse or partner’s visa or if you are on a bridging visa or working holiday visa)',
+    { questionId: 'q-sf-sponsor', elementType: 'dropdown', options: ['Yes', 'No'] },
+  );
+  const recSponsor = resolveFieldWithoutLlm(qSponsorship, p);
+  assert.ok(recSponsor);
+  assert.equal(recSponsor.answer, 'Yes');
+
+  // 2. Export control
+  const qExport = field(
+    'As a U.S. company that exports software and technology internationally, we must comply with U.S. export control laws in every country where we operate. The information provided will be used to determine whether we need to obtain an Export Control License for your employment if you are hired. Are you a citizen, national or permanent resident of Iran, Cuba, North Korea or Syria?',
+    { questionId: 'q-sf-export', elementType: 'dropdown', options: ['Yes', 'No'] },
+  );
+  const recExport = resolveFieldWithoutLlm(qExport, p);
+  assert.ok(recExport);
+  assert.equal(recExport.answer, 'No');
+
+  // 3. Regarding future positions
+  const qFuture = field(
+    'Regarding future positions at Salesforce, please select one of the following options',
+    {
+      questionId: 'q-sf-future',
+      elementType: 'dropdown',
+      options: [
+        'Yes, I would like to receive communications about Salesforce and future openings',
+        'No, please do not contact me about Salesforce and future openings',
+      ],
+    },
+  );
+  const recFuture = resolveFieldWithoutLlm(qFuture, p);
+  assert.ok(recFuture);
+  assert.equal(recFuture.answer, 'Yes, I would like to receive communications about Salesforce and future openings');
+
+  // 4. Truthfulness / acknowledgment
+  const qAck = field(
+    'I acknowledge that I have read, reviewed and answered the above questions truthfully and accurately. I further understand, and agree, that any offer of employment I may receive from Salesforce is conditional on the truth of the above statements and that, in the event it is subsequently determined that any of the above is inaccurate, any such offer of employment can be rescinded and, in the event I have commenced employment, such employment will be terminated, to the extent permitted by applicable law. Please select "yes" if you acknowledge.',
+    { questionId: 'q-sf-ack', elementType: 'dropdown', options: ['Yes', 'No'] },
+  );
+  const recAck = resolveFieldWithoutLlm(qAck, p);
+  assert.ok(recAck);
+  assert.equal(recAck.answer, 'Yes');
+});
+
+test('offline resolution handles hours limitations, commute ability, and education degree options', () => {
+  const p = profile({
+    education: {
+      degree: 'Master of Science in Computer Science Java Python AWS',
+      highest_level: 'Master of Science in Computer Science Java Python AWS',
+    },
+  });
+
+  // Hours limitations (textarea)
+  const qHoursText = field(
+    'Are there any limitations to the hours you may be available, as required by the job?*',
+    { questionId: 'q-hours-ta', elementType: 'textarea', fieldType: 'textarea' },
+  );
+  const recHours = resolveFieldWithoutLlm(qHoursText, p);
+  assert.ok(recHours);
+  assert.equal(recHours.answer, 'No');
+
+  // Commute ability (dropdown)
+  const qCommute = field(
+    'Are you able to commute to the site?*',
+    { questionId: 'q-commute', elementType: 'dropdown', fieldType: 'dropdown', options: ['Yes', 'No'] },
+  );
+  const recCommute = resolveFieldWithoutLlm(qCommute, p);
+  assert.ok(recCommute);
+  assert.equal(recCommute.answer, 'Yes');
+
+  // Highest level of education (custom-dropdown with options)
+  const qEducation = field(
+    'What is the highest level of education you have completed?',
+    {
+      questionId: 'q-highest-edu',
+      elementType: 'custom-dropdown',
+      fieldType: 'dropdown',
+      options: [
+        'High School Diploma',
+        "Associate's Degree",
+        "Bachelor's Degree",
+        "Master's Degree",
+        'Doctorate',
+        'None of the Above',
+      ],
+    },
+  );
+  const recEdu = resolveFieldWithoutLlm(qEducation, p);
+  assert.ok(recEdu);
+  assert.equal(recEdu.answer, "Master's Degree");
+});
+

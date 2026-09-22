@@ -4,7 +4,7 @@
  */
 
 import { discoverPage, interactField, validatePage } from '../../interaction/index.mjs';
-import { waitForDomSettled, isDiscoveredFieldFilled } from '../../workdayDom.mjs';
+import { waitForDomSettled, isDiscoveredFieldFilled, readFieldState } from '../../workdayDom.mjs';
 import { detectWorkdayStep } from '../../stateDetector.mjs';
 import { selectionMatchesAnswer } from '../../workdayDefaults.mjs';
 import {
@@ -34,7 +34,7 @@ export const workdayAdapter = {
   },
 
   async waitStable(page) {
-    await waitForDomSettled(page, { timeout: 2000 }).catch(() => {});
+    await waitForDomSettled(page, { timeout: 250 }).catch(() => {});
   },
 
   async scan(page, meta = {}) {
@@ -48,14 +48,25 @@ export const workdayAdapter = {
     const label = field.label || '';
     if (!label) return false;
     if (field.elementType === 'button') return false;
+    if (stepName === 'My Experience'
+      && profile?._workdaySkillsFilled === true
+      && /type\s*to\s*add\s*skills|enter\s+a\s*skill\s*below/i.test(label)) return false;
+
+    // My Information fields are handled by handleStep1MyInformation — skip in orchestrator
+    // to prevent stall-break on fields that are already filled by the dedicated handler.
+    if (stepName === 'My Information') {
+      const myInfoHandled = /how did you hear about us|phone\s*(number|device\s*type)?|country\s*(\/\s*territory\s*)?phone\s*code|city|state\s*\/\s*(region|province)|address\s*line|postal\s*code|country\s*\(address|^country$/i.test(label);
+      if (myInfoHandled) return false;
+    }
+
     const raw = fieldForFilter(field);
-    const mandatory = isMandatoryField(label, raw);
+    const mandatory = isMandatoryField(label, raw, stepName);
     if (field.elementType === 'file' && !mandatory) return false;
     if (isDiscoveredFieldFilled(field._raw || field, label)) return false;
     if (mandatory) return field.elementType !== 'file';
-    if (isSkippableUnimportantLabel(label, raw)) return false;
+    if (isSkippableUnimportantLabel(label, raw, stepName)) return false;
     if (shouldSkipOptionalFill(label, raw, profile, stepName)) return false;
-    if (profile?._fillOptionalFields !== true && !shouldIncludeInScan(label, raw)) {
+    if (profile?._fillOptionalFields !== true && !shouldIncludeInScan(label, raw, stepName)) {
       return false;
     }
     if (stepName === 'My Information' && /how did you hear about us/i.test(label)) {
@@ -72,6 +83,14 @@ export const workdayAdapter = {
   },
 
   async readValue(page, field, meta = {}) {
+    const directVal = await readFieldState(page, field).catch(() => '');
+    if (directVal && !/^select(\s+one)?\.?$/i.test(directVal)) {
+      return {
+        current: directVal,
+        field: { ...field, currentValue: directVal },
+        all: [],
+      };
+    }
     const snap = await discoverPage(page, {
       pageNumber: meta.pageNumber || field.pageNumber || 1,
       stepName: meta.stepName || field.stepName || '',

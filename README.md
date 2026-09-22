@@ -271,6 +271,8 @@ workday-auto-apply/auto-apply/
 └── data/                        Runtime artifacts (gitignored)
 ```
 
+Internal handoff documentation: `workday-auto-apply/SESSION-CHECKPOINT.md`.
+
 ---
 
 ## Security & data handling
@@ -308,7 +310,7 @@ git commit -m "description"
 git push origin main
 ```
 
-App-specific notes: `workday-auto-apply/auto-apply/README.md`.
+Extended architecture notes: `workday-auto-apply/auto-apply/README.md` · `workday-auto-apply/CODEBASE-ANALYSIS.md`.
 
 ---
 

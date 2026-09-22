@@ -118,6 +118,20 @@ export async function resolveResumePath(explicitPath) {
  * @returns {Promise<string|null>} absolute path
  */
 export async function getResumePathForApply(profile = {}, plan = {}) {
+  try {
+    const { isApplyWizzConfigured } = await import('./applyWizzClient.mjs');
+    const { resolveApplyWizzResumeUrl, ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+    if (isApplyWizzConfigured() && resolveApplyWizzResumeUrl(profile)) {
+      const fromApi = await ensureClientResumeFromApplyWizz(profile);
+      if (fromApi) {
+        console.log(`    📎 Resume from Apply Wizz: ${basename(fromApi)}`);
+        return fromApi;
+      }
+    }
+  } catch {
+    /* fall through to local resumes/ */
+  }
+
   // Drop stale relative paths that no longer resolve from current cwd
   const candidates = [
     plan?.resume,
@@ -196,20 +210,98 @@ function extractEducationBlock(text) {
 }
 
 function extractExperienceBlock(text) {
-  const idx = text.search(/\nEXPERIENCE\n/i);
+  const idx = text.search(/\n(?:PROFESSIONAL\s+EXPERIENCE|WORK\s+EXPERIENCE|EXPERIENCE)\s*\n/i);
   if (idx < 0) return '';
   const rest = text.slice(idx);
-  const end = rest.search(/\n(PROJECTS|EDUCATION|ACHIEVEMENTS)\n/i);
+  const end = rest.search(/\n(PROJECTS|EDUCATION|ACHIEVEMENTS|CERTIFICATIONS|SKILLS)\s*\n/i);
   return end > 0 ? rest.slice(0, end) : rest;
 }
 
+function cleanResumeLine(line = '') {
+  return String(line || '').replace(/\s+/g, ' ').replace(/^[-•*]\s*/, '').trim();
+}
+
+function parseResumeMonthYear(value = '') {
+  const match = String(value || '').match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{4})\b/i);
+  return match ? `${match[1].slice(0, 3)} ${match[2]}` : '';
+}
+
+function splitEducationCredential(line = '') {
+  const value = cleanResumeLine(line).replace(/\s*[|—–-]\s*$/, '').trim();
+  const match = value.match(/^(.*?\b(?:Bachelor(?:'s)?|Master(?:'s)?|Doctor(?:ate)?|Ph\.?D\.?|B\.?Tech\.?|M\.?Tech\.?|MBA|Associate)\b\s*(?:of\s+[^,|]+)?)(?:,\s*|\s+-\s*)(.+)$/i);
+  if (match) return { degree: cleanResumeLine(match[1]), major: cleanResumeLine(match[2]) };
+  const comma = value.split(/,\s*/);
+  if (comma.length >= 2 && /degree|science|technology|engineering|arts|business/i.test(comma[0])) {
+    return { degree: cleanResumeLine(comma[0]), major: cleanResumeLine(comma.slice(1).join(', ')) };
+  }
+  return { degree: value, major: '' };
+}
+
+/** Extract factual top education/work records from one client resume. */
+export function parseResumeProfile(text = '') {
+  const raw = String(text || '').replace(/\r/g, '');
+  const lines = raw.split('\n').map(cleanResumeLine).filter(Boolean);
+  const educationIndex = lines.findIndex((line) => /^education$/i.test(line));
+  const educationEnd = educationIndex >= 0
+    ? lines.findIndex((line, index) => index > educationIndex && /^(?:professional\s+)?experience|work\s+experience|projects|skills|certifications|achievements$/i.test(line))
+    : -1;
+  const educationLines = educationIndex >= 0
+    ? lines.slice(educationIndex + 1, educationEnd > educationIndex ? educationEnd : lines.length)
+    : [];
+  const credentialLine = educationLines.find((line) => /\b(bachelor|master|doctor|ph\.?d|b\.?tech|m\.?tech|mba|associate)\b/i.test(line));
+  const credential = splitEducationCredential(credentialLine || '');
+  const schoolLineIndex = credentialLine ? educationLines.indexOf(credentialLine) : -1;
+  const university = schoolLineIndex >= 0
+    ? (educationLines.slice(schoolLineIndex + 1).find((line) => !/^\d{4}(?:\s*[-–]\s*\d{4})?$/.test(line) && !/\b(gpa|cgpa)\b/i.test(line)) || '').split(/\s*[|—–]\s*/)[0].trim()
+    : '';
+  const educationYears = educationLines.join(' ').match(/\b(?:19|20|21)\d{2}\b/g) || [];
+
+  const experienceIndex = lines.findIndex((line) => /^(?:professional\s+experience|work\s+experience|experience)$/i.test(line));
+  const experienceEnd = experienceIndex >= 0
+    ? lines.findIndex((line, index) => index > experienceIndex && /^(education|projects|skills|certifications|achievements)$/i.test(line))
+    : -1;
+  const experienceLines = experienceIndex >= 0
+    ? lines.slice(experienceIndex + 1, experienceEnd > experienceIndex ? experienceEnd : lines.length)
+    : [];
+  const dateIndex = experienceLines.findIndex((line) => /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b/i.test(line));
+  const dateLine = dateIndex >= 0 ? experienceLines[dateIndex] : '';
+  const dateParts = dateLine.match(/(\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b)\s*(?:[-–—]|to)\s*(Present|Current|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4})?/i);
+  const title = dateIndex >= 0 ? cleanResumeLine(dateLine.slice(0, dateLine.indexOf(dateParts?.[1] || dateLine)).replace(/[|—–-]\s*$/, '')) : '';
+  const companyParts = (dateIndex >= 0 ? experienceLines[dateIndex + 1] || '' : '').split('|').map(cleanResumeLine).filter(Boolean);
+  const current = /\b(present|current)\b/i.test(dateLine);
+
+  return {
+    skills: extractResumeSkillNames(raw),
+    education: {
+      degree: credential.degree,
+      major: credential.major,
+      field_of_study_hierarchy: credential.major ? [credential.major] : [],
+      university,
+      from_year: educationYears[0] || '',
+      to_year: educationYears[educationYears.length - 1] || '',
+      highest_level: credential.degree,
+    },
+    experience: {
+      current_title: title,
+      current_company: companyParts[0] || '',
+      city: companyParts[1] || '',
+      location: companyParts[1] || '',
+      from_date: parseResumeMonthYear(dateParts?.[1] || ''),
+      to_date: current ? '' : parseResumeMonthYear(dateParts?.[2] || ''),
+      currently_working: current,
+    },
+  };
+}
+
 function extractSkillsBlock(text) {
-  const idx = text.search(/\n(?:CORE\s+)?SKILLS\b|TECHNICAL\s+SKILLS|KEY\s+SKILLS/i);
+  const idx = text.search(/\b(?:CORE\s+SKILLS|TECHNICAL\s+SKILLS|KEY\s+SKILLS|AREAS\s+OF\s+EXPERTISE|TECHNICAL\s+PROFICIENCIES|SKILLS\s*&?\s*(?:EXPERTISE|SUMMARY|ABILITIES)?|PROGRAMMING\s+LANGUAGES|TECHNOLOGIES|TECH\s+STACK|TOOLKIT|SKILLS\b)\b/i);
   if (idx < 0) return '';
   const rest = text.slice(idx);
-  const end = rest.search(/\n(?:EXPERIENCE|EDUCATION|PROJECTS|ACHIEVEMENTS|WORK\s+HISTORY)\n/i);
-  return end > 0 ? rest.slice(0, end) : rest;
+  const end = rest.search(/\b(?:PROFESSIONAL\s+EXPERIENCE|WORK\s+EXPERIENCE|EXPERIENCE|EDUCATION|ACADEMIC|PROJECTS|ACHIEVEMENTS|WORK\s+HISTORY|CERTIFICATIONS|PUBLICATIONS)\b/i);
+  return end > 0 ? rest.slice(0, end) : rest.slice(0, 1500);
 }
+
+const DEGREE_OR_EDUCATION_RE = /\b(master|bachelor|phd|doctorate|doctor|associate|degree|diploma|b\.?tech|m\.?tech|b\.?s\.?|m\.?s\.?|b\.?a\.?|m\.?a\.?|m\.?b\.?a|gpa|cgpa|university|college|school|academy|institute|graduat|education|student|high\s*school|intermediate|secondary|major|minor|field\s*of\s*study)\b/i;
 
 /**
  * Parse 1–N skill names from resume text (CORE SKILLS / Skills / comma lists).
@@ -219,7 +311,8 @@ function extractSkillsBlock(text) {
 export function extractResumeSkillNames(text = '') {
   const raw = String(text || '');
   if (!raw.trim()) return [];
-  const block = extractSkillsBlock(raw) || raw.slice(0, 1800);
+  const block = extractSkillsBlock(raw);
+  if (!block) return [];
   const out = [];
   const seen = new Set();
   for (const line of block.split(/\n/)) {
@@ -228,11 +321,18 @@ export function extractResumeSkillNames(text = '') {
       .trim();
     if (!cleaned || cleaned.length > 140) continue;
     if (/^(experience|education|projects|achievements|work history)$/i.test(cleaned)) continue;
+    if (DEGREE_OR_EDUCATION_RE.test(cleaned) && /\b(degree|university|college|school|master|bachelor)\b/i.test(cleaned)) continue;
     for (const part of cleaned.split(/[,|;•·]/)) {
-      const skill = part.replace(/^[-–*]\s*/, '').replace(/\s+/g, ' ').trim();
-      if (skill.length < 2 || skill.length > 42) continue;
+      const skill = part
+        .replace(/^[-–*]\s*/, '')
+        .replace(/^.*:\s*/, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (skill.length < 2 || skill.length > 35) continue;
       if (!/[A-Za-z]/.test(skill)) continue;
       if (/^(and|the|with|skills|languages?|frameworks?|tools?)$/i.test(skill)) continue;
+      if (DEGREE_OR_EDUCATION_RE.test(skill)) continue;
+      if (/^computer\s*science$/i.test(skill)) continue;
       const key = skill.toLowerCase();
       if (seen.has(key)) continue;
       seen.add(key);
@@ -308,7 +408,15 @@ export function inferAnswerFromResume(label, resumeText, field = {}) {
   if (/^(full\s*)?name$/i.test(lower)) return name.full || null;
   if (/^email/i.test(lower)) return firstMatch(resumeText, /[\w.+-]+@[\w.-]+\.\w+/);
   if (/phone\s*number|^phone$/i.test(lower)) {
-    return firstMatch(resumeText, /\+?\d[\d\s().-]{8,}\d/)?.replace(/\s+/g, ' ') || null;
+    const raw = firstMatch(resumeText, /\+?\d[\d\s().-]{8,}\d/);
+    if (!raw) return null;
+    let d = raw.replace(/\D/g, '');
+    if (d.length === 11 && d.startsWith('1')) d = d.slice(1);
+    return d.length >= 10 ? d.slice(-10) : null;
+  }
+  if (/country\s*(\/\s*territory\s*)?phone\s*code/i.test(lower)) {
+    if (/united states|usa/i.test(resumeText)) return 'United States of America (+1)';
+    return null;
   }
   if (/linkedin/i.test(lower)) {
     const url = firstMatch(resumeText, /https?:\/\/(www\.)?linkedin\.com\/[\w./-]+/i);
@@ -324,8 +432,9 @@ export function inferAnswerFromResume(label, resumeText, field = {}) {
   }
   if (/^city$/i.test(lower)) return firstMatch(resumeText, /([A-Za-z][A-Za-z\s]+),\s*(India|USA|United States)/)?.split(',')[0]?.trim() || null;
   if (/^country$/i.test(lower) && !/phone\s*code/i.test(lower)) {
+    if (/united states of america/i.test(resumeText)) return 'United States of America';
+    if (/united states|usa|\bU\.S\.\b/i.test(resumeText)) return 'United States of America';
     if (/india/i.test(resumeText)) return 'India';
-    if (/united states|usa/i.test(resumeText)) return 'United States';
   }
   if (/address\s*line\s*1/i.test(lower)) {
     return 'Hyderabad';

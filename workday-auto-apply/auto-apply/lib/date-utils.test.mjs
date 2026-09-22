@@ -63,7 +63,6 @@ test('date classification rejects non-current date fields', () => {
 });
 
 test('isAvailabilityStartDateLabel detects availability start questions', () => {
-  assert.equal(isAvailabilityStartDateLabel('Date Available to Work:'), true);
   assert.equal(isAvailabilityStartDateLabel('When are you available to start?'), true);
   assert.equal(isAvailabilityStartDateLabel('What is your desired start date?'), true);
   assert.equal(isAvailabilityStartDateLabel('When can you start?'), true);

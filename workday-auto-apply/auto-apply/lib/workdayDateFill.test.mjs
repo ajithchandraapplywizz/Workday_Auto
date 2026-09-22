@@ -30,10 +30,12 @@ test('strictDateMatch rejects a leftover year with the wrong month', () => {
   assert.equal(strictDateMatch({ month: 'MM', year: 'YYYY', text: 'MM/YYYY' }, { month: '06', year: '2025' }), false);
 });
 
-test('parseDateFillValue accepts MM/YYYY and year-only', () => {
+test('parseDateFillValue accepts MM/YYYY, year-only, and month names like Aug 2024', () => {
   assert.deepEqual(parseDateFillValue('05/2025'), { month: '05', year: '2025', padded: '05/2025' });
   assert.deepEqual(parseDateFillValue('5/2025'), { month: '05', year: '2025', padded: '05/2025' });
   assert.deepEqual(parseDateFillValue('2020', 'year'), { month: '01', year: '2020', padded: '01/2020' });
+  assert.deepEqual(parseDateFillValue('Aug 2024'), { month: '08', year: '2024', padded: '08/2024' });
+  assert.deepEqual(parseDateFillValue('August 2024'), { month: '08', year: '2024', padded: '08/2024' });
   assert.equal(parseDateFillValue('not-a-date'), null);
 });
 

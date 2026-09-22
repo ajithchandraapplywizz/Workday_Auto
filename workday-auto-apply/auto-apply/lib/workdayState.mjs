@@ -2,23 +2,16 @@
  * workdayState.mjs — Mandatory State / Province field on My Information
  */
 
-import { getTenantExperienceOverrides } from './tenantQuestionYaml.mjs';
-
 export const STATE_LABEL = 'State';
 export const WORKDAY_DEFAULT_STATE = 'California';
 
 /**
- * Resolve state/province value from tenant YAML, profile, or default.
+ * Resolve state/province value from profile or default.
  * @param {object} profile
  * @param {string} [tenant]
  * @returns {string}
  */
 export function resolveStateValue(profile = {}, tenant = '') {
-  const tenantKey = String(tenant || profile?._tenant || '').trim().toLowerCase();
-  try {
-    const exp = getTenantExperienceOverrides(tenantKey);
-    // personal block is on tenant doc — fall through to profile
-  } catch {}
 
   // Tenant YAML may expose personal via profile merge elsewhere; prefer profile.
   const fromTenantPersonal = profile?.personal?.state

@@ -136,6 +136,7 @@ test('required field uses profile fallback when the question engine asks for rev
     profile: {
       qa_answers: {},
       _persistAnswers: false,
+      _applyWizzHydrated: true,
       personal: { phone: '5550100' },
     },
     adapter,
@@ -266,5 +267,57 @@ test('verification mismatch is not treated as success', async () => {
 
   assert.equal(result.status, STATUS.BLOCKED);
   assert.equal(result.reason, 'verification_failed');
+  assert.equal(result.failed[0].reason, 'verification_failed');
+});
+
+test('orchestrator enforces guard cap of 2 attempts and refuses 3rd attempt on loop', async () => {
+  let fillAttempts = 0;
+  const testField = {
+    questionId: 'q-loop-test',
+    label: 'Do you have any relatives who work for our company?',
+    elementType: 'radio',
+    fieldType: 'radio',
+    required: false,
+    options: ['Yes', 'No'],
+    currentValue: null,
+  };
+
+  const adapter = {
+    name: 'fake',
+    detectPage: async () => 'Application Questions',
+    waitStable: async () => {},
+    scan: async () => ({ fields: [testField] }),
+    shouldFill: () => true,
+    fill: async () => {
+      fillAttempts += 1;
+      return { success: true, verifiedValue: 'No' };
+    },
+    // Simulate verification failing to reflect target value
+    readValue: async () => ({ current: '', field: { ...testField, currentValue: '' }, all: [testField] }),
+    valuesMatch: () => false,
+    validatePage: async () => ({ ok: false, requiredRemaining: 0, errors: [] }),
+  };
+
+  const decision = {
+    questionId: 'q-loop-test',
+    intent: 'prior_association',
+    answer: 'No',
+    confidence: 0.95,
+    requiresReview: false,
+    source: 'applywizz_profile',
+    reasonCode: 'EXPLICIT_PROFILE_MATCH',
+  };
+
+  const result = await runPageOrchestrator({
+    page: {},
+    profile: { qa_answers: {}, _persistAnswers: false },
+    adapter,
+    maxCycles: 5,
+    answerFn: async () => ({ pageNumber: 1, answers: [decision] }),
+  });
+
+  // Verification that fillAttempts stopped at exactly 2 (MAX_FIELD_RETRIES = 2)
+  assert.equal(fillAttempts, 2, `Total fill attempts must be capped at 2, got: ${fillAttempts}`);
+  assert.equal(result.failed.length, 1);
   assert.equal(result.failed[0].reason, 'verification_failed');
 });

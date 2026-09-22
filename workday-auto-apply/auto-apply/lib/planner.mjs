@@ -11,9 +11,10 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import yaml from 'js-yaml';
 import readline from 'readline/promises';
-import { fuzzyScore } from './fields.mjs';
-import { normalizeLabel, createQAStore, isComplianceSensitive, saveAnswerToYaml } from './qaStore.mjs';
-import { hydrateProfileFromApplyWizz } from './applyWizzClient.mjs';
+import { fuzzyScore, findBestOptionMatch } from './fields.mjs';
+import { normalizeLabel, createQAStore, isComplianceSensitive, saveAnswerToYaml, isSalaryQuestion, isHourlyWageQuestion } from './qaStore.mjs';
+import { detectControlType } from './scanner.mjs';
+import { hydrateProfileFromApplyWizz, isApplyWizzConfigured } from './applyWizzClient.mjs';
 import {
   mergeWorkdayDefaultAnswers,
 } from './workdayDefaults.mjs';
@@ -25,13 +26,24 @@ import { collectLiveFieldOptions } from './workdayDom.mjs';
 import { resolveUnknownWithLlm } from './openRouterLlm.mjs';
 import { shouldIncludeInScan, isSkippableUnimportantLabel, isMandatoryField, shouldSkipOptionalFill } from './scanFieldFilter.mjs';
 import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
+import { ensureUsWorkdayContact } from './clientContact.mjs';
+import { normalizePersonalNames } from './personName.mjs';
+import { getResumePathForApply } from './resumeParser.mjs';
+import {
+  isSignatureOrFullNameQuestion,
+  isShiftOrScheduleQuestion,
+  isSpecificManagerOrLocationQuestion,
+} from './questionEngine/intents.mjs';
+import { isApiOnlyAnswerMode, applyApiOnlyProfileGuards } from './apiOnlyProfile.mjs';
 
 // ─── Field label → profile key mapping ──────────────────────────────────────
 // Each entry: [regex to match field label, path in profile.yml, optional transform]
 export const FIELD_MAP = [
   // Personal
-  [/^(legal\s*)?(first|given)\s*name(\s*local)?(\(s\))?$|^legalName--firstNameLocal$|^legalName--firstName|^Given Name/i, 'personal.first_name'],
-  [/^(legal\s*)?(last|family|surname)\s*name(\s*local)?(\(s\))?$|^legalName--lastNameLocal$|^legalName--lastName|^Family Name/i, 'personal.last_name'],
+  [/^(legal\s*)?(first|given)\s*name(\s*local)?(\s*\(?s?\)?)?$|^legalName--firstNameLocal$|^legalName--firstName|^given name/i, 'personal.first_name'],
+  [/^(legal\s*)?(last|family|surname)\s*name(\s*local)?(\s*\(?s?\)?)?$|^legalName--lastNameLocal$|^legalName--lastName|^family name/i, 'personal.last_name'],
+  [/local\s*given\s*name/i, 'personal.first_name'],
+  [/local\s*family\s*name/i, 'personal.last_name'],
   [/^(full\s*)?name$/i, 'personal.full_name'],  // resolved as first + last
   [/^email/i, 'personal.email'],
   [/phone\s*device\s*type/i, '_static.Mobile'],
@@ -74,15 +86,15 @@ export const FIELD_MAP = [
   [/please select one of the below options(?!\s*['']?\s*yes)/i, '_static.I am completing the application and anti-corruption questions on behalf of myself.'],
   [/enter your name.*agency.*n\/?a/i, '_static.N/A'],
   [/country\s*(\/\s*territory\s*)?phone\s*code|^phoneNumber--countryPhoneCode/i, 'personal.country_phone_code'],
-  [/extension|^phoneNumber--extension$/i, 'personal.phone_extension'],
-  [/^phone\s*number$|^phoneNumber--phoneNumber$|^phone$/i, 'personal.phone'],
+  [/^phone\s*number|^phoneNumber--phoneNumber$|^phone$/i, 'personal.phone'],
+  [/phone\s*extension|^phoneNumber--extension$/i, 'personal.phone_extension'],
   [/linkedin/i, 'personal.linkedin'],
   [/portfolio|website|url|shared\s*url/i, 'personal.linkedin'],
-  [/^city$|^address--city/i, 'personal.city'],
   [/^state$|^address--state/i, 'personal.state'],
   [/^postal\s*code$|^zip|^address--postalCode/i, 'personal.postal_code'],
-  [/^address\s*line\s*1$|^address--addressLine1/i, 'personal.address_line1'],
-  [/^address\s*line\s*2$|^address--addressLine2/i, 'personal.address_line2'],
+  [/^address\s*line\s*1(\s*-\s*local)?$|^address--addressLine1/i, 'personal.address_line1'],
+  [/^address\s*line\s*2(\s*-\s*local)?$|^address--addressLine2/i, 'personal.address_line2'],
+  [/^city(\s*-\s*local)?$|^address--city/i, 'personal.city'],
   [/^location$/i, 'experience.location'],
   [/^country$/i, 'personal.country'],
   [/^(?!.*phone).*address/i, 'personal.address_line1'],
@@ -183,13 +195,38 @@ export const FIELD_MAP = [
 ];
 
 // ─── Load profile ───────────────────────────────────────────────────────────
+async function loadProfileFromApiOnly() {
+  const profile = applyApiOnlyProfileGuards({
+    personal: {},
+    work_auth: {},
+    eeo: {},
+    education: {},
+    experience: {},
+    skills: [],
+    qa_answers: {},
+  });
+  console.log('  🌐 Profile mode: API-only (Apply Wizz → resume → LLM). Local YAML/Q&A DB disabled.');
+  await hydrateProfileFromApplyWizz(profile);
+  if (!profile._applyWizzHydrated && !isApplyWizzConfigured()) {
+    console.warn('  ⚠️  Apply Wizz not configured — set APPLYWIZZ_ID in .env; using resume + LLM only.');
+  }
+  if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
+  await ensureUsWorkdayContact(profile);
+  profile._mandatoryOnlyFill = true;
+  profile._resumePath = await getResumePathForApply(profile).catch(() => null);
+  return profile;
+}
+
 export async function loadProfile(profilePath) {
+  if (isApiOnlyAnswerMode()) {
+    return loadProfileFromApiOnly();
+  }
+
   const raw = await readFile(profilePath || resolve(process.cwd(), 'config', 'profile.yml'), 'utf-8');
   const profile = yaml.load(raw);
 
-  // Resolve full_name from first + last
   if (profile.personal) {
-    profile.personal.full_name = `${profile.personal.first_name || ''} ${profile.personal.last_name || ''}`.trim();
+    profile.personal = normalizePersonalNames(profile.personal);
     // If city isn't explicitly set, extract from location
     if (!profile.personal.city && profile.personal.location) {
       profile.personal.city = profile.personal.location.split(',')[0].trim();
@@ -207,6 +244,8 @@ export async function loadProfile(profilePath) {
 
   mergeWorkdayDefaultAnswers(profile);
   await hydrateProfileFromApplyWizz(profile);
+  if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
+  await ensureUsWorkdayContact(profile);
 
   // Default: only fill mandatory (*) fields unless profile explicitly opts in
   if (profile._fillOptionalFields !== true) {
@@ -214,7 +253,7 @@ export async function loadProfile(profilePath) {
   }
 
   if (!profile.personal?.phone) {
-    console.warn('⚠️  profile.personal.phone is missing in config/profile.yml — Workday phone fill will stop until it is set.');
+    console.warn('⚠️  No phone on file after Apply Wizz + contact bootstrap — My Information phone may fail.');
   }
 
   return profile;
@@ -244,6 +283,7 @@ function parseTenantOverrideEntry(entry) {
 }
 
 function loadTenantOverrideRules(tenant = '') {
+  if (isApiOnlyAnswerMode()) return [];
   const resolvedTenant = String(tenant || '').trim().toLowerCase();
   if (!resolvedTenant || resolvedTenant === 'unknown') return [];
   if (TENANT_OVERRIDE_CACHE.has(resolvedTenant)) return TENANT_OVERRIDE_CACHE.get(resolvedTenant);
@@ -286,10 +326,30 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
     return ['External Career Site Sources', 'Anthropic'];
   }
 
+  if (isSignatureOrFullNameQuestion(cleanLabel)) {
+    const p = profile.personal || {};
+    const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || '';
+    if (fullName) return fullName;
+  }
+
+  if (isShiftOrScheduleQuestion(cleanLabel)) {
+    return 'Flexible';
+  }
+
+  if (isSpecificManagerOrLocationQuestion(cleanLabel)) {
+    return 'N/A';
+  }
+
   const overrideRules = loadTenantOverrideRules(tenant);
   for (const [regex, path] of overrideRules) {
     if (regex.test(cleanLabel)) {
       if (path.startsWith('_dynamic.today')) {
+        // Prefer the stored profile date (available_to_start or experience.start_date)
+        // over today's date. Today is only a fallback when the profile has no date.
+        const storedDate =
+          getNestedValue(profile, 'experience.available_to_start')
+          || getNestedValue(profile, 'experience.start_date');
+        if (storedDate) return String(storedDate);
         return getTodayMMDDYYYY('Asia/Kolkata');
       }
       if (path.startsWith('_static.')) {
@@ -306,6 +366,12 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
   for (const [regex, path] of FIELD_MAP) {
     if (regex.test(cleanLabel)) {
       if (path.startsWith('_dynamic.today')) {
+        // Prefer the stored profile date (available_to_start or experience.start_date)
+        // over today's date. _dynamic.today is an assumption, not a fact.
+        const storedDate =
+          getNestedValue(profile, 'experience.available_to_start')
+          || getNestedValue(profile, 'experience.start_date');
+        if (storedDate) return String(storedDate);
         return getTodayMMDDYYYY('Asia/Kolkata');
       }
       if (path.startsWith('_static.')) {
@@ -494,6 +560,84 @@ export async function askHuman(questionText, field = {}, { company, compliance, 
   }
 }
 
+/**
+ * Pre-fill validity check: validates resolved value against what the field can actually accept.
+ * Returns { valid: boolean, reason?: string, bestScore?: number }
+ */
+export function validateResolvedValue(field = {}, resolvedValue, options = {}) {
+  if (resolvedValue === undefined || resolvedValue === null || resolvedValue === '') {
+    return { valid: false, reason: 'empty_value' };
+  }
+
+  const controlType = field.controlType || detectControlType(field);
+  const label = String(field.label || field.id || field.name || '');
+  const threshold = options.threshold ?? 85;
+
+  // 1. Dropdown / Checkbox / Radio: if visible options were scraped, resolvedValue must match one >= 85
+  if (controlType === 'custom-dropdown' || controlType === 'native-select' || controlType === 'radio-group' || controlType === 'checkbox-group') {
+    const rawOptions = field.options || [];
+    if (Array.isArray(rawOptions) && rawOptions.length > 0) {
+      if (controlType === 'checkbox-group') {
+        const parts = (Array.isArray(resolvedValue) ? resolvedValue : String(resolvedValue).split(/[,;\n]/))
+          .map(p => String(p).trim()).filter(Boolean);
+        const hasAnyMatch = parts.some(p => findBestOptionMatch(p, rawOptions, threshold).matched);
+        if (!hasAnyMatch) {
+          return { valid: false, reason: 'checkbox_value_not_in_visible_options' };
+        }
+      } else {
+        const match = findBestOptionMatch(resolvedValue, rawOptions, threshold);
+        if (!match.matched) {
+          return { valid: false, reason: 'option_not_in_visible_options', bestScore: match.bestScore };
+        }
+      }
+    }
+  }
+
+  // 2. Date-picker: resolved value must parse as a real date
+  if (controlType === 'date-picker') {
+    const strVal = String(resolvedValue).trim();
+    const isDatePattern = /^\d{1,2}[\/-]\d{1,2}[\/-]\d{2,4}$/.test(strVal) || /^\d{4}[\/-]\d{1,2}[\/-]\d{1,2}$/.test(strVal);
+    const parsedTimestamp = Date.parse(strVal);
+    if (!isDatePattern && isNaN(parsedTimestamp)) {
+      return { valid: false, reason: 'invalid_date_format' };
+    }
+  }
+
+  // 3. Free-text with implied numeric / salary / percentage check
+  if (controlType === 'free-text' || !controlType) {
+    if (isSalaryQuestion(label)) {
+      const isHourly = isHourlyWageQuestion(label);
+      const strVal = String(resolvedValue).trim();
+      const numClean = strVal.replace(/[$,\s]/g, '');
+      const num = parseFloat(numClean);
+
+      if (isNaN(num)) {
+        return { valid: false, reason: 'non_numeric_salary' };
+      }
+
+      if (isHourly) {
+        if (num < 10 || num > 500) {
+          return { valid: false, reason: 'implausible_hourly_wage' };
+        }
+      } else {
+        // Expected annual salary: at least 4 digits, magnitude >= 1000 (catches "43")
+        if (num < 1000 || numClean.length < 4) {
+          return { valid: false, reason: 'implausible_salary_magnitude' };
+        }
+      }
+    }
+
+    if (/%|percent/i.test(label)) {
+      const num = parseFloat(String(resolvedValue).replace(/[%\s]/g, ''));
+      if (!isNaN(num) && (num < 0 || num > 100)) {
+        return { valid: false, reason: 'implausible_percentage' };
+      }
+    }
+  }
+
+  return { valid: true };
+}
+
 // ─── Phase 2: Resolve field with Q&A store + human fallback ─────────────────
 export async function resolveField(field, profile, qaStore, options = {}) {
   const { skipPrompt = true, plan, company, resumePath, url, tenant, page } = options;
@@ -514,6 +658,21 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     return profile._answerCache.get(normalized);
   }
   const compliance = isComplianceSensitive(rawLabel);
+
+  // For availability/start-date fields: check the profile for a stored date FIRST.
+  // buildCurrentDateAction returns today's date, which would overwrite the stored
+  // available_to_start (e.g. 09/20/2026) — so we must gate it.
+  const { isAvailabilityStartDateLabel } = await import('./date-utils.mjs');
+  if (isAvailabilityStartDateLabel(rawLabel, { label: rawLabel, question: rawLabel })) {
+    const storedDate =
+      profile?.experience?.available_to_start
+      || profile?.experience?.start_date
+      || (profile?.personal && profile.personal.available_to_start);
+    if (storedDate) {
+      return rememberResolvedAnswer(profile, normalized, String(storedDate));
+    }
+    // No profile date — fall through to the dynamic-date fallback below.
+  }
 
   const dynamicDateAction = buildCurrentDateAction(rawLabel, {
     label: rawLabel,
@@ -548,6 +707,11 @@ export async function resolveField(field, profile, qaStore, options = {}) {
       },
     );
     if (engineHit?.answer) {
+      const validity = validateResolvedValue(fieldObj, engineHit.answer);
+      if (!validity.valid) {
+        console.log(`    ⚠️  Pre-fill validity check rejected "${String(engineHit.answer)}" for "${rawLabel}": ${validity.reason}`);
+        return null;
+      }
       return rememberResolvedAnswer(profile, normalized, engineHit.answer);
     }
   }
@@ -569,6 +733,11 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     forceLlm: requiredUnknown,
   });
   if (resolved?.answer) {
+    const validity = validateResolvedValue(fieldObj, resolved.answer);
+    if (!validity.valid) {
+      console.log(`    ⚠️  Pre-fill validity check rejected "${String(resolved.answer)}" for "${rawLabel}": ${validity.reason}`);
+      return null;
+    }
     return rememberResolvedAnswer(profile, normalized, resolved.answer);
   }
 
@@ -766,25 +935,26 @@ export async function generatePlan(scan, profile, { resumePath, jdText, url, qaS
       }
     }
 
-    // Check profile.qa_answers then QA store if available
     if (!mapped && label) {
       const ageYes = resolveMinimumAgeAnswer(label, profile);
       if (ageYes) {
         fills.push({ ...field, value: ageYes });
         mapped = true;
       }
-      const normalized = normalizeLabel(label);
-      const fromProfile = profile?.qa_answers?.[normalized];
-      if (!mapped && fromProfile != null && fromProfile !== '') {
-        fills.push({ ...field, value: Array.isArray(fromProfile) ? fromProfile : String(fromProfile) });
-        mapped = true;
-      } else if (!mapped && store) {
-        const stored = await store.get(normalized);
-        if (stored != null) {
-          const val = typeof stored === 'object' && stored.answer !== undefined ? stored.answer : String(stored);
-          if (val) {
-            fills.push({ ...field, value: Array.isArray(val) ? val : String(val) });
-            mapped = true;
+      if (!mapped && !isApiOnlyAnswerMode()) {
+        const normalized = normalizeLabel(label);
+        const fromProfile = profile?.qa_answers?.[normalized];
+        if (fromProfile != null && fromProfile !== '') {
+          fills.push({ ...field, value: Array.isArray(fromProfile) ? fromProfile : String(fromProfile) });
+          mapped = true;
+        } else if (store) {
+          const stored = await store.get(normalized);
+          if (stored != null) {
+            const val = typeof stored === 'object' && stored.answer !== undefined ? stored.answer : String(stored);
+            if (val) {
+              fills.push({ ...field, value: Array.isArray(val) ? val : String(val) });
+              mapped = true;
+            }
           }
         }
       }

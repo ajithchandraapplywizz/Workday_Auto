@@ -13,4 +13,5 @@ export {
   resolveFieldWithoutLlm,
   resolveDynamicAnswer,
   decisionForField,
+  llmAnswerWithPlaywrightContext,
 } from './pageAnswerEngine.mjs';

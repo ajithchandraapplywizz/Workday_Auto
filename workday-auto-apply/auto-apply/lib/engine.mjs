@@ -20,6 +20,8 @@ import {
   isWorkdayJobPageMissing,
   isWorkdayWizardVisible,
   ensureWorkdayApplicationWizard,
+  extractWorkdayCompanyName,
+  extractJobRoleFromDom,
 } from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
@@ -29,6 +31,7 @@ import { handleWorkday } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
 import { peekClientAnswer } from './clientAnswer.mjs';
 import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
+import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { saveAnswerToYaml, normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
 import { isAutoApplyMode } from './openRouterLlm.mjs';
@@ -38,6 +41,9 @@ import {
   countUnfilledMandatoryQuestions,
   acknowledgeAllPageAgreements,
 } from './workdayQuestionFill.mjs';
+import { runStepDomPrep } from './stepDomPrep.mjs';
+import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
+import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -77,14 +83,229 @@ import { runDynamicFieldLoop, resetPerApplicationSessionState } from './dynamicF
 import { validatePage } from './interaction/index.mjs';
 import { repairRequiredFieldsFromErrors, parseErrorFieldNames } from './workdayErrorRepair.mjs';
 import { bootstrapClientContext } from './profileBootstrap.mjs';
+import { resolvePostalForWorkday, workdayPhoneCodeForCountry } from './clientContact.mjs';
 import { disarmRiskyAddButtons, installScriptOnlyClickGuard, drainBlockedScriptClicks } from './safeClick.mjs';
+import { logFieldTrace, getTraceFilePath } from './trace.mjs';
 import * as readline from 'readline/promises';
 import { stdin as input, stdout as output } from 'process';
+import { dispatchFillHandler, formatToMMDDYYYY } from './fillHandlers.mjs';
+import { detectControlType } from './scanner.mjs';
+import { validateResolvedValue } from './planner.mjs';
+import { tokenSetRatio } from './fields.mjs';
+import { writeFieldTraceLine, escalateToManualReview } from './reporter.mjs';
+
+export const DEFAULT_MAX_FILL_ATTEMPTS = 2;
+
+/**
+ * Read the current on-screen value of a form field in the DOM.
+ */
+export async function readFieldState(page, field) {
+  if (!page) return '';
+  const controlType = field.controlType || detectControlType(field);
+
+  try {
+    return await page.evaluate(({ selector, automationId, wdQId, cType }) => {
+      let root = null;
+      if (wdQId) root = document.querySelector(`[data-wd-q-id="${wdQId}"]`);
+      if (!root && automationId) root = document.querySelector(`[data-automation-id="${automationId}"]`);
+      if (!root && selector) root = document.querySelector(selector);
+      if (!root) return '';
+
+      // Checkbox group
+      if (cType === 'checkbox-group') {
+        const cbs = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
+        const checkedLabels = cbs.filter(cb => cb.checked || cb.getAttribute('aria-checked') === 'true').map(cb => {
+          const lbl = cb.id ? document.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+          return (lbl?.textContent || cb.getAttribute('aria-label') || cb.value || '').trim();
+        }).filter(Boolean);
+        return checkedLabels.join(', ');
+      }
+
+      // Radio group
+      if (cType === 'radio-group') {
+        const checked = root.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"]');
+        if (checked) {
+          const lbl = checked.id ? document.querySelector(`label[for="${CSS.escape(checked.id)}"]`) : checked.closest('label');
+          return (lbl?.textContent || checked.getAttribute('aria-label') || checked.value || '').trim();
+        }
+        return '';
+      }
+
+      // Dropdown (native or custom)
+      if (cType === 'native-select' || root.tagName?.toLowerCase() === 'select') {
+        const sel = root.tagName?.toLowerCase() === 'select' ? root : root.querySelector('select');
+        if (sel && sel.selectedOptions?.[0]) return (sel.selectedOptions[0].textContent || '').trim();
+      }
+      const selectedItem = root.querySelector('[data-automation-id="selectedItem"]');
+      if (selectedItem?.textContent?.trim() && !/^select(\s+one)?\.?$/i.test(selectedItem.textContent.trim())) {
+        return selectedItem.textContent.trim();
+      }
+      const btn = root.querySelector('button[aria-haspopup="listbox"], [data-automation-id*="select"] button, [role="combobox"]');
+      if (btn) {
+        const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t && !/^select(\s+one)?\.?$/i.test(t)) return t;
+      }
+
+      // Date spinbuttons
+      const spinButtons = Array.from(root.querySelectorAll('input[role="spinbutton"], input[data-automation-id*="dateSection"]'));
+      if (spinButtons.length >= 2) {
+        const vals = spinButtons.map(s => (s.value || '').trim()).filter(v => v && !/^(mm|dd|yyyy)$/i.test(v));
+        if (vals.length >= 2) return vals.join('/');
+      }
+
+      // Standard input or textarea
+      const input = root.querySelector('input:not([type="hidden"]), textarea');
+      if (input && input.value !== undefined) {
+        return (input.value || '').trim();
+      }
+
+      return (root.value || root.innerText || root.textContent || '').trim();
+    }, {
+      selector: field.selector,
+      automationId: field.automationId,
+      wdQId: field.wdQId,
+      cType: controlType,
+    });
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * 3d. Verify that a field actually changed to match the expected value.
+ */
+export async function verifyFieldFilled(page, field, expectedValue) {
+  const actualValue = await readFieldState(page, field);
+  const expectedStr = String(expectedValue || '').trim();
+  const controlType = field.controlType || detectControlType(field);
+
+  if (!actualValue) {
+    return { verified: false, actualValue: '', expectedValue: expectedStr };
+  }
+
+  // Dropdown or radio comparison
+  if (controlType === 'custom-dropdown' || controlType === 'native-select' || controlType === 'radio-group') {
+    const score = tokenSetRatio(expectedStr, actualValue);
+    return {
+      verified: score >= 85 || actualValue.toLowerCase() === expectedStr.toLowerCase(),
+      actualValue,
+      expectedValue: expectedStr,
+      score,
+    };
+  }
+
+  // Checkbox group comparison
+  if (controlType === 'checkbox-group') {
+    const targets = (Array.isArray(expectedValue) ? expectedValue : expectedStr.split(/[,;\n]/))
+      .map(t => String(t).trim().toLowerCase()).filter(Boolean);
+    const actualLower = actualValue.toLowerCase();
+    const verified = targets.some(t => actualLower.includes(t) || tokenSetRatio(t, actualValue) >= 80);
+    return { verified, actualValue, expectedValue: expectedStr };
+  }
+
+  // Date comparison
+  if (controlType === 'date-picker') {
+    const formatted = formatToMMDDYYYY(expectedStr);
+    const verified = actualValue === formatted || actualValue.replace(/^0+/, '') === formatted.replace(/^0+/, '');
+    return { verified, actualValue, expectedValue: formatted };
+  }
+
+  // Free-text comparison
+  const textScore = tokenSetRatio(expectedStr, actualValue);
+  const verified = actualValue.toLowerCase().includes(expectedStr.toLowerCase()) || textScore >= 80;
+  return { verified, actualValue, expectedValue: expectedStr, score: textScore };
+}
+
+/**
+ * 3d. Post-Fill Verification + Capped Retry
+ * Runs fill handler, verifies state, retries up to maxAttempts (default 2), then escalates.
+ */
+export async function executeFillWithVerification(page, field, resolvedValue, profile = {}, options = {}) {
+  const maxAttempts = options.maxAttempts ?? DEFAULT_MAX_FILL_ATTEMPTS;
+  const controlType = field.controlType || detectControlType(field);
+  const candidateId = profile?.id || process.env.APPLYWIZZ_ID || 'default_candidate';
+  const tenant = profile?._tenant || (page ? getWorkdayTenant(page.url?.() || '') : '');
+  const step = options.step || profile?._currentStep || '';
+  const tier = options.tier || 'tier1_supabase';
+
+  let lastActualValue = '';
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    await dispatchFillHandler(page, field, resolvedValue, options);
+
+    await page.waitForTimeout(options.settleMs ?? 80);
+
+    const verification = await verifyFieldFilled(page, field, resolvedValue);
+    lastActualValue = verification.actualValue;
+
+    if (verification.verified) {
+      recordFilled(profile, field.label, resolvedValue);
+
+      await writeFieldTraceLine({
+        automationId: field.automationId || field.id,
+        label: field.label,
+        controlType,
+        tier,
+        valueAttempted: resolvedValue,
+        verified: true,
+        step,
+      });
+
+      return {
+        success: true,
+        verified: true,
+        attempts: attempt,
+        actualValue: verification.actualValue,
+      };
+    }
+
+    console.log(`    ⚠️  Attempt ${attempt}/${maxAttempts} unverified for "${(field.label || '').slice(0, 40)}" (actual="${verification.actualValue}")`);
+  }
+
+  // Cap reached — stop looping and escalate to manual review
+  await escalateToManualReview({
+    candidateId,
+    tenant,
+    automationId: field.automationId || field.id,
+    questionLabel: field.label,
+    controlType,
+    visibleOptions: field.options || [],
+    tierAttempted: tier,
+    attemptedValue: resolvedValue,
+    reason: `verification_failed_after_${maxAttempts}_attempts`,
+    step,
+  });
+
+  return {
+    success: false,
+    verified: false,
+    attempts: maxAttempts,
+    actualValue: lastActualValue,
+  };
+}
+
 
 function recordFilled(profile, label, value) {
   if (!profile) return;
   if (!profile._filledValues) profile._filledValues = {};
   if (label) profile._filledValues[label] = value;
+
+  // Persist submitted answers for random/custom questions permanently to Supabase
+  if (profile?._applyWizzId && label && value != null && String(value).trim()) {
+    import('./supabaseClient.mjs').then((m) => {
+      if (m.isSupabaseConfigured && m.isSupabaseConfigured()) {
+        const normKey = m.normalizeQuestionKey ? m.normalizeQuestionKey(label) : String(label).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+        m.upsertSupabaseAnswer({
+          applywizzId: profile._applyWizzId,
+          question: String(label).trim(),
+          questionNormalized: normKey,
+          answer: String(value).trim(),
+          company: profile?._tenant || '',
+          source: 'submitted_fill',
+        }).catch(() => {});
+      }
+    }).catch(() => {});
+  }
 }
 
 function clearStaleFilledValuesFromErrors(profile, errors = []) {
@@ -232,11 +453,13 @@ async function findResumeFileInput(page) {
     for (let depth = 0; depth < 16 && current; depth++, current = current.parentElement) {
       const text = (current.textContent || '').toLowerCase().replace(/\s+/g, ' ');
       const auto = (current.getAttribute?.('data-automation-id') || '').toLowerCase();
-      if (/cover\s*letter|additional\s*attachment|supporting\s*document/i.test(text)
-        || /coverletter|additionalattachment/i.test(auto)) {
+      const hasCoverLetter = /cover\s*letter|additional\s*attachment|supporting\s*document/i.test(text) || /coverletter|additionalattachment/i.test(auto);
+      const hasResume = /resume\s*\/\s*cv|\bresume\b|\bcv\b/i.test(text) || /resume|\bcv\b/i.test(auto);
+
+      if (hasCoverLetter && !hasResume) {
         return -100;
       }
-      if (/resume\s*\/\s*cv|\bresume\b|\bcv\b/i.test(text) || /resume|\bcv\b/i.test(auto)) score += 50;
+      if (hasResume) score += 50;
       if (/upload a file|drop files here|select files|attachments?/i.test(text)) score += 10;
       if (/file-?upload|fileupload|attachment/i.test(auto)) score += 20;
     }
@@ -423,6 +646,15 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (isAlreadyFilled) {
       console.log(`    ✓ "${SOURCE_LABEL}" already set: "${currentSourceText}"`);
       profile._step1SourceFilled = true;
+      logFieldTrace({
+        automationId: 'source--source',
+        label: SOURCE_LABEL,
+        controlType: 'combobox',
+        tier: 'tier1_defaults',
+        valueAttempted: currentSourceText,
+        success: true,
+        step: 'My Information',
+      });
     } else {
       const sourceResult = await fillSourceFieldAuto(page, profile);
       const verifiedDisplay = await getReferralSourceDisplay(page);
@@ -437,8 +669,27 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.qa_answers['how did you hear about us'] = selected;
         await saveAnswerToYaml(SOURCE_LABEL, selected).catch(() => {});
         recordFilled(profile, SOURCE_LABEL, selected);
+        logFieldTrace({
+          automationId: 'source--source',
+          label: SOURCE_LABEL,
+          controlType: 'combobox',
+          tier: 'tier1_defaults',
+          valueAttempted: selected,
+          success: true,
+          step: 'My Information',
+        });
       } else {
         console.log(`    ⚠️  Field 1: source not verified in DOM ("${verifiedDisplay || '(empty)'}") — continuing without terminal prompt`);
+        logFieldTrace({
+          automationId: 'source--source',
+          label: SOURCE_LABEL,
+          controlType: 'combobox',
+          tier: 'tier1_defaults',
+          valueAttempted: sourceResult.selected || '',
+          success: false,
+          reason: 'source_not_verified_in_dom',
+          step: 'My Information',
+        });
       }
     }
   } catch (err) {
@@ -479,8 +730,18 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           await noRadio.check({ force: true }).catch(() => noRadio.click({ force: true }));
         });
       }
+      const checkedNow = await noRadio.isChecked().catch(() => true);
       console.log('    ✅ Field 2 Complete: previous worker = "No"');
       recordFilled(profile, 'Previous Worker', 'No');
+      logFieldTrace({
+        automationId: 'candidateIsPreviousWorker',
+        label: 'Previously worked for Workday',
+        controlType: 'radio',
+        tier: 'tier1_defaults',
+        valueAttempted: 'No',
+        success: checkedNow,
+        step: 'My Information',
+      });
     }
   } catch (err) {
     console.log(`    ⚠️  Field 2 warning: ${err.message?.substring(0, 100)}`);
@@ -511,24 +772,63 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           }
         });
         recordFilled(profile, 'Phone Device Type', phoneValue);
+        logFieldTrace({
+          automationId: 'phoneNumber--phoneType',
+          label: 'Phone Device Type',
+          controlType: 'dropdown',
+          tier: 'tier1_profile_fact',
+          valueAttempted: phoneValue,
+          success: true,
+          step: 'My Information',
+        });
       }
     }
   } catch {}
 
-  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code...');
+  // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
+  console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
+  let selectedCountry = '';
   try {
-    const countryCodeValue = profile?.personal?.country_phone_code
-      || profile?.personal?.country
-      || 'India (+91)';
-    const { searchTerm, optionText } = parseCountryPhoneCode(countryCodeValue);
-    const query = (searchTerm || 'india').split(/\s+/)[0];
+    const countryControl = await locateWorkdayFieldByLabel(page, '^country$')
+      || page.locator('#address--country, [data-automation-id="address--country"], [data-automation-id="addressSection_country"]')
+          .locator('button, [role="combobox"], input').first();
 
-    const clearBtn = page.locator('[data-automation-id="country-phone-code"] [data-automation-id="delete-item"], #phoneNumber--countryPhoneCode [data-automation-id="delete-item"], [data-automation-id="country-phone-code"] [data-automation-id="clear-button"]').first();
-    if (await clearBtn.isVisible({ timeout: 800 }).catch(() => false)) {
-      await interactAndRescan(page, async () => {
-        await clearBtn.click({ force: true });
-      });
+    if (countryControl && await countryControl.isVisible({ timeout: 1200 }).catch(() => false)) {
+      const liveText = ((await countryControl.innerText().catch(() => '')) ||
+        (await countryControl.inputValue().catch(() => '')) ||
+        (await countryControl.textContent().catch(() => '')) || '').trim();
+      if (liveText && !/select\s*one|select/i.test(liveText)) {
+        selectedCountry = liveText;
+        console.log(`    ✓ Country already selected at top: "${selectedCountry}"`);
+      }
     }
+
+    selectedCountry = 'United States of America';
+    profile.personal = profile.personal || {};
+    profile.personal.country = selectedCountry;
+    profile.personal.country_phone_code = 'United States of America (+1)';
+
+    // If Country at top exists and is not yet set to selectedCountry, set it now
+    if (countryControl && await countryControl.isVisible({ timeout: 800 }).catch(() => false)) {
+      const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
+      const want = selectedCountry.toLowerCase();
+      if (!cur || !cur.toLowerCase().includes('united states')) {
+        await interactAndRescan(page, async () => {
+          await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+        });
+        await handleSearchableDropdown(page, countryControl, 'united states', selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
+        recordFilled(profile, 'Country', selectedCountry);
+        console.log(`    ✅ Country at top set from profile: "${selectedCountry}"`);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
+  }
+
+  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code (default: United States of America (+1))...');
+  try {
+    const expectedPhoneCode = 'United States of America (+1)';
+    const query = 'united states';
 
     const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code')
       || page.locator('[data-automation-id="country-phone-code"]')
@@ -543,35 +843,100 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         (await countryPhoneCodeControl.innerText().catch(() => '')) ||
         (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
 
-      const alreadySelected = /india/i.test(currentCode) && /\+91/i.test(currentCode);
-      if (!alreadySelected) {
+      let alreadySelected = false;
+      if (inHint) alreadySelected = /india|\+91/i.test(currentCode);
+      else if (usHint) alreadySelected = /united states|\+1/i.test(currentCode);
+      else alreadySelected = currentCode && !/select\s*one|select/i.test(currentCode) && (
+        currentCode.toLowerCase().includes(query.toLowerCase()) ||
+        currentCode.toLowerCase().includes(selectedCountry.toLowerCase())
+      );
+
+      if (alreadySelected) {
+        console.log(`    ✓ Country Phone Code already set and matches top country: "${currentCode}"`);
+        recordFilled(profile, 'Country / Territory Phone Code', currentCode);
+        logFieldTrace({
+          automationId: 'country-phone-code',
+          label: 'Country / Territory Phone Code',
+          controlType: 'combobox',
+          tier: 'tier1_profile_fact',
+          valueAttempted: currentCode,
+          success: true,
+          step: 'My Information',
+        });
+      } else {
+        // Only clear if previous selection was genuinely incorrect
+        const clearBtn = page.locator('[data-automation-id="country-phone-code"] [data-automation-id="delete-item"], #phoneNumber--countryPhoneCode [data-automation-id="delete-item"], [data-automation-id="country-phone-code"] [data-automation-id="clear-button"]').first();
+        if (await clearBtn.isVisible({ timeout: 500 }).catch(() => false)) {
+          await interactAndRescan(page, async () => {
+            await clearBtn.click({ force: true });
+          });
+          await page.waitForTimeout(150);
+        }
+
         await interactAndRescan(page, async () => {
           await countryPhoneCodeControl.scrollIntoViewIfNeeded().catch(() => {});
           await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
         });
 
-        // Manual equivalent: search "india" then press Enter
+        // Search with robust dropdown handler that firmly focuses search box before typing
         const result = await handleSearchableDropdown(page, countryPhoneCodeControl, query, optionText, { confirmWithEnter: true, alreadyOpen: true });
         if (!result.success) {
-          const clicked = await clickVisiblePromptOption(page, ['India (+91)', 'India +91', 'India', optionText, query]);
+          const candidates = usHint ? [
+            'United States of America (+1)',
+            'United States (+1)',
+            'United States of America',
+            optionText,
+            query,
+          ] : inHint ? [
+            'India (+91)',
+            'India',
+            optionText,
+            query,
+          ] : [
+            optionText,
+            expectedPhoneCode,
+            selectedCountry,
+            query,
+          ];
+
+          const clicked = await clickVisiblePromptOption(page, candidates);
           if (clicked) {
             await page.keyboard.press('Enter').catch(() => {});
             console.log(`    ✓ Country option via DOM text: "${clicked}"`);
           } else {
-            await page.keyboard.type(query, { delay: 40 });
+            // Direct input check with proper focus and clearing
+            const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], [data-automation-id*="search" i], [data-uxi-element-id*="searchBox" i]').filter({ has: page.locator(':visible') }).first();
+            if (await searchInput.isVisible({ timeout: 600 }).catch(() => false)) {
+              await searchInput.click().catch(() => {});
+              await page.waitForTimeout(80);
+              await searchInput.fill('');
+              await page.waitForTimeout(50);
+              await searchInput.pressSequentially(query, { delay: 40 });
+            } else {
+              await page.waitForTimeout(300);
+              await page.keyboard.type(query, { delay: 50 });
+            }
+            await page.waitForTimeout(300);
             await page.keyboard.press('Enter');
           }
         }
 
         await waitForDomSettled(page);
         const verified = ((await countryPhoneCodeControl.innerText().catch(() => '')) ||
-          (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
-        console.log(`    ✅ Field 3 Complete: searched "${query}" + Enter → "${verified || optionText}"`);
-        recordFilled(profile, 'Country / Territory Phone Code', optionText);
+          (await countryPhoneCodeControl.textContent().catch(() => '')) ||
+          (await countryPhoneCodeControl.inputValue().catch(() => '')) || '').trim();
+        console.log(`    ✅ Field 3 Complete: searched "${query}" → "${verified || optionText}"`);
+        recordFilled(profile, 'Country / Territory Phone Code', verified || optionText);
+        logFieldTrace({
+          automationId: 'country-phone-code',
+          label: 'Country / Territory Phone Code',
+          controlType: 'combobox',
+          tier: 'tier1_profile_fact',
+          valueAttempted: optionText,
+          success: Boolean(verified),
+          step: 'My Information',
+        });
         await discoverWorkdayFields(page);
-      } else {
-        console.log(`    ✓ Country Phone Code already set: "${currentCode}"`);
-        recordFilled(profile, 'Country / Territory Phone Code', currentCode);
       }
     }
   } catch (err) {
@@ -580,10 +945,14 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   console.log('  🎯 [Field 4/4] Resolving Phone Number...');
   try {
-    const phoneValue = profile?.personal?.phone || profile?.phone;
+    const { normalizePhoneForCountry } = await import('./clientContact.mjs');
+    const phoneHint = `${profile?.personal?.country || ''} ${profile?.personal?.country_phone_code || ''}`;
+    const phoneValue = normalizePhoneForCountry(profile?.personal?.phone || profile?.phone || '', phoneHint);
     if (!phoneValue) {
       throw new Error('profile.personal.phone is required');
     }
+    profile.personal = profile.personal || {};
+    profile.personal.phone = phoneValue;
 
     const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input#phoneNumber--phoneNumber, input[id*="phoneNumber--phoneNumber"], input[name="phoneNumber"], input[type="tel"]')
       .or(page.getByRole('textbox', { name: /^phone number/i }))
@@ -593,15 +962,25 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (await phoneNumberInput.isVisible({ timeout: 2000 }).catch(() => false)) {
       await interactAndRescan(page, async () => {
         await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
-        await phoneNumberInput.fill(String(phoneValue).trim());
+        await phoneNumberInput.fill(phoneValue);
       });
       const verified = await phoneNumberInput.inputValue().catch(() => '');
-      if (String(verified).replace(/\D/g, '') !== String(phoneValue).replace(/\D/g, '')) {
+      const phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
+      if (!phoneOk) {
         console.log(`    ⚠️  Phone verify mismatch: expected ${phoneValue}, got ${verified}`);
       } else {
         console.log(`    ✅ Field 4 Complete: Phone Number "${phoneValue}"`);
       }
       recordFilled(profile, 'Phone Number', String(phoneValue).trim());
+      logFieldTrace({
+        automationId: 'phone-number',
+        label: 'Phone Number',
+        controlType: 'text',
+        tier: 'tier1_profile_fact',
+        valueAttempted: phoneValue,
+        success: phoneOk,
+        step: 'My Information',
+      });
     }
   } catch (err) {
     console.log(`    ⚠️  Field 4 warning: ${err.message?.substring(0, 100)}`);
@@ -612,10 +991,19 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = indiaSixDigitPostal(profile);
+      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
       await interactAndRescan(page, async () => { await postalInput.fill(pin); });
       recordFilled(profile, 'Postal Code', pin);
-      console.log(`    📮 Postal Code set to 6-digit PIN "${pin}"`);
+      console.log(`    📮 Postal Code set to "${pin}"`);
+      logFieldTrace({
+        automationId: 'addressSection_postalCode',
+        label: 'Postal Code',
+        controlType: 'text',
+        tier: 'tier1_profile_fact',
+        valueAttempted: pin,
+        success: true,
+        step: 'My Information',
+      });
     }
   } catch {}
 
@@ -628,6 +1016,16 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       citySuccess = true;
     }
 
+    logFieldTrace({
+      automationId: 'addressSection_city',
+      label: CITY_LABEL,
+      controlType: 'combobox',
+      tier: 'tier1_profile_fact',
+      valueAttempted: resolveCityValue(profile),
+      success: citySuccess,
+      step: 'My Information',
+    });
+
     if (!citySuccess) {
       console.log(`    ⚠️  City is required but could not be verified in DOM (wanted "${resolveCityValue(profile)}")`);
     }
@@ -637,6 +1035,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   console.log('  🎯 [Field 5b] Resolving Address Line 1 (mandatory)...');
   try {
+    const { mergeResumeContactIntoProfile } = await import('./clientContact.mjs');
+    mergeResumeContactIntoProfile(profile);
     const addressValue = profile?.personal?.address_line1
       || profile?.qa_answers?.['address line 1']
       || '';
@@ -655,7 +1055,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         });
       }
       const verified = (await addressInput.inputValue().catch(() => '') || '').trim();
-      if (verified === addressValue) {
+      const addrOk = (verified === addressValue);
+      if (addrOk) {
         console.log(`    ✅ Address Line 1 DOM verified: "${verified}"`);
         profile.personal = profile.personal || {};
         profile.personal.address_line1 = addressValue;
@@ -666,9 +1067,50 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       } else {
         console.log(`    ⚠️  Address Line 1 verify mismatch: wanted "${addressValue}", got "${verified}"`);
       }
+      logFieldTrace({
+        automationId: 'addressSection_addressLine1',
+        label: 'Address Line 1',
+        controlType: 'text',
+        tier: 'tier1_profile_fact',
+        valueAttempted: addressValue,
+        success: addrOk,
+        step: 'My Information',
+      });
     }
   } catch (err) {
     console.log(`    ⚠️  Address Line 1 warning: ${err.message?.substring(0, 100)}`);
+  }
+
+  console.log('  🎯 [Field 5a] Resolving Country (address — from Apply Wizz / resume)...');
+  try {
+    const countryValue = String(profile?.personal?.country || 'United States of America').trim() || 'United States of America';
+    if (countryValue) {
+      const countryControl = await locateWorkdayFieldByLabel(page, '^country$')
+        || page.locator('#address--country, [data-automation-id="address--country"]').locator('button, [role="combobox"], input').first();
+      if (countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false)) {
+        const current = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
+        const want = countryValue.toLowerCase();
+        if (!current || !current.toLowerCase().includes('united states')) {
+          await interactAndRescan(page, async () => {
+            await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+          });
+          await handleSearchableDropdown(page, countryControl, 'united states', countryValue, { confirmWithEnter: true, alreadyOpen: true });
+        }
+        recordFilled(profile, 'Country', countryValue);
+        console.log(`    ✅ Country set from client profile: "${countryValue}"`);
+        logFieldTrace({
+          automationId: 'addressSection_country',
+          label: 'Country',
+          controlType: 'combobox',
+          tier: 'tier1_profile_fact',
+          valueAttempted: countryValue,
+          success: true,
+          step: 'My Information',
+        });
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Country field warning: ${err.message?.substring(0, 100)}`);
   }
 
   console.log('  🎯 [Field 5c] Resolving State dropdown (mandatory — DOM verify)...');
@@ -676,7 +1118,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     const stateValue = resolveStateValue(profile, profile?._tenant || getWorkdayTenant(page.url()));
     if (stateValue) {
       const stateResult = await fillStateFromDom(page, profile);
-      if (stateResult.success && stateValueMatches(stateResult.domValue, stateValue)) {
+      const stateOk = stateResult.success && stateValueMatches(stateResult.domValue, stateValue);
+      if (stateOk) {
         console.log(`    ✅ State DOM verified: "${stateResult.domValue}"`);
         profile.personal = profile.personal || {};
         profile.personal.state = stateValue;
@@ -687,6 +1130,15 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       } else {
         console.log(`    ⚠️  State not verified in DOM (wanted "${stateValue}", got "${stateResult.domValue || '(empty)'}")`);
       }
+      logFieldTrace({
+        automationId: 'addressSection_countryRegion',
+        label: STATE_LABEL,
+        controlType: 'dropdown',
+        tier: 'tier1_profile_fact',
+        valueAttempted: stateValue,
+        success: stateOk,
+        step: 'My Information',
+      });
     }
   } catch (err) {
     console.log(`    ⚠️  State field warning: ${err.message?.substring(0, 100)}`);
@@ -694,37 +1146,64 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   try {
     const textFields = [
-      { label: 'Given Name', keys: ['personal.first_name', 'first_name'] },
-      { label: 'Family Name', keys: ['personal.last_name', 'last_name'] },
+      {
+        match: /^(legal\s*name\s*[-–—:]\s*)?(first|given)\s*name/i,
+        label: 'First Name',
+        autoId: 'legalNameSection_firstName',
+        selector: 'input[data-automation-id*="firstName" i], input#legalNameSection_firstName, input[name*="firstName" i]',
+        keys: ['personal.first_name', 'first_name'],
+      },
+      {
+        match: /^(legal\s*name\s*[-–—:]\s*)?(last|family|surname)\s*name/i,
+        label: 'Last Name',
+        autoId: 'legalNameSection_lastName',
+        selector: 'input[data-automation-id*="lastName" i], input#legalNameSection_lastName, input[name*="lastName" i]',
+        keys: ['personal.last_name', 'last_name'],
+      },
     ];
     for (const tf of textFields) {
-      const inputEl = page.getByLabel(tf.label, { exact: false }).first();
-      if (await inputEl.isVisible({ timeout: 400 }).catch(() => false)) {
+      let inputEl = page.locator(tf.selector).first();
+      if (!await inputEl.isVisible({ timeout: 500 }).catch(() => false)) {
+        inputEl = page.getByLabel(tf.match).first();
+      }
+      if (await inputEl.isVisible({ timeout: 500 }).catch(() => false)) {
         const val = await inputEl.inputValue().catch(() => '');
-        if (!val || val.trim() === '') {
-          let fillVal = '';
-          for (const k of tf.keys) {
-            const v = k.includes('.') ? k.split('.').reduce((o, i) => o?.[i], profile) : profile?.[k];
-            if (v) { fillVal = String(v); break; }
-          }
-          if (fillVal) {
-            await interactAndRescan(page, async () => { await inputEl.fill(fillVal).catch(() => {}); });
-            recordFilled(profile, tf.label, fillVal);
-          }
+        let fillVal = '';
+        for (const k of tf.keys) {
+          const v = k.includes('.') ? k.split('.').reduce((o, i) => o?.[i], profile) : profile?.[k];
+          if (v) { fillVal = String(v); break; }
+        }
+        if (fillVal && (!val || val.trim() === '' || val.trim().toLowerCase() !== fillVal.toLowerCase())) {
+          await interactAndRescan(page, async () => {
+            await inputEl.scrollIntoViewIfNeeded().catch(() => {});
+            await inputEl.fill(fillVal).catch(() => {});
+          });
+          recordFilled(profile, tf.label, fillVal);
+          const verified = await inputEl.inputValue().catch(() => '');
+          logFieldTrace({
+            automationId: tf.autoId,
+            label: tf.label,
+            controlType: 'text',
+            tier: 'tier1_profile_fact',
+            valueAttempted: fillVal,
+            success: verified.trim().toLowerCase() === fillVal.trim().toLowerCase(),
+            step: 'My Information',
+          });
         }
       }
     }
   } catch {}
+
 
   try {
     const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = indiaSixDigitPostal(profile);
+      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
       await interactAndRescan(page, async () => { await postalInput.fill(pin); });
       recordFilled(profile, 'Postal Code', pin);
-      console.log(`    📮 Postal Code set to 6-digit PIN "${pin}"`);
+      console.log(`    📮 Postal Code set to "${pin}"`);
     }
   } catch {}
 
@@ -904,7 +1383,11 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
     });
     if (/postal/i.test(String(label)) && mappedVal) {
       const countryHint = `${profile?.personal?.country_phone_code || ''} ${profile?.personal?.country || ''}`;
-      if (/india|\+91/i.test(countryHint)) mappedVal = indiaSixDigitPostal(profile);
+      if (/india|\+91/i.test(countryHint)) {
+        mappedVal = indiaSixDigitPostal(profile);
+      } else if (/united states|\+1/i.test(countryHint)) {
+        mappedVal = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      }
     }
 
     if (!mappedVal) continue;
@@ -933,8 +1416,8 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
 async function runWorkdayQuestionWorkflow(page, profile, plan, stepName, options = {}) {
   console.log(`  🔄 Page workflow: "${stepName}" (orchestrator — all required questions)`);
   const dynamicResult = await runDynamicFieldLoop(page, profile, plan, stepName, {
-    maxPasses: options.maxPasses ?? 18,
-    maxOuterPasses: options.maxOuterPasses ?? 4,
+    maxPasses: options.maxPasses ?? 7,
+    maxOuterPasses: options.maxOuterPasses ?? 2,
   });
   if (dynamicResult.humanRequired?.length) {
     profile._stepBlocked = profile._stepBlocked || {};
@@ -956,7 +1439,7 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
 
   if (stepName === 'My Information') {
     await handleStep1MyInformation(page, profile, plan);
-    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 16 });
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 });
     return;
   }
 
@@ -983,7 +1466,7 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
     }
     await handleStep2MyExperience(page, profile);
     await fillWorkdaySkillsSection(page, profile);
-    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 14 });
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 });
     return;
   }
 
@@ -997,8 +1480,11 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
     await handleWorkdayResumeUpload(page, resumePath, profile);
   }
 
+  await runStepDomPrep(page, stepName, profile);
+
   await runWorkdayQuestionWorkflow(page, profile, plan, stepName, {
-    maxPasses: /application questions|voluntary disclosures/i.test(stepName) ? 20 : 16,
+    maxPasses: /application questions|voluntary disclosures|self identify/i.test(stepName) ? 6 : 5,
+    maxOuterPasses: 1,
   });
 
   const agreementsChecked = await acknowledgeAllPageAgreements(page, profile, stepName);
@@ -1051,7 +1537,7 @@ async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint =
 async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
   const before = stepName || await detectWorkdayStep(page);
 
-  const maxAdvance = 6;
+  const maxAdvance = 3;
   let lastErrors = [];
 
   for (let attempt = 0; attempt < maxAdvance; attempt++) {
@@ -1075,62 +1561,25 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
       } else {
         await fillCurrentWorkdayStep(page, before, profile, plan);
       }
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(RAPID.settleMs);
     }
 
     await acknowledgeAllPageAgreements(page, profile, before);
 
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-      const footer = document.querySelector('[data-automation-id="footerContainer"], footer');
-      footer?.scrollIntoView({ block: 'end' });
-    }).catch(() => {});
-    await page.waitForTimeout(300);
+    const rapid = await rapidAdvanceOnce(page, before);
+    if (rapid.transitioned) {
+      console.log(`  ✓ Rapid advance: "${before}" → "${rapid.step}" (${rapid.clicked || 'footer'})`);
+      return { transitioned: true, step: rapid.step, hasSaveButton: true, hasErrors: false, aqPageAdvanced: rapid.aqPageAdvanced };
+    }
+    if (rapid.submitBlocked) {
+      return { ...rapid, transitioned: false, step: before, submitBlocked: true };
+    }
 
     const result = await advanceWorkdayStepWithVerification(page, before);
     if (result.transitioned) return result;
     if (result.errors?.length) lastErrors = result.errors;
     if (result.submitBlocked) {
-      // The only button left finishes the application — hand back to the Review flow.
       return { ...result, transitioned: false, step: before, submitBlocked: true };
-    }
-
-    await page.evaluate(() => {
-      window.scrollTo(0, document.body.scrollHeight);
-      const footer = document.querySelector('[data-automation-id="footerContainer"], footer');
-      footer?.scrollIntoView({ block: 'end' });
-    }).catch(() => {});
-    await page.waitForTimeout(400);
-
-    const forced = await page.evaluate(() => {
-      const isVisible = (el) => {
-        const s = window.getComputedStyle(el);
-        return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || el.getClientRects().length > 0);
-      };
-      const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
-      const targets = buttons.filter((btn) => {
-        if (!isVisible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
-        const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
-        return /save and continue|save & continue/i.test(t) || /^next$/i.test(t);
-      });
-      const btn = targets[targets.length - 1];
-      if (!btn) return null;
-      btn.scrollIntoView({ block: 'center' });
-      btn.click();
-      return (btn.textContent || '').replace(/\s+/g, ' ').trim();
-    });
-
-    if (forced) {
-      console.log(`  ➡️  Force-clicked "${forced}"`);
-      await waitForDomSettled(page);
-      await page.waitForTimeout(1500);
-      const after = await detectWorkdayStep(page);
-      const aqAfter = before === 'Application Questions' ? await getApplicationQuestionsPageInfo(page) : null;
-      const aqBefore = before === 'Application Questions' ? await getApplicationQuestionsPageInfo(page) : null;
-      if (after !== before || (aqAfter && aqBefore && aqAfter.current > aqBefore.current)) {
-        console.log(`  ✓ Step advanced after force-click: "${before}" → "${after}"`);
-        return { transitioned: true, step: after, hasSaveButton: true, hasErrors: false };
-      }
     }
   }
 
@@ -1193,8 +1642,8 @@ async function advanceWorkdayStep(page, currentStep = '') {
   try {
     await page.waitForSelector('[data-automation-id="loading-spinner"], div[class*="loading-spinner"], div.loading-backdrop', { state: 'detached', timeout: 15000 });
   } catch {}
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-  await waitForDomSettled(page);
+  try { await page.waitForLoadState('domcontentloaded', { timeout: 5000 }); } catch {}
+  await waitForDomSettled(page, { timeout: RAPID.settleMs });
 
   const errorMessages = await page.evaluate(() => {
     const errs = [];
@@ -1237,14 +1686,12 @@ async function advanceWorkdayStepWithVerification(page, previousStep) {
     }
   }
 
-  for (let i = 0; i < 5; i++) {
-    await waitForDomSettled(page);
-    const next = await detectWorkdayStep(page);
-    if (next !== before || next === 'Review') {
-      console.log(`  ✓ Step transitioned: "${before}" → "${next}"`);
-      return { ...result, transitioned: true, step: next };
-    }
-    await page.waitForTimeout(2000);
+  const prog = await waitForWizardProgress(page, before, {
+    aqBefore: before === 'Application Questions' ? aqBefore : null,
+  });
+  if (prog.changed) {
+    console.log(`  ✓ Step transitioned: "${before}" → "${prog.step}"`);
+    return { ...result, transitioned: true, step: prog.step, aqPageAdvanced: prog.aqAdvanced };
   }
 
   console.log(`  ⚠️  Step did not change after Save and Continue (still "${before}")`);
@@ -1376,13 +1823,17 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
     }
   }
 
+  const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
+
   const decision = await confirmSubmitInTerminal(confirmSubmit);
   if (decision === 'decline') {
     console.log('  ✋ N — not submitting. Stopping here.');
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'review_declined' }).catch(() => {});
     return 'review-declined';
   }
   if (decision === 'skip') {
     console.log('  ⏭️  S — skipped (not submitted). Continuing to the next URL.');
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped' }).catch(() => {});
     return 'skipped';
   }
 
@@ -1400,15 +1851,20 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
   if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');
     await takeScreenshot(page, 'workday-submitted');
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
+    await cleanupClientResume(profile);
     return 'submitted';
   }
 
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
     console.log('Post-submit verification appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'in_progress', failureReason: 'needs_manual_verification' }).catch(() => {});
     return 'needs-manual-verification';
   }
 
+  await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
+  await cleanupClientResume(profile);
   return 'submitted';
 }
 
@@ -1421,19 +1877,18 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   console.log(`  Blocked: Certifications Add, bare Add, Help/Share, optional questions`);
   console.log(`${'═'.repeat(60)}`);
 
-  if (!profile?.personal?.phone) {
-    console.error('❌ profile.personal.phone is required in config/profile.yml');
-    return 'incomplete';
-  }
-
   // Fresh session markers for THIS job URL — never reuse prior page fingerprints/skips.
   resetPerApplicationSessionState(profile);
+
+  const initialJobUrl = plan?.url || profile._jobUrl || page.url();
+  profile._canonicalJobUrl = profile._canonicalJobUrl || initialJobUrl;
+  profile._jobUrl = profile._canonicalJobUrl;
 
   // Browser refuses optional Add / chrome clicks even if a module tries.
   await installScriptOnlyClickGuard(page);
 
-  const detected = detectWorkdayTenant(plan?.url || page.url());
-  const tenant = detected?.tenant || getWorkdayTenant(plan?.url || page.url());
+  const detected = detectWorkdayTenant(profile._canonicalJobUrl || plan?.url || page.url());
+  const tenant = detected?.tenant || getWorkdayTenant(profile._canonicalJobUrl || plan?.url || page.url());
   // Hard lock: never fill optional fields unless explicitly opted in.
   profile._fillOptionalFields = profile._fillOptionalFields === true;
   profile._scriptOnly = true;
@@ -1449,11 +1904,50 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
   await bootstrapClientContext(profile, plan);
 
-  const maxSteps = 40;
-  const maxNoProgress = 3;
+  const { isApplyWizzConfigured } = await import('./applyWizzClient.mjs');
+  const { profileFactPresence } = await import('./questionEngine/profileFacts.mjs');
+  if (isApplyWizzConfigured() && !profile._applyWizzHydrated) {
+    console.error('❌ Apply Wizz client API did not hydrate — stopping this apply (no fabricated identity/contact answers).');
+    console.error('     Fix TLS/network (APPLYWIZZ_TLS_INSECURE=1 on Windows CA issues) and confirm get-client-details returns client + additional_information.');
+    await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'applywizz_not_hydrated' }).catch(() => {});
+    return 'incomplete';
+  }
+  if (isApplyWizzConfigured()) {
+    const facts = profileFactPresence(profile);
+    if (!facts.name || !facts.email) {
+      console.error('❌ Apply Wizz profile missing legal name or email — My Information cannot be filled from API.');
+      await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'missing_name_or_email' }).catch(() => {});
+      return 'incomplete';
+    }
+  }
+
+  if (!profile?.personal?.phone) {
+    const { ensureWorkdayContactFromClient } = await import('./clientContact.mjs');
+    await ensureWorkdayContactFromClient(profile);
+  }
+  if (!profile?.personal?.phone) {
+    console.error('❌ No phone after Apply Wizz bootstrap — set personal.phone or fix APPLYWIZZ_ID in .env');
+    await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'missing_phone' }).catch(() => {});
+    return 'incomplete';
+  }
+
+  await recordClientApplication(profile, {
+    url: profile._canonicalJobUrl,
+    company: profile._company || plan?.company || '',
+    jobTitle: plan?.jobTitle || '',
+    status: 'started',
+  }).catch(() => {});
+
+  if (await isWorkdayWizardVisible(page)) {
+    await tryUsePreviousApplication(page, profile).catch(() => false);
+  }
+
+  const maxSteps = 18;
+  const maxNoProgress = 2;
   let currentIteration = 0;
   let lastFingerprint = '';
   let noProgressCount = 0;
+  const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
     currentIteration++;
@@ -1467,6 +1961,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       if (entry.entered) {
         console.log(`  ✅ Entered wizard via ${entry.method}`);
         stepName = await detectWorkdayStep(page);
+        await tryUsePreviousApplication(page, profile).catch(() => false);
       }
     }
 
@@ -1495,7 +1990,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
     }
 
-    await takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`);
+    takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`).catch(() => {});
 
     const pageGate = await validatePage(page, profile, stepName).catch(() => null);
     if (pageGate && !pageGate.ok) {
@@ -1504,18 +1999,10 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
     const orch = profile._lastOrchestrator;
     if (orch?.status === 'blocked') {
-      console.log(`  🛑 Not advancing — orchestrator blocked page ${orch.page}: ${orch.reason} (${orch.questionId || ''})`);
-      return {
-        status: 'blocked',
-        page: orch.page,
-        questionId: orch.questionId,
-        reason: orch.reason,
-        requiresReview: true,
-        step: stepName,
-      };
+      console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
     }
 
-    console.log('  ➡️  Fill done — auto Save and Continue...');
+    console.log('  ➡️  Fill done — instant Save and Continue...');
     let advanceResult;
     try {
       advanceResult = await clickSaveAndContinueAtAnyCost(page, stepName, profile, plan);
@@ -1527,11 +2014,25 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     if (advanceResult.transitioned) {
       noProgressCount = 0;
       lastFingerprint = fingerprint;
+      if (/my information/i.test(stepName) || /my experience|application questions/i.test(advanceResult.step || '')) {
+        await recordClientApplication(profile, {
+          url: profile._canonicalJobUrl || plan?.url || page.url(),
+          company: profile._company || plan?.company || '',
+          status: 'in_progress',
+          tenantProgress: true,
+        }).catch(() => {});
+      }
       continue;
     }
 
     const maybeReview = await detectWorkdayStep(page);
     if (maybeReview === 'Review' || advanceResult.submitBlocked) {
+      await recordClientApplication(profile, {
+        url: profile._canonicalJobUrl || plan?.url || page.url(),
+        company: profile._company || '',
+        status: 'in_progress',
+        success: true,
+      }).catch(() => {});
       return await verifyAndSubmitReview(page, profile, { confirmSubmit });
     }
 
@@ -1549,22 +2050,37 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
     const unfilledAfter = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
     const fingerprintAfter = await computeStepFingerprint(page, stepName);
-    const madeProgress = fingerprintAfter !== fingerprint
-      || fingerprint !== lastFingerprint
-      || (unfilledBefore > 0 && unfilledAfter < unfilledBefore);
+    const reducedRequired = unfilledBefore >= 0 && unfilledAfter >= 0 && unfilledAfter < unfilledBefore;
+    const madeProgress = reducedRequired;
 
     lastFingerprint = fingerprint;
 
+    if (stepStuck.name !== stepName) {
+      stepStuck.name = stepName;
+      stepStuck.count = 0;
+      stepStuck.lastUnfilled = unfilledAfter;
+    } else if (unfilledAfter === stepStuck.lastUnfilled) {
+      stepStuck.count += 1;
+    } else {
+      stepStuck.count = 0;
+      stepStuck.lastUnfilled = unfilledAfter;
+    }
+
+    if (stepStuck.count >= 3) {
+      console.log(`  ⛔ Stuck on "${stepName}" (${stepStuck.count} passes, ${unfilledAfter} required empty) — stop refill loop`);
+      break;
+    }
+
     if (madeProgress) {
       noProgressCount = 0;
-      console.log(`  ↻ Page changed but step did not advance — retrying Save and Continue (${unfilledAfter} required empty)`);
+      console.log(`  ↻ Required count improved (${unfilledBefore} → ${unfilledAfter}) — retry Save and Continue`);
       continue;
     }
 
     noProgressCount++;
 
     if (noProgressCount === 1 && unfilledAfter > 0) {
-      const retryWorkflow = await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 12 }).catch(() => null);
+      const retryWorkflow = await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 }).catch(() => null);
       if (retryWorkflow?.filled > 0) {
         console.log(`  🔄 Question workflow filled ${retryWorkflow.filled} stuck field(s) — retrying Save and Continue`);
         noProgressCount = 0;
@@ -1582,8 +2098,20 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
   const finalStep = await detectWorkdayStep(page);
   if (finalStep === 'Review') {
+    await recordClientApplication(profile, {
+      url: profile._canonicalJobUrl || plan?.url || page.url(),
+      company: profile._company || '',
+      status: 'in_progress',
+      success: true,
+    }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit });
   }
+  await recordClientApplication(profile, {
+    url: profile._canonicalJobUrl || plan?.url || page.url(),
+    company: profile._company || plan?.company || '',
+    status: 'failed',
+    failureReason: 'wizard_did_not_reach_review',
+  }).catch(() => {});
   return 'incomplete';
 }
 
@@ -2086,7 +2614,7 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, profile: profileIn = null } = {}) {
   console.log(`📝 Fill mode: ${url}`);
 
   const ats = detectATS(url);
@@ -2099,6 +2627,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   const page = existingPage || await context.newPage();
 
   const fieldResults = []; // for learner
+  let activeProfile = profileIn;
 
   try {
     const currentUrl = page.url();
@@ -2112,6 +2641,15 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       }
     }
 
+    const profile = profileIn || await loadProfile().catch(() => ({}));
+    activeProfile = profile;
+    if (url) {
+      profile._canonicalJobUrl = url;
+      profile._jobUrl = url;
+      profile._company = profile._company || extractWorkdayCompanyName(url);
+      profile._jobTitle = profile._jobTitle || plan?.jobTitle || plan?.role || await extractJobRoleFromDom(page, url);
+    }
+
     // Handle Workday multi-step wizard
     if (ats === 'workday') {
       if (!await isWorkdayWizardVisible(page)) {
@@ -2119,6 +2657,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           email: workdayEmail,
           password: workdayPassword,
           mode,
+          profile,
         });
         if (!wdOk) {
           console.log('  ❌ Workday authentication could not be confirmed — aborting wizard loop.');
@@ -2127,7 +2666,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         }
       }
       if (!await isWorkdayWizardVisible(page)) {
-        const entry = await ensureWorkdayApplicationWizard(page, { mode });
+        const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
         if (entry.entered) {
           console.log(`  ✅ Entered application wizard via ${entry.method}`);
         }
@@ -2137,8 +2676,6 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
       await page.waitForTimeout(1000);
 
-      // Load profile and execute complete 5-step wizard loop
-      const profile = await loadProfile().catch(() => ({}));
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
@@ -2155,13 +2692,25 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       console.log(`   Report: data/applied.csv`);
       console.log(`${'─'.repeat(60)}`);
 
-      const holdMs = (statusLabel === 'skipped' || statusLabel === 'review-declined' || statusLabel === 'blocked') ? 2500 : 8000;
+      // Determine hold time before browser close based on outcome:
+      // — quick close for skipped/declined/blocked (no value in waiting)
+      // — extended hold for incomplete/verification states (allow human inspection)
+      // — normal 8s for submitted/review-declined outcomes
+      let holdMs;
+      if (statusLabel === 'skipped' || statusLabel === 'review-declined' || statusLabel === 'blocked') {
+        holdMs = 2500;
+      } else if (statusLabel === 'incomplete' || statusLabel === 'needs-manual-verification' || statusLabel === 'human-required') {
+        holdMs = 120000; // 2 minutes — keep open for manual intervention
+        console.log(`\n   ⚠️  Bot could not complete automatically (${statusLabel}). Browser stays open for 2 minutes so you can review/fix.`);
+      } else {
+        holdMs = 8000;
+      }
       console.log(`\n   — Closing browser in ${Math.round(holdMs / 1000)}s...`);
       await page.waitForTimeout(holdMs);
       await browser.close();
       return status;
     } else if (!existingPage) {
-      await discoverApplicationForm(page, url, { mode });
+      await discoverApplicationForm(page, url, { mode, profile });
     }
 
     const fills = plan.fills || plan.fields || [];
@@ -2553,12 +3102,14 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
   } catch (err) {
     const timestamp = new Date().toISOString();
-    let errorUrl = url;
-    try {
-      if (page && !page.isClosed()) errorUrl = page.url();
-    } catch {}
+    const errorUrl = activeProfile?._canonicalJobUrl || activeProfile?._jobUrl || url;
 
     console.error(`\n❌ [${timestamp}] Fill failed on ${errorUrl}: ${err.message}`);
+    await recordClientApplication(activeProfile || {}, {
+      url: errorUrl,
+      status: 'failed',
+      failureReason: err.message,
+    }).catch(() => {});
 
     if (page && !page.isClosed()) {
       try {

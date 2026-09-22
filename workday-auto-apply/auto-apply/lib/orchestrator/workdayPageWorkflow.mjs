@@ -26,8 +26,8 @@ import { waitForDomSettled } from '../workdayDom.mjs';
  * @param {{ maxCycles?: number, maxOuterPasses?: number, pageNumber?: number }} [options]
  */
 export async function runWorkdayPageWorkflow(page, profile = {}, plan = {}, stepName = '', options = {}) {
-  const maxCycles = options.maxCycles ?? (/voluntary disclosures|application questions/i.test(stepName) ? 18 : 14);
-  const maxOuter = options.maxOuterPasses ?? 4;
+  const maxCycles = options.maxCycles ?? (/voluntary disclosures|application questions/i.test(stepName) ? 6 : 4);
+  const maxOuter = options.maxOuterPasses ?? 1;
   profile._currentStep = stepName;
   profile._jobUrl = profile._jobUrl || page.url();
 
@@ -64,7 +64,7 @@ export async function runWorkdayPageWorkflow(page, profile = {}, plan = {}, step
       console.log(`  ➡️  Application Questions page ${info.current}/${info.total} complete — Next`);
       const moved = await advanceApplicationQuestionsPage(page);
       if (!moved) break;
-      await waitForDomSettled(page, { timeout: 1500 }).catch(() => {});
+      await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
     }
 
     if (lastOrch?.status === STATUS.PAGE_COMPLETE) {
@@ -72,10 +72,10 @@ export async function runWorkdayPageWorkflow(page, profile = {}, plan = {}, step
     }
 
     const progress = lastOrch?.filled || 0;
-    if (outer > 0 && progress === 0) {
+    if (progress === 0 || (lastOrch?.pageCheck?.requiredRemaining ?? 1) === 0) {
       break;
     }
-    await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
+    await waitForDomSettled(page, { timeout: 300 }).catch(() => {});
   }
 
   return finalize(lastOrch || { status: lastStatus, filled: 0 }, totalFilled, profile);

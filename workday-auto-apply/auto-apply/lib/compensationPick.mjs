@@ -33,9 +33,10 @@ export function toAnnualAmount(amount, period = 'year') {
 }
 
 export function getExpectedCompensationAnnual(profile = null) {
-  const raw = profile?.compensation
-    || profile?.salary
-    || profile?.experience?.desired_salary
+  const unwrap = (val) => (typeof val === 'object' && val !== null ? (val.target || val.amount || val.value || val.annual || null) : val);
+  const raw = unwrap(profile?.compensation)
+    || unwrap(profile?.salary)
+    || unwrap(profile?.experience?.desired_salary)
     || lookupSemanticCompensationAnswer('desired salary', profile, profile?._tenant || '');
   const period = detectPeriod(String(raw));
   const amount = parseNumericToken(String(raw));
@@ -176,6 +177,36 @@ export function pickCompensationFromOptions(options = [], profile = null, prefer
   return preferred || list[list.length - 1];
 }
 
+export function isCurrencyRequiredQuestion(label = '') {
+  return /currency|\(e\.g\.\s*(?:usd|eur|jpy|inr|gbp|cad)\)|include\s+relevant\s+currency/i.test(String(label || ''));
+}
+
+export function formatSalaryWithCurrency(amount, profile = null, label = '') {
+  const raw = String(amount || '').trim();
+  if (!raw) return '';
+  if (/[a-z]{3}|\$|€|£|¥/i.test(raw)) return raw;
+
+  const explicitCurrency = profile?.currency
+    || profile?.compensation_currency
+    || profile?._applyWizzRaw?.currency
+    || profile?._applyWizzRaw?.salary_currency
+    || '';
+  if (explicitCurrency) return `${raw} ${explicitCurrency.toUpperCase()}`;
+
+  const country = String(profile?.personal?.country || '').toLowerCase();
+  if (/india/i.test(country)) {
+    if (profile?.work_auth?.authorized_us === 'Yes' || /usd/i.test(label)) {
+      return `${raw} USD`;
+    }
+    return `${raw} INR`;
+  }
+  if (/united\s*kingdom|great\s*britain|uk\b/i.test(country)) return `${raw} GBP`;
+  if (/canada/i.test(country)) return `${raw} CAD`;
+  if (/australia/i.test(country)) return `${raw} AUD`;
+
+  return `${raw} USD`;
+}
+
 /** Numeric string for plain text salary inputs (no option list). */
 export function compensationInputValue(profile = null, label = '') {
   if (isHourlyWageQuestion(label) && profile?.compensation_hourly) {
@@ -184,6 +215,10 @@ export function compensationInputValue(profile = null, label = '') {
   const lookupLabel = isHourlyWageQuestion(label) ? label : 'desired salary';
   const raw = lookupSemanticCompensationAnswer(lookupLabel, profile, profile?._tenant || '');
   const amount = parseNumericToken(String(raw));
-  if (!amount) return String(raw || '').trim();
-  return String(Math.round(amount));
+  const numStr = amount ? String(Math.round(amount)) : String(raw || '').trim();
+  if (isCurrencyRequiredQuestion(label)) {
+    return formatSalaryWithCurrency(numStr, profile, label);
+  }
+  return numStr;
 }
+

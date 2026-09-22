@@ -19,7 +19,7 @@ export function formatHttpError(err) {
   return [...new Set(parts)].join(' — ') || 'unknown network error';
 }
 
-function isTlsCertError(err) {
+export function isTlsCertError(err) {
   const blob = [err?.code, err?.cause?.code, err?.message, err?.cause?.message].join(' ');
   return /UNABLE_TO_VERIFY|CERT_|SELF_SIGNED|DEPTH_ZERO|unable to verify the first certificate/i.test(blob);
 }
@@ -76,20 +76,36 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
  * @param {{ attempts?: number, label?: string }} [retry]
  */
 export async function httpsJsonWithRetry(opts, { attempts = 3, label = 'HTTP' } = {}) {
+  const insecureOk = opts.rejectUnauthorized === false
+    || String(process.env.APPLYWIZZ_TLS_INSECURE || process.env.NODE_TLS_INSECURE || '').trim() === '1';
+
   let lastError;
   for (let attempt = 1; attempt <= attempts; attempt++) {
     try {
-      return await httpsJsonRequest(opts);
+      return await httpsJsonRequest({
+        ...opts,
+        rejectUnauthorized: insecureOk ? false : opts.rejectUnauthorized,
+      });
     } catch (err) {
       lastError = err;
-      console.log(`  ⚠️  ${label} attempt ${attempt}/${attempts} failed: ${formatHttpError(err)}`);
+      if (isTlsCertError(err) && !insecureOk && opts.rejectUnauthorized !== false) {
+        console.log(`  ⚠️  ${label}: TLS verify failed — retrying without certificate verify (Windows/corporate CA)`);
+        try {
+          return await httpsJsonRequest({ ...opts, rejectUnauthorized: false });
+        } catch (retryErr) {
+          lastError = retryErr;
+          console.log(`  ⚠️  ${label} insecure retry failed: ${formatHttpError(retryErr)}`);
+        }
+      } else {
+        console.log(`  ⚠️  ${label} attempt ${attempt}/${attempts} failed: ${formatHttpError(err)}`);
+      }
       if (attempt < attempts) {
         await new Promise((done) => setTimeout(done, 800 * attempt));
       }
     }
   }
   if (isTlsCertError(lastError) && opts.rejectUnauthorized !== false) {
-    console.log(`  ⚠️  ${label}: certificate verify failed — retrying once (Windows/corporate CA)`);
+    console.log(`  ⚠️  ${label}: certificate verify failed — final retry without verify`);
     return await httpsJsonRequest({ ...opts, rejectUnauthorized: false });
   }
   throw lastError;

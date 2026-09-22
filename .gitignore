@@ -62,8 +62,24 @@ test-tele.js
 Thumbs.db
 *.log
 **/*.log
+# Project planning / documentation - keep local
+CODEBASE-ANALYSIS.md
+FLOW-REPORT.md
+SESSION-CHECKPOINT.md
+WORKFLOW-MAP.md
+WORKFLOW.md
+workday-cascading-dropdown-master-prompt.md
+
 # Cursor local configuration
 .cursor/
+
+# YAML files (ignore all yml/yaml files)
+*.yml
+*.yaml
+**/*.yml
+**/*.yaml
+!**/*.example.yml
+!**/*.example.yaml
 
 # Generated reports
 reports/
@@ -73,3 +89,10 @@ tests/reports/
 data/*.json
 data/*.csv
 data/*.html
+**/data/*.json
+**/data/*.csv
+**/data/*.html
+sync_ids.txt
+**/sync_ids.txt
+workday-auto-apply/data/
+**/workday-auto-apply/data/**

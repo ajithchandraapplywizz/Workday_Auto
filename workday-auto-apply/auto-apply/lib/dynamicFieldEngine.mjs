@@ -42,13 +42,14 @@ export function resetPerApplicationSessionState(profile = {}) {
   delete profile._dynamicLoopStep;
   delete profile._step1SourceFilled;
   delete profile._clientBootstrapped;
+  delete profile._orchestratorSkipTries;
 }
 
 /**
  * Run the orchestrator for the current wizard step.
  */
 export async function runDynamicFieldLoop(page, profile, plan = {}, stepName = '', options = {}) {
-  const maxCycles = options.maxPasses ?? (/voluntary disclosures|application questions/i.test(stepName) ? 18 : 14);
+  const maxCycles = options.maxPasses ?? (/voluntary disclosures|application questions/i.test(stepName) ? 10 : 7);
   profile._currentStep = stepName;
   profile._jobUrl = profile._jobUrl || page.url();
   ensureSessionSets(profile);
@@ -56,7 +57,7 @@ export async function runDynamicFieldLoop(page, profile, plan = {}, stepName = '
 
   const result = await runWorkdayPageWorkflow(page, profile, plan, stepName, {
     maxCycles,
-    maxOuterPasses: options.maxOuterPasses ?? 4,
+    maxOuterPasses: options.maxOuterPasses ?? 2,
     pageNumber: options.pageNumber || 1,
   });
   profile._lastOrchestrator = result.orchestrator;

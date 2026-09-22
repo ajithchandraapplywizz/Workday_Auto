@@ -19,6 +19,7 @@ import { getWorkdayTenant } from './discovery.mjs';
 import { pickNearestSelectOption } from './openRouterLlm.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
 import { fillEducationFieldOfStudy } from './workdayExperience.mjs';
+import { lookupSupabaseAnswerSync } from './supabaseClient.mjs';
 
 /** Field names mentioned in Workday validation messages. */
 export function parseErrorFieldNames(errors = []) {
@@ -27,9 +28,9 @@ export function parseErrorFieldNames(errors = []) {
     const text = String(raw || '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
     const patterns = [
-      /the field (.{2,60}?) is required/gi,
-      /\bError-([A-Za-z0-9 /'&-]{2,60}?)(?=The field|Select|$)/g,
-      /^(.{2,60}?) is required/gi,
+      /the field ([\s\S]{2,600}?) is required/gi,
+      /\bError-([A-Za-z0-9 /'&-]{2,300}?)(?=The field|Select|$)/g,
+      /^([\s\S]{2,600}?) is required/gi,
     ];
     for (const re of patterns) {
       let match;
@@ -71,7 +72,7 @@ async function markErrorFields(page, fieldNames = []) {
     // 2. Fields named in the validation banner
     for (const name of names) {
       const wanted = name.toLowerCase();
-      const labels = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"]'));
+      const labels = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]'));
       let best = null;
       for (const labelEl of labels) {
         const text = norm(labelEl.textContent)
@@ -82,8 +83,9 @@ async function markErrorFields(page, fieldNames = []) {
           .toLowerCase();
         if (!text) continue;
         const exact = text === wanted;
-        const starts = text.startsWith(wanted) && text.length <= wanted.length + 24;
-        if (!exact && !starts) continue;
+        const starts = (text.startsWith(wanted) && text.length <= wanted.length + 30) || (wanted.startsWith(text) && wanted.length <= text.length + 30);
+        const contains = (text.length > 20 && wanted.length > 20 && (text.includes(wanted.slice(0, 30)) || wanted.includes(text.slice(0, 30))));
+        if (!exact && !starts && !contains) continue;
         const field = labelEl.closest(FIELD_SELECTOR);
         if (!field) continue;
         if (exact) { best = field; break; }
@@ -93,7 +95,7 @@ async function markErrorFields(page, fieldNames = []) {
     }
 
     const describe = (field, name) => {
-      const labelEl = field.querySelector('label, legend, [data-automation-id*="label"]');
+      const labelEl = field.querySelector('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]');
       const label = norm(labelEl?.textContent).replace(/\*+$/, '').trim() || name;
 
       const radios = Array.from(field.querySelectorAll('input[type="radio"]'));
@@ -187,6 +189,7 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
     },
     profile,
     {
+      page,
       stepName,
       allowLlm: !isComplianceSensitive(label),
       resumePath: profile._resumePath,
@@ -199,6 +202,11 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
   if (!answer && isComplianceSensitive(label)) {
     console.log(`    🛑 "${label}" is a compliance field with no verified answer — not guessing`);
     return null;
+  }
+
+  if (!answer) {
+    const fromSupabase = lookupSupabaseAnswerSync(label, profile, { options, fieldType });
+    if (fromSupabase?.answer) answer = fromSupabase.answer;
   }
 
   if (!answer) {
@@ -295,7 +303,23 @@ async function fillMarkedField(page, descriptor, answer) {
     return false;
   }
 
-  const control = field.locator('textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
+  const spins = field.locator('input[role="spinbutton"]');
+  if (await spins.count() >= 3) {
+    const dateVal = String(wanted);
+    const m = dateVal.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || dateVal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (m) {
+      const month = m[1].length === 2 && Number(m[1]) <= 12 ? m[1] : (m[2] || '01');
+      const day = m[1].length === 2 && Number(m[1]) <= 12 ? m[2] : (m[3] || '01');
+      const year = m[3] || m[1];
+      await spins.nth(0).fill(String(Number(month)));
+      await spins.nth(1).fill(String(Number(day)));
+      await spins.nth(2).fill(String(year));
+      await spins.nth(2).press('Tab');
+      return true;
+    }
+  }
+
+  const control = field.locator('textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([role="spinbutton"])').first();
   if (!(await control.isVisible({ timeout: 600 }).catch(() => false))) return false;
   await control.click({ force: true }).catch(() => {});
   await control.fill(wanted).catch(() => {});

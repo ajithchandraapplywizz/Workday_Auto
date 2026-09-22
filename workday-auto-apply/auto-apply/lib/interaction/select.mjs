@@ -1,11 +1,25 @@
 import { locateControl } from './locators.mjs';
 import { delegateExistingFill } from './_delegate.mjs';
 import { okResult, failResult } from './_result.mjs';
+import { fillSelectVerified, matchOptionSafely } from './selectVerified.mjs';
 
 /**
  * Native <select> only. Prefer label, then value. No guess.
  */
 export async function fillSelect(page, field, answer, ctx = {}) {
+  const options = (field.options || []).map((o) => (typeof o === 'string' ? o : o?.text || '')).filter(Boolean);
+  if (options.length) {
+    const safeMatch = matchOptionSafely(answer, options);
+    if (!safeMatch.match) {
+      return failResult(field, `select_option_not_found:${safeMatch.reason || 'not_in_options'}`, { recoverable: false });
+    }
+  }
+
+  if (process.env.STRICT_FILL === '1') {
+    const verifiedResult = await fillSelectVerified(page, field, answer, ctx);
+    if (verifiedResult.success) return verifiedResult;
+    // Fallback to legacy path if strict fill could not locate
+  }
   const located = await locateControl(page, field, []);
   const loc = located.locator;
   const isNative = loc

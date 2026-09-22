@@ -86,8 +86,64 @@ export function explicitEeo(profile = {}, kind = '') {
 }
 
 export function explicitSalary(profile = {}, hourly = false) {
-  if (hourly) return profile.compensation_hourly ? String(profile.compensation_hourly) : '';
-  return profile.compensation != null ? String(profile.compensation) : '';
+  if (hourly) {
+    if (profile.compensation_hourly) return String(profile.compensation_hourly);
+    const hourlyFromQa = qaGet(profile, 'hourly wage', 'hourly rate', 'hourly compensation', 'hourly');
+    if (hourlyFromQa) {
+      const m = hourlyFromQa.match(/(\d+(?:\.\d+)?)/);
+      if (m) return m[1];
+    }
+    const unwrapComp = (val) => {
+      if (val == null) return null;
+      if (typeof val === 'object') return val.target || val.amount || val.value || val.annual || null;
+      return val;
+    };
+    const annualRaw = unwrapComp(profile.compensation)
+      || profile.target_salary
+      || profile.expected_salary
+      || qaGet(profile, 'salary', 'compensation', 'target compensation', 'desired compensation');
+    if (annualRaw) {
+      const numMatch = String(annualRaw).replace(/,/g, '').match(/(\d{4,7})/);
+      if (numMatch) {
+        const annualNum = Number(numMatch[1]);
+        if (annualNum > 1000) {
+          return String(Math.round(annualNum / 2080));
+        }
+      }
+    }
+    if (profile._supabaseQa) {
+      for (const [k, v] of Object.entries(profile._supabaseQa)) {
+        if (/compensation|salary/i.test(k) && !/hourly/i.test(k) && v) {
+          const numMatch = String(v).replace(/,/g, '').match(/(\d{4,7})/);
+          if (numMatch) {
+            const annualNum = Number(numMatch[1]);
+            if (annualNum > 1000) return String(Math.round(annualNum / 2080));
+          }
+        }
+      }
+    }
+    return '';
+  }
+
+  const unwrapComp = (val) => {
+    if (val == null) return null;
+    if (typeof val === 'object') return val.target || val.amount || val.value || val.annual || null;
+    return val;
+  };
+  const annual = unwrapComp(profile.compensation)
+    || profile.target_salary
+    || profile.expected_salary
+    || qaGet(profile, 'salary', 'compensation', 'target compensation', 'desired compensation');
+  if (annual != null && String(annual).trim()) return String(annual).trim();
+
+  if (profile._supabaseQa) {
+    for (const [k, v] of Object.entries(profile._supabaseQa)) {
+      if (/compensation|salary/i.test(k) && v) {
+        return String(v).trim();
+      }
+    }
+  }
+  return '';
 }
 
 /**

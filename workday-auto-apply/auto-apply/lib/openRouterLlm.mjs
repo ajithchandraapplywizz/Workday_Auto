@@ -30,8 +30,19 @@ import {
 } from './experienceAnswer.mjs';
 import { extractYesNoAnswer, isYesNoQuestionLabel, lookupSensitiveSafeAnswer } from './workdayDefaults.mjs';
 import { fieldTypeToCode, describeFieldTypeCode } from './fieldTypeCodes.mjs';
+import { mapToExactOption } from './questionEngine/optionMap.mjs';
+import {
+  isHighRiskIntent,
+  isSignatureOrFullNameQuestion,
+  isShiftOrScheduleQuestion,
+  pickShiftOption,
+  isSpecificManagerOrLocationQuestion,
+} from './questionEngine/intents.mjs';
 import { parseMonthYear, parseYear } from './experienceDates.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
+import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
+import { isSupabaseConfigured, upsertSupabaseAnswer } from './supabaseClient.mjs';
+import { buildLlmDateContext, getTodayISODate } from './date-utils.mjs';
 
 /**
  * True for free-text / numeric input controls (not dropdown/radio with options).
@@ -50,25 +61,110 @@ export function isInputLikeField(fieldType = '', options = []) {
 const STORE_PATH = resolve(process.cwd(), 'data', 'llm-qa-store.json');
 const PROFILE_PATH = resolve(process.cwd(), 'config', 'profile.yml');
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const DEFAULT_MODEL = 'google/gemini-2.5-flash';
+// Gemini direct endpoint (generateContent, used when GEMINI_API_KEY is set)
+// Gemini direct endpoint (generateContent, used when GEMINI_API_KEY is set)
+const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
+const DEFAULT_MODEL = 'gemini-3.5-flash'; // used when neither env var is set
+const GEMINI_FALLBACK_MODELS = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
 
 let storeCache = null;
 
+/** Returns the active API key: prefers GEMINI_API_KEY, falls back to OPENROUTER_API_KEY. */
 function getApiKey() {
+  const gemini = String(process.env.GEMINI_API_KEY || '').trim();
+  if (gemini) return gemini;
   return String(process.env.OPENROUTER_API_KEY || '').trim();
 }
 
+/** True when GEMINI_API_KEY is the active key (not OpenRouter). */
+function isGeminiDirect() {
+  return Boolean(String(process.env.GEMINI_API_KEY || '').trim());
+}
+
 function getModel() {
-  return String(process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  if (isGeminiDirect()) {
+    return String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  }
+  return String(process.env.OPENROUTER_MODEL || `google/${DEFAULT_MODEL}`).trim() || `google/${DEFAULT_MODEL}`;
 }
 
 export function isOpenRouterEnabled() {
   return Boolean(getApiKey());
 }
 
-async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000 } = {}) {
+/**
+ * Unified LLM chat function.
+ * - When GEMINI_API_KEY is set: calls Gemini generateContent endpoint directly.
+ * - Otherwise: calls OpenRouter with the configured model.
+ * Always returns a response shaped like OpenAI: { choices:[{ message:{ content } }] }
+ */
+export async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000 } = {}) {
   const key = getApiKey();
-  if (!key) throw new Error('OPENROUTER_API_KEY missing');
+  if (!key) throw new Error('No LLM API key configured (set GEMINI_API_KEY or OPENROUTER_API_KEY in .env)');
+
+  // ── Gemini direct API path ──────────────────────────────────────────────────
+  if (isGeminiDirect()) {
+    const primaryModel = getModel();
+    const candidateModels = Array.from(new Set([primaryModel, ...GEMINI_FALLBACK_MODELS]));
+
+    // Convert OpenAI-style messages to Gemini contents format
+    const geminiContents = messages
+      .filter((m) => m.role !== 'system')          // system goes into systemInstruction
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: String(m.content || '') }],
+      }));
+    const systemMsg = messages.find((m) => m.role === 'system');
+    const requestBody = {
+      contents: geminiContents,
+      generationConfig: {
+        temperature,
+        maxOutputTokens: max_tokens,
+      },
+    };
+    if (systemMsg) {
+      requestBody.systemInstruction = { parts: [{ text: String(systemMsg.content || '') }] };
+    }
+
+    let lastError = null;
+    for (const model of candidateModels) {
+      try {
+        const url = `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
+        const res = await httpsJsonWithRetry({
+          url,
+          method: 'POST',
+          timeoutMs,
+          headers: { 'Content-Type': 'application/json' },
+          body: requestBody,
+        }, { attempts: 1, label: `GeminiDirect:${model}` });
+
+        if (!res.ok) {
+          const errText = String(res.text || '').slice(0, 180);
+          lastError = new Error(`Gemini API [${model}] ${res.status}: ${errText}`);
+          // If rate-limited (429) or high-demand (503), try the next candidate model
+          if (res.status === 429 || res.status === 503) {
+            console.log(`    ⚠️  Gemini model ${model} hit ${res.status} — trying fallback model...`);
+            continue;
+          }
+          throw lastError;
+        }
+
+        const geminiJson = res.json();
+        const text = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
+        return { choices: [{ message: { content: text } }] };
+      } catch (err) {
+        lastError = err;
+        if (/429|503|quota|demand/i.test(err.message)) {
+          continue;
+        }
+        throw err;
+      }
+    }
+
+    throw lastError || new Error('All Gemini candidate models failed.');
+  }
+
+  // ── OpenRouter fallback path ────────────────────────────────────────────────
   const res = await httpsJsonWithRetry({
     url: OPENROUTER_URL,
     method: 'POST',
@@ -157,6 +253,7 @@ export function lookupLlmAnswerSync(label, { threshold = 0.88 } = {}) {
 }
 
 export async function saveLlmAnswer({ label, answer, options = [], fieldType = '', model = '', company = '' }) {
+  if (isApiOnlyAnswerMode()) return;
   const norm = normalizeLabel(label);
   if (!norm || answer == null || answer === '') return;
   const store = await loadStore();
@@ -175,15 +272,22 @@ export async function saveLlmAnswer({ label, answer, options = [], fieldType = '
 }
 
 export function isPersonalIdentityQuestion(label = '') {
+  if (isSignatureOrFullNameQuestion(label)) return true;
   const n = normalizeLabel(label);
   if (!n) return false;
   if (/agency|relative|official|institution|certif|foregoing|on behalf/i.test(n)) return false;
   return /^(legal\s*)?(first|given|last|family|surname|full)\s*name/.test(n)
-    || /^(first|last|given)\s*name$/.test(n)
+    || /^(first|last|given|family)\s*name$/.test(n)
     || /^email/.test(n)
     || /^(phone|mobile|cell)(\s*number)?$/.test(n)
     || /phone\s*number/.test(n)
-    || /country.*phone\s*code/.test(n);
+    || /phone\s*device\s*type/.test(n)
+    || /phone\s*extension/.test(n)
+    || /country.*phone\s*code/.test(n)
+    || /^city$/.test(n)
+    || /^state$/.test(n)
+    || /^country$/.test(n)
+    || /postal\s*code|^zip/.test(n);
 }
 
 export function localNearestOption(preferred, options = []) {
@@ -215,6 +319,14 @@ function pickFromOptions(raw, options = []) {
     return o.includes(lower) || lower.includes(o);
   });
   return partial || trimmed;
+}
+
+export function isMissingProfileStatement(text) {
+  const s = String(text || '').trim();
+  if (!s) return true;
+  if (/^(unknown|not sure|unsure)$/i.test(s)) return true;
+  return /\b(not|no)\s+.*(provided|specified|mentioned|available|found|given|on file|in (the )?profile|in (the )?resume)\b/i.test(s)
+    || /\b(none provided|information not available|not provided in)\b/i.test(s);
 }
 
 /**
@@ -250,9 +362,15 @@ export function validateLlmFieldDecision(raw, context = {}) {
   const rawAnswers = Array.isArray(decision.answer)
     ? decision.answer
     : String(decision.answer ?? '').split(code === 5 ? /[,;\n|]+/ : /\n/);
+  const isEssay = isDescribeExperienceQuestion(context.question || '');
   const answers = rawAnswers
     .map((answer) => String(answer ?? '').replace(/^["']|["']$/g, '').replace(/\s+/g, ' ').trim())
-    .filter((answer) => answer && !/^(unknown|not sure|unsure)$/i.test(answer));
+    .filter((answer) => {
+      if (!answer) return false;
+      if (/^(unknown|not sure|unsure)$/i.test(answer)) return false;
+      if (!isEssay && isMissingProfileStatement(answer)) return false;
+      return true;
+    });
   if (!answers.length) return null;
 
   if (options.length && code >= 2) {
@@ -300,35 +418,37 @@ function applicantSnapshot(profile = {}) {
     phone_code: p.country_phone_code || '',
     source: p.source || 'LinkedIn',
     linkedin: p.linkedin || '',
-    gender: e.gender || 'Male',
-    hispanic_latino: e.hispanic_latino || 'No',
-    race: e.race || 'Asian',
-    veteran: e.veteran_status || 'I am not a protected veteran',
-    disability: e.disability_status || 'No, I do not have a disability and have not had one in the past',
-    authorized_us: w.authorized_us || 'Yes',
-    sponsorship_needed: w.sponsorship_needed || 'No',
+    gender: e.gender || '',
+    hispanic_latino: e.hispanic_latino || '',
+    race: e.race || '',
+    veteran: e.veteran_status || '',
+    disability: e.disability_status || '',
+    authorized_us: w.authorized_us || '',
+    sponsorship_needed: w.sponsorship_needed || '',
     visa_type: w.visa_type || '',
     willing_to_relocate: w.willing_to_relocate || awQa[normalizeLabel('willing to relocate')] || '',
     job_title: exp.current_title || '',
     company: exp.current_company || '',
     years_experience: exp.years || awQa[normalizeLabel('years of experience')] || '',
-    from_date: exp.from_date || '05/2025',
-    to_date: exp.to_date || '06/2026',
+    from_date: exp.from_date || '',
+    to_date: exp.to_date || '',
     location: exp.location || p.city || '',
     description: exp.description || '',
     alternate_roles: Array.isArray(profile._applyWizzAlternateRoles) ? profile._applyWizzAlternateRoles : [],
     work_preferences: Array.isArray(profile._applyWizzWorkPreferences) ? profile._applyWizzWorkPreferences : [],
-    university: edu.university || 'Other',
-    degree: edu.degree || "Bachelor's",
-    major: edu.major || 'Computer Science',
-    education_from: edu.from_year || '2020',
-    education_to: edu.to_year || edu.graduation_year || '2024',
-    graduation_year: edu.graduation_year || edu.to_year || '2024',
+    university: edu.university || '',
+    degree: edu.degree || '',
+    major: edu.major || '',
+    education_from: edu.from_year || '',
+    education_to: edu.to_year || edu.graduation_year || '',
+    graduation_year: edu.graduation_year || edu.to_year || '',
     gpa: edu.gpa || '',
     compensation: profile.compensation || profile.salary || '',
     compensation_hourly: profile.compensation_hourly || '',
     desired_start_date: profile._desiredStartDate || '',
     skills: Array.isArray(profile.skills) ? profile.skills.filter(Boolean).slice(0, 20) : [],
+    resume_excerpt: String(profile._resumeText || '').slice(0, 3000),
+    resume_profile: profile._resumeProfile || null,
     apply_wizz_answers: awQa,
     apply_wizz_client_context: profile._applyWizzClientContext || {},
     known_qa_answers: qaSample,
@@ -352,7 +472,7 @@ function coerceRequiredAnswer(question, answer, options = [], applicant = {}, pr
     if (/hourly|per\s*hour/i.test(question) && profile?.compensation_hourly) {
       return String(profile.compensation_hourly);
     }
-    return value && !/unknown/i.test(value) ? value : 'Negotiable';
+    return value && !/unknown/i.test(value) ? value : null;
   }
 
   if (isYesNoQuestionLabel(question) && list.length) {
@@ -367,7 +487,7 @@ function coerceRequiredAnswer(question, answer, options = [], applicant = {}, pr
   if (isYearsQuantityQuestion(question) || isDescribeExperienceQuestion(question)) {
     if (isYearsQuantityQuestion(question) && (isInvalidYearsAnswer(value) || !value)) {
       const resolved = resolveExperienceQuestionAnswer(question, profile || { experience: { years: applicant.years_experience }, skills: applicant.skills }, { options: list });
-      return resolved?.answer || (list.length ? list[0] : '0');
+      return resolved?.answer || null;
     }
     if (isDescribeExperienceQuestion(question) && (!value || /^(yes|no|na|n\/a)$/i.test(value))) {
       const resolved = resolveExperienceQuestionAnswer(question, profile || { experience: { years: applicant.years_experience }, skills: applicant.skills }, { options: list });
@@ -376,27 +496,67 @@ function coerceRequiredAnswer(question, answer, options = [], applicant = {}, pr
     return sanitizeExperienceAnswer(question, value, profile, { options: list });
   }
 
-  if (/(how many years|years?\s+of\s+)/i.test(question) && !value) {
-    return list.length ? (localNearestOption('0', list)?.option || list[0]) : '0';
-  }
-  if (!value && list.length) {
-    const yesNo = list.filter((o) => /^(yes|no)$/i.test(o));
-    if (yesNo.length) return yesNo.find((o) => /^no$/i.test(o)) || yesNo[0];
-    return list[0];
-  }
   if (!value && isYesNoQuestionLabel(question)) {
     const reloc = applicant.willing_to_relocate || profile?.work_auth?.willing_to_relocate;
     if (/relocat|reside in/i.test(question) && reloc) return extractYesNoAnswer(reloc) || reloc;
   }
-  if (!value && isHighRiskPersonalFactQuestion(question) && !factValuesContain(applicant, question)) {
-    return /^(are you|do you|have you|will you|did you)/i.test(question) ? 'No' : 'N/A';
-  }
-  return value || 'N/A';
+  if (!value && isHighRiskPersonalFactQuestion(question) && !factValuesContain(applicant, question)) return null;
+  if (!isDescribeExperienceQuestion(question) && isMissingProfileStatement(value)) return null;
+  return value || null;
 }
 
 async function persistUnknownToTenant(label, answer, opts = {}, field = {}) {
+  if (!label || answer == null || answer === '') return;
+
+  const awlId = String(
+    opts.profile?._applyWizzId
+    || opts.profile?.applywizz_id
+    || opts.profile?.client_id
+    || process.env.APPLYWIZZ_ID
+    || ''
+  ).trim();
+
+  if (isSupabaseConfigured() && awlId) {
+    try {
+      await upsertSupabaseAnswer({
+        applywizzId: awlId,
+        question: String(label),
+        questionNormalized: normalizeLabel(label),
+        answer: String(answer),
+        fieldType: field?.fieldType || field?.type || 'input',
+        options: Array.isArray(field?.options) ? field.options : (opts.options || []),
+        source: 'ai',
+        unknownQuestion: true,
+        llmModel: getModel(),
+        jobUrl: opts.jobUrl || opts.profile?._jobUrl || '',
+        company: opts.company || opts.profile?._company || '',
+      });
+      console.log(`    💾 Supabase client_questions ← "${String(label).slice(0, 45)}" = "${String(answer).slice(0, 40)}"`);
+    } catch (err) {
+      console.log(`    ⚠️  Supabase unknown-answer save skipped: ${err.message?.slice(0, 100) || err}`);
+    }
+  }
+
+  if (isApiOnlyAnswerMode()) {
+    try {
+      const { saveApplyWizzClientAnswer } = await import('./applyWizzClient.mjs');
+      await saveApplyWizzClientAnswer(opts.profile || {}, {
+        label: String(label),
+        answer: String(answer),
+        fieldType: field?.fieldType || field?.type || 'input',
+        options: Array.isArray(field?.options) ? field.options : (opts.options || []),
+        source: 'llm',
+        jobUrl: opts.jobUrl || opts.profile?._jobUrl || '',
+        company: opts.company || opts.profile?._company || '',
+      });
+    } catch (err) {
+      console.log(`    ⚠️  Apply Wizz Q&A persist skipped: ${err.message?.slice(0, 80) || err}`);
+    }
+    return;
+  }
+
   const tenant = String(opts.tenant || '').trim().toLowerCase();
-  if (!tenant || tenant === 'unknown' || !label || answer == null || answer === '') return;
+  if (!tenant || tenant === 'unknown') return;
   try {
     const { saveAnswerToTenantYaml } = await import('./tenantQuestionYaml.mjs');
     await saveAnswerToTenantYaml(tenant, {
@@ -496,7 +656,25 @@ export async function gatherPlaywrightFieldContext(page, label, field = {}) {
           const selected = el.querySelector('[data-automation-id="selectedItem"]');
           const input = el.querySelector('input:not([type="hidden"]), textarea');
           const currentValue = (selected?.textContent || input?.value || '').replace(/\s+/g, ' ').trim();
-          best = { label: text.replace(/\*+$/, '').trim(), fieldType, required, currentValue, score };
+
+          const extractedOptions = [];
+          if (hasRadio || hasCheckbox) {
+            el.querySelectorAll('input[type="radio"], input[type="checkbox"]').forEach((inp) => {
+              const id = inp.id;
+              const lab = id ? el.querySelector(`label[for="${CSS.escape(id)}"]`) : inp.closest('label');
+              const optText = (lab?.textContent || inp.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+              if (optText && !extractedOptions.includes(optText)) extractedOptions.push(optText);
+            });
+          } else if (hasDropdown) {
+            el.querySelectorAll('select option').forEach((opt) => {
+              const optText = (opt.textContent || '').replace(/\s+/g, ' ').trim();
+              if (optText && !/^select(\s+one)?$/i.test(optText) && !extractedOptions.includes(optText)) {
+                extractedOptions.push(optText);
+              }
+            });
+          }
+
+          best = { label: text.replace(/\*+$/, '').trim(), fieldType, required, currentValue, options: extractedOptions, score };
         }
       }
 
@@ -514,6 +692,9 @@ export async function gatherPlaywrightFieldContext(page, label, field = {}) {
       if (live.fieldType) base.fieldType = live.fieldType;
       if (live.required != null) base.required = Boolean(live.required);
       if (live.currentValue) base.currentValue = live.currentValue;
+      if (Array.isArray(live.options) && live.options.length && (!base.options || !base.options.length)) {
+        base.options = live.options;
+      }
       if (Array.isArray(live.nearbyLabels)) base.nearbyLabels = live.nearbyLabels;
     }
 
@@ -629,6 +810,7 @@ async function callOpenRouter({
     : 'No option list. Type a short realistic answer.';
 
   const expCtx = buildExperienceContext(profile || {});
+  const dateContext = buildLlmDateContext(domContext?.timeZone || 'Asia/Kolkata');
   const typeCode = fieldTypeToCode(fieldType || domContext?.fieldType || 'text');
   const typeDesc = describeFieldTypeCode(typeCode);
   const system = `You fill one Workday job application field for this applicant.
@@ -652,6 +834,7 @@ PRIORITY:
 
 Rules:
 - REQUIRED field — never return UNKNOWN or empty.
+- DATE / AVAILABILITY: ${dateContext}
 - Years of experience in domain X: years if profile supports X, else 0. Never Yes/No for years inputs.
 - Describe / tell-us / why-looking / which-areas essays: 2–4 honest sentences from the profile. If the domain is not in the profile, say so and describe the actual role/skills. Never leave empty and do not answer Yes/No.
 - Salary: compensation from facts or Negotiable.
@@ -672,6 +855,9 @@ Field type: ${fieldType || domContext?.fieldType || 'text'}
 Question: ${question}
 
 ${domBlock}
+
+Calendar context:
+${dateContext}
 
 ${optionBlock}
 
@@ -726,6 +912,7 @@ export async function answerInputFieldWithLlm({
   const snap = applicant || await loadProfileSnapshot(profile);
   const expCtx = buildExperienceContext(profile || {});
   const brief = profileBrief || profile?._llmProfileBrief || '';
+  const dateContext = buildLlmDateContext(domContext?.timeZone || 'Asia/Kolkata');
 
   const system = `You answer ONE Workday application field for this applicant.
 Return ONLY valid JSON, with no markdown:
@@ -736,6 +923,7 @@ FIELD TYPE CODE: ${describeFieldTypeCode(fieldTypeToCode(fieldType))}
 Be humanic: read the full profile. Do NOT answer Yes to everything.
 
 Rules:
+0) DATE / AVAILABILITY: ${dateContext}
 1) Code 1 / years INPUT: if domain matches role/skills → years (${expCtx.yearsText}); else 0. Never Yes/No.
 2) Describe / tell-us / why-looking / which-areas: 2–4 honest sentences from the profile. If the domain is not in the profile, say so and describe the actual role. Never Yes/No and never empty.
 3) Dropdown/radio: exact option text only.
@@ -771,6 +959,9 @@ Required: ${domContext.required ? 'yes' : 'no'}`
 ${domBlock}
 ${optionBlock}
 
+Calendar context:
+${dateContext}
+
 Question to analyse and answer:
 ${label}
 
@@ -795,12 +986,27 @@ ${JSON.stringify(snap, null, 2)}`,
 /**
  * Resolve an unknown Workday field: cache first, then OpenRouter, then persist.
  */
-function identityAnswerFromApplicant(label, applicant = {}) {
+function identityAnswerFromApplicant(label, applicant = {}, profile = null) {
+  const p = profile?.personal || {};
   const n = normalizeLabel(label);
-  if (/email/.test(n)) return applicant.email || null;
-  if (/phone|mobile|cell/.test(n) && !/code/.test(n)) return applicant.phone || null;
-  if (/phone\s*code/.test(n)) return applicant.phone_code || null;
-  if (/name/.test(n)) return applicant.name || null;
+  if (/^(legal\s*)?(first|given)\s*name/.test(n)) return p.first_name || applicant.first_name || null;
+  if (/^(legal\s*)?(last|family|surname)\s*name/.test(n)) return p.last_name || applicant.last_name || null;
+  if (/^full\s*name/.test(n)) {
+    return [p.first_name, p.last_name].filter(Boolean).join(' ')
+      || applicant.name
+      || null;
+  }
+  if (/email/.test(n)) return p.email || applicant.email || null;
+  if (/phone\s*device\s*type/.test(n)) return p.phone_device_type || 'Mobile';
+  if (/phone\s*extension/.test(n)) return p.phone_extension != null ? String(p.phone_extension) : '';
+  if (/phone|mobile|cell/.test(n) && !/code|device|extension/.test(n)) {
+    return p.phone || applicant.phone || null;
+  }
+  if (/country.*phone.*code|phone.*code/.test(n)) return p.country_phone_code || applicant.phone_code || null;
+  if (/^country$/.test(n)) return p.country || null;
+  if (/^city$/.test(n)) return p.city || null;
+  if (/^state$/.test(n)) return p.state || null;
+  if (/postal\s*code|^zip/.test(n)) return p.postal_code || null;
   return null;
 }
 
@@ -819,10 +1025,35 @@ export async function pickNearestSelectOption({
   const list = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
   if (!list.length) return preferred || null;
 
+  const qNorm = normalizeLabel(question);
+  if (/phone\s*device\s*type/.test(qNorm)) {
+    const mobile = list.find((o) => /^mobile$/i.test(o));
+    if (mobile) return mobile;
+  }
+  if (/^state$/.test(qNorm) && profile?.personal?.state) {
+    const local = localNearestOption(profile.personal.state, list);
+    if (local && local.score >= 0.4) return local.option;
+  }
+  if (/^state$/.test(qNorm) && list.every((o) => /indeed|linkedin|referral|job board|source/i.test(o))) {
+    return null;
+  }
+
   if (isSalaryQuestion(question)) {
     const picked = pickCompensationFromOptions(list, profile, preferred);
     if (picked) return picked;
   }
+
+  if (isShiftOrScheduleQuestion(question)) {
+    const shift = pickShiftOption(list);
+    if (shift) return shift;
+  }
+
+  if (isSpecificManagerOrLocationQuestion(question)) {
+    const pref = list.find((o) => /\b(no\s*preference|any|all|none|n\/?a)\b/i.test(o)) || list[0];
+    if (pref) return pref;
+  }
+
+  const computedAvailability = computeAvailabilityOption(question, preferred, list);
 
   const local = localNearestOption(preferred, list);
   if (local && local.score >= 0.8) return local.option;
@@ -848,6 +1079,10 @@ export async function pickNearestSelectOption({
       });
       const matched = pickFromOptions(answer, list);
       if (matched && list.some((o) => o.toLowerCase() === String(matched).toLowerCase())) {
+        if (computedAvailability && matched.toLowerCase() !== computedAvailability.toLowerCase()) {
+          console.log(`    📅 Availability correction: "${matched}" → "${computedAvailability}" from calendar dates`);
+          return computedAvailability;
+        }
         return matched;
       }
     } catch (err) {
@@ -857,7 +1092,32 @@ export async function pickNearestSelectOption({
 
   // Without a meaningful preferred value, selecting the first option fabricates an
   // answer. Leave it unresolved so the caller can require a human-sourced answer.
-  return preferred && local?.score >= 0.5 ? local.option : null;
+  return computedAvailability || (preferred && local?.score >= 0.5 ? local.option : null);
+}
+
+function computeAvailabilityOption(question, preferred, options = []) {
+  if (!/available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(String(question || ''))) {
+    return null;
+  }
+  const raw = String(preferred || '').trim();
+  const match = raw.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || raw.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!match) return null;
+  const target = raw.includes('-')
+    ? Date.UTC(Number(match[1]), Number(match[2]) - 1, Number(match[3]))
+    : Date.UTC(Number(match[3]), Number(match[1]) - 1, Number(match[2]));
+  const todayParts = getTodayISODate().split('-').map(Number);
+  const today = Date.UTC(todayParts[0], todayParts[1] - 1, todayParts[2]);
+  const days = Math.ceil((target - today) / 86400000);
+  if (days <= 0) return options.find((option) => /immediately|as soon as possible|now/i.test(option)) || null;
+
+  const weeks = Math.ceil(days / 7);
+  const exact = options.find((option) => {
+    const weeksMatch = option.match(/\b(\d+)\s*weeks?\b/i);
+    return weeksMatch && Number(weeksMatch[1]) === weeks;
+  });
+  if (exact) return exact;
+  if (weeks > 4) return options.find((option) => /more than\s*4\s*weeks?|over\s*4\s*weeks?/i.test(option)) || null;
+  return options.find((option) => /within\s*1\s*week|less than\s*1\s*week/i.test(option) && weeks <= 1) || null;
 }
 
 /**
@@ -897,7 +1157,7 @@ Dates: work MM/YYYY, education YYYY.
 Do not include name, phone, email, or mobile.
 If a key is unknown, omit it.
 School should be Other when the university is not a listed Workday school.
-Degree should be a Bachelor's variant. Major should be Computer Science if that is the field.`,
+Analyze the resume carefully for the highest completed degree. Master of Science, Masters of Science, MS, and M.S. all mean the same degree; return "Master of Science" for those cases. Bachelor of Science, BS, and B.S. mean "Bachelor of Science". Do not downgrade a master's degree to bachelor's. Major and education dates are informational only.`,
         },
         {
           role: 'user',
@@ -925,10 +1185,7 @@ Degree should be a Bachelor's variant. Major should be Computer Science if that 
       profile.experience[key] = String(value);
     }
     if (parsed.description) profile.experience.description = String(parsed.description);
-    profile.education.university = 'Other';
-    profile.education.degree = parsed.degree && /bachelor/i.test(String(parsed.degree))
-      ? String(parsed.degree)
-      : "Bachelor's";
+    if (parsed.degree) profile.education.degree = String(parsed.degree);
     profile.education.major = 'Computer Science';
     profile.education.field_of_study_hierarchy = ['Computer Science'];
     for (const [key, value] of [['from_year', parsed.from_year], ['to_year', parsed.to_year]]) {
@@ -949,6 +1206,7 @@ Degree should be a Bachelor's variant. Major should be Computer Science if that 
 export async function resolveUnknownWithLlm(questionText, field = {}, opts = {}) {
   const label = String(questionText || '').trim();
   if (!label) return null;
+  if (field.required !== true && opts.forceLlm !== true) return null;
 
   const safeAnswer = lookupSensitiveSafeAnswer(label);
   if (safeAnswer) return safeAnswer;
@@ -973,7 +1231,9 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
       ...applicant,
       email: opts.profile?.personal?.email,
       phone: opts.profile?.personal?.phone,
-    });
+      first_name: opts.profile?.personal?.first_name,
+      last_name: opts.profile?.personal?.last_name,
+    }, opts.profile);
     if (fromProfile) {
       console.log(`    👤 Personal details stay on profile: "${label.slice(0, 40)}" ← "${String(fromProfile).slice(0, 30)}"`);
       return fromProfile;
@@ -1000,6 +1260,16 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
 
   const effectiveLabel = domContext.label || label;
   const fieldType = domContext.fieldType || field?.fieldType || field?.type || 'text';
+  let cached = null;
+
+  if (isPersonalIdentityQuestion(effectiveLabel) && opts.profile) {
+    const applicant = await loadProfileSnapshot(opts.profile);
+    const fromProfileEarly = identityAnswerFromApplicant(effectiveLabel, applicant, opts.profile);
+    if (fromProfileEarly != null && String(fromProfileEarly).trim() !== '') {
+      console.log(`    👤 [Profile] "${effectiveLabel.slice(0, 40)}" ← "${String(fromProfileEarly).slice(0, 30)}"`);
+      return fromProfileEarly;
+    }
+  }
 
   const finish = async (answer, source = 'openrouter') => {
     const applicant = await loadProfileSnapshot(opts.profile);
@@ -1017,12 +1287,49 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
       model: getModel(),
       company: opts.company || opts.tenant || '',
     });
+    const applywizzId = opts.profile?._applyWizzId || process.env.APPLYWIZZ_ID || '';
+    if (isSupabaseConfigured() && applywizzId) {
+      try {
+        await upsertSupabaseAnswer({
+          applywizzId,
+          question: effectiveLabel,
+          questionNormalized: normalizeLabel(effectiveLabel),
+          answer: finalAnswer,
+          fieldType: fieldType || (options.length ? 'dropdown' : 'input'),
+          options,
+          source: 'llm',
+          unknownQuestion: true,
+          llmModel: getModel(),
+          jobUrl: opts.jobUrl || opts.profile?._jobUrl || '',
+          company: opts.company || opts.tenant || '',
+        });
+        if (opts.profile?._supabaseQa) {
+          opts.profile._supabaseQa[normalizeLabel(effectiveLabel)] = String(finalAnswer);
+        }
+      } catch (err) {
+        console.log(`    ⚠️  Supabase answer save skipped: ${err.message?.slice(0, 100) || err}`);
+      }
+    }
     await persistUnknownToTenant(effectiveLabel, finalAnswer, { ...opts, options }, field);
     if (source !== 'cache') {
       console.log(`    💾 LLM ${source} ← "${String(finalAnswer).slice(0, 50)}"`);
     }
     return finalAnswer;
   };
+
+  if (/available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(effectiveLabel) && options.length) {
+    const timingPreferred = opts.preferred || opts.profile?._desiredStartDate || '';
+    const nearest = await pickNearestSelectOption({
+      question: `${effectiveLabel}\nEmployee desired start date: ${timingPreferred || '(not provided)'}`,
+      options,
+      preferred: timingPreferred,
+      profile: opts.profile,
+      company: opts.company || opts.tenant || '',
+      page: opts.page,
+      domContext,
+    });
+    if (nearest) return finish(nearest, 'availability_date_analysis');
+  }
 
   // Profile heuristic for experience Qs — only when LLM is off OR field is not a free-text input.
   // Input fields: LLM analyses the question against the full Apply Wizz profile first.
@@ -1041,6 +1348,9 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
     }
   }
 
+  if (isApiOnlyAnswerMode()) {
+    if (!isOpenRouterEnabled()) return null;
+  } else {
   // Concept synonyms before fuzzy/LLM (education ↔ graduation, salary ↔ compensation, …)
   try {
     const { resolveByConcept } = await import('./answerConcepts.mjs');
@@ -1069,7 +1379,9 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
     }
   }
 
-  const cached = await lookupLlmAnswer(effectiveLabel, { threshold: isSalaryQuestion(effectiveLabel) ? 0.55 : 0.88 });
+  cached = isApiOnlyAnswerMode()
+    ? null
+    : await lookupLlmAnswer(effectiveLabel, { threshold: isSalaryQuestion(effectiveLabel) ? 0.55 : 0.88 });
   if (cached) {
     const badYearsCache = isYearsQuantityQuestion(effectiveLabel) && isInvalidYearsAnswer(cached);
     const openEnded = String(effectiveLabel).length > 55
@@ -1080,6 +1392,7 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
       console.log(`    ♻️  LLM cache: "${effectiveLabel.slice(0, 55)}" ← "${String(cached).slice(0, 50)}"`);
       return finish(cached, 'cache');
     }
+  }
   }
 
   if (options.length) {
@@ -1139,6 +1452,14 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
     return finish(answer, 'api');
   } catch (err) {
     console.log(`    ⚠️  OpenRouter failed: ${err.message?.slice(0, 120) || err}`);
+    const offlineSafe = lookupSensitiveSafeAnswer(effectiveLabel);
+    if (offlineSafe != null) {
+      if (options.length) {
+        const mapped = mapToExactOption(offlineSafe, options, fieldType);
+        if (mapped.ok) return finish(mapped.answer, 'offline_safe');
+      }
+      return finish(offlineSafe, 'offline_safe');
+    }
     const offlineExp = resolveExperienceQuestionAnswer(effectiveLabel, opts.profile, { options, fieldType });
     if (offlineExp?.answer != null) return finish(offlineExp.answer, offlineExp.source);
     const offline = isSalaryQuestion(effectiveLabel)
@@ -1173,34 +1494,48 @@ export async function analyzeUnknownQuestionsBatch(questions = [], profile = {},
     resumePath: opts.resumePath || profile?._resumePath,
   });
   const applicant = await loadProfileSnapshot(profile);
+  const dateContext = buildLlmDateContext();
 
   try {
     const data = await openRouterChat({
       temperature: 0.05,
-      max_tokens: 1200,
-      timeoutMs: 60000,
+      max_tokens: 1600,
+      timeoutMs: 90000,
       messages: [
         {
           role: 'system',
-          content: `You map Workday questions to applicant FACTS only.
-Never invent years, salary, visa, sponsorship, clearance, licenses, skills, dates, or education.
-If a fact is missing or the question is ambiguous, answer must be null and requiresReview true.
-If options are provided, answer must be exactly one of those strings.
-Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0,"grounded":false,"requiresReview":true,"reason":""}]}`,
+          content: `You answer Workday job-application questions using ONLY the applicant facts JSON and profile brief.
+For each question: read the full question text and intent (not keywords alone).
+Field type codes: 1=free text/number, 2=dropdown, 3=radio, 4=checkbox, 5=multi-select.
+When options[] is non-empty, answer MUST be copied exactly from that list (one option, or array for code 5).
+Calendar context: ${dateContext}
+For availability timing questions, compare the employee desired start date with today's date: a past/completed date maps to Immediately; a future date maps to the matching interval option such as 1 week. Return the exact live option.
+Required questions must get a best-effort answer from facts — use null only when truly unknown.
+Never invent visa/sponsorship/clearance/license facts; set requiresReview true for those if missing.
+Describe/essay: 2–4 honest sentences from profile. Years inputs: numbers only. Age 16/18+: Yes.
+Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0.85,"grounded":true,"requiresReview":false,"reason":""}]}`,
         },
         {
           role: 'user',
           content: JSON.stringify({
             facts: applicant,
-            brief: String(profile?._llmProfileBrief || '').slice(0, 1500),
-            questions: rows.map((q) => ({
-              questionId: q.questionId,
-              question: q.label,
-              intent: q.intent,
-              options: q.options || [],
-              answerType: q.elementType || q.answerType || '',
-              required: q.required === true,
-            })),
+            brief: String(profile?._llmProfileBrief || '').slice(0, 2000),
+            calendar_context: dateContext,
+            questions: rows.map((q) => {
+              const el = q.elementType || q.answerType || '';
+              const code = fieldTypeToCode(el);
+              const liveOptions = (q.options || []).map((o) => String(o || '').trim()).filter(Boolean);
+              return {
+                questionId: q.questionId,
+                question: q.label,
+                intent: q.intent,
+                field_type_code: code,
+                field_type: describeFieldTypeCode(code),
+                options: liveOptions,
+                options_numbered: liveOptions.map((o, i) => `${i + 1}. ${o}`),
+                required: q.required === true,
+              };
+            }),
           }),
         },
       ],
@@ -1208,31 +1543,86 @@ Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0,"gro
     const raw = String(data?.choices?.[0]?.message?.content || '');
     const parsed = JSON.parse(raw.replace(/```(?:json)?|```/gi, '').match(/\{[\s\S]*\}/)?.[0] || '{}');
     const answers = Array.isArray(parsed.answers) ? parsed.answers : [];
-    return rows.map((q) => {
+    const out = [];
+    for (const q of rows) {
       const hit = answers.find((a) => a.questionId === q.questionId) || {};
-      const grounded = hit.grounded === true;
-      const answer = hit.answer == null ? null : String(hit.answer).trim();
-      const confidence = Number(hit.confidence);
-      const requiresReview = hit.requiresReview === true || !grounded || !answer
-        || !Number.isFinite(confidence) || confidence < 0.70;
-      return {
+      const highRisk = isHighRiskIntent(q.intent || '');
+      let answer = hit.answer == null ? null : String(hit.answer).trim();
+      let confidence = Number(hit.confidence);
+      let grounded = hit.grounded !== false;
+      const el = q.elementType || q.answerType || '';
+      const liveOptions = (q.options || []).map((o) => String(o || '').trim()).filter(Boolean);
+
+      if (answer && liveOptions.length) {
+        const mapped = mapToExactOption(answer, liveOptions, el);
+        if (mapped.ok) {
+          answer = mapped.answer;
+          grounded = true;
+        } else if (!highRisk) {
+          answer = null;
+        }
+      }
+
+      let requiresReview = hit.requiresReview === true || !answer;
+      if (highRisk && (!grounded || !answer)) requiresReview = true;
+      if (!requiresReview && answer) {
+        if (!Number.isFinite(confidence) || confidence < 0.65) confidence = 0.78;
+      }
+
+      if (requiresReview && liveOptions.length && !highRisk && liveOptions.length <= 12) {
+        const nearest = await pickNearestSelectOption({
+          question: q.label,
+          options: liveOptions,
+          preferred: answer || '',
+          profile,
+          page: opts.page || null,
+        }).catch(() => null);
+        if (nearest && liveOptions.some((o) => o === nearest || o.toLowerCase() === String(nearest).toLowerCase())) {
+          answer = nearest;
+          requiresReview = false;
+          confidence = 0.72;
+          grounded = true;
+        }
+      }
+
+      out.push({
         questionId: q.questionId,
         answer: requiresReview ? null : answer,
         confidence: Number.isFinite(confidence) ? confidence : 0,
         grounded,
         requiresReview,
         reason: hit.reason || (requiresReview ? 'ungrounded_or_missing' : 'llm_page_batch'),
-      };
-    });
+      });
+    }
+    return out;
   } catch (err) {
     console.log(`    ⚠️  Page-batch LLM failed: ${err.message?.slice(0, 120) || err}`);
-    return rows.map((q) => ({
-      questionId: q.questionId,
-      answer: null,
-      confidence: 0,
-      grounded: false,
-      requiresReview: true,
-      reason: 'llm_batch_failed',
-    }));
+    return rows.map((q) => {
+      const safe = lookupSensitiveSafeAnswer(q.label);
+      if (safe) {
+        const liveOpts = (q.options || []).map((o) => String(o || '').trim()).filter(Boolean);
+        let ans = safe;
+        if (liveOpts.length) {
+          const mapped = mapToExactOption(safe, liveOpts, q.elementType || q.answerType || '');
+          if (mapped.ok) ans = mapped.answer;
+        }
+        return {
+          questionId: q.questionId,
+          answer: ans,
+          confidence: 0.90,
+          grounded: true,
+          requiresReview: false,
+          reason: 'offline_safe_fallback',
+        };
+      }
+      return {
+        questionId: q.questionId,
+        answer: null,
+        confidence: 0,
+        grounded: false,
+        requiresReview: true,
+        reason: 'llm_batch_failed',
+      };
+    });
   }
 }

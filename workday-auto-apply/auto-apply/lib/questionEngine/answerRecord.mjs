@@ -49,7 +49,7 @@ export function buildAnswerRecord(partial = {}) {
 
 export function reviewRecord(field, intent, reasonCode, extras = {}) {
   return buildAnswerRecord({
-    questionId: field.questionId,
+    questionId: field.questionId || field.id || '',
     intent,
     normalizedQuestion: field.label,
     answerType: extras.answerType,

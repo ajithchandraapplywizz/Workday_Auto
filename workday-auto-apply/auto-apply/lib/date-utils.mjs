@@ -90,8 +90,6 @@ const CURRENT_DATE_PATTERNS = [
 ];
 
 const AVAILABILITY_START_PATTERNS = [
-  /date\s+available\s+to\s+work/i,
-  /date\s+available\b/i,
   /when.*available.*start/i,
   /available.*to.*start/i,
   /when.*can.*you.*start/i,

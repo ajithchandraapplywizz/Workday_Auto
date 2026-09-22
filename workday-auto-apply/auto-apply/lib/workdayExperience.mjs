@@ -11,7 +11,6 @@ import { resolveField, mapLabelToProfileValue, getNestedValue } from './planner.
 import { createQAStore, saveAnswerToYaml } from './qaStore.mjs';
 import { lookupDefaultAnswer, leadingYesNo, selectionMatchesAnswer } from './workdayDefaults.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
-import { getTenantExperienceOverrides, getTenantEducationOverrides, saveAnswerToTenantYaml, lookupTenantAnswer } from './tenantQuestionYaml.mjs';
 import { hydrateExperienceFromLlm, pickNearestSelectOption, resolveUnknownWithLlm } from './openRouterLlm.mjs';
 import { collectLiveFieldOptions } from './workdayDom.mjs';
 import { inferFromResumeFile, getResumePathForApply } from './resumeParser.mjs';
@@ -91,23 +90,48 @@ function valuesMatch(actual, expected) {
   }
   if (/^other$/i.test(a) && /^other$/i.test(e)) return true;
   if (/bachelor/i.test(a) && /bachelor/i.test(e)) return true;
+  if (/master/i.test(a) && /master/i.test(e)) return true;
+  if (/doctor|phd/i.test(a) && /doctor|phd/i.test(e)) return true;
   if (/computer\s*science/i.test(a) && /computer\s*science/i.test(e)) return true;
   return false;
 }
 
-const DEGREE_VARIANTS = [
-  "Bachelor's",
-  'Bachelors',
-  "Bachelor's Degree",
-  'Bachelors Degree',
-  'Bachelor of Science',
-  'Bachelor of Arts',
-  'Bachelor',
-  'Undergraduate',
-  'BS',
-  'B.S.',
-  'BA',
-];
+function getDegreeVariantsForLevel(preferred = '') {
+  const p = String(preferred || '').toLowerCase();
+  if (/master|ms\b|m\.?tech|mba|postgraduate|m\.?s\b/i.test(p)) {
+    return [
+      'Master of Science',
+      'Master of Science (MS)',
+      "Master's Degree",
+      'Masters Degree',
+      "Master's",
+      'Masters',
+      'Master of Science in Information Technology',
+      'Master of Science in Computer Science',
+      'Master of Science in Engineering',
+      'Master of Technology',
+      'MS',
+      'M.S.',
+    ];
+  }
+  return [
+    "Bachelor's",
+    'Bachelors',
+    "Bachelor's Degree",
+    'Bachelors Degree',
+    'Bachelor of Science',
+    'Bachelor of Arts',
+    'Bachelor of Science (BS)',
+    'Bachelor of Technology',
+    'Bachelor',
+    'Undergraduate',
+    'BS',
+    'B.S.',
+    'BA',
+  ];
+}
+
+const DEGREE_VARIANTS = getDegreeVariantsForLevel("Bachelor's");
 
 /**
  * Mark the best-matching field container on the page via data-wd-exp-target.
@@ -175,9 +199,41 @@ async function markFieldByLabel(page, labelPattern, sectionType = null) {
       if (sectionType === 'work' && sec === 'education') continue;
       if (sectionType === 'education' && sec === 'work') continue;
 
-      const field = labelEl.closest(
+      // Check standard HTML5 htmlFor directly
+      const forId = labelEl.getAttribute('for') || labelEl.htmlFor;
+      if (forId) {
+        const directControl = document.getElementById(forId);
+        if (directControl && directControl.offsetParent !== null) {
+          const rect = directControl.getBoundingClientRect();
+          if (rect.width > 2 && rect.height > 2) {
+            candidates.push({ field: directControl, labelLen: labelText.length, area: 1, sec });
+            continue;
+          }
+        }
+      }
+
+      // Check aria-labelledby
+      if (labelEl.id) {
+        const ariaControl = document.querySelector(`[aria-labelledby~="${labelEl.id}"]`);
+        if (ariaControl && ariaControl.offsetParent !== null) {
+          candidates.push({ field: ariaControl, labelLen: labelText.length, area: 1, sec });
+          continue;
+        }
+      }
+
+      let field = labelEl.closest(
         '[data-automation-id*="formField"], [data-automation-id*="form-field"], [data-automation-id*="Field"], fieldset, [role="group"]'
-      ) || labelEl.parentElement?.parentElement;
+      );
+      if (!field) {
+        let p = labelEl.parentElement;
+        for (let i = 0; i < 5 && p; i++) {
+          if (p.querySelector('input:not([type="hidden"]), textarea, select, [role="combobox"], button[aria-haspopup="listbox"], [data-automation-id="selectWidget"]')) {
+            field = p;
+            break;
+          }
+          p = p.parentElement;
+        }
+      }
       if (!field) continue;
 
       const hasControl = field.querySelector(
@@ -294,11 +350,18 @@ async function isSectionRequiredInDom(page, sectionType) {
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
     const headingRe = kind === 'work' ? /work\s*experience/i : /^education/i;
     const errorRe = kind === 'work'
-      ? /work\s*experience.{0,30}(is\s*)?required/i
-      : /education.{0,30}(is\s*)?required/i;
+      ? /work\s*experience.{0,40}(is\s*)?required|job\s*title.{0,30}(is\s*)?required|company.{0,30}(is\s*)?required/i
+      : /education.{0,40}(is\s*)?required|school.{0,30}(is\s*)?required|degree.{0,30}(is\s*)?required/i;
 
     const body = norm(document.body?.innerText || '');
     if (errorRe.test(body)) return true;
+
+    // Check error banners / alerts specifically
+    const alerts = document.querySelectorAll('[data-automation-id*="error" i], [role="alert"], [class*="alert" i], [class*="error" i]');
+    for (const a of alerts) {
+      const aText = norm(a.textContent);
+      if (errorRe.test(aText)) return true;
+    }
 
     const headings = document.querySelectorAll('h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"]');
     for (const h of headings) {
@@ -500,6 +563,39 @@ async function ensureSectionsExpanded(page) {
 
 async function findFieldLocator(page, spec, sectionType) {
   const pattern = spec.labelPattern || spec.label;
+
+  // 1. Check direct Workday automation-id selectors scoped to section
+  if (Array.isArray(spec.automationIds) && spec.automationIds.length) {
+    for (const autoId of spec.automationIds) {
+      const sectionPrefix = sectionType === 'work'
+        ? '[data-automation-id*="workExperience" i], [data-automation-id*="work-experience" i], [data-automation-id*="workExperiencePanelSet" i]'
+        : sectionType === 'education'
+          ? '[data-automation-id*="education" i], [data-automation-id*="educationPanelSet" i]'
+          : '';
+
+      const selectors = [
+        `input[data-automation-id*="${autoId}" i]`,
+        `textarea[data-automation-id*="${autoId}" i]`,
+        `button[data-automation-id*="${autoId}" i]`,
+        `[data-automation-id*="${autoId}" i] input:not([type="hidden"])`,
+        `[data-automation-id*="${autoId}" i] textarea`,
+        `[data-automation-id*="${autoId}" i] [role="combobox"]`,
+        `[data-automation-id*="${autoId}" i] button`,
+        `[data-automation-id*="${autoId}" i]`,
+        `input[id*="${autoId}" i]`,
+      ];
+
+      for (const sel of selectors) {
+        const fullSel = sectionPrefix ? `${sectionPrefix} ${sel}` : sel;
+        const candidate = page.locator(fullSel).first();
+        if (await candidate.isVisible({ timeout: 200 }).catch(() => false)) {
+          return candidate;
+        }
+      }
+    }
+  }
+
+  // 2. Try markFieldByLabel
   let loc = await markFieldByLabel(page, pattern, sectionType);
   if (loc && await loc.count()) return loc;
   if (sectionType) {
@@ -507,12 +603,16 @@ async function findFieldLocator(page, spec, sectionType) {
     if (loc && await loc.count()) return loc;
   }
 
-  // Playwright getByLabel fallback
+  // 3. Playwright getByLabel fallback
   const byLabel = page.getByLabel(new RegExp(pattern, 'i')).first();
-  if (await byLabel.isVisible({ timeout: 500 }).catch(() => false)) {
-    const wrapper = byLabel.locator('xpath=ancestor::*[contains(@data-automation-id,"formField") or contains(@data-automation-id,"Field") or self::fieldset][1]').first();
-    if (await wrapper.count()) return wrapper;
-    return byLabel.locator('xpath=ancestor::div[1]').first();
+  if (await byLabel.isVisible({ timeout: 400 }).catch(() => false)) {
+    return byLabel;
+  }
+
+  // 4. Section-scoped aria-label search
+  const byAria = page.locator(`[aria-label*="${spec.label}" i], [placeholder*="${spec.label}" i]`).first();
+  if (await byAria.isVisible({ timeout: 250 }).catch(() => false)) {
+    return byAria;
   }
 
   return null;
@@ -543,6 +643,10 @@ async function readFieldValue(fieldLoc) {
     } else if (spins.length === 1 && spinValue(spins[0])) {
       return spinValue(spins[0]);
     }
+    if (field.tagName === 'TEXTAREA' && field.value) return normalize(field.value);
+    if (field.tagName === 'INPUT' && field.getAttribute('role') !== 'spinbutton' && field.value) {
+      return normalize(field.value);
+    }
     const textarea = field.querySelector('textarea');
     if (textarea?.value) return normalize(textarea.value);
     const input = field.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
@@ -554,6 +658,10 @@ async function readFieldValue(fieldLoc) {
       .map((el) => normalize(el.textContent))
       .filter((t) => t && !/^select(\s+one)?$/i.test(t) && !/items?\s*selected/i.test(t));
     if (pillTexts.length) return pillTexts[0];
+    if (field.tagName === 'BUTTON' || field.getAttribute?.('role') === 'combobox') {
+      const t = normalize(field.textContent);
+      if (t && !/^select(\s+one)?$/i.test(t) && !/^0 items selected$/i.test(t) && !/^no items selected$/i.test(t)) return t;
+    }
     const btn = field.querySelector('[data-automation-id="selectWidget"] button, button[aria-haspopup="listbox"], [role="combobox"]');
     if (btn) {
       const t = normalize(btn.textContent);
@@ -574,6 +682,21 @@ async function readFieldValue(fieldLoc) {
 async function fillTextAggressive(page, fieldLoc, value, label) {
   const str = String(value);
   const attempts = [];
+
+  const tag = await fieldLoc.evaluate((el) => el.tagName?.toLowerCase()).catch(() => '');
+
+  // 1. Direct input or textarea element
+  if (tag === 'textarea' || tag === 'input') {
+    await fieldLoc.click({ force: true }).catch(() => {});
+    await fieldLoc.fill(str);
+    await fieldLoc.press('Tab').catch(() => {});
+    const actual = await fieldLoc.inputValue().catch(() => '');
+    if (valuesMatch(actual, str)) {
+      attempts.push(`direct ${tag}.fill → "${actual}" ✓`);
+      return { ok: true, attempts };
+    }
+    attempts.push(`direct ${tag}.fill → "${actual}" ✗`);
+  }
 
   const textarea = fieldLoc.locator('textarea').first();
   if (await textarea.count() && await textarea.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -938,7 +1061,7 @@ async function fillSpinYearOnce(page, fieldLoc, year) {
 
   const spin = spins.nth(count > 1 ? yearIdx : 0);
   const okSet = await setOneSpin(page, spin, y);
-  await spin.press('Tab').catch(() => {});
+    await spin.press('Tab').catch(() => {});
   const actual = await readSpinDigits(spin) || await readFieldValue(fieldLoc);
   const ok = okSet || String(actual).includes(y);
   attempts.push(ok ? `year ${y} typed → "${actual}" ✓` : `year ${y} typed → "${actual}" ✗`);
@@ -960,16 +1083,42 @@ async function fillTypeAndEnter(page, fieldLoc, text) {
   let after = await readFieldValue(fieldLoc);
   let ok = typed.ok || valuesMatch(after, text) || /other|computer\s*science/i.test(after);
 
-  if (!ok && /^other$/i.test(String(text))) {
-    const input = fieldLoc.locator('input:not([type="hidden"]):not([type="checkbox"]):not([role="spinbutton"])').first();
+  if (!ok && !/^other$/i.test(String(text))) {
+    const fallbackTyped = await typeAndClickOption(page, fieldLoc, 'Other');
+    after = await readFieldValue(fieldLoc);
+    ok = fallbackTyped.ok || valuesMatch(after, 'Other') || /other/i.test(after);
+    if (ok) {
+      attempts.push(`typed "${text}" not found, fell back to "Other" ✓`);
+      return { ok: true, selected: fallbackTyped.selected || after || 'Other', attempts };
+    }
+  }
+
+  if (!ok) {
+    const isDirectInput = await fieldLoc.evaluate((el) => el.tagName?.toLowerCase() === 'input').catch(() => false);
+    const input = isDirectInput ? fieldLoc : fieldLoc.locator('input:not([type="hidden"]):not([type="checkbox"]):not([role="spinbutton"])').first();
     if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+      const fillVal = /^other$/i.test(String(text)) ? 'Other' : text;
       await input.click({ force: true }).catch(() => {});
-      await input.fill('Other');
+      await input.fill(fillVal);
       await input.press('Enter').catch(() => {});
       await page.waitForTimeout(400);
       after = await readFieldValue(fieldLoc);
-      ok = valuesMatch(after, 'Other') || /other/i.test(after);
-      attempts.push(ok ? 'input Other + Enter ✓' : 'input Other + Enter ✗');
+      ok = valuesMatch(after, fillVal) || /other/i.test(after);
+      attempts.push(ok ? `input ${fillVal} + Enter ✓` : `input ${fillVal} + Enter ✗`);
+      if (ok) {
+        return { ok: true, selected: after || fillVal, attempts };
+      }
+      if (!ok && !/^other$/i.test(fillVal)) {
+        await input.fill('Other');
+        await input.press('Enter').catch(() => {});
+        await page.waitForTimeout(400);
+        after = await readFieldValue(fieldLoc);
+        ok = valuesMatch(after, 'Other') || /other/i.test(after);
+        attempts.push(ok ? 'input Other + Enter ✓' : 'input Other + Enter ✗');
+        if (ok) {
+          return { ok: true, selected: after || 'Other', attempts };
+        }
+      }
     }
   }
 
@@ -1006,7 +1155,17 @@ function pickLocalNearestOption(label, options = [], preferred = '') {
 
   const fallbacks = [];
   if (/school|university|institution/i.test(label)) fallbacks.push(/^other\b/i, /not listed/i, /not in (the )?list/i);
-  if (/degree/i.test(label)) fallbacks.push(/bachelor/i, /^b\.?s\.?\b/i, /undergraduate/i);
+  if (/degree/i.test(label)) {
+    const isMaster = /master|ms\b|m\.s\.|graduate|postgraduate/i.test(want);
+    const isDoctor = /doctor|phd|ph\.d/i.test(want);
+    if (isDoctor) {
+      fallbacks.push(/doctor/i, /ph\.?d/i);
+    } else if (isMaster) {
+      fallbacks.push(/master/i, /\bms\b/i, /\bm\.s\.\b/i, /postgraduate/i);
+    } else {
+      fallbacks.push(/bachelor/i, /^b\.?s\.?\b/i, /undergraduate/i);
+    }
+  }
   if (/field\s*of\s*study|major/i.test(label)) fallbacks.push(/computer\s*science/i, /information technology/i, /engineering/i);
   for (const re of fallbacks) {
     const hit = list.find((o) => re.test(o));
@@ -1017,15 +1176,24 @@ function pickLocalNearestOption(label, options = [], preferred = '') {
 
 async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable = false } = {}) {
   const attempts = [];
+  const variants = /degree/i.test(label) ? getDegreeVariantsForLevel(value) : [];
   const options = /degree/i.test(label) || !searchable
-    ? [value, ...DEGREE_VARIANTS]
+    ? [value, ...variants]
     : [value];
   let uniqueOptions = [...new Set(options.map(String).filter(Boolean))];
 
   const live = await collectLiveFieldOptions(page, label, 'dropdown').catch(() => []);
   if (live.length) {
     const present = uniqueOptions.filter((opt) => live.some((o) => valuesMatch(o, opt)));
-    const narrowed = present.length ? present : [pickLocalNearestOption(label, live, value)].filter(Boolean);
+    let narrowed = present.length ? present : [pickLocalNearestOption(label, live, value)].filter(Boolean);
+    if (!narrowed.length) {
+      const llmNearest = await pickNearestSelectOption({
+        question: label,
+        options: live,
+        preferred: value,
+      }).catch(() => null);
+      if (llmNearest) narrowed = [llmNearest];
+    }
     if (narrowed.length) {
       attempts.push(`live options narrowed to: ${narrowed.join(', ')}`);
       uniqueOptions = narrowed;
@@ -1232,12 +1400,11 @@ function stripKeyPrefix(overrides, prefix) {
  * (tenant override → profile/Apply Wizz → defaults) and validated as a range.
  * @returns {string|null}
  */
-function resolveDateFieldAnswer(profileKey, profile, tenantExp, tenantEdu) {
+function resolveDateFieldAnswer(profileKey, profile) {
   if (profileKey === 'experience.from_date' || profileKey === 'experience.to_date') {
     const source = {
       ...WORKDAY_DEFAULT_EXPERIENCE,
       ...(profile?.experience || {}),
-      ...stripKeyPrefix(tenantExp, 'experience.'),
     };
     const range = resolveWorkDateRange(source);
     for (const note of range.notes) console.log(`    📅 Work dates — ${note}`);
@@ -1247,7 +1414,6 @@ function resolveDateFieldAnswer(profileKey, profile, tenantExp, tenantEdu) {
   const source = {
     ...WORKDAY_DEFAULT_EDUCATION,
     ...(profile?.education || {}),
-    ...stripKeyPrefix(tenantEdu, 'education.'),
   };
   const range = resolveEducationYearRange(source);
   for (const note of range.notes) console.log(`    📅 Education years — ${note}`);
@@ -1262,16 +1428,22 @@ const DATE_PROFILE_KEYS = new Set([
 ]);
 
 async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url, fieldType) {
-  const tenant = getWorkdayTenant(url);
-  const tenantExp = getTenantExperienceOverrides(tenant);
-  const tenantEdu = getTenantEducationOverrides(tenant);
-
   // Dates are never hardcoded here — a wrong date is worse than an empty one.
   if (DATE_PROFILE_KEYS.has(profileKey)) {
-    return resolveDateFieldAnswer(profileKey, profile, tenantExp, tenantEdu);
+    return resolveDateFieldAnswer(profileKey, profile);
   }
 
-  if (profileKey === 'education.university') return 'Other';
+  if (profileKey === 'education.university') {
+    const fromProfile = profile?.education?.university || profile?.education?.school;
+    if (fromProfile != null && fromProfile !== '' && !/^other$/i.test(String(fromProfile))) {
+      return String(fromProfile);
+    }
+    const fromQa = profile?._applyWizzQa?.['school or university'] || profile?.qa_answers?.['school or university'];
+    if (fromQa != null && fromQa !== '' && !/^other$/i.test(String(fromQa))) {
+      return String(fromQa);
+    }
+    return fromProfile || 'Other';
+  }
   if (profileKey === 'education.degree') return profile?.education?.degree || "Bachelor's";
   if (profileKey === 'education.field_of_study_hierarchy' || /field\s*of\s*study/i.test(labelText)) {
     const major = profile?.education?.major
@@ -1280,18 +1452,6 @@ async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url
         : '');
     return major || 'Computer Science';
   }
-  if (profileKey?.startsWith('experience.') && tenantExp) {
-    const shortKey = profileKey.replace(/^experience\./, '');
-    const fromTenant = tenantExp[shortKey] ?? tenantExp[profileKey];
-    if (fromTenant != null && fromTenant !== '') return String(fromTenant);
-  }
-  if (profileKey?.startsWith('education.') && tenantEdu) {
-    const shortKey = profileKey.replace(/^education\./, '');
-    const fromTenant = tenantEdu[shortKey] ?? tenantEdu[profileKey];
-    if (fromTenant != null && fromTenant !== '') return String(fromTenant);
-  }
-  const storedTenantAnswer = lookupTenantAnswer(tenant, labelText);
-  if (storedTenantAnswer) return String(storedTenantAnswer);
   if (profileKey) {
     const fromProfile = getNestedValue(profile, profileKey);
     if (fromProfile != null && fromProfile !== '') {
@@ -1313,7 +1473,12 @@ async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url
   if (mapped != null && mapped !== '') {
     return Array.isArray(mapped) ? mapped[mapped.length - 1] : String(mapped);
   }
-  const fromDefault = lookupDefaultAnswer(labelText);
+  // Gate: hardcoded defaults MUST NOT answer high-trust fields whose answer must
+  // come from the profile (available_to_start, work_auth, relatives, diploma).
+  // These are all caught by the provenance gate when they flow through resolveField,
+  // but lookupDefaultAnswer bypasses that gate entirely.
+  const isHighTrustLabel = /sponsor|visa|authorized.*work|work.*author|relative|prior.*association|association.*prior|diploma|high\s*school|g\.e\.d|minimum.*education|educational.*requirement|start\s*date|available.*start|when.*can.*you.*start/i.test(labelText);
+  const fromDefault = isHighTrustLabel ? null : lookupDefaultAnswer(labelText);
   if (fromDefault) return Array.isArray(fromDefault) ? fromDefault.join(' / ') : String(fromDefault);
   const resolved = await resolveField(
     { label: labelText, type: fieldType, required: true },
@@ -1348,6 +1513,18 @@ async function isFieldRequiredInDom(page, fieldLoc, labelText = '') {
     for (const el of inputs) {
       if (el.required || el.getAttribute('aria-required') === 'true') return true;
     }
+
+    // Check parent panel / section header for asterisk (e.g. "Education *" or "Work Experience *")
+    let parentSection = container.closest?.('[data-automation-id*="section" i], [data-automation-id*="panel" i], fieldset, [data-automation-id*="formField"]');
+    if (parentSection) {
+      const heading = parentSection.querySelector?.('h1,h2,h3,h4,legend,[data-automation-id*="heading" i],[data-automation-id*="title" i]');
+      const headingText = (heading?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/\*/.test(headingText)) {
+        // In required sections, school, degree, job title, and company are mandatory
+        if (/school|degree|job\s*title|company/i.test(labelText)) return true;
+      }
+    }
+
     // Compact formField still showing * next to the control.
     const text = (container?.textContent || '').replace(/\s+/g, ' ').trim();
     if (/\*/.test(text) && text.length < 280) return true;
@@ -1388,15 +1565,15 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
   }
 
   let result = { ok: false, attempts: [] };
-  switch (type) {
-    case 'monthyear':
-    case 'year':
+    switch (type) {
+      case 'monthyear':
+      case 'year':
       result = await fillWorkdayDateField(page, {
         labelPattern: spec.labelPattern || spec.label,
         sectionType,
         value: answer,
         mode: type,
-        requiredOnly: profile?._fillOptionalFields !== true && !alwaysFill,
+        requiredOnly: Boolean(answer) ? false : (profile?._fillOptionalFields !== true && !alwaysFill),
       });
       if (result.skippedOptional) {
         logBlock(sectionName, label, result.attempts);
@@ -1408,18 +1585,18 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
       break;
     case 'typeahead':
       result = await fillTypeAndEnter(page, fieldLoc, answer);
-      break;
-    case 'dropdown':
-      result = await fillDropdownAggressive(page, fieldLoc, answer, label, { searchable: false });
-      break;
-    case 'searchable':
-      result = await fillDropdownAggressive(page, fieldLoc, answer, label, { searchable: true });
-      break;
-    case 'textarea':
-    case 'text':
-    default:
-      result = await fillTextAggressive(page, fieldLoc, answer, label);
-      break;
+        break;
+      case 'dropdown':
+        result = await fillDropdownAggressive(page, fieldLoc, answer, label, { searchable: false });
+        break;
+      case 'searchable':
+        result = await fillDropdownAggressive(page, fieldLoc, answer, label, { searchable: true });
+        break;
+      case 'textarea':
+      case 'text':
+      default:
+        result = await fillTextAggressive(page, fieldLoc, answer, label);
+        break;
   }
 
   let after = result.after || (fieldLoc ? await readFieldValue(fieldLoc) : '');
@@ -1494,16 +1671,6 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
 
     profile.qa_answers = profile.qa_answers || {};
     profile.qa_answers[label.toLowerCase()] = stored;
-    await saveAnswerToYaml(label, stored).catch(() => {});
-    await saveAnswerToTenantYaml(getWorkdayTenant(url), {
-      label,
-      answer: stored,
-      fieldType: type === 'fieldofstudy' || type === 'typeahead' || type === 'dropdown' || type === 'searchable'
-        ? 'dropdown'
-        : type,
-      options: stored ? [String(stored)] : [],
-      step: sectionName,
-    }).catch(() => {});
     if (key) {
       const parts = key.split('.');
       let obj = profile;
@@ -1517,14 +1684,93 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
   return verified;
 }
 
-async function ensureCurrentlyWorkHereUnchecked(page) {
-  const cb = page.locator(
-    'input[type="checkbox"][data-automation-id*="currentlyWorkHere"], label:has-text("currently work here") input[type="checkbox"]'
-  ).first();
-  if (!(await cb.isVisible({ timeout: 1000 }).catch(() => false))) return;
-  if (await cb.isChecked().catch(() => false)) {
-    await cb.click({ force: true }).catch(() => {});
-    console.log('  ☐  Unchecked: "I currently work here"');
+async function ensureCurrentlyWorkHere(page, currentlyWorking = false) {
+  try {
+    const res = await page.evaluate((shouldCheck) => {
+      const candidates = [];
+      const inputs = document.querySelectorAll('input[type="checkbox"], [role="checkbox"]');
+      for (const input of inputs) {
+        const id = input.id || '';
+        const name = input.name || '';
+        const auto = input.getAttribute('data-automation-id') || '';
+        const aria = input.getAttribute('aria-label') || '';
+        const labelText = input.labels?.[0]?.textContent || input.closest('label')?.textContent || '';
+        const parentText = input.parentElement?.textContent || '';
+        const combined = `${id} ${name} ${auto} ${aria} ${labelText} ${parentText}`.toLowerCase();
+        if (/currently\s*work\s*(here)?|current\s*role|current\s*job/i.test(combined)) {
+          candidates.push(input);
+        }
+      }
+
+      if (!candidates.length) {
+        const labels = document.querySelectorAll('label, [data-automation-id*="formLabel"], [data-automation-id*="checkbox"]');
+        for (const lbl of labels) {
+          const text = (lbl.textContent || '').trim();
+          if (/currently\s*work\s*here/i.test(text)) {
+            const cb = lbl.querySelector('input[type="checkbox"], [role="checkbox"]') || lbl;
+            candidates.push(cb);
+          }
+        }
+      }
+
+      if (!candidates.length) return { found: false };
+
+      const el = candidates[0];
+      const isChecked = el.getAttribute('role') === 'checkbox'
+        ? el.getAttribute('aria-checked') === 'true'
+        : Boolean(el.checked || el.getAttribute('aria-checked') === 'true');
+
+      if (shouldCheck && !isChecked) {
+        el.click();
+        if (el.tagName === 'INPUT') el.checked = true;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return { found: true, changed: true, checked: true };
+      } else if (!shouldCheck && isChecked) {
+        el.click();
+        if (el.tagName === 'INPUT') el.checked = false;
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        return { found: true, changed: true, checked: false };
+      }
+      return { found: true, changed: false, checked: isChecked };
+    }, currentlyWorking);
+
+    if (res?.found) {
+      if (res.changed) {
+        console.log(`  ${res.checked ? '☑' : '☐'} "I currently work here" set to ${res.checked}`);
+        await page.waitForTimeout(400);
+      }
+      return;
+    }
+
+    // Playwright locator fallback
+    const locators = [
+      page.getByLabel(/currently work here/i).first(),
+      page.locator('input[type="checkbox"][data-automation-id*="currentlyWork" i]').first(),
+      page.locator('[data-automation-id*="currentlyWork" i]').first(),
+      page.locator('label:has-text("currently work here")').first(),
+    ];
+    for (const loc of locators) {
+      if (await loc.count()) {
+        const isChecked = await loc.isChecked().catch(async () => {
+          return await loc.evaluate((el) => el.getAttribute('aria-checked') === 'true' || el.checked).catch(() => false);
+        });
+        if (currentlyWorking && !isChecked) {
+          await loc.click({ force: true }).catch(() => {});
+          console.log('  ☑  Checked: "I currently work here" (via locator click)');
+          await page.waitForTimeout(400);
+          break;
+        } else if (!currentlyWorking && isChecked) {
+          await loc.click({ force: true }).catch(() => {});
+          console.log('  ☐  Unchecked: "I currently work here" (via locator click)');
+          await page.waitForTimeout(400);
+          break;
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`    ⚠️ ensureCurrentlyWorkHere error: ${err.message}`);
   }
 }
 
@@ -1532,24 +1778,17 @@ const WORK_FIELDS = [
   { label: 'Job Title', labelPattern: '^Job\\s*Title', key: 'experience.current_title', type: 'text', alwaysFill: true },
   { label: 'Company', labelPattern: '^Company', key: 'experience.current_company', type: 'text', alwaysFill: true },
   { label: 'Location', labelPattern: '^Location', key: 'experience.location', type: 'text' },
-  { label: 'From', labelPattern: '^From\\b|^Start\\s*Date', key: 'experience.from_date', type: 'monthyear', alwaysFill: true },
-  { label: 'To', labelPattern: '^To\\b(?!\\s*year)|^End\\s*Date', key: 'experience.to_date', type: 'monthyear', alwaysFill: true },
+  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*From', key: 'experience.from_date', type: 'monthyear', alwaysFill: true },
+  { label: 'To', labelPattern: '^To\\b(?!\\s*year)|^End\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*To', key: 'experience.to_date', type: 'monthyear', alwaysFill: true },
   { label: 'Role Description', labelPattern: 'Role\\s*Description', key: 'experience.description', type: 'textarea' },
 ];
 
-/** Always fill these on My Experience (Workday education block). */
 const EDUCATION_CORE_FIELDS = [
-  { label: 'School or University', labelPattern: 'School\\s*or\\s*University|^School$', key: 'education.university', type: 'typeahead' },
+  { label: 'School or University', labelPattern: 'School\\s*or\\s*University|^School$', key: 'education.university', type: 'typeahead', alwaysFill: true },
   { label: 'Degree', labelPattern: '^\\*?\\s*Degree', key: 'education.degree', type: 'searchable', alwaysFill: true },
-  { label: 'Field of Study', labelPattern: 'Field\\s*of\\s*Study', key: 'education.field_of_study_hierarchy', type: 'fieldofstudy', alwaysFill: true },
-];
-
-/** Dates fill when the education row is open; GPA / highest-level stay required-only. */
-const EDUCATION_OPTIONAL_FIELDS = [
-  { label: 'From', labelPattern: '^From\\b', key: 'education.from_year', type: 'year', alwaysFill: true },
-  { label: 'To (Actual or Expected)', labelPattern: 'To.*Actual|Expected|^To\\s*\\*?$', key: 'education.to_year', type: 'year', alwaysFill: true },
-  { label: 'Overall Result (GPA)', labelPattern: 'Overall\\s*Result', key: 'education.gpa', type: 'text' },
-  { label: 'Highest level of education', labelPattern: 'highest\\s*level\\s*of\\s*education', key: 'education.highest_level', type: 'text' },
+  { label: 'Field of Study', labelPattern: 'Field\\s*of\\s*Study|^Major$', key: 'education.major', type: 'fieldofstudy', alwaysFill: true },
+  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^First\\s*Year|^Dates?\\s*Attended.*From', key: 'education.from_year', type: 'year', alwaysFill: true },
+  { label: 'To', labelPattern: '^To\\b|^End\\s*(Date|Month|Year)?|^Last\\s*Year|^Expected\\s*Graduation|^Graduation\\s*(Date|Year)?|^Dates?\\s*Attended.*To', key: 'education.to_year', type: 'year', alwaysFill: true },
 ];
 
 export async function handleStep2MyExperience(page, profile = {}) {
@@ -1562,21 +1801,19 @@ export async function handleStep2MyExperience(page, profile = {}) {
     ...WORKDAY_DEFAULT_EXPERIENCE,
     ...(profile.experience || {}),
   };
+  const configuredUniversity = profile?.education?.university || profile?.education?.school || '';
   profile.education = {
     ...WORKDAY_DEFAULT_EDUCATION,
     ...(profile.education || {}),
-    university: 'Other',
+    university: configuredUniversity || 'Other',
     degree: profile?.education?.degree || "Bachelor's",
-    major: 'Computer Science',
-    field_of_study_hierarchy: ['Computer Science'],
+    major: profile?.education?.major || 'Computer Science',
+    field_of_study_hierarchy: profile?.education?.field_of_study_hierarchy?.length
+      ? profile.education.field_of_study_hierarchy
+      : ['Computer Science'],
   };
 
-  profile.education.university = 'Other';
-  profile.education.major = 'Computer Science';
-  profile.education.field_of_study_hierarchy = ['Computer Science'];
-  if (!/bachelor/i.test(String(profile.education.degree || ''))) {
-    profile.education.degree = "Bachelor's";
-  }
+  // Apply Wizz resume values are authoritative; defaults only fill missing fields.
 
   const qaStore = createQAStore();
   const url = page.url();
@@ -1598,16 +1835,27 @@ export async function handleStep2MyExperience(page, profile = {}) {
 
   const fillOptional = profile?._fillOptionalFields === true;
 
-  // Required-only: a collapsed section is never expanded unless Workday demands it.
+  const hasCandidateWorkData = Boolean(
+    profile.experience?.current_company ||
+    profile.experience?.company ||
+    profile.experience?.current_title ||
+    profile.experience?.role
+  );
+  const hasCandidateEduData = Boolean(
+    profile.education?.university ||
+    profile.education?.school ||
+    profile.education?.degree
+  );
+
   const workOnPage = await sectionPresentOnPage(page, 'work');
   const workExpanded = workOnPage && await sectionHasVisibleFields(page, 'work');
-  const workRequired = workOnPage && !workExpanded && (fillOptional || await isSectionRequiredInDom(page, 'work'));
+  let workRequired = workOnPage && !workExpanded && (fillOptional || hasCandidateWorkData || await isSectionRequiredInDom(page, 'work'));
   const hasWorkSection = workExpanded || workRequired;
 
   const educationOnPage = await sectionPresentOnPage(page, 'education');
   const educationExpanded = educationOnPage && await sectionHasVisibleFields(page, 'education');
-  const educationRequired = educationOnPage && !educationExpanded
-    && (fillOptional || await isSectionRequiredInDom(page, 'education'));
+  let educationRequired = educationOnPage && !educationExpanded
+    && (fillOptional || hasCandidateEduData || await isSectionRequiredInDom(page, 'education'));
   const hasEducationSection = educationExpanded || educationRequired;
 
   if (workOnPage && !hasWorkSection) {
@@ -1624,60 +1872,45 @@ export async function handleStep2MyExperience(page, profile = {}) {
   // Log what the wizard will actually type, so a wrong date is visible in the run log.
   const workRange = resolveWorkDateRange(profile.experience || {});
   const eduRange = resolveEducationYearRange(profile.education || {});
+  if (workRange.from) profile.experience.from_date = workRange.from;
+  if (workRange.to) profile.experience.to_date = workRange.to;
+  if (eduRange.from) profile.education.from_year = eduRange.from;
+  if (eduRange.to) profile.education.to_year = eduRange.to;
   console.log(`  📅 Work: ${workRange.from || '(none)'} → ${workRange.to || '(none)'} | Education: ${eduRange.from || '(none)'} → ${eduRange.to || '(none)'}`);
   for (const note of [...workRange.notes, ...eduRange.notes]) {
     console.log(`     ⚠️  ${note}`);
   }
 
   if (workRequired || educationRequired) {
-    await ensureSectionsExpanded(page);
+  await ensureSectionsExpanded(page);
     // Re-disarm: expanding work/education must never leave a Certifications Add live.
     await disarmRiskyAddButtons(page);
     await skipOptionalExperienceSections(page, profile, { force: stepBlocked });
   }
   if (hasWorkSection) {
-    await ensureCurrentlyWorkHereUnchecked(page);
+    await ensureCurrentlyWorkHere(page, profile?.experience?.currently_working === true);
     await disarmRiskyAddButtons(page);
   } else if (!workOnPage) {
     console.log('  ℹ️  Work Experience section not on this application — skipping (resume/skills only)');
   }
 
   if (hasWorkSection) {
-    console.log('\n  ▶ WORK EXPERIENCE');
-    for (const spec of WORK_FIELDS) {
-      const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
-      if (ok) filled++;
-      else failed++;
+  console.log('\n  ▶ WORK EXPERIENCE');
+  for (const spec of WORK_FIELDS) {
+    const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
+    if (ok) filled++;
+    else failed++;
     }
   } else {
     skipped += WORK_FIELDS.length;
   }
 
   if (hasEducationSection) {
-    console.log('\n  ▶ EDUCATION (School=Other, Degree=Bachelor\'s, Field=Computer Science)');
+    console.log('\n  ▶ EDUCATION (school from Supabase/default; degree from resume + LLM analysis)');
     for (const spec of EDUCATION_CORE_FIELDS) {
-      const ok = await fillFieldAtAnyCost(page, 'Education', 'education', spec, profile, qaStore, url);
-      if (ok) filled++;
-      else failed++;
-    }
-    for (const spec of EDUCATION_OPTIONAL_FIELDS) {
-      const isDate = spec.type === 'year' || spec.type === 'monthyear';
-      if (!isDate) {
-        const loc = await findFieldLocator(page, spec, 'education');
-        if (!loc) {
-          skipped++;
-          continue;
-        }
-        const required = await isFieldRequiredInDom(page, loc, spec.label);
-        if (!required && profile?._fillOptionalFields !== true) {
-          logBlock('Education', spec.label, ['optional — skipped']);
-          skipped++;
-          continue;
-        }
-      }
-      const ok = await fillFieldAtAnyCost(page, 'Education', 'education', spec, profile, qaStore, url);
-      if (ok) filled++;
-      else failed++;
+    const ok = await fillFieldAtAnyCost(page, 'Education', 'education', spec, profile, qaStore, url);
+    if (ok) filled++;
+    else failed++;
     }
   } else {
     if (!educationOnPage) console.log('  ℹ️  Education section not on this application — skipping');
@@ -1685,6 +1918,37 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   await handleWebsitesSection(page, profile, { force: stepBlocked });
+
+  // Auto-repair date validation error (e.g. Workday resume parsing auto-filled "To" before "From")
+  const dateError = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /must end after start date|end date (must be|cannot be)|start date (must be|cannot be)/i.test(text);
+  }).catch(() => false);
+
+  if (dateError) {
+    console.log('  ⚠️  Workday validation error detected: "Must end after start date" — attempting auto-repair...');
+    if (profile?.experience?.currently_working === true) {
+      await ensureCurrentlyWorkHere(page, true);
+      await page.waitForTimeout(400);
+    }
+    const stillError = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      return /must end after start date/i.test(text);
+    }).catch(() => false);
+
+    if (stillError) {
+      const safeToDate = workRange.to || new Date().toISOString().slice(5, 7) + '/' + new Date().getFullYear();
+      console.log(`    Fixing To date with: ${safeToDate}`);
+      await fillWorkdayDateField(page, {
+        labelPattern: '^To\\b(?!\\s*year)|^End\\s*Date',
+        sectionType: 'work',
+        value: safeToDate,
+        mode: 'monthyear',
+        requiredOnly: false,
+      });
+      await page.waitForTimeout(400);
+    }
+  }
 
   console.log('\n  ══════════════════════════════════════════');
   const skipNote = skipped > 0 ? `, ${skipped} skipped (section not on page)` : '';
@@ -1699,13 +1963,16 @@ export function mergeWorkdayDefaultExperienceEducation(profile) {
     ...WORKDAY_DEFAULT_EXPERIENCE,
     ...(profile.experience || {}),
   };
+  const configuredUniversity = profile?.education?.university || profile?.education?.school || '';
   profile.education = {
     ...WORKDAY_DEFAULT_EDUCATION,
     ...(profile.education || {}),
-    university: 'Other',
+    university: configuredUniversity || 'Other',
     degree: profile?.education?.degree || "Bachelor's",
-    major: 'Computer Science',
-    field_of_study_hierarchy: ['Computer Science'],
+    major: profile?.education?.major || 'Computer Science',
+    field_of_study_hierarchy: profile?.education?.field_of_study_hierarchy?.length
+      ? profile.education.field_of_study_hierarchy
+      : ['Computer Science'],
   };
   return profile;
 }

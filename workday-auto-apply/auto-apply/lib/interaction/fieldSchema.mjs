@@ -64,11 +64,13 @@ export function normalizeDiscoveredField(raw = {}, meta = {}) {
   const elementType = mapElementType(fieldType, raw);
   const options = optionTexts(raw);
   const questionId = stableQuestionId(raw, label);
+  const automationId = raw.automationId || raw['data-automation-id'] || raw.dataAutomationId || raw.widgetId || raw.id || questionId;
   const widgetKind = inferWidgetKind({ ...raw, fieldType, nativeSelect: raw.nativeSelect });
   const currentValue = raw.currentValue ?? raw.value ?? null;
 
   return {
     questionId,
+    automationId,
     label,
     description: String(raw.placeholder || raw.description || raw.helpText || '').trim(),
     elementType,

@@ -12,13 +12,7 @@ export async function delegateExistingFill(page, field, answer, profile = null) 
   const raw = field._raw || field;
   const label = field.label || raw.label || '';
   const fieldType = raw.fieldType || field.fieldType || field.elementType || 'text';
-  const meta = {
-    ...raw,
-    wdQId: field.wdQId || raw.wdQId || null,
-    label: raw.label || field.label,
-    containerText: raw.containerText || field.containerText || '',
-  };
-  const ok = await fillApplicationQuestionField(page, label, fieldType, answer, profile, meta);
+  const ok = await fillApplicationQuestionField(page, label, fieldType, answer, profile, raw);
   return Boolean(ok);
 }
 

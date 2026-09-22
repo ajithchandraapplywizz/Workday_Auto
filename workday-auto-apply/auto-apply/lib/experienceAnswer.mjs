@@ -52,7 +52,7 @@ export function isDescribeExperienceQuestion(label = '') {
   const text = String(label || '');
   if (!text) return false;
   if (isYearsQuantityQuestion(text)) return false;
-  return /(briefly\s+describe|please\s+describe|describe\s+your\s+experience|tell\s+us\s+about|why\s+are\s+you\s+looking|level\s+of\s+expertise|explain\s+your\s+experience|if\s+so,?\s+briefly|do\s+you\s+have\s+.{0,80}experience|which\s+of\s+the\s+following\s+areas)/i
+  return /(briefly\s+describe|please\s+describe|describe\s+your\s+experience|tell\s+us\s+about|why\s+are\s+you\s+looking|level\s+of\s+expertise|explain\s+your\s+experience|if\s+so,?\s+briefly|which\s+of\s+the\s+following\s+areas)/i
     .test(text);
 }
 
@@ -62,7 +62,7 @@ export function isDescribeExperienceQuestion(label = '') {
  * @returns {boolean}
  */
 export function isProceedQuestion(label = '') {
-  return /would you like to proceed|do you (wish|want) to proceed|wish to continue|want to continue with this/i
+  return /would you like to proceed|do you (wish|want) to proceed|wish to continue|want to continue with this|i acknowledge that i have read|please select ['"]?yes['"]? if you acknowledge/i
     .test(String(label || ''));
 }
 

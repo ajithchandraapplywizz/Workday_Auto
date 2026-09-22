@@ -25,16 +25,9 @@ import { mapLabelToProfileValue, resolveField } from './planner.mjs';
 import { pickNearestSelectOption, resolveUnknownWithLlm, isPersonalIdentityQuestion } from './openRouterLlm.mjs';
 import { pickCompensationFromOptions, compensationInputValue } from './compensationPick.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
-import { saveAnswerToTenantYaml, lookupTenantAnswer } from './tenantQuestionYaml.mjs';
 import { peekClientAnswer, resolveClientAnswer } from './clientAnswer.mjs';
 import { resolveDynamicAnswer } from './questionEngine/index.mjs';
-import {
-  isSignatureOrFullNameQuestion,
-  isTodaysDateField,
-  pickShiftOption,
-  isAvailabilityCheckboxQuestion,
-  resolveWorkScheduleCheckboxAnswer,
-} from './questionEngine/intents.mjs';
+import { isSignatureOrFullNameQuestion, isTodaysDateField, pickShiftOption } from './questionEngine/intents.mjs';
 import {
   fillWorkdayCustomDropdown,
   markDropdownByLabel,
@@ -652,8 +645,14 @@ function buildSelectOneOptionCandidates(answer, labelText = '') {
   if (/gender|please select your sex|^sex$/i.test(labelText)) {
     opts.push('Male', 'Female', 'Non-Binary');
   }
-  if (/education|bachelor|degree/i.test(labelText)) {
-    opts.push("Bachelor's Degree", 'Bachelors Degree', "Bachelor's", 'Bachelor of Science', 'Bachelors of Technology');
+  if (/education|bachelor|degree/i.test(labelText) || /master|bachelor|ph\.?d|doctor/i.test(a)) {
+    if (/master|ms\b|m\.s\./i.test(a)) {
+      opts.push("Master's Degree", "Masters Degree", "Master's", "Master of Science", "Graduate Degree", "Master");
+    } else if (/ph\.?d|doctor/i.test(a)) {
+      opts.push("Doctorate", "Doctor of Philosophy", "PhD", "Doctoral Degree");
+    } else {
+      opts.push("Bachelor's Degree", "Bachelors Degree", "Bachelor's", "Bachelor of Science", "Bachelors of Technology", "Bachelor");
+    }
   }
   if (/notice\s*period/i.test(labelText) || /notice\s*period/i.test(a)) {
     opts.push(...WORKDAY_NOTICE_PERIOD_OPTIONS);
@@ -772,14 +771,7 @@ async function markSelectOneWidget(page, { labelText = '', selectOneIndex = null
       return '';
     }
     function extractQuestionFromText(raw) {
-      const text = (raw || '').replace(/\s+/g, ' ').trim().replace(/\*+$/, '');
-      const questions = [...text.matchAll(/([^.!?]{8,500}\?)/g)].map((m) => m[1].trim());
-      if (questions.length) {
-        const preferred = questions.find((q) => /are you|have you|do you|will you|years old|age of|please select|please indicate/i.test(q));
-        return preferred || questions[questions.length - 1];
-      }
-      const ageish = text.match(/((?:are you|must be|at least|over the age).{0,80}(?:1[68]).{0,40})/i);
-      if (ageish) return ageish[1].trim();
+      const text = (raw || '').replace(/\s+/g, ' ').trim().replace(/\*+$/, '').trim();
       return text;
     }
 
@@ -1089,16 +1081,6 @@ export async function fillAllWorkdaySelectOneDropdowns(page, profile, stepName =
       });
       if (ok) {
         recordField(profile, questionLabel, answer);
-        await saveAnswerToYaml(questionLabel, answer).catch(() => {});
-        if (tenant) {
-          await saveAnswerToTenantYaml(tenant, {
-            label: questionLabel,
-            answer,
-            fieldType: 'dropdown',
-            options: q.options || [],
-            step: stepName,
-          }).catch(() => {});
-        }
         filledThisPass++;
         totalFilled++;
         // Short settle only — keep filling remaining dropdowns in this same pass
@@ -1178,15 +1160,6 @@ async function promptRemainingSelectOneDropdowns(page, profile, stepName = '') {
     });
     if (ok) {
       recordField(profile, questionLabel, answer);
-      if (tenant) {
-        await saveAnswerToTenantYaml(tenant, {
-          label: questionLabel,
-          answer,
-          fieldType: 'dropdown',
-          options: q.options || [],
-          step: stepName,
-        }).catch(() => {});
-      }
       filled++;
       await waitForDomSettled(page);
     }
@@ -1367,7 +1340,7 @@ export async function advanceApplicationQuestionsPage(page) {
   return false;
 }
 
-function parseCheckboxGroupAnswers(answer, options = [], label = '') {
+function parseCheckboxGroupAnswers(answer, options = []) {
   const list = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
   if (Array.isArray(answer)) {
     return answer.map((part) => String(part).trim()).filter(Boolean);
@@ -1378,10 +1351,6 @@ function parseCheckboxGroupAnswers(answer, options = [], label = '') {
     const hits = list.filter((opt) => lower.includes(opt.toLowerCase()));
     if (hits.length) return hits;
     if (isYesNoAnswer(raw) && !list.some((o) => isYesNoAnswer(o))) {
-      const mapped = resolveWorkScheduleCheckboxAnswer(label, raw, list);
-      if (mapped) {
-        return mapped.split(/[,;|]/).map((part) => part.trim()).filter(Boolean);
-      }
       const best = list.find((o) => /full[-\s]?time|regular/i.test(o)) || pickShiftOption(list);
       if (best) return [best];
     }
@@ -1456,15 +1425,25 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
   // offering Full Time / Part Time / Per Diem stays a single-choice work-type group.
   const groupOptions = await readCheckboxGroupOptions(fieldBox);
   const employmentTypeOptions = groupOptions.some((o) => /part[-\s]?time|per\s*diem|contingent/i.test(o));
-  const availabilityGroup = isAvailabilityCheckboxQuestion(label);
-  const shiftGroup = (isShiftAvailabilityQuestion(label) || availabilityGroup) && !employmentTypeOptions;
+  const shiftGroup = isShiftAvailabilityQuestion(label) && !employmentTypeOptions;
   const workTypeGroup = !shiftGroup && (isWorkTypeCheckboxLabel(label) || isWorkTypeContainerText(label));
   const salaryGroup = !shiftGroup && isSalaryQuestion(label);
 
-  let desired = parseCheckboxGroupAnswers(answer, groupOptions, label);
+  let desired = parseCheckboxGroupAnswers(answer, groupOptions);
   if (salaryGroup && !desired.length) {
     const picked = pickCompensationFromOptions(groupOptions, profile, answer);
     if (picked) desired = [picked];
+  }
+
+  // If answer was "Yes" or affirmative and exact matches weren't found, align to open/available options
+  if (!desired.length && isYesNoAnswer(answer) && /^yes\b/i.test(String(answer).trim()) && groupOptions.length > 0) {
+    if (shiftGroup || workTypeGroup || /available|schedule|shift/i.test(label)) {
+      const best = pickShiftOption(groupOptions);
+      if (best) desired = [best];
+      else desired = [groupOptions[0]];
+    } else {
+      desired = [groupOptions[0]];
+    }
   }
 
   // Only check boxes named by Apply Wizz / LLM. Do not invent Full Time or every shift.
@@ -1521,9 +1500,6 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
           if (!hay) return false;
           if (mode === 'worktype' && /part\s*time/.test(hay)) return false;
           if (hay === needle || hay.includes(needle) || needle.includes(hay)) return true;
-          const hayCompact = hay.replace(/\s+/g, '').replace(/-/g, '');
-          const needleCompact = needle.replace(/\s+/g, '').replace(/-/g, '');
-          if (hayCompact === needleCompact) return true;
           // "Full Time" must still match a "Full-time" target.
           return squash(hay) === squash(needle);
         });
@@ -1812,9 +1788,8 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     marked = await page.evaluate((id) => {
       const el = document.querySelector(`[data-wd-q-id="${id}"]`);
       if (!el) return false;
-      const box = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el;
       document.querySelectorAll('[data-auto-fill-target]').forEach((node) => node.removeAttribute('data-auto-fill-target'));
-      box.setAttribute('data-auto-fill-target', '1');
+      el.setAttribute('data-auto-fill-target', '1');
       return true;
     }, fieldMetadata.wdQId).catch(() => false);
   }
@@ -1887,33 +1862,6 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     }
     return false;
   }, normTarget);
-
-  if (!marked && resolveMinimumAgeAnswer(questionLabel, profile)) {
-    marked = await page.evaluate(() => {
-      document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
-      for (const field of document.querySelectorAll('[data-automation-id*="formField"], fieldset')) {
-        const blob = (field.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!/at least 18|18 years|16 years|years of age/i.test(blob)) continue;
-        field.setAttribute('data-auto-fill-target', '1');
-        return true;
-      }
-      return false;
-    }).catch(() => false);
-  }
-
-  if (!marked && isAvailabilityCheckboxQuestion(questionLabel)) {
-    marked = await page.evaluate(() => {
-      document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
-      for (const field of document.querySelectorAll('[data-automation-id*="formField"], fieldset')) {
-        const blob = (field.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!/available\s*to\s*work|indicate\s+availability/i.test(blob)) continue;
-        if (!field.querySelector('input[type="checkbox"]')) continue;
-        field.setAttribute('data-auto-fill-target', '1');
-        return true;
-      }
-      return false;
-    }).catch(() => false);
-  }
 
   if (!marked) return false;
 
@@ -2067,9 +2015,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (isPartTimeWorkTypeLabel(questionLabel)) {
         ok = true;
       } else if (isFullTimeWorkTypeLabel(questionLabel) || isWorkTypeCheckboxLabel(questionLabel)) {
-        const cb = fieldBox.locator('input[type="checkbox"]').first();
-        if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
-          const isChecked = await cb.isChecked().catch(() => false);
+      const cb = fieldBox.locator('input[type="checkbox"]').first();
+      if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
+        const isChecked = await cb.isChecked().catch(() => false);
           if (!isChecked) await cb.click({ force: true });
           ok = await cb.isChecked().catch(() => false);
         }
@@ -2085,7 +2033,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           const certLabel = fieldBox.locator('label').filter({ hasText: /certify.*foregoing statement/i }).first();
           if (await certLabel.isVisible({ timeout: 800 }).catch(() => false)) {
             await certLabel.click({ force: true });
-            ok = true;
+        ok = true;
           }
         }
       }
@@ -2152,18 +2100,6 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
     await page.evaluate(() => {
       document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
     }).catch(() => {});
-  }
-
-  if (!ok && resolveMinimumAgeAnswer(questionLabel, profile)) {
-    const ageAnswer = 'Yes';
-    const ageRe = /^\s*yes\b/i;
-    const ageRadio = page.getByRole('radio', { name: ageRe }).first();
-    if (await ageRadio.isVisible({ timeout: 800 }).catch(() => false)) {
-      await ageRadio.click({ force: true });
-      ok = true;
-    } else {
-      ok = await fillDropdownInFieldBox(page, page.locator('[data-automation-id*="formField"]').filter({ hasText: /18 years|at least 18/i }).first(), questionLabel, ageAnswer);
-    }
   }
 
   return ok;
@@ -2275,9 +2211,9 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       const tenant = profile?._tenant || getWorkdayTenant(page.url());
       const resolved = await resolveDynamicAnswer(
         {
-          ...q,
-          label: questionLabel,
-          required: q.required ?? true,
+      ...q,
+      label: questionLabel,
+      required: q.required ?? true,
           fieldType: q.fieldType,
           type: q.fieldType,
         },
@@ -2286,7 +2222,7 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
           page,
           stepName: stepName || profile?._currentStep || '',
           pageNumber: 1,
-          resumePath: profile?._resumePath,
+      resumePath: profile?._resumePath,
           qaStore,
           allowLlm: true,
         },
@@ -2309,10 +2245,10 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         );
         answer = directClient?.answer || null;
       }
-      if (!answer) {
-        console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
-        continue;
-      }
+    if (!answer) {
+      console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
+      continue;
+    }
 
     answer = adjustAnswerForFieldType(questionLabel, answer, q, profile) || answer;
     if (!answer) {
@@ -2347,18 +2283,8 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       }
     if (ok) {
       recordField(profile, questionLabel, answer);
-        await saveAnswerToYaml(questionLabel, answer).catch(() => {});
         if (!profile.qa_answers) profile.qa_answers = {};
         profile.qa_answers[normalizeLabel(questionLabel)] = answer;
-        if (tenant) {
-          await saveAnswerToTenantYaml(tenant, {
-            label: questionLabel,
-            answer,
-            fieldType: q.fieldType,
-            options: q.options || [],
-            step: stepName || profile?._currentStep || '',
-          }).catch(() => {});
-        }
         if (!isDropdown) {
           console.log(`    ✅ [${q.fieldType}] "${q.label.slice(0, 55)}..." ← "${String(answer).length > 40 ? String(answer).slice(0, 40) + '...' : answer}"`);
         }
@@ -2382,16 +2308,6 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         if (ok) {
           answer = nearest;
           recordField(profile, questionLabel, nearest);
-          await saveAnswerToYaml(questionLabel, nearest).catch(() => {});
-          if (tenant) {
-            await saveAnswerToTenantYaml(tenant, {
-              label: questionLabel,
-              answer: nearest,
-              fieldType: q.fieldType,
-              options,
-              step: stepName || profile?._currentStep || '',
-            }).catch(() => {});
-          }
           console.log(`    ✅ [nearest] "${questionLabel.slice(0, 55)}..." ← "${String(nearest).slice(0, 40)}"`);
           filled++;
           await waitForDomSettled(page);
@@ -2789,7 +2705,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
     const custom = await fillWorkdayCustomDropdown(page, { label, fieldType: 'dropdown' }, wanted);
     if (custom.success) {
       recordField(profile, 'Gender', custom.verifiedValue);
-      return true;
+    return true;
     }
   }
 

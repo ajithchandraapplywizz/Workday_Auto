@@ -6,6 +6,8 @@
  * Do not Tab between segments and do not click the calendar icon.
  */
 
+import { parseMonthYear } from './experienceDates.mjs';
+
 export const DATE_INPUT_SELECTOR = [
   'input[role="spinbutton"]',
   '[role="spinbutton"]',
@@ -116,6 +118,11 @@ export function parseDateFillValue(value, mode = 'monthyear') {
     const year = y[1];
     const month = mode === 'year' ? '01' : '01';
     return { month, year, padded: `${month}/${year}` };
+  }
+  const parsed = parseMonthYear(raw);
+  if (parsed) {
+    const mm = String(parsed.month).padStart(2, '0');
+    return { month: mm, year: String(parsed.year), padded: `${mm}/${parsed.year}` };
   }
   return null;
 }
@@ -272,22 +279,6 @@ export async function markDateWidget(page, opts) {
       if (sectionType === 'education' && sec === 'work') continue;
       labels.push(el);
     }
-    if (!labels.length) return { found: false, required: false, count: 0, reason: 'no From/To label' };
-
-    labels.sort((a, b) => {
-      const aSec = detectSection(a);
-      const bSec = detectSection(b);
-      const aMatch = sectionType && aSec === sectionType ? 0 : 1;
-      const bMatch = sectionType && bSec === sectionType ? 0 : 1;
-      if (aMatch !== bMatch) return aMatch - bMatch;
-      return norm(a.textContent).length - norm(b.textContent).length;
-    });
-
-    const labelEl = labels[0];
-    const sameKind = labels.filter((el) => detectSection(el) === detectSection(labelEl) || detectSection(el) === 'unknown');
-    const idx = sameKind.indexOf(labelEl);
-    const nextLabel = sameKind[idx + 1] || null;
-
     function widgetWrappers(scope) {
       const nodes = [
         ...scope.querySelectorAll('[data-automation-id="dateInputWrapper"], [data-automation-id*="dateInputWrapper"]'),
@@ -305,6 +296,75 @@ export async function markDateWidget(page, opts) {
       }
       return out;
     }
+
+    if (!labels.length) {
+      const isStartOrFrom = /from|start|first/i.test(labelPattern);
+      const sectionNodes = Array.from(document.querySelectorAll(
+        sectionType === 'work'
+          ? '[data-automation-id*="workExperience" i], [data-automation-id*="work-experience" i], [data-automation-id*="workExperiencePanelSet" i], fieldset'
+          : sectionType === 'education'
+            ? '[data-automation-id*="education" i], [data-automation-id*="educationPanelSet" i], fieldset'
+            : '[data-automation-id*="section" i], main, body'
+      )).filter((sec) => detectSection(sec) === (sectionType || detectSection(sec)));
+
+      const searchRoot = sectionNodes[0] || document;
+      const allWidgets = widgetWrappers(searchRoot);
+      if (allWidgets.length > 0) {
+        const specific = allWidgets.find((w) => {
+          const auto = (w.wrap.getAttribute('data-automation-id') || '').toLowerCase();
+          const aria = (w.wrap.getAttribute('aria-label') || '').toLowerCase();
+          return isStartOrFrom
+            ? /start|from|first/.test(auto) || /start|from|first/.test(aria)
+            : /end|to|last|graduat/.test(auto) || /end|to|last|graduat/.test(aria);
+        });
+
+        const targetWidget = specific || (isStartOrFrom ? allWidgets[0] : (allWidgets[1] || allWidgets[0]));
+        if (targetWidget && targetWidget.controls.length > 0) {
+          const controls = targetWidget.controls;
+          let monthEl = controls.find((el) => classify(el) === 'month');
+          let yearEl = controls.find((el) => classify(el) === 'year');
+          let dayEl = controls.find((el) => classify(el) === 'day');
+          if (!monthEl && !yearEl) {
+            if (controls.length >= 3) { monthEl = controls[0]; dayEl = controls[1]; yearEl = controls[2]; }
+            else if (controls.length >= 2) { monthEl = controls[0]; yearEl = controls[1]; }
+            else { yearEl = controls[0]; }
+          }
+          if (!yearEl && controls.length === 1) yearEl = controls[0];
+          if (!monthEl && controls.length >= 2) monthEl = controls[0];
+          if (!yearEl && controls.length >= 2) yearEl = controls[controls.length - 1];
+
+          const root = targetWidget.wrap;
+          if (root) root.setAttribute('data-wd-date-root', '1');
+          if (monthEl) monthEl.setAttribute('data-wd-date-month', '1');
+          if (yearEl) yearEl.setAttribute('data-wd-date-year', '1');
+          if (dayEl) dayEl.setAttribute('data-wd-date-day', '1');
+
+          return {
+            found: Boolean(monthEl || yearEl),
+            required: true,
+            count: controls.length,
+            hasMonth: Boolean(monthEl),
+            hasYear: Boolean(yearEl),
+            hasDay: Boolean(dayEl),
+          };
+        }
+      }
+      return { found: false, required: false, count: 0, reason: 'no From/To label' };
+    }
+
+    labels.sort((a, b) => {
+      const aSec = detectSection(a);
+      const bSec = detectSection(b);
+      const aMatch = sectionType && aSec === sectionType ? 0 : 1;
+      const bMatch = sectionType && bSec === sectionType ? 0 : 1;
+      if (aMatch !== bMatch) return aMatch - bMatch;
+      return norm(a.textContent).length - norm(b.textContent).length;
+    });
+
+    const labelEl = labels[0];
+    const sameKind = labels.filter((el) => detectSection(el) === detectSection(labelEl) || detectSection(el) === 'unknown');
+    const idx = sameKind.indexOf(labelEl);
+    const nextLabel = sameKind[idx + 1] || null;
 
     function nearestControls(label, candidates) {
       if (!candidates.length) return [];

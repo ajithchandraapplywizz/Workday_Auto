@@ -23,6 +23,7 @@ import {
 } from './experienceAnswer.mjs';
 import { isYesNoQuestionLabel, extractYesNoAnswer, lookupSensitiveSafeAnswer } from './workdayDefaults.mjs';
 import { isMinimumAgeQuestion, resolveMinimumAgeAnswer } from './minimumAge.mjs';
+import { trace } from './trace.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 import { enrichFieldWithTypeCode, fieldTypeToCode } from './fieldTypeCodes.mjs';
 import {
@@ -38,10 +39,7 @@ import {
   isShiftOrScheduleQuestion,
   pickShiftOption,
   isSpecificManagerOrLocationQuestion,
-  isAvailabilityCheckboxQuestion,
-  resolveWorkScheduleCheckboxAnswer,
 } from './questionEngine/intents.mjs';
-import { isAvailabilityStartDateLabel, getTodayMMDDYYYY } from './date-utils.mjs';
 
 function fieldOptions(field = {}) {
   return (field.options || [])
@@ -57,8 +55,7 @@ function fieldLabel(field = {}, fallback = '') {
 }
 
 function isAvailabilityTimingQuestion(label = '') {
-  return isAvailabilityStartDateLabel(label)
-    || /available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(label);
+  return /available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(label);
 }
 
 /**
@@ -77,7 +74,7 @@ function profileFactForLabel(label, profile = {}) {
 
   if (/^(legal\s*)?(first|given)\s*name/.test(n) || n === 'first name') return p.first_name || null;
   if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return p.last_name || null;
-  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$/.test(n)) return p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || null;
+  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || null;
   if (/^email/.test(n)) return p.email || null;
   if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(n)) {
     const hint = `${p.country || ''} ${p.country_phone_code || ''}`;
@@ -179,18 +176,6 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
   // Stored YAML / fuzzy Apply Wizz "No" must never win on 16+/18+ working-age questions.
   if (isMinimumAgeQuestion(label) && extractYesNoAnswer(text) === 'No') return null;
   if (isYearsQuantityQuestion(label) && isInvalidYearsAnswer(text)) return null;
-  const ft = String(fieldType || '').toLowerCase();
-  if (/checkbox-group|multi-checkbox|multi.?check/.test(ft)) {
-    const optTexts = (options || []).map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
-    const yn = extractYesNoAnswer(text);
-    if (yn && optTexts.length && !optTexts.some((o) => extractYesNoAnswer(o))) {
-      if (isAvailabilityCheckboxQuestion(label)) {
-        const mapped = resolveWorkScheduleCheckboxAnswer(label, text, optTexts);
-        if (mapped) return mapped;
-      }
-      return null;
-    }
-  }
   if (isYesNoQuestionLabel(label) && !/checkbox-group|text|input|textarea/i.test(fieldType)) {
     const yn = extractYesNoAnswer(text);
     if (!yn) return null;
@@ -263,12 +248,12 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (!label) return null;
 
   if (profile && isApplyWizzConfigured() && !profile._applyWizzHydrated) {
-    await hydrateProfileFromApplyWizz(profile);
+    await hydrateProfileFromApplyWizz(profile, opts);
   }
 
   const fieldType = enriched.fieldType || enriched.type || opts.fieldType || '';
   let options = fieldOptions(enriched).length ? fieldOptions(enriched) : (opts.options || []);
-  if (!options.length && opts.page && /dropdown|select|combobox|radio|checkbox-group|multi-checkbox/i.test(fieldType)) {
+  if (!options.length && opts.page && /dropdown|select|combobox|radio/i.test(fieldType)) {
     try {
       const { collectLiveFieldOptions } = await import('./workdayDom.mjs');
       options = await collectLiveFieldOptions(opts.page, label, fieldType) || [];
@@ -296,34 +281,19 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (sensitive) {
     const hit = finish(sensitive, 'sensitive_safe');
     if (hit) {
+      trace({
+        stage: 'sensitive_safe',
+        clientId: profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '',
+        tenant: opts.tenant || profile?._tenant || '',
+        query: normalizeLabel(label),
+        hit: true,
+        answer: hit.answer,
+      });
       console.log(`    🛡️  [Sensitive] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       return hit;
     }
   }
 
-  if (isAvailabilityStartDateLabel(label, enriched)) {
-    const today = getTodayMMDDYYYY('Asia/Kolkata');
-    const hit = finish(today, 'availability_start_date');
-    if (hit) {
-      console.log(`    📅 [Availability date] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      return hit;
-    }
-  }
-
-  if (isShiftOrScheduleQuestion(label) || isAvailabilityCheckboxQuestion(label)) {
-    const mapped = resolveWorkScheduleCheckboxAnswer(label, 'Yes', options);
-    if (mapped) {
-      const hit = finish(mapped, 'work_schedule');
-      if (hit) {
-        console.log(`    📋 [Schedule] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
-        return hit;
-      }
-    }
-    if (!options.length) {
-      const flex = finish('Flexible', 'work_schedule');
-      if (flex) return flex;
-    }
-  }
 
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)
@@ -368,6 +338,10 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
+  const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '';
+  const tenant = opts.tenant || profile?._tenant || '';
+
+  // ─── TIER 2: CRM API (Apply Wizz) ────────────────────────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
     options,
     fieldType,
@@ -375,28 +349,84 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   });
   const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
   if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
-    const apiHit = finish(fromApi.answer, fromApi.source || 'supabase_clients_table');
+    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api');
     if (apiHit) {
-      console.log(`    🗄️  [Supabase Tier 1 API facts] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      trace({
+        stage: 'tier2',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        source: fromApi.source,
+        answer: apiHit.answer,
+      });
+      console.log(`    🗄️  [CRM API Tier 2 facts] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
       return apiHit;
     }
   }
+  trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
 
-  // ─── TIER 2: Resume Parsing ──────────────────────────────────────────────────
+  // ─── TIER 3: Resume Parsing ──────────────────────────────────────────────────
   const fromExperience = resolveExperienceQuestionAnswer(label, profile, { options, fieldType });
-  const expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`);
+  let expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`);
+  
+  if (!expHit && profile._resumeText) {
+    // Check if question asks about specific skill / experience in resume
+    const { inferAnswerFromResume } = await import('./resumeParser.mjs');
+    const directInfer = inferAnswerFromResume(label, profile._resumeText, { options, fieldType });
+    if (directInfer) {
+      expHit = finish(directInfer, 'resume_direct_infer');
+    } else if (isYesNoQuestionLabel(label) && options.length) {
+      // If asking "Do you have at least X years experience in <tech>", check if tech is in resume
+      const lowerResume = (profile._resumeText || '').toLowerCase();
+      const topicTokens = (label.toLowerCase().match(/[a-z0-9+#.]{3,}/g) || [])
+        .filter(t => !/^(have|least|years|experience|with|systems|distributed|the|for|you|and|are)\b/i.test(t));
+      const hasTopic = topicTokens.length > 0 && topicTokens.some(t => lowerResume.includes(t));
+      if (hasTopic) {
+        const yesOpt = options.find(o => /^yes\b/i.test(o)) || 'Yes';
+        expHit = finish(yesOpt, 'resume_keyword_match');
+      }
+    }
+  }
+
   if (expHit) {
-    console.log(`    📄 [Resume Tier 2] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
+    trace({
+      stage: 'tier3',
+      clientId,
+      tenant,
+      query: normalizeLabel(label),
+      hit: true,
+      source: expHit.source || fromExperience?.source || 'resume',
+      answer: expHit.answer,
+    });
+    console.log(`    📄 [Resume Tier 3] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
     return expHit;
   }
+  trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
+
 
   // Only mandatory/required questions proceed to LLM unless forceLlm is set
   if (!required && opts.forceLlm !== true && !domainQuestion && !availabilityTiming) {
     return null;
   }
 
-  // ─── TIER 3: LLM Analysis with Live Playwright DOM Context + Persist to Supabase ─
-  console.log(`    🤖 [LLM Tier 3] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
+  // ─── TIER 4: LLM Analysis with Live Playwright DOM Context ───────────────────
+  // (4) Tier 4 LLM must never answer work-auth, sponsorship, or EEO questions.
+  const isProtectedCompliance = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo/i.test(label);
+  if (isProtectedCompliance) {
+    trace({
+      stage: 'tier4',
+      clientId,
+      tenant,
+      query: normalizeLabel(label),
+      hit: false,
+      rejectionReason: 'llm_blocked_for_compliance',
+    });
+    console.log(`    🛑 [LLM Tier 4 blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
+    return null;
+  }
+
+  console.log(`    🤖 [LLM Tier 4] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
   const llmAnswer = await resolveUnknownWithLlm(label, {
     ...enriched,
     fieldType,
@@ -415,10 +445,41 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     preferred: isProceedQuestion(label) ? 'Yes' : '',
   });
 
+  // Check if LLM answer contradicts a stored profile fact
+  if (llmAnswer) {
+    const pFact = profileFactForLabel(label, profile);
+    if (pFact && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
+      trace({
+        stage: 'tier4',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: false,
+        rejectionReason: 'llm_contradicts_profile_fact',
+        llmAnswer,
+        profileFact: pFact,
+      });
+      console.log(`    🛑 [LLM Tier 4 rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
+      return null;
+    }
+  }
+
   const llmHit = finish(llmAnswer, 'llm_profile');
+
   if (llmHit) {
+    trace({
+      stage: 'tier4',
+      clientId,
+      tenant,
+      query: normalizeLabel(label),
+      hit: true,
+      llmChoice: llmHit.answer,
+      allowedOptions: options,
+      dryRun: opts.dryRun === true,
+    });
+
     const awlId = profile._applyWizzId || profile.applywizz_id || profile.client_id || process.env.APPLYWIZZ_ID || '';
-    if (awlId && isSupabaseConfigured()) {
+    if (awlId && isSupabaseConfigured() && opts.dryRun !== true) {
       upsertSupabaseAnswer({
         applywizzId: awlId,
         question: label,
@@ -433,9 +494,10 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       }).catch((e) => console.log(`    ⚠️  Supabase write error: ${e.message?.slice(0, 80)}`));
       recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
     }
-    console.log(`    🤖 [LLM Tier 3 → Supabase saved] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
+    console.log(`    🤖 [LLM Tier 4${opts.dryRun ? ' (dry-run)' : ' → Supabase saved'}] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
     return llmHit;
   }
+  trace({ stage: 'tier4', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
 
   if (isProceedQuestion(label)) {
     const yes = options.find((opt) => /^yes\b/i.test(opt)) || 'Yes';
@@ -446,9 +508,10 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), Tier 3 (LLM) for "${label.slice(0, 55)}"`);
+  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (CRM API), Tier 3 (Resume), Tier 4 (LLM) for "${label.slice(0, 55)}"`);
   return null;
 }
+
 
 
 export { normalizeLabel };

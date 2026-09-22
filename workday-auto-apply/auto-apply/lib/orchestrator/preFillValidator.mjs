@@ -5,6 +5,7 @@
 import { validateAnswer } from '../interaction/answerValidator.mjs';
 import { isHighRiskIntent } from '../questionEngine/intents.mjs';
 import { contradictsVerified } from './memory.mjs';
+import { validateResolvedValue } from '../planner.mjs';
 
 export const FILL_CONFIDENCE_FLOOR = 0.70;
 
@@ -40,12 +41,17 @@ export function validateBeforeFill(field = {}, decision = {}, profile = {}) {
     return { ok: false, reason: 'low_confidence', requiresReview: true };
   }
 
-  if (isHighRiskIntent(decision.intent) && /llm_semantic|unknown/i.test(String(decision.source || ''))) {
+  if (isHighRiskIntent(decision.intent) && /unknown/i.test(String(decision.source || ''))) {
     return { ok: false, reason: 'high_risk_unsupported', requiresReview: true };
   }
 
   if (contradictsVerified(profile, decision.intent, answer)) {
     return { ok: false, reason: 'contradicts_verified_memory', requiresReview: true };
+  }
+
+  const preCheck = validateResolvedValue(field, answer);
+  if (!preCheck.valid) {
+    return { ok: false, reason: preCheck.reason || 'invalid_resolved_value', requiresReview: true };
   }
 
   const interaction = validateAnswer(field, {

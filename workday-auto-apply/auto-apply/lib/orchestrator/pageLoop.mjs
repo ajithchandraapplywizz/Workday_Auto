@@ -12,7 +12,7 @@ import {
   llmAnswerWithPlaywrightContext,
 } from '../questionEngine/index.mjs';
 import { isSelectOnePlaceholder } from '../interaction/workdayCustomDropdown.mjs';
-import { normalizeLabel, saveAnswerToYaml } from '../qaStore.mjs';
+import { normalizeLabel, saveAnswerToYaml, appendManualReviewRecord } from '../qaStore.mjs';
 import { isMandatoryField } from '../scanFieldFilter.mjs';
 import { validateBeforeFill } from './preFillValidator.mjs';
 import { rememberVerified } from './memory.mjs';
@@ -20,9 +20,12 @@ import { blockedResult, STATUS } from './types.mjs';
 import { logOrchestrator } from './logger.mjs';
 import { collectLiveFieldOptions } from '../workdayDom.mjs';
 import { resolveClientAnswer } from '../clientAnswer.mjs';
+import { trace, logFieldTrace } from '../trace.mjs';
+import { makeGuard } from '../loopGuard.mjs';
+import { verifyProvenance } from '../provenanceGate.mjs';
 
 const MAX_FIELD_RETRIES = 2;
-const MAX_FILLS_PER_CYCLE = 8;
+const MAX_FILLS_PER_CYCLE = 24;
 const MAX_VERIFY_FAILS_PER_FIELD = 2;
 
 function squashOptionText(v = '') {
@@ -75,9 +78,18 @@ function fieldNeedsFill(field, adapter, profile, stepName) {
   return false;
 }
 
-function releaseStaleFilledIds(fields, filledIds, filledNormLabels, adapter, profile, step) {
+function releaseStaleFilledIds(fields, filledIds, filledNormLabels, adapter, profile, step, verifyFailCounts = null) {
   for (const field of fields) {
     if (!fieldNeedsFill(field, adapter, profile, step)) continue;
+    const failKey = fieldDedupeKey(field);
+    if (verifyFailCounts && (verifyFailCounts.get(failKey) || 0) >= MAX_VERIFY_FAILS_PER_FIELD) {
+      continue; // Never release fields that reached maximum verification retry cap
+    }
+    const skipNorm = normalizeLabel(field.label || '');
+    const skipKey = skipNorm || field.questionId || field.label;
+    if ((profile?._orchestratorSkipTries?.get(skipKey) || 0) >= 1) {
+      continue; // Never release fields that were already gated/skipped as human required
+    }
     filledIds.delete(field.questionId || field.label);
     const norm = normalizeLabel(field.label || '');
     if (norm) filledNormLabels.delete(norm);
@@ -107,7 +119,19 @@ export async function runPageOrchestrator({
 
   let fields = dedupeFields((await adapter.scan(page, { pageNumber, stepName: step })).fields || []);
   logOrchestrator('scan', { step, fields: fields.length });
+  for (const f of fields) {
+    trace({
+      stage: 'scan',
+      step,
+      page: pageNumber,
+      label: f.label,
+      normLabel: normalizeLabel(f.label || ''),
+      fieldType: f.fieldType || f.elementType,
+      options: f.options,
+    });
+  }
 
+  const guard = makeGuard({ maxAttemptsPerField: MAX_FIELD_RETRIES, maxIterationsPerPage: maxCycles });
   const filledIds = new Set();
   const filledNormLabels = new Set();
   const verifyFailCounts = new Map();
@@ -152,7 +176,7 @@ export async function runPageOrchestrator({
       if (fillsThisCycle === 0) {
         const pageCheckEarly = await adapter.validatePage(page, profile, step);
         if (pageCheckEarly.ok === true) break;
-        releaseStaleFilledIds(fields, filledIds, filledNormLabels, adapter, profile, step);
+        releaseStaleFilledIds(fields, filledIds, filledNormLabels, adapter, profile, step, verifyFailCounts);
         field = pickNext(fields, filledIds, filledNormLabels, adapter, profile, step);
       }
       if (!field) break;
@@ -226,6 +250,35 @@ export async function runPageOrchestrator({
         }
       }
     }
+
+    // Provenance Gate Check (Block-and-log mode)
+    const prov = verifyProvenance(field, decision);
+    if (!prov.ok) {
+      logOrchestrator('provenance_blocked', {
+        questionId: field.questionId,
+        label: field.label,
+        source: prov.source,
+        reason: prov.reason,
+      });
+      trace({
+        stage: 'provenance_blocked',
+        step,
+        page: pageNumber,
+        questionId: field.questionId,
+        label: field.label,
+        source: prov.source,
+        evidence: prov.evidence,
+        matchScore: prov.matchScore,
+        reason: prov.reason,
+        controlTag: field.controlTag || field._raw?.tagName,
+        controlRole: field.controlRole || field.role || field._raw?.role,
+        controlAriaHaspopup: field.controlAriaHaspopup || field._raw?.ariaHaspopup,
+        controlType: field.elementType || field.fieldType,
+        controlId: field.questionId || field._raw?.wdQId || field.label,
+        labelResolutionPath: field.locatorStrategy?.preferred || 'label',
+      });
+      gate = { ok: false, reason: `provenance_gate:${prov.reason}`, requiresReview: true };
+    }
     if (!gate.ok) {
       const highRisk = isHighRiskIntent(decision?.intent || classifyQuestionIntent(field.label, field)) && mandatory;
       logOrchestrator('skip_fill', {
@@ -233,6 +286,29 @@ export async function runPageOrchestrator({
         reason: gate.reason,
         required: field.required,
       });
+      const autoId = field.automationId || field._raw?.automationId || field._raw?.['data-automation-id'] || field.questionId;
+      logFieldTrace({
+        automationId: autoId,
+        label: field.label,
+        controlType: field.elementType || field.fieldType || 'text',
+        tier: decision?.source || 'unresolved',
+        valueAttempted: gate?.answer || decision?.answer || '',
+        success: false,
+        reason: gate.reason || 'validation_failed',
+        step,
+        page: pageNumber,
+      });
+      appendManualReviewRecord({
+        candidateId: profile?.id || process.env.APPLYWIZZ_ID,
+        tenant: profile?._tenant || '',
+        questionLabel: field.label,
+        controlType: field.controlType || field.elementType || field.fieldType || 'text',
+        visibleOptions: field.options || [],
+        tierAttempted: decision?.source || 'unresolved',
+        attemptedValue: gate?.answer || decision?.answer || '',
+        reason: gate.reason || 'validation_failed',
+        step,
+      }).catch(() => {});
       if (highRisk || (mandatory && gate.requiresReview)) {
         profile._humanRequired = profile._humanRequired || [];
         profile._humanRequired.push({
@@ -250,6 +326,7 @@ export async function runPageOrchestrator({
             extras: { step, filled, verified, failed, adapter: adapter.name },
           });
         }
+        console.log(`    ⚠️  Mandatory field needs review: "${field.label}" — attempting safe fallback...`);
       }
       const skipNorm = normalizeLabel(field.label || '');
       const skipKey = skipNorm || field.questionId || field.label;
@@ -269,9 +346,85 @@ export async function runPageOrchestrator({
       continue;
     }
 
+    if (guard.isExceeded(field)) {
+      logOrchestrator('field_skipped_guard_exceeded', {
+        step,
+        questionId: field.questionId,
+        label: field.label,
+        reason: 'max_attempts_reached',
+      });
+      const autoId = field.automationId || field._raw?.automationId || field._raw?.['data-automation-id'] || field.questionId;
+      logFieldTrace({
+        automationId: autoId,
+        label: field.label,
+        controlType: field.elementType || field.fieldType || 'text',
+        tier: decision?.source || 'guard',
+        valueAttempted: gate?.answer || '',
+        success: false,
+        reason: 'max_attempts_reached',
+        step,
+        page: pageNumber,
+      });
+      filledIds.add(field.questionId || field.label);
+      const failNorm = normalizeLabel(field.label || '');
+      if (failNorm) filledNormLabels.add(failNorm);
+      cyclesWithoutFill += 1;
+      fillsThisCycle += 1;
+      continue;
+    }
+
     let lastFill = null;
     let ok = false;
     for (let attempt = 1; attempt <= MAX_FIELD_RETRIES; attempt++) {
+      if (guard.isExceeded(field)) {
+        trace({
+          stage: 'guard_exceeded',
+          guardKey: guard.makeKey(field),
+          attempts: 2,
+          action: 'break_attempts',
+        });
+        break;
+      }
+      const guardKey = guard.makeKey(field, gate.answer, fillsThisCycle);
+      const attemptRecord = guard.recordAttempt(field, gate.answer, fillsThisCycle);
+      if (attemptRecord.exceeded) {
+        trace({
+          stage: 'guard_exceeded',
+          guardKey,
+          attempts: attemptRecord.count,
+          action: 'break_attempts',
+        });
+        break;
+      }
+      const controlId = field.questionId || field._raw?.wdQId || field.label;
+      const controlTag = field.controlTag || field._raw?.tagName || 'unknown';
+      const controlRole = field.controlRole || field.role || field._raw?.role || 'unknown';
+      const controlAriaHaspopup = field.controlAriaHaspopup || field._raw?.ariaHaspopup || null;
+      const controlType = field.elementType || field.fieldType || 'text';
+      const labelResolutionPath = field.locatorStrategy?.preferred || 'label';
+      const source = decision?.source || 'unknown';
+      const evidence = decision?.evidence || decision?.reasonCode || '';
+      const matchScore = decision?.score ?? decision?.confidence ?? 1.0;
+
+      trace({
+        stage: 'fill',
+        step,
+        page: pageNumber,
+        questionId: field.questionId,
+        label: field.label,
+        answer: gate.answer,
+        attempt,
+        guardKey,
+        source,
+        evidence,
+        matchScore,
+        controlTag,
+        controlRole,
+        controlAriaHaspopup,
+        controlType,
+        controlId,
+        labelResolutionPath,
+      });
       lastFill = await adapter.fill(page, field, gate.answer, {
         profile,
         pageNumber,
@@ -280,7 +433,13 @@ export async function runPageOrchestrator({
       await adapter.waitStable(page);
       const read = await adapter.readValue(page, field, { pageNumber, stepName: step });
       fields = dedupeFields(read.all || fields);
-      let actual = read.current || lastFill?.verifiedValue || '';
+      let actual = read.current ?? '';
+      if (!actual && lastFill?.success === true) {
+        actual = lastFill?.verifiedValue || '';
+      }
+      if (isSelectOnePlaceholder(actual)) {
+        actual = '';
+      }
       const isMultiCb = /multi-checkbox|checkbox-group/i.test(String(field.elementType || field.fieldType || ''));
       let matched = false;
       if (isMultiCb) {
@@ -311,6 +470,39 @@ export async function runPageOrchestrator({
         matched = (field.elementType === 'checkbox' && lastFill?.success === true)
           || adapter.valuesMatch(gate.answer, actual);
       }
+      trace({
+        stage: 'verify',
+        step,
+        page: pageNumber,
+        questionId: field.questionId,
+        label: field.label,
+        expected: gate.answer,
+        actual,
+        guardKey,
+        ok: matched,
+        attempt,
+        source,
+        evidence,
+        matchScore,
+        controlTag,
+        controlRole,
+        controlAriaHaspopup,
+        controlType,
+        controlId,
+        labelResolutionPath,
+      });
+      const autoId = field.automationId || field._raw?.automationId || field._raw?.['data-automation-id'] || field.questionId || controlId;
+      logFieldTrace({
+        automationId: autoId,
+        label: field.label,
+        controlType,
+        tier: source,
+        valueAttempted: gate.answer,
+        success: matched,
+        reason: matched ? 'verified' : (lastFill?.reason || 'verification_failed'),
+        step,
+        page: pageNumber,
+      });
       logOrchestrator('verify', {
         questionId: field.questionId,
         requested: String(gate.answer).slice(0, 40),
@@ -320,6 +512,8 @@ export async function runPageOrchestrator({
       });
       if (matched) {
         ok = true;
+        field.currentValue = gate.answer;
+        if (field._raw) field._raw.currentValue = gate.answer;
         rememberVerified(profile, {
           questionId: field.questionId,
           intent: decision.intent,
@@ -335,6 +529,15 @@ export async function runPageOrchestrator({
         verified += 1;
         break;
       }
+      if (attemptRecord.exceeded) {
+        trace({
+          stage: 'guard_exceeded',
+          guardKey,
+          attempts: attemptRecord.count,
+          action: 'break_attempts',
+        });
+        break;
+      }
     }
 
     if (!ok) {
@@ -347,6 +550,17 @@ export async function runPageOrchestrator({
         requested: gate.answer,
       });
       logOrchestrator('field_failed', { questionId: field.questionId, reason: 'verification_failed', attempt: failN });
+      appendManualReviewRecord({
+        candidateId: profile?.id || process.env.APPLYWIZZ_ID,
+        tenant: profile?._tenant || '',
+        questionLabel: field.label,
+        controlType: field.controlType || field.elementType || field.fieldType || 'text',
+        visibleOptions: field.options || [],
+        tierAttempted: decision?.source || 'unverified',
+        attemptedValue: gate.answer,
+        reason: 'verification_failed',
+        step,
+      }).catch(() => {});
       if (mandatory && failN < MAX_VERIFY_FAILS_PER_FIELD) {
         const live = await collectLiveFieldOptions(page, field.label, field.fieldType || field.elementType).catch(() => []);
         if (live.length) {
@@ -401,6 +615,8 @@ export async function runPageOrchestrator({
     filledIds.add(field.questionId || field.label);
     const doneNorm = normalizeLabel(field.label || '');
     if (doneNorm) filledNormLabels.add(doneNorm);
+    field.currentValue = gate.answer;
+    if (field._raw) field._raw.currentValue = gate.answer;
     fillsThisCycle += 1;
     cyclesWithoutFill = 0;
     } // end multi-fill per cycle

@@ -5,6 +5,8 @@
 import { mkdir, writeFile, appendFile, readFile } from 'fs/promises';
 import { resolve, basename } from 'path';
 import { existsSync } from 'fs';
+import { logFieldTrace } from './trace.mjs';
+import { appendManualReviewRecord } from './qaStore.mjs';
 
 const SCREENSHOTS_DIR = resolve(process.cwd(), 'screenshots');
 const CSV_REPORT = resolve(process.cwd(), 'data', 'applied.csv');
@@ -137,3 +139,93 @@ function parseCSVLine(line) {
   parts.push(current);
   return parts;
 }
+
+const FIELD_TRACE_LOG = resolve(process.cwd(), 'runs', 'field-trace.log');
+
+/**
+ * 3f. Per-Field Trace Log
+ * One structured line per field per run:
+ * automation-id | label text | controlType | tier used | value attempted | verified pass/fail
+ */
+export async function writeFieldTraceLine({
+  automationId = '',
+  label = '',
+  controlType = '',
+  tier = '',
+  valueAttempted = '',
+  verified = false,
+  reason = '',
+  step = '',
+} = {}) {
+  const cleanAid = String(automationId || 'unknown').trim();
+  const cleanLabel = String(label || 'unlabeled').replace(/\s+/g, ' ').trim();
+  const cleanType = String(controlType || 'unknown').trim();
+  const cleanTier = String(tier || 'unknown').trim();
+  const cleanVal = valueAttempted != null && String(valueAttempted).trim() !== '' ? String(valueAttempted).trim() : 'none';
+  const passFail = verified ? 'pass' : 'fail';
+
+  const traceLine = `${cleanAid} | ${cleanLabel} | ${cleanType} | ${cleanTier} | ${cleanVal} | verified ${passFail}`;
+
+  console.log(`  📊 [TRACE] ${traceLine}`);
+
+  try {
+    await mkdir(resolve(process.cwd(), 'runs'), { recursive: true });
+    await appendFile(FIELD_TRACE_LOG, `${new Date().toISOString()} | ${traceLine}\n`);
+  } catch {}
+
+  // Also call underlying logFieldTrace
+  try {
+    logFieldTrace({
+      automationId: cleanAid,
+      label: cleanLabel,
+      controlType: cleanType,
+      tier: cleanTier,
+      valueAttempted: cleanVal,
+      success: Boolean(verified),
+      reason,
+      step,
+    });
+  } catch {}
+
+  return traceLine;
+}
+
+/**
+ * 3e. Escalate field to manual review queue and emit failed trace line.
+ */
+export async function escalateToManualReview({
+  candidateId = '',
+  tenant = '',
+  automationId = '',
+  questionLabel = '',
+  controlType = '',
+  visibleOptions = [],
+  tierAttempted = '',
+  attemptedValue = '',
+  reason = '',
+  step = '',
+} = {}) {
+  await appendManualReviewRecord({
+    candidateId,
+    tenant,
+    questionLabel,
+    controlType,
+    visibleOptions,
+    tierAttempted,
+    attemptedValue,
+    reason,
+    step,
+  });
+
+  return await writeFieldTraceLine({
+    automationId,
+    label: questionLabel,
+    controlType,
+    tier: tierAttempted,
+    valueAttempted: attemptedValue,
+    verified: false,
+    reason,
+    step,
+  });
+}
+

@@ -62,8 +62,19 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "dotenv": "^18.0.1",
+    "fuzzball": "^2.2.6",
     "js-yaml": "^4.1.1",
+    "p-limit": "^7.3.3",
     "pdf-parse": "^2.4.5",
-    "playwright": "^1.58.1"
+    "playwright": "^1.63.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.1"
   }
 }

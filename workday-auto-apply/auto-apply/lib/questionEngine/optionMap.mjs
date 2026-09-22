@@ -5,6 +5,7 @@
 import { alignAnswerToWorkdayOptions } from '../applyWizzClient.mjs';
 import { extractYesNoAnswer, selectionMatchesAnswer } from '../workdayDefaults.mjs';
 import { matchDemographicOption } from '../interaction/workdayCustomDropdown.mjs';
+import { pickCompensationFromOptions } from '../compensationPick.mjs';
 
 /**
  * @param {string} answer
@@ -43,6 +44,9 @@ export function mapToExactOption(answer, options = [], elementType = '') {
 
   const matched = opts.find((o) => selectionMatchesAnswer(o, text));
   if (matched) return { ok: true, answer: matched };
+
+  const compPicked = pickCompensationFromOptions(opts, { compensation: text }, text);
+  if (compPicked && opts.includes(compPicked)) return { ok: true, answer: compPicked };
 
   if (!needsOption) return { ok: true, answer: text };
   return { ok: false, reasonCode: 'NO_VALID_OPTION' };

@@ -5,7 +5,7 @@
  * Vision is not used here.
  */
 
-import { discoverFields } from './scanner.mjs';
+import { discoverFields, detectControlType } from './scanner.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 
 const FORM_ROOT_SELECTOR = '[data-automation-id="formContent"], form, main, [role="main"], body';
@@ -348,13 +348,27 @@ export async function discoverFormFieldQuestions(page) {
     }
 
     function extractQuestionFromText(raw) {
-      const text = (raw || '').replace(/\s+/g, ' ').trim().replace(/\*+$/, '');
-      const questions = [...text.matchAll(/([^.!?]{8,500}\?)/g)].map((m) => m[1].trim());
-      if (questions.length) {
-        const preferred = questions.find((q) => /are you|have you|do you|will you|years old|age of|please select|please indicate/i.test(q));
-        return preferred || questions[questions.length - 1];
+      // Sentence splitting on '.' broke abbreviations like e.g. and G.E.D.
+      // For ambient / prev_sibling text: only split on real sentence boundaries
+      // (period + space + uppercase). Never strip trailing * — it is the
+      // required-field marker and belongs in the label.
+      const text = (raw || '').replace(/\s+/g, ' ').trim();
+      // If the text already ends with ?, return it whole — no splitting needed.
+      if (/\?$/.test(text)) return text;
+      // For text that contains a question somewhere in the middle, extract only
+      // on genuine sentence boundaries ('. ' followed by capital letter).
+      const parts = text.split(/(?<=[.!?])\s+(?=[A-Z])/);
+      const questionParts = parts.filter((p) => /\?/.test(p));
+      if (questionParts.length) {
+        const preferred = questionParts.find((q) =>
+          /are you|have you|do you|will you|years old|age of|please select|please indicate/i.test(q)
+        );
+        return (preferred || questionParts[questionParts.length - 1]).trim();
       }
-      const ageish = text.match(/((?:are you|must be|at least|over the age).{0,80}(?:1[68]).{0,40})/i);
+      // Age-gate pattern ("must be at least 18")
+      const ageish = text.match(
+        /((?:are you|must be|at least|over the age).{0,80}(?:1[68]).{0,40})/i
+      );
       if (ageish) return ageish[1].trim();
       return text;
     }
@@ -371,9 +385,11 @@ export async function discoverFormFieldQuestions(page) {
     }
 
     function cleanLabelText(raw) {
+      // Do NOT strip * — it is the Workday required-field marker.
+      // Removing it truncates labels like "Availability/Start Date:*" and
+      // hides the required signal from downstream consumers.
       return String(raw || '')
         .replace(/\s+/g, ' ')
-        .replace(/\*+/g, ' ')
         .replace(/\s*\(required\)\s*/gi, ' ')
         .replace(/^\s*(please\s+select|select\s+one|choose)\s+/i, '')
         .replace(/\s+select(\s+one)?(\s+required)?\s*$/i, '')
@@ -447,7 +463,15 @@ export async function discoverFormFieldQuestions(page) {
       if (!candidates?.length) return '';
       // Prefer real questions (even long Voluntary/legal blobs) over widget chrome
       const scored = candidates.map((c) => {
-        const t = extractQuestionFromText(c.text);
+        // For explicit label elements (formField_label, aria-label, aria-labelledby),
+        // use the raw cleaned text directly — no sentence splitting.
+        // Splitting on '.' inside these breaks abbreviations like "e.g." and "G.E.D.".
+        // Sentence extraction only applies to ambient prev_sibling / title text.
+        const explicitSource =
+          c.source === 'formField_label' ||
+          c.source === 'aria-label' ||
+          c.source === 'aria-labelledby';
+        const t = explicitSource ? c.text : extractQuestionFromText(c.text);
         let score = 0;
         if (/\?/.test(t)) score += 50;
         if (/are you|have you|do you|will you|years old|age of|please select|please indicate/i.test(t)) score += 25;
@@ -514,10 +538,60 @@ export async function discoverFormFieldQuestions(page) {
       return Array.from(all).indexOf(widget);
     }
 
+    function readDateSpinValue(container) {
+      if (!container) return null;
+      const spinButtons = Array.from(container.querySelectorAll(
+        'input[role="spinbutton"], [role="spinbutton"], input[data-automation-id*="dateSection"], input[data-automation-id*="dateInput"]'
+      ));
+      if (spinButtons.length >= 2) {
+        let month = '', day = '', year = '';
+        for (const sp of spinButtons) {
+          const hint = `${sp.getAttribute('aria-label') || ''} ${sp.getAttribute('data-automation-id') || ''} ${sp.placeholder || ''}`.toLowerCase();
+          const val = (sp.value || '').trim();
+          if (/month|\bmm\b|datesectionmonth/i.test(hint)) month = val;
+          else if (/day|\bdd\b|datesectionday/i.test(hint)) day = val;
+          else if (/year|yyyy|datesectionyear/i.test(hint)) year = val;
+        }
+        if (!month && !day && !year) {
+          if (spinButtons.length >= 3) {
+            month = spinButtons[0].value || '';
+            day = spinButtons[1].value || '';
+            year = spinButtons[2].value || '';
+          } else if (spinButtons.length === 2) {
+            month = spinButtons[0].value || '';
+            year = spinButtons[1].value || '';
+          }
+        }
+        const isPlaceholder = (v) => !v || /^(m+|d+|y+|mm|dd|yyyy|empty|select)$/i.test(v);
+        if (isPlaceholder(month) && isPlaceholder(day) && isPlaceholder(year)) {
+          return '';
+        }
+        const cleanM = isPlaceholder(month) ? '' : String(month).padStart(2, '0');
+        const cleanD = isPlaceholder(day) ? '' : String(day).padStart(2, '0');
+        const cleanY = isPlaceholder(year) ? '' : String(year);
+        if (cleanM && cleanD && cleanY) {
+          return `${cleanM}/${cleanD}/${cleanY}`;
+        }
+        if (cleanM && cleanY && !cleanD) {
+          return `${cleanM}/${cleanY}`;
+        }
+        if (cleanM || cleanD || cleanY) {
+          return [cleanM, cleanD, cleanY].filter(Boolean).join('/');
+        }
+      }
+      return null;
+    }
+
     function readValue(field) {
       if (field?.matches?.('[data-automation-id="selectOne"], [data-automation-id="selectWidget"]')) {
         return readValueFromWidget(field);
       }
+      const textarea = field.querySelector('textarea');
+      if (textarea && textarea.value !== undefined) {
+        return (textarea.value || '').trim();
+      }
+      const dateSpin = readDateSpinValue(field);
+      if (dateSpin !== null) return dateSpin;
       const selected = field.querySelector('[data-automation-id="selectedItem"]');
       if (selected?.textContent?.trim()) {
         const t = selected.textContent.trim();
@@ -540,16 +614,8 @@ export async function discoverFormFieldQuestions(page) {
         const t = (combo.textContent || '').replace(/\s+/g, ' ').trim();
         if (t && t.length < 80 && !/^select/i.test(t) && !/\?$/.test(t)) return t;
       }
-      const textInput = field.querySelector('input[type="text"]:not([type="hidden"]), input[type="number"], input[type="tel"], input[type="email"], input:not([type]), textarea');
+      const textInput = field.querySelector('input[type="text"]:not([type="hidden"]):not([role="spinbutton"]):not([data-automation-id*="dateSection"]), input[type="number"]:not([role="spinbutton"]):not([data-automation-id*="dateSection"]), input[type="tel"], input[type="email"], input:not([type]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([role="spinbutton"]):not([data-automation-id*="dateSection"]), textarea');
       const dateInput = field.querySelector('input[type="date"]');
-      const spinButtons = field.querySelectorAll('input[role="spinbutton"]');
-      if (spinButtons.length >= 3) {
-        const values = Array.from(spinButtons).map((input) => input.value || '');
-        if (values.some(Boolean) && !values.every((v) => /^m+$/i.test(v) || /^d+$/i.test(v) || /^y+$/i.test(v))) {
-          return `${String(values[0]).padStart(2, '0')}/${String(values[1]).padStart(2, '0')}/${values[2] || ''}`;
-        }
-      }
-      if (spinButtons.length === 1 && spinButtons[0].value) return spinButtons[0].value.trim();
       if (textInput?.value) return textInput.value.trim();
       if (dateInput?.value) return dateInput.value.trim();
       const checked = field.querySelector('input[type="radio"]:checked');
@@ -579,6 +645,11 @@ export async function discoverFormFieldQuestions(page) {
     );
 
     for (const field of containers) {
+      // If this container is an outer wrapper with child formFields, skip it so child fields are processed individually
+      if (field.querySelector('[data-automation-id*="formField"], [data-automation-id*="FormField"]')) {
+        continue;
+      }
+
       // Multi-widget questionnaire panels: do not skip — child selectWidgets are
       // harvested in the selectOne fallback + full control walk below.
       if (field.matches?.('[data-automation-id*="secondaryQuestionnaire"]')) {
@@ -606,15 +677,11 @@ export async function discoverFormFieldQuestions(page) {
         // Keep short labels that look like real field names; drop noise.
         if (!/^[A-Za-z][A-Za-z0-9 /&-]{1,30}$/.test(label)) continue;
       }
-      const questionMatch = label.match(/[^.?!]*\?/);
-      if (questionMatch && questionMatch[0].length >= 12) {
-        label = questionMatch[0].trim();
-      } else if (/please\s+enter\s+your\s+name/i.test(label)) {
+      if (/please\s+enter\s+your\s+name/i.test(label)) {
         label = 'Please enter your name:';
       } else if (/please\s+enter\s+today['’]?s\s+date/i.test(label)) {
         label = "Please enter today's date:";
       } else if (/sign\s+to\s+acknowledge|read.*sign.*acknowledge|please\s+read.*carefully.*sign/i.test(label)) {
-        // Long legal acknowledgement paragraph — normalize to short signature-field label
         label = 'Please sign (type name) and enter the date:';
       }
       if (/indicates a required field|application questions \d+ of/i.test(label)) continue;
@@ -632,13 +699,15 @@ export async function discoverFormFieldQuestions(page) {
       const textInput = field.querySelector(
         'input[type="text"]:not([type="hidden"]), input[type="number"], input[type="tel"], input[type="email"], input:not([type]):not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'
       );
+      const isTextarea = Boolean(
+        textInput && String(textInput.tagName || '').toUpperCase() === 'TEXTAREA'
+      );
       const dateInput = field.querySelector('input[type="date"]');
       const spinButtons = field.querySelectorAll('input[role="spinbutton"]');
       const checkboxes = field.querySelectorAll('input[type="checkbox"]');
       const checkbox = checkboxes[0] || null;
       const describeTextarea = Boolean(
-        textInput
-        && String(textInput.tagName || '').toUpperCase() === 'TEXTAREA'
+        isTextarea
         && /please describe|briefly describe|tell us about|why are you looking|which of the following/i.test(label)
       );
       const multiSelect = !describeTextarea && (
@@ -649,18 +718,17 @@ export async function discoverFormFieldQuestions(page) {
       if (multiSelect) fieldType = 'checkbox-group';
       else if (checkbox && !combo && radios.length === 0 && !textInput && spinButtons.length === 0) fieldType = 'checkbox';
       else if (spinButtons.length >= 3 && !combo && radios.length === 0) fieldType = 'date';
+      else if (isTextarea && !combo) fieldType = 'textarea';
       else if (combo) fieldType = 'dropdown';
       else if ((textInput || dateInput || spinButtons.length > 0) && radios.length === 0) {
-        fieldType = dateInput ? 'date' : 'text';
+        fieldType = dateInput ? 'date' : (isTextarea ? 'textarea' : 'text');
       } else if (radios.length > 0 && !combo) fieldType = 'radio';
       else if (!combo && !textInput && radios.length === 0 && !checkbox && spinButtons.length === 0) continue;
 
       let currentValue = readValue(field);
-      if (spinButtons.length >= 3) {
-        const values = Array.from(spinButtons).map((input) => input.value || '');
-        if (values.every(Boolean)) {
-          currentValue = `${String(values[0]).padStart(2, '0')}/${String(values[1]).padStart(2, '0')}/${values[2]}`;
-        }
+      const dateSpin = readDateSpinValue(field);
+      if (dateSpin !== null && dateSpin !== '') {
+        currentValue = dateSpin;
       }
       const hasRequiredMarker = Boolean(
         field.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]')
@@ -683,21 +751,42 @@ export async function discoverFormFieldQuestions(page) {
         };
       }).filter((option) => option.text);
 
+      const radioOptions = Array.from(radios).map((rb) => {
+        const id = rb.id;
+        const lab = id ? field.querySelector(`label[for="${CSS.escape(id)}"]`) : rb.closest('label');
+        return {
+          text: (lab?.textContent || rb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
+          checked: Boolean(rb.checked),
+        };
+      }).filter((option) => option.text);
+
       const selectWidget = field.querySelector('[data-automation-id="selectOne"], [data-automation-id="selectWidget"]');
       const selectOneIndex = selectWidget ? selectOneIndexForWidget(selectWidget) : null;
-      const formFieldIndex = (fieldType === 'dropdown' || fieldType === 'select') ? formFieldIndexFor(field) : -1;
+      const formFieldIndex = (fieldType === 'dropdown' || fieldType === 'select') ? formFieldIndexFor(field) : null;
       const fieldTypeCode = fieldTypeToCode(fieldType);
-      const selectIdx = selectOneIndex != null && selectOneIndex >= 0 ? selectOneIndex : -1;
-      const markerDisambig = formFieldIndex >= 0
+      const disambiguator = typeof formFieldIndex === 'number' && formFieldIndex >= 0
         ? String(formFieldIndex)
-        : (selectIdx >= 0 ? `s${selectIdx}` : '');
-      const markerId = ensureMarkerId(field, label, markerDisambig);
+        : (typeof selectOneIndex === 'number' && selectOneIndex >= 0 ? `s${selectOneIndex}` : '');
+      const markerId = ensureMarkerId(
+        field,
+        label,
+        disambiguator,
+      );
+
+      const controlEl = combo || textInput || dateInput || spinButtons[0] || checkboxes[0] || radios[0] || selectWidget || field.querySelector('[data-automation-id]:not([data-automation-id*="formField"]):not([data-automation-id*="label"])');
+      const automationId = controlEl?.getAttribute('data-automation-id')
+        || field.getAttribute('data-automation-id')
+        || controlEl?.id
+        || field.id
+        || '';
 
       results.push({
         label,
         fieldType,
         field_type_code: fieldTypeCode,
         fieldTypeCode,
+        automationId,
+        controlId: automationId,
         currentValue,
         required,
         hasRequiredMarker,
@@ -705,15 +794,17 @@ export async function discoverFormFieldQuestions(page) {
         inputType: dateInput ? 'date' : (textInput?.getAttribute('type') || (spinButtons.length ? 'number' : 'text')),
         containerText: (field.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 500),
         labelCandidates: candidates.map((c) => c.text).slice(0, 8),
-        selectOneIndex: selectOneIndex >= 0 ? selectOneIndex : null,
-        formFieldIndex: formFieldIndex >= 0 ? formFieldIndex : null,
+        selectOneIndex: typeof selectOneIndex === 'number' && selectOneIndex >= 0 ? selectOneIndex : null,
+        formFieldIndex: typeof formFieldIndex === 'number' && formFieldIndex >= 0 ? formFieldIndex : null,
         wdQId: markerId,
         options: fieldType === 'checkbox-group'
           ? checkboxOptions
-          : Array.from(field.querySelectorAll('select option')).map((option) => ({
-            text: (option.textContent || '').replace(/\s+/g, ' ').trim(),
-            value: option.value,
-          })).filter((option) => option.text && !/^select(\s+one)?$/i.test(option.text)),
+          : fieldType === 'radio'
+            ? radioOptions
+            : Array.from(field.querySelectorAll('select option')).map((option) => ({
+              text: (option.textContent || '').replace(/\s+/g, ' ').trim(),
+              value: option.value,
+            })).filter((option) => option.text && !/^select(\s+one)?$/i.test(option.text)),
       });
     }
 
@@ -752,12 +843,15 @@ export async function discoverFormFieldQuestions(page) {
         || /race which most accurately|gender|hispanic/i.test(label);
 
       const markerId = ensureMarkerId(fieldRoot || widget, label, `s${selectOneIndex}`);
+      const widgetAutoId = widget.getAttribute('data-automation-id') || fieldRoot?.getAttribute('data-automation-id') || widget.id || '';
 
       results.push({
         label,
         fieldType: 'dropdown',
         field_type_code: 2,
         fieldTypeCode: 2,
+        automationId: widgetAutoId,
+        controlId: widgetAutoId,
         currentValue,
         required,
         hasRequiredMarker,
@@ -831,23 +925,18 @@ export async function discoverFormFieldQuestions(page) {
 
       seen.add(key);
       const markerId = ensureMarkerId(groupRoot, label, typeAttr || tag || 'ctrl');
-
-      const walkCheckboxOptions = fieldType === 'checkbox-group'
-        ? Array.from(groupRoot.querySelectorAll('input[type="checkbox"]')).map((cb) => {
-          const id = cb.id;
-          const lab = id ? groupRoot.querySelector(`label[for="${CSS.escape(id)}"]`) : cb.closest('label');
-          return {
-            text: (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim(),
-            checked: Boolean(cb.checked),
-          };
-        }).filter((o) => o.text)
-        : [];
+      const automationId = control.getAttribute('data-automation-id')
+        || groupRoot.getAttribute('data-automation-id')
+        || control.id
+        || '';
 
       results.push({
         label,
         fieldType,
         field_type_code: fieldTypeToCode(fieldType),
         fieldTypeCode: fieldTypeToCode(fieldType),
+        automationId,
+        controlId: automationId,
         currentValue: readValue(groupRoot) || (control.value || '').trim(),
         required,
         hasRequiredMarker: required,
@@ -857,7 +946,7 @@ export async function discoverFormFieldQuestions(page) {
         labelCandidates: candidates.map((c) => c.text).slice(0, 8),
         elementText: cleanLabelText(control.textContent || control.getAttribute('aria-label') || ''),
         wdQId: markerId,
-        options: walkCheckboxOptions,
+        options: [],
         source: 'full_control_walk',
       });
     }
@@ -1243,7 +1332,7 @@ export async function locateWorkdayFieldByLabel(page, labelPattern, options = {}
       if (!formField) continue;
 
       const trigger = formField.querySelector(
-        'button[aria-haspopup="listbox"], [role="combobox"], select, [data-automation-id="selectWidget"] button, [data-automation-id*="select"] button, input[role="combobox"]'
+        'button[aria-haspopup="listbox"], [role="combobox"], select, [data-automation-id="selectWidget"] button, [data-automation-id*="select"] button, input[role="combobox"], textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'
       );
       if (!trigger) continue;
 
@@ -1262,6 +1351,8 @@ export async function locateWorkdayFieldByLabel(page, labelPattern, options = {}
     const automation = trigger.getAttribute('data-automation-id');
     if (automation) return `[data-automation-id="${CSS.escape(automation)}"]`;
     const name = trigger.getAttribute('name');
+    if (name) return `${trigger.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
+    if (trigger.tagName && /textarea/i.test(trigger.tagName)) return 'textarea';
     if (name) return `${trigger.tagName.toLowerCase()}[name="${CSS.escape(name)}"]`;
     return '';
   }, { pattern, exclude });
@@ -1283,3 +1374,79 @@ export function parseCountryPhoneCode(profileValue) {
     optionText: raw,
   };
 }
+
+/**
+  * Reads the current live DOM value of a field without full-page discovery.
+  */
+export async function readFieldState(page, field) {
+  if (!page || !field) return '';
+  const controlType = field.controlType || detectControlType(field);
+
+  try {
+    return await page.evaluate(({ selector, automationId, wdQId, cType }) => {
+      let root = null;
+      if (wdQId) root = document.querySelector(`[data-wd-q-id="${wdQId}"]`);
+      if (!root && automationId) root = document.querySelector(`[data-automation-id="${automationId}"]`);
+      if (!root && selector) root = document.querySelector(selector);
+      if (!root) return '';
+
+      // Checkbox group
+      if (cType === 'checkbox-group') {
+        const cbs = Array.from(root.querySelectorAll('input[type="checkbox"], [role="checkbox"]'));
+        const checkedLabels = cbs.filter(cb => cb.checked || cb.getAttribute('aria-checked') === 'true').map(cb => {
+          const lbl = cb.id ? document.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+          return (lbl?.textContent || cb.getAttribute('aria-label') || cb.value || '').trim();
+        }).filter(Boolean);
+        return checkedLabels.join(', ');
+      }
+
+      // Radio group
+      if (cType === 'radio-group') {
+        const checked = root.querySelector('input[type="radio"]:checked, [role="radio"][aria-checked="true"]');
+        if (checked) {
+          const lbl = checked.id ? document.querySelector(`label[for="${CSS.escape(checked.id)}"]`) : checked.closest('label');
+          return (lbl?.textContent || checked.getAttribute('aria-label') || checked.value || '').trim();
+        }
+        return '';
+      }
+
+      // Dropdown (native or custom)
+      if (cType === 'native-select' || root.tagName?.toLowerCase() === 'select') {
+        const sel = root.tagName?.toLowerCase() === 'select' ? root : root.querySelector('select');
+        if (sel && sel.selectedOptions?.[0]) return (sel.selectedOptions[0].textContent || '').trim();
+      }
+      const selectedItem = root.querySelector('[data-automation-id="selectedItem"]');
+      if (selectedItem?.textContent?.trim() && !/^select(\s+one)?\.?$/i.test(selectedItem.textContent.trim())) {
+        return selectedItem.textContent.trim();
+      }
+      const btn = root.querySelector('button[aria-haspopup="listbox"], [data-automation-id*="select"] button, [role="combobox"]');
+      if (btn) {
+        const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+        if (t && !/^select(\s+one)?\.?$/i.test(t)) return t;
+      }
+
+      // Date spinbuttons
+      const spinButtons = Array.from(root.querySelectorAll('input[role="spinbutton"], input[data-automation-id*="dateSection"]'));
+      if (spinButtons.length >= 2) {
+        const vals = spinButtons.map(s => (s.value || '').trim()).filter(v => v && !/^(mm|dd|yyyy)$/i.test(v));
+        if (vals.length >= 2) return vals.join('/');
+      }
+
+      // Standard input or textarea
+      const input = root.querySelector('input:not([type="hidden"]), textarea');
+      if (input && input.value !== undefined) {
+        return (input.value || '').trim();
+      }
+
+      return (root.value || root.innerText || root.textContent || '').trim();
+    }, {
+      selector: field.selector,
+      automationId: field.automationId,
+      wdQId: field.wdQId,
+      cType: controlType,
+    });
+  } catch {
+    return '';
+  }
+}
+

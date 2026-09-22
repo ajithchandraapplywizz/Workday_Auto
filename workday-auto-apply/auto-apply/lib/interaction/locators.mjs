@@ -49,7 +49,8 @@ export async function locateControl(page, field = {}, roles = []) {
     ? roles
     : ['textbox', 'combobox', 'radio', 'checkbox', 'searchbox', 'spinbutton'];
   if (label) {
-    const nameRe = new RegExp(label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&').slice(0, 80), 'i');
+    const truncated = label.slice(0, 80).trim();
+    const nameRe = new RegExp(truncated.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i');
     for (const role of roleList) {
       try {
         const hit = await firstVisible(page.getByRole(role, { name: nameRe }));
