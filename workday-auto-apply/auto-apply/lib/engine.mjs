@@ -662,7 +662,6 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.personal.source = selected;
         profile.qa_answers = profile.qa_answers || {};
         profile.qa_answers['how did you hear about us'] = selected;
-        await saveAnswerToYaml(SOURCE_LABEL, selected).catch(() => {});
         recordFilled(profile, SOURCE_LABEL, selected);
         logFieldTrace({
           automationId: 'source--source',
@@ -1057,7 +1056,6 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.personal.address_line1 = addressValue;
         profile.qa_answers = profile.qa_answers || {};
         profile.qa_answers['address line 1'] = addressValue;
-        await saveAnswerToYaml('Address Line 1', addressValue).catch(() => {});
         recordFilled(profile, 'Address Line 1', addressValue);
       } else {
         console.log(`    ⚠️  Address Line 1 verify mismatch: wanted "${addressValue}", got "${verified}"`);
