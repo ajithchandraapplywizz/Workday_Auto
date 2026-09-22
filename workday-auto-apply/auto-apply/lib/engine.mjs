@@ -25,7 +25,6 @@ import {
 } from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
-import { recordResult } from './learner.mjs';
 import { isSubmitButton } from './scanner.mjs';
 import { handleWorkday } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
@@ -33,7 +32,7 @@ import { peekClientAnswer } from './clientAnswer.mjs';
 import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
 import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
-import { saveAnswerToYaml, normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
+import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
 import { isAutoApplyMode } from './openRouterLlm.mjs';
 import { detectWorkdayStep } from './stateDetector.mjs';
 import {
@@ -53,7 +52,6 @@ import {
 import { handleStep2MyExperience, fillEducationFieldOfStudy } from './workdayExperience.mjs';
 import { fillCityFromDom, getCityInputValue, cityValueMatches, CITY_LABEL, resolveCityValue } from './workdayCity.mjs';
 import { fillStateFromDom, stateValueMatches, STATE_LABEL, resolveStateValue } from './workdayState.mjs';
-import { applyTenantOverridesToProfile } from './tenantQuestionYaml.mjs';
 import {
   harvestPageQuestions,
   summarizeQuestionsByStep,
@@ -439,9 +437,6 @@ export async function promptUserInTerminal(label, fieldType, options = [], { com
     id: domCode,
     options: (options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean),
   }, { company, compliance, page, profile });
-  if (answer) {
-    await saveAnswerToYaml(label, answer).catch(() => {});
-  }
   return answer || '';
 }
 
