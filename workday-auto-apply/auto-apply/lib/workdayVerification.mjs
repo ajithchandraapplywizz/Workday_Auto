@@ -204,7 +204,7 @@ export async function resolveWorkdayVerification(page, { email, password, compan
             for (const inp of pwdInputs) {
               const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
               const name = await inp.getAttribute('name').catch(() => '');
-              if (autoId === 'verifyPassword' || autoId === 'verifyNewPassword' || name === 'verifyPassword') continue;
+              if (autoId === 'verifyPassword' || autoId === 'verifyNewPassword' || name === 'verifyPassword' || autoId === 'beecatcher' || name === 'website') continue;
               await inp.fill(password);
               break;
             }
