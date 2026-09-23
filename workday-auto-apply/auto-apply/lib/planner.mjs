@@ -691,6 +691,32 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     || isMandatoryField(rawLabel, fieldObj)
     || fieldObj.required === true;
 
+  // Centralized 4-Tier Architecture:
+  // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+  const resolved = await resolveClientAnswer({
+    ...fieldObj,
+    label: rawLabel,
+    required: requiredUnknown,
+  }, profile, {
+    page,
+    plan,
+    company,
+    resumePath,
+    url,
+    tenant: resolvedTenant,
+    step: stepName,
+    required: requiredUnknown,
+    forceLlm: requiredUnknown,
+  });
+  if (resolved?.answer) {
+    const validity = validateResolvedValue(fieldObj, resolved.answer);
+    if (!validity.valid) {
+      console.log(`    ⚠️  Pre-fill validity check rejected "${String(resolved.answer)}" for "${rawLabel}": ${validity.reason}`);
+      return null;
+    }
+    return rememberResolvedAnswer(profile, normalized, resolved.answer);
+  }
+
   if (options.useQuestionEngine !== false) {
     const engineHit = await resolveDynamicAnswer(
       {
@@ -714,31 +740,6 @@ export async function resolveField(field, profile, qaStore, options = {}) {
       }
       return rememberResolvedAnswer(profile, normalized, engineHit.answer);
     }
-  }
-
-  // Legacy path (scan-batch / callers that opt out of question engine only).
-  const resolved = await resolveClientAnswer({
-    ...fieldObj,
-    label: rawLabel,
-    required: requiredUnknown,
-  }, profile, {
-    page,
-    plan,
-    company,
-    resumePath,
-    url,
-    tenant: resolvedTenant,
-    step: stepName,
-    required: requiredUnknown,
-    forceLlm: requiredUnknown,
-  });
-  if (resolved?.answer) {
-    const validity = validateResolvedValue(fieldObj, resolved.answer);
-    if (!validity.valid) {
-      console.log(`    ⚠️  Pre-fill validity check rejected "${String(resolved.answer)}" for "${rawLabel}": ${validity.reason}`);
-      return null;
-    }
-    return rememberResolvedAnswer(profile, normalized, resolved.answer);
   }
 
   if (!requiredUnknown) return null;

@@ -313,9 +313,14 @@ export function validateLlmFieldDecision(raw, context = {}) {
     : String(decision.answer ?? '');
   const honestMiss = /^(0|na|n\/a|no)\b|do not have|have not used|no (professional )?experience|not used/i
     .test(rawAnswerPreview.trim());
-  if (!decision || (decision.grounded !== true && !honestMiss)) return null;
-  const confidence = Number(decision.confidence);
-  if (!Number.isFinite(confidence) || confidence < (honestMiss ? 0.45 : 0.65)) return null;
+  if (!decision) return null;
+
+  // For free-text input fields without options, require grounded evidence or honest miss
+  if (!options.length) {
+    if (decision.grounded !== true && !honestMiss) return null;
+    const confidence = Number(decision.confidence);
+    if (!Number.isFinite(confidence) || confidence < (honestMiss ? 0.45 : 0.65)) return null;
+  }
 
   const rawAnswers = Array.isArray(decision.answer)
     ? decision.answer
@@ -331,13 +336,48 @@ export function validateLlmFieldDecision(raw, context = {}) {
     });
   if (!answers.length) return null;
 
+  // When options exist (Dropdown, Radio, Multi-select), efficiently map to existing options
   if (options.length && code >= 2) {
-    const exact = answers.map((answer) =>
-      options.find((option) => option.toLowerCase() === answer.toLowerCase())
-    );
-    if (exact.some((answer) => !answer)) return null;
-    if (code !== 5 && exact.length !== 1) return null;
-    return code === 5 ? [...new Set(exact)].join(', ') : exact[0];
+    const matchedList = answers.map((answer) => {
+      const lower = answer.toLowerCase().trim();
+      // 1. Exact match
+      const exact = options.find((opt) => opt.toLowerCase().trim() === lower);
+      if (exact) return exact;
+
+      // 2. Yes/No questions
+      if (isYesNoQuestionLabel(context.question || '')) {
+        const yn = extractYesNoAnswer(lower);
+        if (yn) {
+          const ynOpt = options.find((opt) => extractYesNoAnswer(opt) === yn);
+          if (ynOpt) return ynOpt;
+        }
+      }
+
+      // 3. Substring / partial match
+      const partial = options.find((opt) => {
+        const o = opt.toLowerCase().trim();
+        return o.includes(lower) || lower.includes(o);
+      });
+      if (partial) return partial;
+
+      // 4. Fuzzy similarity match
+      const scored = options
+        .map((opt) => ({ opt, score: fuzzyScore(answer, opt) }))
+        .sort((a, b) => b.score - a.score)[0];
+      if (scored && scored.score >= 0.45) return scored.opt;
+
+      return null;
+    }).filter(Boolean);
+
+    if (!matchedList.length) {
+      const fallback = pickFromOptions(rawAnswerPreview, options);
+      if (fallback && options.some((o) => o.toLowerCase() === fallback.toLowerCase())) {
+        return fallback;
+      }
+      return null;
+    }
+    if (code !== 5) return matchedList[0];
+    return [...new Set(matchedList)].join(', ');
   }
 
   if (code === 5) return [...new Set(answers)].join(', ');

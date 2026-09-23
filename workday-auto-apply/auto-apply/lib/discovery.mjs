@@ -211,7 +211,8 @@ const CONTINUE_APPLICATION_SELECTORS = [
 
 /** True when the multi-step application wizard is visible (not JD / login). */
 export async function isWorkdayWizardVisible(page) {
-  const url = page.url();
+  if (!page || typeof page.$ !== 'function') return false;
+  const url = typeof page.url === 'function' ? page.url() : '';
   if (/\/login(?:\?|$)/i.test(url)) return false;
 
   // If on login, registration, or Social SSO screen, it is NOT the wizard
@@ -516,6 +517,11 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
   const postScan = await prescanGatewayElements(page);
 
   if (mode === 'signin') {
+    // If on reset password form, do NOT treat it as signin form
+    if (postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || !postScan.hasEmailInput)) {
+      console.log('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
+      return;
+    }
     // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
     if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
       console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');

@@ -986,39 +986,41 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
  * Fill every visible Workday selectOne widget on the current page (Application Questions).
  */
 async function resolveDropdownAnswer(page, profile, questionLabel, q, stepName) {
-  const hit = await resolveDynamicAnswer(
+  // Centralized 4-Tier Architecture:
+  // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+  const direct = await resolveClientAnswer(
     {
       ...q,
       label: questionLabel,
       fieldType: q.fieldType || 'dropdown',
+      options: q.options || [],
       required: q.required ?? true,
     },
     profile,
-    {
-      page,
-      stepName,
-      pageNumber: 1,
-      resumePath: profile?._resumePath,
-      allowLlm: true,
-    },
+    { page, resumePath: profile?._resumePath, forceLlm: true, step: stepName },
   );
-  let answer = hit?.answer || null;
+  let answer = direct?.answer || null;
   if (!answer) {
-    answer = await matchQuestionToAnswer(questionLabel, profile);
-  }
-  if (!answer) {
-    const direct = await resolveClientAnswer(
+    const hit = await resolveDynamicAnswer(
       {
         ...q,
         label: questionLabel,
         fieldType: q.fieldType || 'dropdown',
-        options: q.options || [],
         required: q.required ?? true,
       },
       profile,
-      { page, resumePath: profile?._resumePath, forceLlm: true },
+      {
+        page,
+        stepName,
+        pageNumber: 1,
+        resumePath: profile?._resumePath,
+        allowLlm: true,
+      },
     );
-    answer = direct?.answer || null;
+    answer = hit?.answer || null;
+  }
+  if (!answer) {
+    answer = await matchQuestionToAnswer(questionLabel, profile);
   }
   return answer;
 }
@@ -2208,42 +2210,48 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       const optionPreview = (q.options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean);
       console.log(`    🔎 Live parse [${q.fieldType}]: "${questionLabel.slice(0, 70)}"${optionPreview.length ? ` | options: ${optionPreview.slice(0, 6).join(', ')}${optionPreview.length > 6 ? ', ...' : ''}` : ' | input field'}`);
 
-      const tenant = profile?._tenant || getWorkdayTenant(page.url());
-      const resolved = await resolveDynamicAnswer(
+      // Centralized 4-Tier Architecture:
+      // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+      const directClient = await resolveClientAnswer(
         {
-      ...q,
-      label: questionLabel,
-      required: q.required ?? true,
+          ...q,
+          label: questionLabel,
           fieldType: q.fieldType,
-          type: q.fieldType,
+          options: q.options,
+          required: q.required ?? true,
         },
         profile,
         {
           page,
-          stepName: stepName || profile?._currentStep || '',
-          pageNumber: 1,
-      resumePath: profile?._resumePath,
-          qaStore,
-          allowLlm: true,
+          resumePath: profile?._resumePath,
+          forceLlm: true,
+          step: stepName || profile?._currentStep || '',
         },
       );
-      let answer = resolved?.answer || null;
+      let answer = directClient?.answer || null;
       if (!answer) {
-        answer = await matchQuestionToAnswer(questionLabel, profile, qaStore);
-      }
-      if (!answer) {
-        const directClient = await resolveClientAnswer(
+        const resolved = await resolveDynamicAnswer(
           {
             ...q,
             label: questionLabel,
-            fieldType: q.fieldType,
-            options: q.options,
             required: q.required ?? true,
+            fieldType: q.fieldType,
+            type: q.fieldType,
           },
           profile,
-          { page, resumePath: profile?._resumePath, forceLlm: true },
+          {
+            page,
+            stepName: stepName || profile?._currentStep || '',
+            pageNumber: 1,
+            resumePath: profile?._resumePath,
+            qaStore,
+            allowLlm: true,
+          },
         );
-        answer = directClient?.answer || null;
+        answer = resolved?.answer || null;
+      }
+      if (!answer) {
+        answer = await matchQuestionToAnswer(questionLabel, profile, qaStore);
       }
     if (!answer) {
       console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);

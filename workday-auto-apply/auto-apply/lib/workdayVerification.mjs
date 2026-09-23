@@ -5,7 +5,7 @@
  * navigates or fills them in the active Playwright browser session, and activates the account.
  */
 
-import { extractWorkdayCompanyName } from './discovery.mjs';
+import { extractWorkdayCompanyName, isInNavOrHeader, isWorkdayWizardVisible } from './discovery.mjs';
 
 /**
  * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
@@ -176,6 +176,298 @@ export async function detectWrongPasswordOrLocked(page) {
 }
 
 /**
+ * Returns true if page is a Workday password reset / set page.
+ */
+export async function isWorkdayPasswordResetSetPage(page) {
+  try {
+    if (!page) return false;
+    const url = typeof page.url === 'function' ? page.url() : '';
+    if (url.includes('/passwordreset/')) return true;
+
+    if (typeof page.evaluate === 'function') {
+      return await page.evaluate(() => {
+        const u = window.location.href || '';
+        if (u.includes('/passwordreset/')) return true;
+
+        const inputs = Array.from(document.querySelectorAll('input')).filter(i => {
+          const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+          const name = (i.name || '').toLowerCase();
+          return autoId !== 'beecatcher' && name !== 'website' && i.offsetParent !== null;
+        });
+
+        const buttons = Array.from(document.querySelectorAll('button, a')).filter(b => b.offsetParent !== null);
+
+        const hasResetBtn = buttons.some(b => {
+          const autoId = (b.getAttribute('data-automation-id') || '').toLowerCase();
+          const text = (b.textContent || '').trim().toLowerCase();
+          return autoId.includes('resetpassword') || autoId.includes('changepassword') ||
+                 text === 'reset password' || text === 'change password' || text.includes('reset password');
+        });
+
+        const hasNewOrVerifyPwd = inputs.some(i => {
+          const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+          const name = (i.name || '').toLowerCase();
+          return autoId.includes('newpassword') || autoId.includes('verify') || name.includes('newpassword') || name.includes('verify');
+        });
+
+        const hasEmail = inputs.some(i => {
+          const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+          const name = (i.name || '').toLowerCase();
+          return (i.type === 'email' || autoId.includes('email') || name.includes('email') || autoId.includes('username')) && !autoId.includes('password');
+        });
+
+        const pwdCount = inputs.filter(i => i.type === 'password' || (i.getAttribute('data-automation-id') || '').toLowerCase().includes('password')).length;
+
+        return (hasResetBtn && (hasNewOrVerifyPwd || pwdCount >= 2 || !hasEmail)) || (pwdCount >= 2 && !hasEmail && u.includes('password'));
+      }).catch(() => false);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Automatically completes the Workday Password Setup / Password Reset form.
+ * 1. Locates new password and verify password fields with SPA wait/polling
+ * 2. Types password with events (input, change, blur) and React native value setter
+ * 3. Clicks Reset Password / Change Password / Submit button
+ * 4. Handles post-reset navigation, clicking "Sign In" / "Continue" or automatically entering credentials to log in!
+ *
+ * @param {import('playwright').Page} page
+ * @param {string} [email]
+ * @param {string} [password]
+ * @returns {Promise<boolean>} True if password setup form was detected and submitted
+ */
+export async function completeWorkdayPasswordResetForm(page, email, password) {
+  const targetPassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+  const targetEmail = email || process.env.WORKDAY_EMAIL || '';
+  if (!page) return false;
+
+  console.log('   🔍 [WorkdayBot] Checking for Workday password reset / set form...');
+
+  const url = typeof page.url === 'function' ? page.url() : '';
+  const isLikelyResetUrl = url.includes('/passwordreset/') || url.includes('password') || url.includes('reset');
+  const maxAttempts = isLikelyResetUrl ? 8 : 1;
+  let formReady = false;
+
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const isReset = await isWorkdayPasswordResetSetPage(page);
+    if (isReset) {
+      const inputCount = (typeof page.evaluate === 'function')
+        ? await page.evaluate(() => {
+            return document.querySelectorAll('input[type="password"], input[data-automation-id*="password" i], input[data-automation-id*="Password" i]').length;
+          }).catch(() => 0)
+        : 1;
+      if (inputCount >= 1) {
+        formReady = true;
+        break;
+      }
+    }
+    if (attempt < maxAttempts - 1) {
+      await page.waitForTimeout(600);
+    }
+  }
+
+  if (!formReady) {
+    console.log('   ℹ️  [WorkdayBot] Password reset form not detected within timeout.');
+    return false;
+  }
+
+  console.log('   🔑 [WorkdayBot] Password setup form detected — setting new password and confirmation password...');
+
+  // 1. Fill fields in DOM with full React event dispatching
+  if (typeof page.evaluate === 'function') {
+    await page.evaluate((pwd) => {
+      const rawInputs = Array.from(document.querySelectorAll('input')).filter(i => {
+        const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+        const name = (i.name || '').toLowerCase();
+        return autoId !== 'beecatcher' && name !== 'website' && i.offsetParent !== null;
+      });
+
+      const pwdInputs = rawInputs.filter(i => {
+        const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+        const type = (i.type || '').toLowerCase();
+        return type === 'password' || autoId.includes('password');
+      });
+
+      if (pwdInputs.length === 0) return { success: false, filled: 0 };
+
+      let newInp = pwdInputs.find(i => {
+        const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+        const name = (i.name || '').toLowerCase();
+        return (autoId.includes('new') || name.includes('new')) && !autoId.includes('verify') && !name.includes('verify');
+      }) || pwdInputs[0];
+
+      let verifyInp = pwdInputs.find(i => {
+        const autoId = (i.getAttribute('data-automation-id') || '').toLowerCase();
+        const name = (i.name || '').toLowerCase();
+        const ph = (i.placeholder || '').toLowerCase();
+        return autoId.includes('verify') || autoId.includes('confirm') || name.includes('verify') || name.includes('confirm') || ph.includes('verify') || ph.includes('confirm');
+      }) || (pwdInputs.length > 1 ? pwdInputs[1] : null);
+
+      const setVal = (el, val) => {
+        if (!el) return;
+        el.focus();
+        const proto = window.HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) {
+          setter.call(el, val);
+        } else {
+          el.value = val;
+        }
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      };
+
+      if (newInp) setVal(newInp, pwd);
+      if (verifyInp) setVal(verifyInp, pwd);
+
+      return {
+        success: true,
+        hasNew: !!newInp,
+        hasVerify: !!verifyInp,
+        count: pwdInputs.length,
+      };
+    }, targetPassword).catch(() => ({ success: false }));
+  }
+
+  // 2. Also fill via Playwright handles to ensure Playwright's browser layer synchronizes keystrokes
+  if (typeof page.$$ === 'function') {
+    const pwHandles = await page.$$([
+      'input[data-automation-id="newPassword"]',
+      'input[data-automation-id="verifyPassword"]',
+      'input[data-automation-id="verifyNewPassword"]',
+      'input[type="password"]',
+    ].join(', ')).catch(() => []);
+
+    for (const h of pwHandles) {
+      if (await h.isVisible().catch(() => false)) {
+        const autoId = (await h.getAttribute('data-automation-id').catch(() => '')).toLowerCase();
+        if (autoId === 'beecatcher') continue;
+        await h.fill(targetPassword).catch(() => {});
+        await page.waitForTimeout(100);
+      }
+    }
+  }
+
+  console.log('   ✍️  [WorkdayBot] Successfully filled New Password and Confirmation Password.');
+  await page.waitForTimeout(600);
+
+  // 3. Locate and click submit button
+  console.log('   💾 [WorkdayBot] Submitting new password and confirmation on reset form...');
+  const saveBtn = (typeof page.$ === 'function')
+    ? await page.$([
+        'button[data-automation-id="changePasswordButton"]:not([disabled])',
+        'button[data-automation-id="resetPasswordButton"]:not([disabled])',
+        'button[data-automation-id="submitButton"]:not([disabled])',
+        'button[type="submit"]:not([disabled])',
+        'button:has-text("Change Password"):not([disabled])',
+        'button:has-text("Reset Password"):not([disabled])',
+        'button:has-text("Submit"):not([disabled])',
+        'button:has-text("Save"):not([disabled])',
+        'button[data-automation-id="changePasswordButton"]',
+        'button[data-automation-id="resetPasswordButton"]',
+        'button[data-automation-id="submitButton"]',
+        'button:has-text("Change Password")',
+        'button:has-text("Reset Password")',
+        'button:has-text("Save")',
+        'button:has-text("Submit")',
+        'button[type="submit"]',
+      ].join(', ')).catch(() => null)
+    : null;
+
+  if (saveBtn && await saveBtn.isVisible().catch(() => false)) {
+    await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
+  } else if (page.keyboard) {
+    await page.keyboard.press('Enter').catch(() => {});
+  }
+
+  await page.waitForTimeout(4000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await page.waitForTimeout(2000);
+
+  // 4. Post-reset check: If application wizard is already reached, return immediately
+  if (typeof isWorkdayWizardVisible === 'function' && await isWorkdayWizardVisible(page)) {
+    console.log('   ✅ [WorkdayBot] Application wizard already reached post-reset!');
+    return true;
+  }
+
+  // 5. Post-reset check: Click any "Sign In" or "Continue" action button
+  const postActionBtn = (typeof page.$ === 'function')
+    ? await page.$([
+        'button[data-automation-id*="signIn" i]:visible',
+        'a[data-automation-id*="signIn" i]:visible',
+        'button:has-text("Sign In"):visible',
+        'a:has-text("Sign In"):visible',
+        'button:has-text("Continue"):visible',
+        'a:has-text("Continue"):visible',
+        'button[data-automation-id*="continue" i]:visible',
+        'a[data-automation-id*="continue" i]:visible',
+        'button:has-text("Log In"):visible',
+        'a:has-text("Log In"):visible',
+        'button[data-automation-id="adventureButton"]:visible',
+        'a[data-automation-id="adventureButton"]:visible',
+        'button[data-automation-id="jobPostingApplyButton"]:visible',
+        'a[data-automation-id="jobPostingApplyButton"]:visible',
+      ].join(', ')).catch(() => null)
+    : null;
+
+  if (postActionBtn && !await isInNavOrHeader(postActionBtn)) {
+    console.log('   🔗 [WorkdayBot] Clicking post-reset action button ("Sign In" / "Continue")...');
+    await postActionBtn.click({ force: true }).catch(() => postActionBtn.evaluate(el => el.click()));
+    await page.waitForTimeout(3000);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  }
+
+  // 6. Post-reset check: If login form appears (Email + Password), automatically fill credentials and submit
+  const emailInp = (typeof page.$ === 'function')
+    ? await page.$('input[data-automation-id="email"]:visible, input[data-automation-id="userName"]:visible, input[type="email"]:visible, input[name="email"]:visible, input[name="userName"]:visible').catch(() => null)
+    : null;
+  const pwdInp = (typeof page.$ === 'function')
+    ? await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible, input[name="password"]:visible').catch(() => null)
+    : null;
+  const submitSignIn = (typeof page.$ === 'function')
+    ? await page.$('button[data-automation-id="signInSubmitButton"]:visible, button:has-text("Sign In"):visible, button[type="submit"]:visible').catch(() => null)
+    : null;
+
+  if (emailInp && pwdInp && submitSignIn && targetEmail) {
+    console.log(`   🔐 [WorkdayBot] Sign-in form visible post-reset — automatically logging in as ${targetEmail}...`);
+    await emailInp.click().catch(() => {});
+    await emailInp.fill(targetEmail);
+    await page.waitForTimeout(200);
+    await pwdInp.click().catch(() => {});
+    await pwdInp.fill(targetPassword);
+    await page.waitForTimeout(200);
+    await submitSignIn.click({ force: true }).catch(() => submitSignIn.evaluate(el => el.click()));
+    await page.waitForTimeout(4000);
+    try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+  }
+
+  // 7. Post-reset check: If URL still contains a redirect parameter, navigate directly to destination
+  try {
+    if (typeof page.url === 'function') {
+      const currentUrl = page.url();
+      if (currentUrl.includes('passwordreset') && currentUrl.includes('redirect=')) {
+        const u = new URL(currentUrl);
+        const redirectParam = u.searchParams.get('redirect');
+        if (redirectParam) {
+          const targetUrl = new URL(redirectParam, u.origin).toString();
+          console.log(`   🚀 [WorkdayBot] Navigating directly to post-reset redirect destination: ${targetUrl}`);
+          await page.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
+          await page.waitForTimeout(3000);
+          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+        }
+      }
+    }
+  } catch {}
+
+  console.log('   ✅ [WorkdayBot] Password reset form submitted and post-reset flow executed.');
+  return true;
+}
+
+/**
  * Polls ZOHO_MAIL_READER for a Workday verification email and handles either link or OTP code.
  * 
  * @param {import('playwright').Page} page - Active browser page in your bot
@@ -227,202 +519,8 @@ export async function resolveWorkdayVerification(page, { email, password, compan
           await page.waitForTimeout(3000);
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-          // If link leads to a New Password / Password Reset screen:
-          const pwdInputs = (typeof page.$$ === 'function')
-            ? await page.$$([
-                'input[data-automation-id="newPassword"]:visible',
-                'input[data-automation-id="password"]:visible',
-                'input[name="newPassword"]:visible',
-                'input[name="password"]:visible',
-                'input[type="password"]:visible',
-              ].join(', ')).catch(() => [])
-            : [];
-
-          if (pwdInputs.length > 0 && password) {
-            console.log('   🔑 [WorkdayBot] Password setup form detected on verification page — setting new password and confirmation password...');
-
-            // Filter out honeypot fields ('beecatcher', 'website')
-            const cleanPwdInputs = [];
-            for (const inp of pwdInputs) {
-              const autoId = (await inp.getAttribute('data-automation-id').catch(() => '')).toLowerCase();
-              const name = (await inp.getAttribute('name').catch(() => '')).toLowerCase();
-              if (autoId === 'beecatcher' || name === 'website') continue;
-              cleanPwdInputs.push(inp);
-            }
-
-            let newPwdInput = null;
-            let verifyPwdInput = null;
-
-            // Identify fields by verify/confirm indicators
-            for (const inp of cleanPwdInputs) {
-              const autoId = (await inp.getAttribute('data-automation-id').catch(() => '')).toLowerCase();
-              const name = (await inp.getAttribute('name').catch(() => '')).toLowerCase();
-              const placeholder = (await inp.getAttribute('placeholder').catch(() => '')).toLowerCase();
-              const aria = (await inp.getAttribute('aria-label').catch(() => '')).toLowerCase();
-              const isVerify = autoId.includes('verify') || autoId.includes('confirm') ||
-                               name.includes('verify') || name.includes('confirm') ||
-                               placeholder.includes('verify') || placeholder.includes('confirm') ||
-                               aria.includes('verify') || aria.includes('confirm');
-              if (isVerify) {
-                verifyPwdInput = inp;
-              } else if (!newPwdInput) {
-                newPwdInput = inp;
-              }
-            }
-
-            if (!newPwdInput && cleanPwdInputs.length > 0) newPwdInput = cleanPwdInputs[0];
-            if (!verifyPwdInput && cleanPwdInputs.length > 1) verifyPwdInput = cleanPwdInputs[1];
-
-            const typePassword = async (inp, val, label) => {
-              if (!inp) return;
-              try {
-                if (typeof inp.click === 'function') await inp.click().catch(() => {});
-                if (typeof inp.fill === 'function') {
-                  await inp.fill('').catch(() => {});
-                  await inp.fill(val);
-                }
-                if (typeof inp.dispatchEvent === 'function') {
-                  await inp.dispatchEvent('input').catch(() => {});
-                  await inp.dispatchEvent('change').catch(() => {});
-                }
-                if (typeof inp.evaluate === 'function') {
-                  await inp.evaluate(el => {
-                    el.dispatchEvent(new Event('input', { bubbles: true }));
-                    el.dispatchEvent(new Event('change', { bubbles: true }));
-                    el.dispatchEvent(new Event('blur', { bubbles: true }));
-                  }).catch(() => {});
-                }
-                await page.waitForTimeout(200);
-                console.log(`   ✍️  [WorkdayBot] Filled ${label}.`);
-              } catch (err) {
-                console.warn(`   ⚠️  [WorkdayBot] Error filling ${label}:`, err.message);
-              }
-            };
-
-            await typePassword(newPwdInput, password, 'New Password');
-
-            if (verifyPwdInput && verifyPwdInput !== newPwdInput) {
-              await typePassword(verifyPwdInput, password, 'Confirmation Password');
-            } else {
-              const fallbackVerify = (typeof page.$ === 'function')
-                ? await page.$([
-                    'input[data-automation-id*="verify" i]:visible',
-                    'input[data-automation-id*="confirm" i]:visible',
-                    'input[name*="verify" i]:visible',
-                    'input[name*="confirm" i]:visible',
-                    'input[id*="verify" i]:visible',
-                    'input[id*="confirm" i]:visible',
-                    'input[placeholder*="verify" i]:visible',
-                    'input[aria-label*="verify" i]:visible',
-                  ].join(', ')).catch(() => null)
-                : null;
-              if (fallbackVerify) {
-                await typePassword(fallbackVerify, password, 'Confirmation Password (fallback)');
-                verifyPwdInput = fallbackVerify;
-              }
-            }
-
-            // Wait a moment for Workday client-side password validators to update
-            await page.waitForTimeout(800);
-
-            // Trigger submit via Enter key on the confirmation field
-            if (verifyPwdInput && typeof verifyPwdInput.press === 'function') {
-              await verifyPwdInput.press('Enter').catch(() => {});
-              await page.waitForTimeout(500);
-            }
-
-            // Locate submit button
-            const saveBtn = (typeof page.$ === 'function')
-              ? await page.$([
-                  'button[data-automation-id="changePasswordButton"]:not([disabled])',
-                  'button[data-automation-id="resetPasswordButton"]:not([disabled])',
-                  'button[data-automation-id="submitButton"]:not([disabled])',
-                  'button[type="submit"]:not([disabled])',
-                  'button:has-text("Change Password"):not([disabled])',
-                  'button:has-text("Reset Password"):not([disabled])',
-                  'button:has-text("Submit"):not([disabled])',
-                  'button:has-text("Save"):not([disabled])',
-                  'button[data-automation-id="changePasswordButton"]',
-                  'button[data-automation-id="resetPasswordButton"]',
-                  'button[data-automation-id="submitButton"]',
-                  'button:has-text("Change Password")',
-                  'button:has-text("Reset Password")',
-                  'button:has-text("Save")',
-                  'button:has-text("Submit")',
-                  'button[type="submit"]',
-                ].join(', ')).catch(() => null)
-              : null;
-
-            if (saveBtn && await saveBtn.isVisible().catch(() => false)) {
-              console.log('   💾 [WorkdayBot] Submitting new password and confirmation on reset form...');
-              await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
-              await page.waitForTimeout(4000);
-              try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-            }
-
-            // Post-reset step 1: Click any "Sign In", "Continue", or "Done" button that appears
-            const postActionBtn = (typeof page.$ === 'function')
-              ? await page.$([
-                  'button[data-automation-id*="signIn" i]:visible',
-                  'a[data-automation-id*="signIn" i]:visible',
-                  'button:has-text("Sign In"):visible',
-                  'a:has-text("Sign In"):visible',
-                  'button:has-text("Continue"):visible',
-                  'a:has-text("Continue"):visible',
-                  'button:has-text("Log In"):visible',
-                  'a:has-text("Log In"):visible',
-                  'button:has-text("Done"):visible',
-                ].join(', ')).catch(() => null)
-              : null;
-            if (postActionBtn && await postActionBtn.isVisible().catch(() => false)) {
-              console.log('   🔗 [WorkdayBot] Clicking post-reset action button ("Sign In" / "Continue")...');
-              await postActionBtn.click({ force: true }).catch(() => postActionBtn.evaluate(el => el.click()));
-              await page.waitForTimeout(3000);
-              try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-            }
-
-            // Post-reset step 2: If login form appears (Email + Password), automatically fill credentials and submit
-            const emailInp = (typeof page.$ === 'function')
-              ? await page.$('input[data-automation-id="email"]:visible, input[data-automation-id="userName"]:visible, input[type="email"]:visible, input[name="email"]:visible, input[name="userName"]:visible').catch(() => null)
-              : null;
-            const pwdInp = (typeof page.$ === 'function')
-              ? await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible, input[name="password"]:visible').catch(() => null)
-              : null;
-            const submitSignIn = (typeof page.$ === 'function')
-              ? await page.$('button[data-automation-id="signInSubmitButton"]:visible, button:has-text("Sign In"):visible, button[type="submit"]:visible').catch(() => null)
-              : null;
-
-            if (emailInp && pwdInp && submitSignIn && await submitSignIn.isVisible().catch(() => false)) {
-              console.log(`   🔐 [WorkdayBot] Login page appeared after reset — automatically logging in as ${email}...`);
-              await emailInp.click().catch(() => {});
-              await emailInp.fill(email);
-              await page.waitForTimeout(200);
-              await pwdInp.click().catch(() => {});
-              await pwdInp.fill(password);
-              await page.waitForTimeout(200);
-              await submitSignIn.click({ force: true }).catch(() => submitSignIn.evaluate(el => el.click()));
-              await page.waitForTimeout(4000);
-              try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
-            }
-
-            // Post-reset step 3: If URL contains a redirect parameter and we haven't entered the wizard yet, navigate directly to destination
-            try {
-              if (typeof page.url === 'function') {
-                const currentUrl = page.url();
-                if (currentUrl.includes('passwordreset') && currentUrl.includes('redirect=')) {
-                  const u = new URL(currentUrl);
-                  const redirectParam = u.searchParams.get('redirect');
-                  if (redirectParam) {
-                    const targetUrl = new URL(redirectParam, u.origin).toString();
-                    console.log(`   🚀 [WorkdayBot] Navigating directly to post-reset redirect destination: ${targetUrl}`);
-                    await page.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-                    await page.waitForTimeout(3000);
-                    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-                  }
-                }
-              }
-            } catch {}
-          }
+          // Complete password setup form if present on the page
+          const resetCompleted = await completeWorkdayPasswordResetForm(page, email, password);
 
           // After activation link loads, check if there is an action button (e.g. "Continue", "Sign In", "Apply")
           if (typeof page.locator === 'function') {
@@ -447,8 +545,9 @@ export async function resolveWorkdayVerification(page, { email, password, compan
             }
           }
 
-          console.log('   ✅ [WorkdayBot] Successfully verified/activated account and set password in browser session.');
-          return { success: true, type: 'link', url: cleanLink };
+          const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
+          console.log(`   ✅ [WorkdayBot] Account verification / password link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
+          return { success: true, type: 'link', url: cleanLink, passwordReset: resetCompleted, onWizard };
         }
         // Case B: Workday sends a numeric verification code / PIN
         if (data.verificationCode) {
@@ -615,6 +714,13 @@ export async function executeWorkdayForgotPassword(page, { email, password, comp
     return { success: false, reason: verifResult?.reason || 'timeout' };
   }
 
-  console.log('   ✅ [WorkdayBot] Password reset link processed successfully.');
-  return { success: true, url: verifResult.url };
+  // Safety net: check if page is still on Password Reset Set form
+  if (await isWorkdayPasswordResetSetPage(page)) {
+    console.log('   🔑 [WorkdayBot] Page still on Password Reset form — completing password reset now...');
+    await completeWorkdayPasswordResetForm(page, email, password);
+  }
+
+  const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
+  console.log(`   ✅ [WorkdayBot] Password reset link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
+  return { success: true, url: verifResult.url, onWizard };
 }

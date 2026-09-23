@@ -28,6 +28,8 @@ import {
   resolveWorkdayVerification,
   isWorkdayVerificationPage,
   isWorkdayForgotPasswordPage,
+  isWorkdayPasswordResetSetPage,
+  completeWorkdayPasswordResetForm,
   detectWrongPasswordOrLocked,
   executeWorkdayForgotPassword,
 } from './workdayVerification.mjs';
@@ -36,6 +38,8 @@ export {
   resolveWorkdayVerification,
   isWorkdayVerificationPage,
   isWorkdayForgotPasswordPage,
+  isWorkdayPasswordResetSetPage,
+  completeWorkdayPasswordResetForm,
   detectWrongPasswordOrLocked,
   executeWorkdayForgotPassword,
 };
@@ -218,9 +222,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
 
     // Login on existing account failed (wrong password or locked) -> launch automated Forgot Password flow
     console.log('   📩 Existing account password mismatched or locked — launching automated Forgot Password recovery via Zoho Mail...');
+    const effectivePassword = createdPassword || password || process.env.WORKDAY_PASSWORD;
     const forgotResult = await executeWorkdayForgotPassword(page, {
       email,
-      password: createdPassword,
+      password: effectivePassword,
       company,
       timeoutMs: 75000,
     });
@@ -230,11 +235,12 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       await page.waitForTimeout(3000);
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-      if (await isWorkdayWizardVisible(page)) {
+      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+        console.log('   ✅ Application wizard active post-password reset!');
         return true;
       }
       await handleAdaptiveGateway(page, 'signin');
-      const postResetLogin = await workdayLogin(page, email, createdPassword);
+      const postResetLogin = await workdayLogin(page, email, effectivePassword);
       if (postResetLogin === true) {
         return finishSuccessfulLogin(page, mode, profile);
       }
@@ -311,9 +317,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
   const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
   if (isWrongOrLocked) {
     console.log('   🔐 Password invalid or account locked after registration/switch — initiating automated Forgot Password recovery via Zoho Mail...');
+    const effectivePassword = createdPassword || password || process.env.WORKDAY_PASSWORD;
     const forgotResult = await executeWorkdayForgotPassword(page, {
       email,
-      password: createdPassword,
+      password: effectivePassword,
       company,
       timeoutMs: 75000,
     });
@@ -323,11 +330,12 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       await page.waitForTimeout(3000);
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-      if (await isWorkdayWizardVisible(page)) {
+      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+        console.log('   ✅ Application wizard active post-password reset!');
         return true;
       }
       await handleAdaptiveGateway(page, 'signin');
-      const postResetLogin = await workdayLogin(page, email, createdPassword);
+      const postResetLogin = await workdayLogin(page, email, effectivePassword);
       if (postResetLogin === true) {
         return finishSuccessfulLogin(page, mode, profile);
       }
@@ -384,6 +392,19 @@ export async function isWorkdayLogin(page) {
  */
 export async function workdayLogin(page, email, password) {
   console.log('   Logging into Workday...');
+
+  // 0. Safety Net: If on Password Reset Form, complete password reset first
+  if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
+    console.log('   🔑 [WorkdayBot] Active Password Reset form detected on login entry — setting new password and submitting form...');
+    await completeWorkdayPasswordResetForm(page, email, password);
+    await page.waitForTimeout(3000);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   ✅ [WorkdayBot] Entered application wizard directly after password reset.');
+      return true;
+    }
+  }
 
   // Adaptively ensure we are on the sign-in form (handles SSO "Sign in with email" and "Sign In" link below Create Account)
   await handleAdaptiveGateway(page, 'signin');
@@ -650,8 +671,8 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         return finishSuccessfulLogin(page, mode, profile);
       }
 
-      if (loginResult === 'locked') {
-        console.log('   🔒 Workday reports account is locked — initiating automated Forgot Password recovery via Zoho Mail...');
+      if (loginResult === 'locked' || loginResult === 'wrong-password-or-locked') {
+        console.log('   🔒 Workday reports invalid credentials or account locked — initiating automated Forgot Password recovery via Zoho Mail...');
         const company = extractWorkdayCompanyName(page.url());
         const forgotSuccess = await executeWorkdayForgotPassword(page, {
           email,
