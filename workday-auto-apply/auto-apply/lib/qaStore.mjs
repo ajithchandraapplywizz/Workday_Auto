@@ -498,7 +498,7 @@ export async function appendManualReviewRecord({
   attemptedValue = '',
   reason = '',
   step = '',
-  filePath = DEFAULT_MANUAL_REVIEW_PATH,
+  filePath = null,
 } = {}) {
   const record = {
     timestamp: new Date().toISOString(),
@@ -512,6 +512,12 @@ export async function appendManualReviewRecord({
     reason: reason || 'unresolved',
     step: step || '',
   };
+
+  console.log(`  📋 [MANUAL REVIEW] Logged question to manual review: "${(questionLabel || '').slice(0, 50)}" (${record.workday_tenant})`);
+
+  if (!filePath) {
+    return record;
+  }
 
   return manualReviewWriteQueue = manualReviewWriteQueue.then(async () => {
     try {
@@ -538,7 +544,6 @@ export async function appendManualReviewRecord({
       }
 
       await fs.writeFile(filePath, JSON.stringify(records, null, 2), 'utf8');
-      console.log(`  📋 [MANUAL REVIEW] Logged question to manual review: "${(questionLabel || '').slice(0, 50)}" (${record.workday_tenant})`);
     } catch (err) {
       console.error(`  ⚠️  Failed to write manual review record: ${err.message}`);
     }
