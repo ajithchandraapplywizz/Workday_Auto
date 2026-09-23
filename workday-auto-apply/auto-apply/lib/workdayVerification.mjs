@@ -195,6 +195,7 @@ export async function resolveWorkdayVerification(page, { email, password, compan
 
   console.log(`   📧 [WorkdayBot] Waiting for verification email for ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
 
+  let notConnectedCount = 0;
   while (Date.now() < deadline) {
     await page.waitForTimeout(pollInterval);
     try {
@@ -347,8 +348,13 @@ export async function resolveWorkdayVerification(page, { email, password, compan
         }
       } else {
         if (data.reason === 'mailbox_not_connected') {
-          console.log(`   ℹ️  [WorkdayBot] Mailbox ${email} is not connected to Zoho Mail Reader — skipping automated email poll.`);
-          return { success: false, reason: 'mailbox_not_connected' };
+          notConnectedCount++;
+          if (notConnectedCount >= 3) {
+            console.log(`   ℹ️  [WorkdayBot] Mailbox ${email} is not connected to Zoho Mail Reader — skipping automated email poll.`);
+            return { success: false, reason: 'mailbox_not_connected' };
+          }
+          console.log(`   ⏳ [WorkdayBot] Mailbox ${email} checking connection... (${notConnectedCount}/3)`);
+          continue;
         }
         console.log(`   ⏳ [WorkdayBot] Waiting for email... (${data.reason || 'pending'})`);
       }
