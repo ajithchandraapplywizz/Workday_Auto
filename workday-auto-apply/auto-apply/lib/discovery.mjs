@@ -338,6 +338,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
 
 // ─── Check if an element is inside a nav or header ─────────────────────────
 export async function isInNavOrHeader(el) {
+  if (!el || typeof el.evaluate !== 'function') return false;
   return await el.evaluate(node => {
     let cur = node;
     while (cur && cur !== document.body) {

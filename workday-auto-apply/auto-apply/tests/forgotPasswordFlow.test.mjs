@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import {
   detectWrongPasswordOrLocked,
   isWorkdayForgotPasswordPage,
+  isWorkdayPasswordResetSetPage,
+  completeWorkdayPasswordResetForm,
   isWorkdayVerificationPage,
   executeWorkdayForgotPassword,
   sanitizeWorkdayUrl,
@@ -208,5 +210,63 @@ test('6. Pure link extraction: strips unwanted text, quotes, and punctuation for
     assert.ok(!cleaned.includes('<'));
     assert.ok(!cleaned.includes('>'));
   }
+});
+
+test('7. completeWorkdayPasswordResetForm: fills new & verify passwords, submits form, and executes post-reset navigation', async () => {
+  let filledNewPassword = '';
+  let filledVerifyPassword = '';
+  let clickedResetButton = false;
+  let clickedSignInButton = false;
+
+  const mockNewPwdInput = {
+    isVisible: async () => true,
+    getAttribute: async (attr) => (attr === 'data-automation-id' ? 'newPassword' : ''),
+    fill: async (val) => { filledNewPassword = val; },
+  };
+
+  const mockVerifyPwdInput = {
+    isVisible: async () => true,
+    getAttribute: async (attr) => (attr === 'data-automation-id' ? 'verifyPassword' : ''),
+    fill: async (val) => { filledVerifyPassword = val; },
+  };
+
+  const mockPage = {
+    url: () => 'https://salesforce.wd12.myworkdayjobs.com/External_Career_Site/passwordreset/abc123token?redirect=/apply',
+    evaluate: async (fn, arg) => {
+      return true;
+    },
+    $$: async (sel) => {
+      if (sel.includes('newPassword') || sel.includes('password')) {
+        return [mockNewPwdInput, mockVerifyPwdInput];
+      }
+      return [];
+    },
+    $: async (sel) => {
+      if (sel.includes('resetPasswordButton') || sel.includes('Reset Password') || sel.includes('submit')) {
+        return {
+          isVisible: async () => true,
+          click: async () => { clickedResetButton = true; },
+        };
+      }
+      if (sel.includes('signIn') || sel.includes('Sign In')) {
+        return {
+          isVisible: async () => true,
+          click: async () => { clickedSignInButton = true; },
+        };
+      }
+      return null;
+    },
+    waitForTimeout: async () => {},
+    waitForLoadState: async () => {},
+    keyboard: { press: async () => {} },
+  };
+
+  const completed = await completeWorkdayPasswordResetForm(mockPage, 'nikhila.narla@applywizard.ai', 'Applywizz@2026789');
+
+  assert.equal(completed, true, 'completeWorkdayPasswordResetForm must succeed');
+  assert.equal(filledNewPassword, 'Applywizz@2026789', 'Must fill new password');
+  assert.equal(filledVerifyPassword, 'Applywizz@2026789', 'Must fill verify password');
+  assert.equal(clickedResetButton, true, 'Must click reset password submit button');
+  assert.equal(clickedSignInButton, true, 'Must click post-reset Sign In button');
 });
 
