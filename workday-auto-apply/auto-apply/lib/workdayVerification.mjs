@@ -8,6 +8,36 @@
 import { extractWorkdayCompanyName } from './discovery.mjs';
 
 /**
+ * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
+ * HTML/markdown remnants, quotes, brackets, angle brackets, or trailing punctuation.
+ * Guarantees a pure, valid URL string to paste and run directly in the current active browser.
+ * 
+ * @param {string} raw
+ * @returns {string|null}
+ */
+export function sanitizeWorkdayUrl(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  let url = raw.trim();
+  // Strip any wrapping quotes, brackets, angle brackets
+  url = url.replace(/^["'`<\(\[\{]+|["'`>\)\]\}]+$/g, '');
+  // Extract strictly the http/https URL part if unwanted leading/trailing text exists
+  const match = url.match(/https?:\/\/[^\s"'<>]+/i);
+  if (!match) return null;
+  url = match[0];
+  // Iteratively strip trailing punctuation often attached in plain text emails
+  while (/[.,;:!?)>"']$/.test(url)) {
+    url = url.slice(0, -1);
+  }
+  try {
+    const parsed = new URL(url);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return null;
+    return parsed.toString();
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Checks if the current page indicates that email verification is required.
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
@@ -182,9 +212,16 @@ export async function resolveWorkdayVerification(page, { email, password, compan
       if (data.found) {
         // Case A: Workday sends an Activation Link or Password Reset Link
         if (data.verificationLink) {
-          console.log(`   🔗 [WorkdayBot] Received activation/reset link: ${data.verificationLink}`);
-          // Navigate to the verification link in the SAME browser session to preserve cookies
-          await page.goto(data.verificationLink, { waitUntil: 'domcontentloaded' });
+          const cleanLink = sanitizeWorkdayUrl(data.verificationLink);
+          if (!cleanLink) {
+            console.warn(`   ⚠️  [WorkdayBot] Received invalid verification link: ${data.verificationLink}`);
+            continue;
+          }
+
+          console.log(`   🔗 [WorkdayBot] Captured pure link (stripped of unwanted text): ${cleanLink}`);
+          console.log('   🌐 [WorkdayBot] Pasting and executing link directly in CURRENT ACTIVE browser session...');
+          // Navigate to the verification link directly in the CURRENT ACTIVE browser session to preserve cookies and login state
+          await page.goto(cleanLink, { waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(3000);
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
@@ -266,8 +303,8 @@ export async function resolveWorkdayVerification(page, { email, password, compan
             }
           }
 
-          console.log('   ✅ [WorkdayBot] Successfully verified/activated account via link in current isolated browser.');
-          return { success: true, type: 'link', url: data.verificationLink };
+          console.log('   ✅ [WorkdayBot] Successfully verified/activated account via pure link in current active browser session.');
+          return { success: true, type: 'link', url: cleanLink };
         }
         // Case B: Workday sends a numeric verification code / PIN
         if (data.verificationCode) {

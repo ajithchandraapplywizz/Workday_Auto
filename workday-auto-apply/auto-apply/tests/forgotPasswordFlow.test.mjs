@@ -5,6 +5,7 @@ import {
   isWorkdayForgotPasswordPage,
   isWorkdayVerificationPage,
   executeWorkdayForgotPassword,
+  sanitizeWorkdayUrl,
 } from '../lib/workdayVerification.mjs';
 import { isWorkdayLogin } from '../lib/workday.mjs';
 import { resolveCompanyEmail } from '../lib/applyWizzClient.mjs';
@@ -170,3 +171,42 @@ test('5. Production data integrity: resolveCompanyEmail never uses dummy emails'
   assert.equal(email.includes('laptap005'), false);
   assert.equal(email.endsWith('@applywizard.ai'), true);
 });
+
+test('6. Pure link extraction: strips unwanted text, quotes, and punctuation for active browser execution', () => {
+  const noisyCases = [
+    {
+      input: 'Please click here https://target.wd5.myworkdayjobs.com/target/reset?token=abc123.',
+      expected: 'https://target.wd5.myworkdayjobs.com/target/reset?token=abc123',
+    },
+    {
+      input: '<https://apple.wd3.myworkdayjobs.com/activate?token=987xyz>',
+      expected: 'https://apple.wd3.myworkdayjobs.com/activate?token=987xyz',
+    },
+    {
+      input: '"https://nvidia.wd5.myworkdayjobs.com/en-US/Careers/reset?auth=xyz";',
+      expected: 'https://nvidia.wd5.myworkdayjobs.com/en-US/Careers/reset?auth=xyz',
+    },
+    {
+      input: 'To reset your password, visit https://target.wd5.myworkdayjobs.com/reset, and log in.',
+      expected: 'https://target.wd5.myworkdayjobs.com/reset',
+    },
+    {
+      input: '[Click here](https://target.wd5.myworkdayjobs.com/reset?token=valid)',
+      expected: 'https://target.wd5.myworkdayjobs.com/reset?token=valid',
+    },
+  ];
+
+  for (const { input, expected } of noisyCases) {
+    const cleaned = sanitizeWorkdayUrl(input);
+    assert.equal(cleaned, expected, `Failed to clean noisy URL: "${input}"`);
+    // Assert strictly valid URL protocol
+    assert.ok(cleaned.startsWith('https://'));
+    assert.ok(!cleaned.endsWith('.'));
+    assert.ok(!cleaned.endsWith(';'));
+    assert.ok(!cleaned.endsWith(','));
+    assert.ok(!cleaned.includes('"'));
+    assert.ok(!cleaned.includes('<'));
+    assert.ok(!cleaned.includes('>'));
+  }
+});
+
