@@ -189,13 +189,15 @@ export async function resolveWorkdayVerification(page, { email, password, compan
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
           // If link leads to a New Password / Password Reset screen:
-          const pwdInputs = await page.$$([
-            'input[data-automation-id="newPassword"]:visible',
-            'input[data-automation-id="password"]:visible',
-            'input[name="newPassword"]:visible',
-            'input[name="password"]:visible',
-            'input[type="password"]:visible',
-          ].join(', ')).catch(() => []);
+          const pwdInputs = (typeof page.$$ === 'function')
+            ? await page.$$([
+                'input[data-automation-id="newPassword"]:visible',
+                'input[data-automation-id="password"]:visible',
+                'input[name="newPassword"]:visible',
+                'input[name="password"]:visible',
+                'input[type="password"]:visible',
+              ].join(', ')).catch(() => [])
+            : [];
 
           if (pwdInputs.length > 0 && password) {
             console.log('   🔑 [WorkdayBot] Password setup form detected on verification page — setting new password...');
@@ -207,27 +209,31 @@ export async function resolveWorkdayVerification(page, { email, password, compan
               break;
             }
 
-            const verifyInput = await page.$([
-              'input[data-automation-id="verifyPassword"]:visible',
-              'input[data-automation-id="verifyNewPassword"]:visible',
-              'input[name="verifyPassword"]:visible',
-              'input[name="verifyNewPassword"]:visible',
-            ].join(', ')).catch(() => null);
+            const verifyInput = (typeof page.$ === 'function')
+              ? await page.$([
+                  'input[data-automation-id="verifyPassword"]:visible',
+                  'input[data-automation-id="verifyNewPassword"]:visible',
+                  'input[name="verifyPassword"]:visible',
+                  'input[name="verifyNewPassword"]:visible',
+                ].join(', ')).catch(() => null)
+              : null;
 
             if (verifyInput) {
               await verifyInput.fill(password);
             }
 
-            const saveBtn = await page.$([
-              'button[data-automation-id="changePasswordButton"]',
-              'button[data-automation-id="resetPasswordButton"]',
-              'button[data-automation-id="submitButton"]',
-              'button:has-text("Change Password")',
-              'button:has-text("Reset Password")',
-              'button:has-text("Save")',
-              'button:has-text("Submit")',
-              'button[type="submit"]',
-            ].join(', ')).catch(() => null);
+            const saveBtn = (typeof page.$ === 'function')
+              ? await page.$([
+                  'button[data-automation-id="changePasswordButton"]',
+                  'button[data-automation-id="resetPasswordButton"]',
+                  'button[data-automation-id="submitButton"]',
+                  'button:has-text("Change Password")',
+                  'button:has-text("Reset Password")',
+                  'button:has-text("Save")',
+                  'button:has-text("Submit")',
+                  'button[type="submit"]',
+                ].join(', ')).catch(() => null)
+              : null;
 
             if (saveBtn && await saveBtn.isVisible().catch(() => false)) {
               console.log('   💾 [WorkdayBot] Submitting new password on reset form...');
