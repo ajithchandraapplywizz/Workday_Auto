@@ -1,7 +1,0 @@
-field_overrides:
-  - ["how did you hear about us", "personal.source"]
-  - ["phone device type", "_static.Mobile"]
-  - ["have you ever been employed by 3m or a subsidiary", "_static.No"]
-  - ["do you have a relative presently employed at or retired from 3m", "_static.No"]
-  - ["are you currently or have you in the past provided services to 3m as a contract worker or consultant", "_static.No"]
-  - ["are you currently or have you ever worked at an abc customer site", "_static.No"]

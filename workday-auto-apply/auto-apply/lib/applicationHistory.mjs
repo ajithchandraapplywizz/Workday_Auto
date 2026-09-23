@@ -9,22 +9,14 @@ import { getWorkdayTenant, extractWorkdayCompanyName } from './discovery.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
 import { isSupabaseConfigured, upsertSupabaseApplication, hasClientAppliedToCompany } from './supabaseClient.mjs';
 
-const HISTORY_FILE = resolve(process.cwd(), 'data', 'application-clients.json');
+let inMemoryHistory = { clients: [] };
 
 async function loadHistory() {
-  if (!existsSync(HISTORY_FILE)) return { clients: [] };
-  try {
-    const raw = await readFile(HISTORY_FILE, 'utf-8');
-    const doc = JSON.parse(raw);
-    return { clients: Array.isArray(doc.clients) ? doc.clients : [] };
-  } catch {
-    return { clients: [] };
-  }
+  return inMemoryHistory;
 }
 
 async function saveHistory(doc) {
-  await mkdir(dirname(HISTORY_FILE), { recursive: true });
-  await writeFile(HISTORY_FILE, `${JSON.stringify(doc, null, 2)}\n`, 'utf-8');
+  inMemoryHistory = doc;
 }
 
 function clientKey(profile = {}, tenant = '') {

@@ -27,9 +27,18 @@ import {
 import {
   resolveWorkdayVerification,
   isWorkdayVerificationPage,
+  isWorkdayForgotPasswordPage,
+  detectWrongPasswordOrLocked,
+  executeWorkdayForgotPassword,
 } from './workdayVerification.mjs';
 
-export { resolveWorkdayVerification, isWorkdayVerificationPage };
+export {
+  resolveWorkdayVerification,
+  isWorkdayVerificationPage,
+  isWorkdayForgotPasswordPage,
+  detectWrongPasswordOrLocked,
+  executeWorkdayForgotPassword,
+};
 
 const MAILBOX_NOT_CONNECTED =
   'Mailbox OTP is not connected (Zoho Mail can be added later). Login is email + password only.';
@@ -37,12 +46,12 @@ const MAILBOX_NOT_CONNECTED =
 /**
  * Classify a failed Workday login attempt from visible page text.
  * @param {import('playwright').Page} page
- * @returns {Promise<'needs-verification'|'needs-signup'|'locked'|'unknown'>}
+ * @returns {Promise<'needs-verification'|'wrong-password-or-locked'|'locked'|'needs-signup'|'unknown'>}
  */
 async function detectLoginFailureReason(page) {
   return await page.evaluate(() => {
     const text = (document.body?.innerText || '').toLowerCase();
-    // Only flag explicit account lockout messages (not the generic "or your account might be locked" disclaimer)
+    // 1. Explicit account lockout messages
     if (
       text.includes('account has been locked') ||
       text.includes('account is locked due to') ||
@@ -51,7 +60,7 @@ async function detectLoginFailureReason(page) {
     ) {
       return 'locked';
     }
-    // Flag explicit email verification screens or unverified account messages
+    // 2. Explicit email verification screens or unverified account messages
     if (
       (text.includes('verification email') && text.includes('sent')) ||
       text.includes('check your spam folder') ||
@@ -68,7 +77,19 @@ async function detectLoginFailureReason(page) {
     ) {
       return 'needs-verification';
     }
-    // All other login failures (wrong password, account not found, generic unable to sign in) -> attempt signup
+    // 3. Wrong password or account might be locked
+    if (
+      text.includes('invalid user name or password') ||
+      text.includes('invalid username or password') ||
+      text.includes('or your account might be locked') ||
+      text.includes('account might be locked') ||
+      text.includes('wrong password') ||
+      text.includes('incorrect password') ||
+      text.includes('invalid password')
+    ) {
+      return 'wrong-password-or-locked';
+    }
+    // All other login failures -> attempt signup fallback
     return 'needs-signup';
   }).catch(() => 'unknown');
 }
@@ -163,7 +184,7 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
  * @param {{ email: string, password: string, mode?: string }} opts
  * @returns {Promise<boolean>}
  */
-async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin' }) {
+async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin', profile = null }) {
   console.log('   No account on this tenant — clicking Create Account and registering...');
   const createdPassword = await workdayCreateAccount(page, email, password);
   if (!createdPassword) {
@@ -181,13 +202,55 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     return true;
   }
 
-  // 2. Resolve email verification
+  const company = extractWorkdayCompanyName(page.url());
+
+  // 2. If the account was detected as already existing, attempt sign in or trigger forgot password
+  if (page._accountAlreadyExists) {
+    console.log('   🔐 Account already exists on this tenant — attempting sign in with credentials...');
+    await handleAdaptiveGateway(page, 'signin');
+    const directLogin = await workdayLogin(page, email, createdPassword);
+    if (directLogin === true) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+    if (await isWorkdayWizardVisible(page)) {
+      return true;
+    }
+
+    // Login on existing account failed (wrong password or locked) -> launch automated Forgot Password flow
+    console.log('   📩 Existing account password mismatched or locked — launching automated Forgot Password recovery via Zoho Mail...');
+    const forgotResult = await executeWorkdayForgotPassword(page, {
+      email,
+      password: createdPassword,
+      company,
+      timeoutMs: 75000,
+    });
+
+    if (forgotResult?.success) {
+      console.log('   ✅ Forgot Password recovery succeeded! Logging in / verifying wizard entry...');
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+      if (await isWorkdayWizardVisible(page)) {
+        return true;
+      }
+      await handleAdaptiveGateway(page, 'signin');
+      const postResetLogin = await workdayLogin(page, email, createdPassword);
+      if (postResetLogin === true) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      if (await isWorkdayWizardVisible(page)) {
+        return true;
+      }
+    }
+  }
+
+  // 3. Resolve email verification
   // Workday account creation sends an activation link or OTP to the applicant's email.
   const isVerifPage = await isWorkdayVerificationPage(page);
   console.log(`   ${isVerifPage ? '📩 Workday page requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
-  const company = extractWorkdayCompanyName(page.url());
   const verified = await resolveWorkdayVerification(page, {
     email,
+    password: createdPassword,
     company,
     startTime: page._lastRegistrationTime || (Date.now() - 60000),
     timeoutMs: 60000,
@@ -209,25 +272,26 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     await handleAdaptiveGateway(page, 'signin');
     const loggedIn = await workdayLogin(page, email, createdPassword);
     if (loggedIn === true) {
-      return finishSuccessfulLogin(page, mode);
+      return finishSuccessfulLogin(page, mode, profile);
     }
     if (await isWorkdayWizardVisible(page)) {
       return true;
     }
   }
 
-  // 3. If verification was not needed/pending or redirected to Sign In, attempt login
+  // 4. If verification was not needed/pending or redirected to Sign In, attempt login
   console.log('   Workday redirected to Sign In / Gateway — logging in with registered credentials...');
   await handleAdaptiveGateway(page, 'signin');
   const loggedIn = await workdayLogin(page, email, createdPassword);
   if (loggedIn === true) {
-    return finishSuccessfulLogin(page, mode);
+    return finishSuccessfulLogin(page, mode, profile);
   }
 
   if (loggedIn === 'needs-verification') {
     console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
     const retryVerified = await resolveWorkdayVerification(page, {
       email,
+      password: createdPassword,
       company,
       startTime: page._lastRegistrationTime || (Date.now() - 60000),
       timeoutMs: 60000,
@@ -238,7 +302,37 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       await handleAdaptiveGateway(page, 'signin');
       const retryLogin = await workdayLogin(page, email, createdPassword);
       if (retryLogin === true) {
-        return finishSuccessfulLogin(page, mode);
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+  }
+
+  // 5. If login failed due to wrong password, mismatched credentials, or account lockout:
+  const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
+  if (isWrongOrLocked) {
+    console.log('   🔐 Password invalid or account locked after registration/switch — initiating automated Forgot Password recovery via Zoho Mail...');
+    const forgotResult = await executeWorkdayForgotPassword(page, {
+      email,
+      password: createdPassword,
+      company,
+      timeoutMs: 75000,
+    });
+
+    if (forgotResult?.success) {
+      console.log('   ✅ Forgot Password recovery succeeded! Verifying entry into application wizard...');
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+      if (await isWorkdayWizardVisible(page)) {
+        return true;
+      }
+      await handleAdaptiveGateway(page, 'signin');
+      const postResetLogin = await workdayLogin(page, email, createdPassword);
+      if (postResetLogin === true) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      if (await isWorkdayWizardVisible(page)) {
+        return true;
       }
     }
   }
@@ -356,13 +450,17 @@ export async function workdayLogin(page, email, password) {
       console.log('    ⚠️  Workday reports account requires email verification before signing in.');
       return 'needs-verification';
     }
-    if (reason === 'needs-signup') {
-      console.log('    Login failed — account may not exist on this tenant (wrong email/password message).');
-      return 'needs-signup';
-    }
     if (reason === 'locked') {
       console.log('    Workday reports the account may be locked.');
       return 'locked';
+    }
+    if (reason === 'wrong-password-or-locked') {
+      console.log('    Workday reports invalid username/password or account might be locked.');
+      return 'wrong-password-or-locked';
+    }
+    if (reason === 'needs-signup') {
+      console.log('    Login failed — account may not exist on this tenant (wrong email/password message).');
+      return 'needs-signup';
     }
     // Still on sign-in with no recognized error — treat as missing account for this tenant.
     console.log('    Still on Sign In form after submit — will try Create Account fallback.');
@@ -376,8 +474,9 @@ export async function workdayLogin(page, email, password) {
       console.log('    ⚠️  Workday reports account requires email verification before signing in.');
       return 'needs-verification';
     }
-    if (reason === 'needs-signup') return 'needs-signup';
     if (reason === 'locked') return 'locked';
+    if (reason === 'wrong-password-or-locked') return 'wrong-password-or-locked';
+    if (reason === 'needs-signup') return 'needs-signup';
     return false;
   }
 
@@ -475,6 +574,7 @@ export async function workdayCreateAccount(page, email, givenPassword) {
 
   if (alreadyExists) {
     console.log('   ℹ️  Account already exists with this email (error alert detected) — switching to Sign In...');
+    page._accountAlreadyExists = true;
     await clickGatewaySignIn(page);
     return password;
   }
@@ -551,8 +651,32 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
       }
 
       if (loginResult === 'locked') {
-        console.log('   ❌ Workday account appears locked — cannot proceed automatically.');
-        return false;
+        console.log('   🔒 Workday reports account is locked — initiating automated Forgot Password recovery via Zoho Mail...');
+        const company = extractWorkdayCompanyName(page.url());
+        const forgotSuccess = await executeWorkdayForgotPassword(page, {
+          email,
+          password,
+          company,
+          timeoutMs: 75000,
+        });
+
+        if (forgotSuccess?.success) {
+          console.log('   ✅ Password reset completed for locked account! Verifying session...');
+          await page.waitForTimeout(3000);
+          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+          if (await isWorkdayWizardVisible(page)) {
+            return true;
+          }
+          await handleAdaptiveGateway(page, 'signin');
+          const relogin = await workdayLogin(page, email, password);
+          if (relogin === true) {
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+          if (await isWorkdayWizardVisible(page)) {
+            return true;
+          }
+        }
       }
 
       if (loginResult === 'needs-verification') {
@@ -560,6 +684,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         const company = extractWorkdayCompanyName(page.url());
         const verified = await resolveWorkdayVerification(page, {
           email,
+          password,
           company,
           startTime: Date.now() - 300000,
         }).catch((err) => {
@@ -584,6 +709,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         email,
         password,
         mode,
+        profile,
       });
     }
     console.log('   ❌ Missing email or password for Workday signin mode.');
@@ -643,13 +769,14 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         await handleAdaptiveGateway(page, 'signin');
         const loggedIn = await workdayLogin(page, email, newPassword);
         if (loggedIn === true) {
-          return finishSuccessfulLogin(page, mode);
+          return finishSuccessfulLogin(page, mode, profile);
         }
 
         if (loggedIn === 'needs-verification') {
           console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
           const retryVerified = await resolveWorkdayVerification(page, {
             email,
+            password: newPassword,
             company,
             startTime: page._lastRegistrationTime || (Date.now() - 60000),
             timeoutMs: 60000,
@@ -660,7 +787,37 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
             await handleAdaptiveGateway(page, 'signin');
             const retryLogin = await workdayLogin(page, email, newPassword);
             if (retryLogin === true) {
-              return finishSuccessfulLogin(page, mode);
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+          }
+        }
+
+        // If login failed due to wrong password, mismatched credentials, or account lockout:
+        const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
+        if (isWrongOrLocked) {
+          console.log('   🔐 Account already exists or locked in signup mode — initiating automated Forgot Password recovery via Zoho Mail...');
+          const forgotSuccess = await executeWorkdayForgotPassword(page, {
+            email,
+            password: newPassword,
+            company,
+            timeoutMs: 75000,
+          });
+
+          if (forgotSuccess?.success) {
+            console.log('   ✅ Forgot Password recovery completed! Verifying application wizard...');
+            await page.waitForTimeout(3000);
+            try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
+            }
+            await handleAdaptiveGateway(page, 'signin');
+            const postResetLogin = await workdayLogin(page, email, newPassword);
+            if (postResetLogin === true) {
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
             }
           }
         }

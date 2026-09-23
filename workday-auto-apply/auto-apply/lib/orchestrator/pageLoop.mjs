@@ -185,7 +185,7 @@ export async function runPageOrchestrator({
     let decision = decisionForField(pack, field);
     let gate = validateBeforeFill(field, decision, profile);
     const mandatory = field.required === true || isMandatoryField(field.label, field, step);
-    if (!gate.ok && mandatory) {
+    if (!gate.ok && mandatory && gate.reason !== 'high_risk_missing_data') {
       const alt = await resolveDynamicAnswer(
         { ...(field._raw || {}), ...field, label: field.label },
         profile,

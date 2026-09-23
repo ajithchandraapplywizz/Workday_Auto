@@ -46,9 +46,9 @@ export const SENSITIVE_INTENTS = new Set([
 ]);
 
 export function isSensitiveField(field = {}, decision = {}) {
-  const intent = String(decision.intent || '').toLowerCase();
+  const intent = String(decision?.intent || '').toLowerCase();
   if (SENSITIVE_INTENTS.has(intent)) return true;
-  const label = normalizeLabel(field.label || decision.label || '');
+  const label = normalizeLabel(field?.label || decision?.label || '');
   if (/authori[sz]ed|work\s*auth|sponsorship|visa|gender|sex|race|ethnicity|veteran|disability|salary|compensation|desired\s*pay/i.test(label)) {
     return true;
   }

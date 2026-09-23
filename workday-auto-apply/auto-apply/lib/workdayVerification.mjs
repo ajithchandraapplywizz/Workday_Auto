@@ -1,7 +1,7 @@
 /**
- * workdayVerification.mjs — Automated Workday Email Verification via ZOHO_MAIL_READER
+ * workdayVerification.mjs — Automated Workday Email Verification & Password Recovery via ZOHO_MAIL_READER
  *
- * Polls the local Zoho Mail Reader microservice for Workday activation links or OTP codes,
+ * Polls the local Zoho Mail Reader microservice for Workday activation/reset links or OTP codes,
  * navigates or fills them in the active Playwright browser session, and activates the account.
  */
 
@@ -68,17 +68,96 @@ export async function isWorkdayVerificationPage(page) {
 }
 
 /**
+ * Checks if the current page is on the Workday Forgot Password form.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function isWorkdayForgotPasswordPage(page) {
+  try {
+    if (page && typeof page.$ === 'function') {
+      const resetBtn = await page.$('button[data-automation-id="resetPasswordButton"]:visible').catch(() => null);
+      if (resetBtn) return true;
+    }
+    if (page && typeof page.evaluate === 'function') {
+      const bodyText = await page.evaluate(() => (document.body?.innerText || '').toLowerCase());
+      return (
+        bodyText.includes('forgot password') &&
+        (bodyText.includes('reset password') || bodyText.includes('instructions to reset'))
+      );
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Detects whether Workday displays an invalid password, wrong credentials, or account locked message.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function detectWrongPasswordOrLocked(page) {
+  try {
+    if (!page || typeof page.evaluate !== 'function') return false;
+    return await page.evaluate(() => {
+      // 1. Error banners or alert boxes
+      const errorEls = Array.from(document.querySelectorAll(
+        '.error-message, [data-automation-id*="error" i], [role="alert"], [data-uxi-element-id*="error" i], .css-1q2092k, .css-14pfav7'
+      ));
+      for (const el of errorEls) {
+        const txt = (el.textContent || '').toLowerCase();
+        if (
+          txt.includes('invalid user name or password') ||
+          txt.includes('invalid username or password') ||
+          txt.includes('or your account might be locked') ||
+          txt.includes('account might be locked') ||
+          txt.includes('account has been locked') ||
+          txt.includes('account is locked') ||
+          txt.includes('temporarily locked') ||
+          txt.includes('too many failed attempts') ||
+          txt.includes('wrong password') ||
+          txt.includes('incorrect password') ||
+          txt.includes('invalid password') ||
+          txt.includes('unable to sign in') ||
+          txt.includes('cannot sign in')
+        ) {
+          return true;
+        }
+      }
+
+      // 2. Body text check
+      const body = (document.body?.innerText || '').toLowerCase();
+      return (
+        body.includes('invalid user name or password') ||
+        body.includes('invalid username or password') ||
+        body.includes('or your account might be locked') ||
+        body.includes('account might be locked') ||
+        body.includes('account has been locked') ||
+        body.includes('account is locked due to') ||
+        body.includes('your account is temporarily locked') ||
+        body.includes('too many failed attempts') ||
+        body.includes('wrong password') ||
+        body.includes('incorrect password')
+      );
+    }).catch(() => false);
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Polls ZOHO_MAIL_READER for a Workday verification email and handles either link or OTP code.
  * 
  * @param {import('playwright').Page} page - Active browser page in your bot
  * @param {Object} options
  * @param {string} options.email - The applicant's email address
+ * @param {string} [options.password] - Candidate password to set if a password reset / new password form appears
  * @param {string} [options.company] - Company name (e.g. "nvidia", "target")
- * @param {number} [options.startTime] - Timestamp (Date.now()) recorded when "Create Account" was clicked
+ * @param {number} [options.startTime] - Timestamp (Date.now()) recorded when request was submitted
  * @param {number} [options.timeoutMs=60000] - Max wait time (default: 60s)
  * @returns {Promise<{ success: boolean, type: 'link'|'code', url?: string, code?: string }>}
  */
-export async function resolveWorkdayVerification(page, { email, company, startTime, timeoutMs = 60000 }) {
+export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 60000 }) {
   const cutoff = startTime || (Date.now() - 30000);
   const pollInterval = 3000; // 3 seconds
   const deadline = Date.now() + timeoutMs;
@@ -101,13 +180,62 @@ export async function resolveWorkdayVerification(page, { email, company, startTi
       }
       const data = await res.json();
       if (data.found) {
-        // Case A: Workday sends an Activation Link (most common)
+        // Case A: Workday sends an Activation Link or Password Reset Link
         if (data.verificationLink) {
-          console.log(`   🔗 [WorkdayBot] Received activation link: ${data.verificationLink}`);
-          // Navigate to the activation link in the SAME browser session to preserve cookies
+          console.log(`   🔗 [WorkdayBot] Received activation/reset link: ${data.verificationLink}`);
+          // Navigate to the verification link in the SAME browser session to preserve cookies
           await page.goto(data.verificationLink, { waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(3000);
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+          // If link leads to a New Password / Password Reset screen:
+          const pwdInputs = await page.$$([
+            'input[data-automation-id="newPassword"]:visible',
+            'input[data-automation-id="password"]:visible',
+            'input[name="newPassword"]:visible',
+            'input[name="password"]:visible',
+            'input[type="password"]:visible',
+          ].join(', ')).catch(() => []);
+
+          if (pwdInputs.length > 0 && password) {
+            console.log('   🔑 [WorkdayBot] Password setup form detected on verification page — setting new password...');
+            for (const inp of pwdInputs) {
+              const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
+              const name = await inp.getAttribute('name').catch(() => '');
+              if (autoId === 'verifyPassword' || autoId === 'verifyNewPassword' || name === 'verifyPassword') continue;
+              await inp.fill(password);
+              break;
+            }
+
+            const verifyInput = await page.$([
+              'input[data-automation-id="verifyPassword"]:visible',
+              'input[data-automation-id="verifyNewPassword"]:visible',
+              'input[name="verifyPassword"]:visible',
+              'input[name="verifyNewPassword"]:visible',
+            ].join(', ')).catch(() => null);
+
+            if (verifyInput) {
+              await verifyInput.fill(password);
+            }
+
+            const saveBtn = await page.$([
+              'button[data-automation-id="changePasswordButton"]',
+              'button[data-automation-id="resetPasswordButton"]',
+              'button[data-automation-id="submitButton"]',
+              'button:has-text("Change Password")',
+              'button:has-text("Reset Password")',
+              'button:has-text("Save")',
+              'button:has-text("Submit")',
+              'button[type="submit"]',
+            ].join(', ')).catch(() => null);
+
+            if (saveBtn && await saveBtn.isVisible().catch(() => false)) {
+              console.log('   💾 [WorkdayBot] Submitting new password on reset form...');
+              await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
+              await page.waitForTimeout(3000);
+              try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+            }
+          }
 
           // After activation link loads, check if there is an action button (e.g. "Continue", "Sign In", "Apply")
           if (typeof page.locator === 'function') {
@@ -132,7 +260,7 @@ export async function resolveWorkdayVerification(page, { email, company, startTi
             }
           }
 
-          console.log('   ✅ [WorkdayBot] Successfully activated account via link in current isolated browser.');
+          console.log('   ✅ [WorkdayBot] Successfully verified/activated account via link in current isolated browser.');
           return { success: true, type: 'link', url: data.verificationLink };
         }
         // Case B: Workday sends a numeric verification code / PIN
@@ -187,4 +315,114 @@ export async function resolveWorkdayVerification(page, { email, company, startTi
   }
 
   throw new Error(`[WorkdayBot] Verification email timed out for ${email}`);
+}
+
+/**
+ * Automatically triggers the Workday Forgot Password workflow:
+ * 1. Locates and clicks "Forgot your password?" on the Sign In form
+ * 2. Enters candidate's email into the reset form (avoiding honeypot 'beecatcher')
+ * 3. Clicks "Reset Password" submit button
+ * 4. Polls Zoho Mail API for the verification/reset link
+ * 5. Opens the reset link in the browser session and sets the new password
+ * 
+ * @param {import('playwright').Page} page
+ * @param {Object} options
+ * @param {string} options.email
+ * @param {string} options.password
+ * @param {string} [options.company]
+ * @param {number} [options.timeoutMs=75000]
+ * @returns {Promise<{ success: boolean, url?: string, reason?: string }>}
+ */
+export async function executeWorkdayForgotPassword(page, { email, password, company, timeoutMs = 75000 }) {
+  console.log(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
+
+  // 1. Locate and click "Forgot your password?" link/button
+  const forgotBtn = await page.$([
+    'button[data-automation-id="forgotPasswordLink"]',
+    'a[data-automation-id="forgotPasswordLink"]',
+    'button:has-text("Forgot your password?")',
+    'a:has-text("Forgot your password?")',
+    'button:has-text("Forgot Password")',
+    'a:has-text("Forgot Password")',
+    '[data-automation-id*="forgot" i]',
+    'a[href*="forgotPassword" i]',
+    'button[aria-label*="forgot" i]',
+  ].join(', ')).catch(() => null);
+
+  if (!forgotBtn || !(await forgotBtn.isVisible().catch(() => false))) {
+    console.log('   ⚠️  [WorkdayBot] Could not locate visible "Forgot your password?" link on page.');
+    return { success: false, reason: 'forgot_link_not_found' };
+  }
+
+  console.log('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
+  await forgotBtn.click({ force: true }).catch(() => forgotBtn.evaluate(el => el.click()));
+  await page.waitForTimeout(3000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  // 2. Wait for Forgot Password form (email input and Reset Password button)
+  try {
+    await page.waitForSelector('button[data-automation-id="resetPasswordButton"]:visible, input[data-automation-id="email"]:visible', { timeout: 8000 });
+  } catch {}
+
+  // 3. Fill client email (explicitly ignoring honeypot 'beecatcher')
+  const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"], input[type="text"]');
+  let emailFilled = false;
+  for (const inp of emailInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
+      const name = await inp.getAttribute('name').catch(() => '');
+      if (autoId === 'beecatcher' || name === 'website') continue;
+      await inp.fill(email);
+      await page.waitForTimeout(200);
+      emailFilled = true;
+      break;
+    }
+  }
+
+  if (!emailFilled) {
+    console.log('   ⚠️  [WorkdayBot] Could not locate email input on Forgot Password form.');
+    return { success: false, reason: 'email_input_not_found' };
+  }
+
+  // 4. Click "Reset Password" submit button
+  const submitBtn = await page.$([
+    'button[data-automation-id="resetPasswordButton"]',
+    'button:has-text("Reset Password")',
+    'button:has-text("Send verification link")',
+    'button:has-text("Send")',
+    'button[type="submit"]:visible',
+  ].join(', ')).catch(() => null);
+
+  if (!submitBtn || !(await submitBtn.isVisible().catch(() => false))) {
+    console.log('   ⚠️  [WorkdayBot] Could not locate "Reset Password" submit button.');
+    return { success: false, reason: 'submit_button_not_found' };
+  }
+
+  const requestTime = Date.now() - 30000;
+  console.log('   📩 [WorkdayBot] Submitting client email for password reset instructions...');
+  await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
+  await page.waitForTimeout(3000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  // 5. Poll Zoho Mail Reader for the reset link
+  console.log('   ⏳ [WorkdayBot] Polling Zoho Mail Reader for password reset email link...');
+  const effectiveCompany = company || (page ? extractWorkdayCompanyName(page.url()) : '');
+  const verifResult = await resolveWorkdayVerification(page, {
+    email,
+    password,
+    company: effectiveCompany,
+    startTime: requestTime,
+    timeoutMs,
+  }).catch((err) => {
+    console.warn(`   ⚠️  [WorkdayBot] Verification poll error: ${err.message}`);
+    return null;
+  });
+
+  if (!verifResult?.success) {
+    console.log('   ❌ [WorkdayBot] Failed to retrieve password reset link from Zoho Mail Reader.');
+    return { success: false, reason: verifResult?.reason || 'timeout' };
+  }
+
+  console.log('   ✅ [WorkdayBot] Password reset link processed successfully.');
+  return { success: true, url: verifResult.url };
 }
