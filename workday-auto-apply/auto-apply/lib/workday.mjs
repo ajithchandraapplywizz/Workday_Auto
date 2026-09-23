@@ -767,13 +767,14 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         await handleAdaptiveGateway(page, 'signin');
         const loggedIn = await workdayLogin(page, email, newPassword);
         if (loggedIn === true) {
-          return finishSuccessfulLogin(page, mode);
+          return finishSuccessfulLogin(page, mode, profile);
         }
 
         if (loggedIn === 'needs-verification') {
           console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
           const retryVerified = await resolveWorkdayVerification(page, {
             email,
+            password: newPassword,
             company,
             startTime: page._lastRegistrationTime || (Date.now() - 60000),
             timeoutMs: 60000,
@@ -784,7 +785,37 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
             await handleAdaptiveGateway(page, 'signin');
             const retryLogin = await workdayLogin(page, email, newPassword);
             if (retryLogin === true) {
-              return finishSuccessfulLogin(page, mode);
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+          }
+        }
+
+        // If login failed due to wrong password, mismatched credentials, or account lockout:
+        const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
+        if (isWrongOrLocked) {
+          console.log('   🔐 Account already exists or locked in signup mode — initiating automated Forgot Password recovery via Zoho Mail...');
+          const forgotSuccess = await executeWorkdayForgotPassword(page, {
+            email,
+            password: newPassword,
+            company,
+            timeoutMs: 75000,
+          });
+
+          if (forgotSuccess?.success) {
+            console.log('   ✅ Forgot Password recovery completed! Verifying application wizard...');
+            await page.waitForTimeout(3000);
+            try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
+            }
+            await handleAdaptiveGateway(page, 'signin');
+            const postResetLogin = await workdayLogin(page, email, newPassword);
+            if (postResetLogin === true) {
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
             }
           }
         }
