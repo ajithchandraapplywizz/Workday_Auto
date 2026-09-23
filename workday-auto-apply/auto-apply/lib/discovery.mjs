@@ -516,8 +516,8 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
   const postScan = await prescanGatewayElements(page);
 
   if (mode === 'signin') {
-    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link
-    if (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount) {
+    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
+    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
       console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
       await clickGatewaySignIn(page);
     }
