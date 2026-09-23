@@ -431,6 +431,18 @@ export async function prescanGatewayElements(page) {
       return !inNav && (autoId === 'continueApplication' || autoId === 'continueApplicationButton' || t === 'continue application') && b.offsetParent !== null;
     });
 
+    const hasForgotPasswordBtn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      const t = (b.textContent || '').trim().toLowerCase();
+      return (t.includes('forgot') || autoId === 'forgotPasswordLink') && b.offsetParent !== null;
+    });
+
+    const hasResetPasswordBtn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      const t = (b.textContent || '').trim().toLowerCase();
+      return (t.includes('reset password') || autoId === 'resetPasswordButton') && b.offsetParent !== null;
+    });
+
     return {
       hasActiveModal: !!modal,
       hasWizardFields,
@@ -443,6 +455,8 @@ export async function prescanGatewayElements(page) {
       hasSignInWithEmailBtn: ssoWithEmailBtn,
       hasCreateAccountBtn,
       hasSignInUnderCreateAccount,
+      hasForgotPasswordBtn,
+      hasResetPasswordBtn,
     };
   }).catch(() => ({}));
 }

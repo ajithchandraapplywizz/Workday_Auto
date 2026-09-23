@@ -278,7 +278,9 @@ export async function isWorkdayLogin(page) {
     scan.hasVerifyPassword ||
     scan.hasSignInWithEmailBtn ||
     scan.hasCreateAccountBtn ||
-    scan.hasSignInUnderCreateAccount
+    scan.hasSignInUnderCreateAccount ||
+    scan.hasForgotPasswordBtn ||
+    scan.hasResetPasswordBtn
   );
 }
 
