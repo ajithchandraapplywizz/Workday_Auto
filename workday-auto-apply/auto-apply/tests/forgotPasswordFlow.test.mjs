@@ -5,9 +5,9 @@ import {
   isWorkdayForgotPasswordPage,
   isWorkdayVerificationPage,
   executeWorkdayForgotPassword,
-} from './workdayVerification.mjs';
-import { isWorkdayLogin } from './workday.mjs';
-import { resolveCompanyEmail } from './applyWizzClient.mjs';
+} from '../lib/workdayVerification.mjs';
+import { isWorkdayLogin } from '../lib/workday.mjs';
+import { resolveCompanyEmail } from '../lib/applyWizzClient.mjs';
 
 test('1. detectWrongPasswordOrLocked: identifies all Workday error banner variations', async () => {
   const variations = [
