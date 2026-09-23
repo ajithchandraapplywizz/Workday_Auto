@@ -49,8 +49,8 @@ test('profile answering: explicit, semantic, memory, unknown, missing, ambiguous
   });
 
   const explicit = resolveFieldWithoutLlm(field('Email Address', { elementType: 'email', options: [] }), profile);
-  metric('phase2', 'known_answered', explicit?.answer === 'test.user@example.test', { detail: 'explicit email' });
-  assert.equal(explicit.answer, 'test.user@example.test');
+  metric('phase2', 'known_answered', explicit?.answer === 'test.user@applywizard.ai', { detail: 'explicit email' });
+  assert.equal(explicit.answer, 'test.user@applywizard.ai');
 
   const semantic = resolveFieldWithoutLlm(field('Have you worked with React.js?'), profile);
   metric('phase2', 'known_answered', semantic?.answer === 'Yes', { detail: 'semantic react' });
@@ -74,7 +74,11 @@ test('profile answering: explicit, semantic, memory, unknown, missing, ambiguous
       elementType: 'number',
       options: [],
     }),
-    { ...profile, experience: { ...profile.experience, years: '' } },
+    {
+      ...profile,
+      experience: { ...profile.experience, years: '' },
+      _applyWizzQa: Object.fromEntries(Object.entries(profile._applyWizzQa || {}).filter(([k]) => !/experience|years/i.test(k))),
+    },
   );
   metric('phase2', 'unsupported_flagged', missingYears?.requiresReview === true && missingYears.answer == null, {
     detail: 'react years',

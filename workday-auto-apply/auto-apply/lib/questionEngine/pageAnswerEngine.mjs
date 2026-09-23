@@ -180,8 +180,11 @@ function deterministicSpecial(field, profile) {
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
   if (intent === 'professional_license' || intent === 'criminal_history') {
-    const safeAnswer = lookupSensitiveSafeAnswer(label) || 'No';
-    return finish(field, intent, safeAnswer, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
+    const fromProfile = profile?.personal?.[intent] || profile?.work_auth?.[intent];
+    if (fromProfile) {
+      return finish(field, intent, fromProfile, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
+    }
+    return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
   const eeoKind = {
     eeo_gender: 'gender',

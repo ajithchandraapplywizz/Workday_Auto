@@ -221,13 +221,14 @@ export async function markDropdownByLabel(page, targetArg = '') {
       }
     }
 
-    // Direct match: find container by label text first
+    // Direct match: find container by label text first (only if container has a single widget)
     const containers = Array.from(document.querySelectorAll('[data-automation-id*="formField"], [data-automation-id*="question"], [data-automation-id*="secondaryQuestionnaire"], [data-wd-q-id], fieldset, [role="group"]'));
     for (const c of containers) {
-      const cText = norm(c.textContent);
-      if (wantNorm && (cText.includes(wantNorm.slice(0, 40)) || wantNorm.includes(cText.slice(0, 40)))) {
-        const directWidget = c.querySelector('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]');
-        if (directWidget && !isNestedSelectWidget(directWidget)) {
+      const widgetsInC = Array.from(c.querySelectorAll('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]')).filter((w) => !isNestedSelectWidget(w));
+      if (widgetsInC.length === 1) {
+        const cText = norm(c.textContent);
+        if (wantNorm && (cText.includes(wantNorm.slice(0, 40)) || wantNorm.includes(cText.slice(0, 40)))) {
+          const directWidget = widgetsInC[0];
           directWidget.setAttribute('data-wd-eeo-target', '1');
           return { found: true, current: readValue(directWidget), score: 200 };
         }

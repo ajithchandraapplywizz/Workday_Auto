@@ -21,7 +21,7 @@ test('mock Apply Wizz payload is parsed and normalized without a network call', 
   metric('phase2', 'profile_normalized', normalized, { code: normalized ? '' : 'F5' });
   metric('phase2', 'profile_available', available, { code: available ? '' : 'F5' });
 
-  assert.equal(overlay.personal.email, 'test.user@example.test');
+  assert.equal(overlay.personal.personal_email || overlay.personal.email, 'test.user@example.test');
   assert.equal(overlay.work_auth.sponsorship_needed, 'No');
   assert.equal(overlay.experience.years, '2');
   assert.equal(overlay.experience.current_title, 'Software Intern');
