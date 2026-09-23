@@ -19,6 +19,7 @@ import {
 } from './qaStore.mjs';
 import { fuzzyScore } from './fields.mjs';
 import { pickCompensationFromOptions } from './compensationPick.mjs';
+import { loadLocalEnvOnce } from './supabaseClient.mjs';
 import {
   resolveExperienceQuestionAnswer,
   sanitizeExperienceAnswer,
@@ -61,31 +62,24 @@ export function isInputLikeField(fieldType = '', options = []) {
 const STORE_PATH = resolve(process.cwd(), 'data', 'llm-qa-store.json');
 const PROFILE_PATH = resolve(process.cwd(), 'config', 'profile.yml');
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-// Gemini direct endpoint (generateContent, used when GEMINI_API_KEY is set)
-// Gemini direct endpoint (generateContent, used when GEMINI_API_KEY is set)
-const GEMINI_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta/models';
-const DEFAULT_MODEL = 'gemini-3.5-flash'; // used when neither env var is set
-const GEMINI_FALLBACK_MODELS = ['gemini-3.5-flash', 'gemini-3.1-flash-lite', 'gemini-3.8-flash'];
+const DEFAULT_MODEL = 'openai/gpt-4o-mini';
+const OPENROUTER_FALLBACK_MODELS = [
+  'openai/gpt-4o-mini',
+  'google/gemini-2.5-flash-lite',
+  'meta-llama/llama-3.3-70b-instruct',
+];
 
 let storeCache = null;
 
-/** Returns the active API key: prefers GEMINI_API_KEY, falls back to OPENROUTER_API_KEY. */
+/** Returns the active OpenRouter API key. */
 function getApiKey() {
-  const gemini = String(process.env.GEMINI_API_KEY || '').trim();
-  if (gemini) return gemini;
+  loadLocalEnvOnce();
   return String(process.env.OPENROUTER_API_KEY || '').trim();
 }
 
-/** True when GEMINI_API_KEY is the active key (not OpenRouter). */
-function isGeminiDirect() {
-  return Boolean(String(process.env.GEMINI_API_KEY || '').trim());
-}
-
 function getModel() {
-  if (isGeminiDirect()) {
-    return String(process.env.GEMINI_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
-  }
-  return String(process.env.OPENROUTER_MODEL || `google/${DEFAULT_MODEL}`).trim() || `google/${DEFAULT_MODEL}`;
+  loadLocalEnvOnce();
+  return String(process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
 }
 
 export function isOpenRouterEnabled() {
@@ -93,96 +87,60 @@ export function isOpenRouterEnabled() {
 }
 
 /**
- * Unified LLM chat function.
- * - When GEMINI_API_KEY is set: calls Gemini generateContent endpoint directly.
- * - Otherwise: calls OpenRouter with the configured model.
+ * Unified LLM chat function via OpenRouter.
+ * Hits OpenRouter chat/completions API with configured model (defaults to openai/gpt-4o-mini),
+ * with automatic fallback to high-efficiency alternative models on rate-limit or errors.
  * Always returns a response shaped like OpenAI: { choices:[{ message:{ content } }] }
  */
 export async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000 } = {}) {
   const key = getApiKey();
-  if (!key) throw new Error('No LLM API key configured (set GEMINI_API_KEY or OPENROUTER_API_KEY in .env)');
+  if (!key) throw new Error('No LLM API key configured (set OPENROUTER_API_KEY in .env)');
 
-  // ── Gemini direct API path ──────────────────────────────────────────────────
-  if (isGeminiDirect()) {
-    const primaryModel = getModel();
-    const candidateModels = Array.from(new Set([primaryModel, ...GEMINI_FALLBACK_MODELS]));
+  const primaryModel = getModel();
+  const candidateModels = Array.from(new Set([primaryModel, ...OPENROUTER_FALLBACK_MODELS]));
 
-    // Convert OpenAI-style messages to Gemini contents format
-    const geminiContents = messages
-      .filter((m) => m.role !== 'system')          // system goes into systemInstruction
-      .map((m) => ({
-        role: m.role === 'assistant' ? 'model' : 'user',
-        parts: [{ text: String(m.content || '') }],
-      }));
-    const systemMsg = messages.find((m) => m.role === 'system');
-    const requestBody = {
-      contents: geminiContents,
-      generationConfig: {
-        temperature,
-        maxOutputTokens: max_tokens,
-      },
-    };
-    if (systemMsg) {
-      requestBody.systemInstruction = { parts: [{ text: String(systemMsg.content || '') }] };
-    }
+  let lastError = null;
+  for (const model of candidateModels) {
+    try {
+      const res = await httpsJsonWithRetry({
+        url: OPENROUTER_URL,
+        method: 'POST',
+        timeoutMs,
+        headers: {
+          Authorization: `Bearer ${key}`,
+          'Content-Type': 'application/json',
+          'HTTP-Referer': 'https://applywizz.com',
+          'X-Title': 'workday-auto-apply',
+        },
+        body: {
+          model,
+          temperature,
+          max_tokens,
+          messages,
+        },
+      }, { attempts: 2, label: `OpenRouter:${model}` });
 
-    let lastError = null;
-    for (const model of candidateModels) {
-      try {
-        const url = `${GEMINI_BASE_URL}/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(key)}`;
-        const res = await httpsJsonWithRetry({
-          url,
-          method: 'POST',
-          timeoutMs,
-          headers: { 'Content-Type': 'application/json' },
-          body: requestBody,
-        }, { attempts: 1, label: `GeminiDirect:${model}` });
-
-        if (!res.ok) {
-          const errText = String(res.text || '').slice(0, 180);
-          lastError = new Error(`Gemini API [${model}] ${res.status}: ${errText}`);
-          // If rate-limited (429) or high-demand (503), try the next candidate model
-          if (res.status === 429 || res.status === 503) {
-            console.log(`    ⚠️  Gemini model ${model} hit ${res.status} — trying fallback model...`);
-            continue;
-          }
-          throw lastError;
-        }
-
-        const geminiJson = res.json();
-        const text = geminiJson?.candidates?.[0]?.content?.parts?.[0]?.text ?? '';
-        return { choices: [{ message: { content: text } }] };
-      } catch (err) {
-        lastError = err;
-        if (/429|503|quota|demand/i.test(err.message)) {
+      if (!res.ok) {
+        const errText = String(res.text || '').slice(0, 180);
+        lastError = new Error(`OpenRouter [${model}] ${res.status}: ${errText}`);
+        if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 404) {
+          console.log(`    ⚠️  OpenRouter model ${model} hit ${res.status} — trying fallback model...`);
           continue;
         }
-        throw err;
+        throw lastError;
       }
-    }
 
-    throw lastError || new Error('All Gemini candidate models failed.');
+      return res.json();
+    } catch (err) {
+      lastError = err;
+      if (/429|502|503|quota|rate limit|not found/i.test(err.message)) {
+        continue;
+      }
+      throw err;
+    }
   }
 
-  // ── OpenRouter fallback path ────────────────────────────────────────────────
-  const res = await httpsJsonWithRetry({
-    url: OPENROUTER_URL,
-    method: 'POST',
-    timeoutMs,
-    headers: {
-      Authorization: `Bearer ${key}`,
-      'HTTP-Referer': 'https://local.workday-auto-apply',
-      'X-Title': 'workday-auto-apply',
-    },
-    body: {
-      model: getModel(),
-      temperature,
-      max_tokens,
-      messages,
-    },
-  }, { attempts: 2, label: 'OpenRouter' });
-  if (!res.ok) throw new Error(`OpenRouter ${res.status}: ${String(res.text || '').slice(0, 180)}`);
-  return res.json();
+  throw lastError || new Error('All OpenRouter candidate models failed.');
 }
 
 /** Fully automatic apply: no form-answer or stuck-step terminal pauses. */
