@@ -27,7 +27,7 @@ import { resolveUnknownWithLlm } from './openRouterLlm.mjs';
 import { shouldIncludeInScan, isSkippableUnimportantLabel, isMandatoryField, shouldSkipOptionalFill } from './scanFieldFilter.mjs';
 import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
 import { ensureUsWorkdayContact } from './clientContact.mjs';
-import { normalizePersonalNames } from './personName.mjs';
+import { normalizePersonalNames, toTitleCase } from './personName.mjs';
 import { getResumePathForApply } from './resumeParser.mjs';
 import {
   isSignatureOrFullNameQuestion,
@@ -329,7 +329,7 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
   if (isSignatureOrFullNameQuestion(cleanLabel)) {
     const p = profile.personal || {};
     const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || '';
-    if (fullName) return fullName;
+    if (fullName) return toTitleCase(fullName);
   }
 
   if (isShiftOrScheduleQuestion(cleanLabel)) {
@@ -358,7 +358,11 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
-        return Array.isArray(val) ? val : String(val);
+        const res = Array.isArray(val) ? val : String(val);
+        if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
+          return toTitleCase(res);
+        }
+        return res;
       }
     }
   }
@@ -379,7 +383,11 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
-        return Array.isArray(val) ? val : String(val);
+        const res = Array.isArray(val) ? val : String(val);
+        if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
+          return toTitleCase(res);
+        }
+        return res;
       }
     }
   }
@@ -691,6 +699,32 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     || isMandatoryField(rawLabel, fieldObj)
     || fieldObj.required === true;
 
+  // Centralized 4-Tier Architecture:
+  // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+  const resolved = await resolveClientAnswer({
+    ...fieldObj,
+    label: rawLabel,
+    required: requiredUnknown,
+  }, profile, {
+    page,
+    plan,
+    company,
+    resumePath,
+    url,
+    tenant: resolvedTenant,
+    step: stepName,
+    required: requiredUnknown,
+    forceLlm: requiredUnknown,
+  });
+  if (resolved?.answer) {
+    const validity = validateResolvedValue(fieldObj, resolved.answer);
+    if (!validity.valid) {
+      console.log(`    ⚠️  Pre-fill validity check rejected "${String(resolved.answer)}" for "${rawLabel}": ${validity.reason}`);
+      return null;
+    }
+    return rememberResolvedAnswer(profile, normalized, resolved.answer);
+  }
+
   if (options.useQuestionEngine !== false) {
     const engineHit = await resolveDynamicAnswer(
       {
@@ -714,31 +748,6 @@ export async function resolveField(field, profile, qaStore, options = {}) {
       }
       return rememberResolvedAnswer(profile, normalized, engineHit.answer);
     }
-  }
-
-  // Legacy path (scan-batch / callers that opt out of question engine only).
-  const resolved = await resolveClientAnswer({
-    ...fieldObj,
-    label: rawLabel,
-    required: requiredUnknown,
-  }, profile, {
-    page,
-    plan,
-    company,
-    resumePath,
-    url,
-    tenant: resolvedTenant,
-    step: stepName,
-    required: requiredUnknown,
-    forceLlm: requiredUnknown,
-  });
-  if (resolved?.answer) {
-    const validity = validateResolvedValue(fieldObj, resolved.answer);
-    if (!validity.valid) {
-      console.log(`    ⚠️  Pre-fill validity check rejected "${String(resolved.answer)}" for "${rawLabel}": ${validity.reason}`);
-      return null;
-    }
-    return rememberResolvedAnswer(profile, normalized, resolved.answer);
   }
 
   if (!requiredUnknown) return null;

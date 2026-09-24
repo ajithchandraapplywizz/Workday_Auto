@@ -40,6 +40,7 @@ import {
   pickShiftOption,
   isSpecificManagerOrLocationQuestion,
 } from './questionEngine/intents.mjs';
+import { toTitleCase } from './personName.mjs';
 
 function fieldOptions(field = {}) {
   return (field.options || [])
@@ -72,9 +73,10 @@ function profileFactForLabel(label, profile = {}) {
   const priorEmployer = priorEmployerAnswer(label, profile);
   if (priorEmployer) return priorEmployer;
 
-  if (/^(legal\s*)?(first|given)\s*name/.test(n) || n === 'first name') return p.first_name || null;
-  if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return p.last_name || null;
-  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || null;
+  if (/^(legal\s*)?(first|given)\s*name/.test(n) || n === 'first name') return toTitleCase(p.first_name) || null;
+  if (/^(legal\s*)?(middle)\s*name/.test(n) || n === 'middle name') return toTitleCase(p.middle_name) || null;
+  if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return toTitleCase(p.last_name) || null;
+  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return toTitleCase(p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name) || null;
   if (/^email/.test(n)) return p.email || null;
   if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(n)) {
     const hint = `${p.country || ''} ${p.country_phone_code || ''}`;
@@ -277,23 +279,6 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     return hit;
   }
 
-  const sensitive = lookupSensitiveSafeAnswer(label);
-  if (sensitive) {
-    const hit = finish(sensitive, 'sensitive_safe');
-    if (hit) {
-      trace({
-        stage: 'sensitive_safe',
-        clientId: profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '',
-        tenant: opts.tenant || profile?._tenant || '',
-        query: normalizeLabel(label),
-        hit: true,
-        answer: hit.answer,
-      });
-      console.log(`    🛡️  [Sensitive] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      return hit;
-    }
-  }
-
 
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)
@@ -365,6 +350,24 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
   trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 1 or Tier 2) ───
+  const sensitive = lookupSensitiveSafeAnswer(label);
+  if (sensitive) {
+    const hit = finish(sensitive, 'sensitive_safe');
+    if (hit) {
+      trace({
+        stage: 'sensitive_safe',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        answer: hit.answer,
+      });
+      console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      return hit;
+    }
+  }
 
   // ─── TIER 3: Resume Parsing ──────────────────────────────────────────────────
   const fromExperience = resolveExperienceQuestionAnswer(label, profile, { options, fieldType });
@@ -445,10 +448,10 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     preferred: isProceedQuestion(label) ? 'Yes' : '',
   });
 
-  // Check if LLM answer contradicts a stored profile fact
+  // Check if LLM answer contradicts a stored profile fact (for free-text inputs)
   if (llmAnswer) {
     const pFact = profileFactForLabel(label, profile);
-    if (pFact && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
+    if (pFact && options.length === 0 && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
       trace({
         stage: 'tier4',
         clientId,

@@ -188,10 +188,16 @@ export function discoverFieldsInDOM(container = document) {
   }
 
   function isRequired(el) {
-    return el.required ||
-      el.getAttribute('aria-required') === 'true' ||
-      Boolean(el.closest('.field, [data-automation-id*="formField"], div')?.querySelector('.required, .asterisk, [aria-required="true"]')) ||
-      Boolean(el.getAttribute('data-automation-id')?.toLowerCase().includes('required'));
+    if (el.required || el.getAttribute('aria-required') === 'true') return true;
+    if (Boolean(el.getAttribute('data-automation-id')?.toLowerCase().includes('required'))) return true;
+    const container = el.closest('[data-automation-id*="formField"], [data-automation-id*="FormField"], fieldset, .field, div[class*="field"]');
+    if (container) {
+      if (container.getAttribute('aria-required') === 'true') return true;
+      if (Boolean(container.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required" i], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]'))) return true;
+      const label = container.querySelector('label, [data-automation-id*="label"]');
+      if (label && /\*/.test(label.textContent || '')) return true;
+    }
+    return false;
   }
 
   function getCurrentValue(el) {

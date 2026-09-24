@@ -118,6 +118,9 @@ export async function runPageOrchestrator({
   logOrchestrator('page_detect', { step, page: pageNumber, adapter: adapter.name });
 
   let fields = dedupeFields((await adapter.scan(page, { pageNumber, stepName: step })).fields || []);
+  if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
+    fields = fields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
+  }
   logOrchestrator('scan', { step, fields: fields.length });
   for (const f of fields) {
     trace({
@@ -147,6 +150,9 @@ export async function runPageOrchestrator({
     await adapter.waitStable(page);
     const scan = await adapter.scan(page, { pageNumber, stepName: step });
     fields = dedupeFields(scan.fields || []);
+    if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
+      fields = fields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
+    }
     logOrchestrator('rescan', { step, fields: fields.length, cycle });
 
     if (cycle > 0 && fields.length > prevFieldCount + 4) {
@@ -432,7 +438,15 @@ export async function runPageOrchestrator({
       });
       await adapter.waitStable(page);
       const read = await adapter.readValue(page, field, { pageNumber, stepName: step });
-      fields = dedupeFields(read.all || fields);
+      if (read.all?.length) {
+        let newFields = dedupeFields(read.all);
+        if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
+          newFields = newFields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
+        }
+        fields = newFields;
+      } else {
+        fields = dedupeFields(fields);
+      }
       let actual = read.current ?? '';
       if (!actual && lastFill?.success === true) {
         actual = lastFill?.verifiedValue || '';

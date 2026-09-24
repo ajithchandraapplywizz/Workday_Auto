@@ -7,11 +7,11 @@ import { detectWorkdayStep } from './stateDetector.mjs';
 import { getApplicationQuestionsPageInfo } from './workdayQuestionFill.mjs';
 
 export const RAPID = {
-  settleMs: 100,
-  pollMs: 80,
-  maxPolls: 30,
-  burstClicks: 2,
-  burstGapMs: 50,
+  settleMs: 150,
+  pollMs: 200,
+  maxPolls: 50,
+  burstClicks: 1,
+  burstGapMs: 100,
 };
 
 /**
@@ -58,9 +58,12 @@ export async function clickFooterAdvanceButton(page) {
       if (!isVisible(btn) || btn.disabled || btn.getAttribute('aria-disabled') === 'true') return false;
       const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
       if (/submit|apply\s*now|send\s*application|complete\s*application/i.test(t)) return false;
+      const aid = (btn.getAttribute('data-automation-id') || '').toLowerCase();
       return /save and continue|save & continue|^next$/i.test(t)
-        || btn.getAttribute('data-automation-id') === 'bottom-navigation-next-button'
-        || btn.getAttribute('data-automation-id') === 'page-footer-next-button';
+        || aid.includes('next-button')
+        || aid.includes('nextbutton')
+        || aid.includes('bottomnavigationnext')
+        || aid.includes('pagefooternext');
     });
     const btn = targets[targets.length - 1];
     if (!btn) return { clicked: null };
@@ -69,6 +72,9 @@ export async function clickFooterAdvanceButton(page) {
       return { clicked: null, submitBlocked: true };
     }
     btn.scrollIntoView({ block: 'center' });
+    btn.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+    btn.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
     btn.click();
     return { clicked: text || 'Save and Continue' };
   });

@@ -211,7 +211,8 @@ const CONTINUE_APPLICATION_SELECTORS = [
 
 /** True when the multi-step application wizard is visible (not JD / login). */
 export async function isWorkdayWizardVisible(page) {
-  const url = page.url();
+  if (!page || typeof page.$ !== 'function') return false;
+  const url = typeof page.url === 'function' ? page.url() : '';
   if (/\/login(?:\?|$)/i.test(url)) return false;
 
   // If on login, registration, or Social SSO screen, it is NOT the wizard
@@ -337,6 +338,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
 
 // ─── Check if an element is inside a nav or header ─────────────────────────
 export async function isInNavOrHeader(el) {
+  if (!el || typeof el.evaluate !== 'function') return false;
   return await el.evaluate(node => {
     let cur = node;
     while (cur && cur !== document.body) {
@@ -431,6 +433,18 @@ export async function prescanGatewayElements(page) {
       return !inNav && (autoId === 'continueApplication' || autoId === 'continueApplicationButton' || t === 'continue application') && b.offsetParent !== null;
     });
 
+    const hasForgotPasswordBtn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      const t = (b.textContent || '').trim().toLowerCase();
+      return (t.includes('forgot') || autoId === 'forgotPasswordLink') && b.offsetParent !== null;
+    });
+
+    const hasResetPasswordBtn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      const t = (b.textContent || '').trim().toLowerCase();
+      return (t.includes('reset password') || autoId === 'resetPasswordButton') && b.offsetParent !== null;
+    });
+
     return {
       hasActiveModal: !!modal,
       hasWizardFields,
@@ -443,6 +457,8 @@ export async function prescanGatewayElements(page) {
       hasSignInWithEmailBtn: ssoWithEmailBtn,
       hasCreateAccountBtn,
       hasSignInUnderCreateAccount,
+      hasForgotPasswordBtn,
+      hasResetPasswordBtn,
     };
   }).catch(() => ({}));
 }
@@ -502,8 +518,13 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
   const postScan = await prescanGatewayElements(page);
 
   if (mode === 'signin') {
-    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link
-    if (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount) {
+    // If on reset password form, do NOT treat it as signin form
+    if (postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || !postScan.hasEmailInput)) {
+      console.log('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
+      return;
+    }
+    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
+    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
       console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
       await clickGatewaySignIn(page);
     }

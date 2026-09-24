@@ -19,6 +19,7 @@ import { pickNearestSelectOption } from './openRouterLlm.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
 import { fillEducationFieldOfStudy } from './workdayExperience.mjs';
 import { lookupSupabaseAnswerSync } from './supabaseClient.mjs';
+import { resolvePostalForWorkday } from './clientContact.mjs';
 
 /** Field names mentioned in Workday validation messages. */
 export function parseErrorFieldNames(errors = []) {
@@ -26,6 +27,9 @@ export function parseErrorFieldNames(errors = []) {
   for (const raw of errors) {
     const text = String(raw || '').replace(/\s+/g, ' ').trim();
     if (!text) continue;
+    if (/postal\s*code|zip\s*code/i.test(text)) {
+      names.add('Postal Code');
+    }
     const patterns = [
       /the field ([\s\S]{2,600}?) is required/gi,
       /\bError-([A-Za-z0-9 /'&-]{2,300}?)(?=The field|Select|$)/g,
@@ -194,6 +198,10 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
       resumePath: profile._resumePath,
     },
   );
+  if (/postal\s*code|zip\s*code/i.test(label)) {
+    return resolvePostalForWorkday(profile);
+  }
+
   if (engineHit?.answer) {
     answer = engineHit.answer;
   }
@@ -362,6 +370,19 @@ async function readMarkedFieldValue(page, descriptor) {
  * @returns {Promise<number>} fields verified as filled
  */
 export async function repairRequiredFieldsFromErrors(page, profile, stepName = '', errors = []) {
+  for (const raw of errors) {
+    const text = String(raw || '');
+    const stateMismatch = text.match(/is not a valid postal code for\s+([A-Za-z\s]+)/i);
+    if (stateMismatch && stateMismatch[1]) {
+      const errState = stateMismatch[1].replace(/[.]*$/, '').trim();
+      if (errState) {
+        profile.personal = profile.personal || {};
+        profile.personal.state = errState;
+        console.log(`    📍 Workday indicates address state is "${errState}" — aligning postal code`);
+      }
+    }
+  }
+
   const names = parseErrorFieldNames(errors);
   const descriptors = await markErrorFields(page, names);
   if (!descriptors.length) {

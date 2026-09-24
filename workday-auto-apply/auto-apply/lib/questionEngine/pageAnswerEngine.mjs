@@ -7,7 +7,9 @@ import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWi
 import { peekClientAnswer, acceptClientValue, resolveClientAnswer } from '../clientAnswer.mjs';
 import { lookupSupabaseAnswerSync, upsertSupabaseAnswer, recordSupabaseAnswerInMemory } from '../supabaseClient.mjs';
 import { resolveMinimumAgeAnswer } from '../minimumAge.mjs';
+import { isMandatoryField } from '../scanFieldFilter.mjs';
 import { findBestMatch, normalizeLabel, isComplianceSensitive } from '../qaStore.mjs';
+import { toTitleCase } from '../personName.mjs';
 import { isApiOnlyAnswerMode } from '../apiOnlyProfile.mjs';
 import {
   lookupSensitiveSafeAnswer,
@@ -108,7 +110,7 @@ function deterministicSpecial(field, profile) {
     const p = profile.personal || {};
     const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || '';
     if (fullName) {
-      return finish(field, 'identity_name', fullName, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+      return finish(field, 'identity_name', toTitleCase(fullName), SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
     }
     // Fallback: use ApplyWizz profile name keys
     const nameFromApi = profile._applyWizzRaw?.full_name
@@ -116,7 +118,7 @@ function deterministicSpecial(field, profile) {
       || profile._applyWizzRaw?.first_name && `${profile._applyWizzRaw.first_name} ${profile._applyWizzRaw.last_name || ''}`.trim()
       || '';
     if (nameFromApi) {
-      return finish(field, 'identity_name', nameFromApi, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.98);
+      return finish(field, 'identity_name', toTitleCase(nameFromApi), SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.98);
     }
   }
 
@@ -151,8 +153,10 @@ function deterministicSpecial(field, profile) {
     return finish(field, 'location_preference', 'N/A', SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
   }
 
+  // lookupSensitiveSafeAnswer covers adverse-history (criminal, felony, misconduct etc.) → 'No'.
+  // Do NOT exclude criminal_history here — the deterministic 'No' is the correct safe answer.
   const safe = lookupSensitiveSafeAnswer(label);
-  if (safe && !isWorkEligibilityQuestion(label) && intent !== 'years_experience' && intent !== 'technology_years_experience' && intent !== 'criminal_history' && intent !== 'identity_name' && intent !== 'date') {
+  if (safe && !isWorkEligibilityQuestion(label) && intent !== 'years_experience' && intent !== 'technology_years_experience' && intent !== 'identity_name' && intent !== 'date') {
     return finish(field, intent, safe, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.94);
   }
 
@@ -180,10 +184,27 @@ function deterministicSpecial(field, profile) {
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
   if (intent === 'professional_license' || intent === 'criminal_history') {
+    // Check profile first
     const fromProfile = profile?.personal?.[intent] || profile?.work_auth?.[intent];
     if (fromProfile) {
       return finish(field, intent, fromProfile, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
     }
+    // Criminal/conviction questions: deterministic 'No' if the label matches adverse history
+    if (intent === 'criminal_history') {
+      const safeCriminal = lookupSensitiveSafeAnswer(label);
+      if (safeCriminal) {
+        return finish(field, intent, safeCriminal, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.95);
+      }
+      // Fallback: dropdown option matching — pick the 'No' option
+      const opts = optionsOf(field);
+      const noOpt = opts.find((o) => /^no\b/i.test(o.trim()));
+      if (noOpt) {
+        return finish(field, intent, noOpt, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.93);
+      }
+      // Last resort: answer 'No' unconditionally — criminal history defaults to No
+      return finish(field, intent, 'No', SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.90);
+    }
+    // professional_license: needs review
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
   const eeoKind = {
@@ -443,6 +464,10 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
 
   for (const field of fields) {
     if (!field?.label || field.elementType === 'button' || field.elementType === 'file') {
+      continue;
+    }
+    const isMandatory = field.required === true || isMandatoryField(field.label, field, opts.stepName);
+    if (profile?._fillOptionalFields !== true && !isMandatory) {
       continue;
     }
     const intent = classifyQuestionIntent(field.label, field);

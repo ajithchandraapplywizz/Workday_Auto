@@ -23,7 +23,6 @@ import { scanForm, slugify } from './lib/scanner.mjs';
 import { fillForm } from './lib/engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './lib/planner.mjs';
 import { isApiOnlyAnswerMode } from './lib/apiOnlyProfile.mjs';
-import { applyLearnings, getStats } from './lib/learner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, readJobLinksFile, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './lib/discovery.mjs';
 import { loadQueue, saveQueue, addToQueue, getPendingFromQueue } from './lib/reporter.mjs';
 import { 
@@ -32,7 +31,6 @@ import {
   getDynamicDateValueForField 
 } from './lib/date-utils.mjs';
 import { chromium } from 'playwright';
-import { runWd5BatchScan, showWd5CatalogPending } from './lib/wd5BatchScan.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -90,6 +88,7 @@ let workdayEmail = process.env.WORKDAY_EMAIL || '';
 let workdayPassword = process.env.WORKDAY_PASSWORD || '';
 let isSignup = false;
 let confirmSubmit = false;
+let dryRun = false;
 let scanBatchOffset = 0;
 let scanBatchLimit = 15;
 let batchLimitExplicit = false;
@@ -104,6 +103,7 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--signup') isSignup = true;
   else if (rawArgs[i] === '--signin') isSignup = false;
   else if (rawArgs[i] === '--confirm-submit') confirmSubmit = true;
+  else if (rawArgs[i] === '--dry-run') dryRun = true;
   else if (rawArgs[i] === '--offset' && rawArgs[i + 1]) scanBatchOffset = Number(rawArgs[++i]) || 0;
   else if (rawArgs[i] === '--limit' && rawArgs[i + 1]) {
     scanBatchLimit = Number(rawArgs[++i]) || 15;
@@ -408,7 +408,6 @@ async function cmdFill(url, planPath) {
     }
   }
 
-  plan = await applyLearnings(plan, url);
   plan = resolveDynamicFields(plan);
 
   try {
@@ -530,7 +529,6 @@ async function cmdApply(url) {
       plan.unmapped.forEach(f => console.log(`    - ${f.label} [${f.type}]`));
     }
 
-    plan = await applyLearnings(plan, url);
     plan = resolveDynamicFields(plan);
 
     console.log('\n── Step 4: Fill & Submit ──');
@@ -543,6 +541,7 @@ async function cmdApply(url) {
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
       confirmSubmit,
+      dryRun,
     });
 
     console.log(`\n${'═'.repeat(60)}`);
@@ -621,32 +620,13 @@ async function cmdQueue(subcommand, ...args) {
   }
 }
 
-// ─── WD5 BATCH SCAN (DOM catalog, no apply) ─────────────────────────────────
-async function cmdScanBatch(file) {
-  const csvPath = file || resolve(process.cwd(), 'data', 'wd5.csv');
-  if (!existsSync(csvPath)) {
-    console.error(`❌ CSV not found: ${csvPath}`);
-    process.exit(1);
-  }
-  const creds = await resolveAuthCredentials();
-  await runWd5BatchScan({
-    csvPath,
-    offset: scanBatchOffset,
-    limit: scanBatchLimit,
-    skipOnAuthFail: scanBatchSkipAuth,
-    interactive: scanBatchInteractive,
-    waitAtReview: scanBatchWaitReview,
-    auth: {
-      workdayEmail: creds.workdayEmail,
-      workdayPassword: creds.workdayPassword,
-      mode: creds.mode,
-    },
-  });
+// ─── WD5 BATCH SCAN (Deprecated) ─────────────────────────────────────────────
+async function cmdScanBatch() {
+  console.log('⚠️  scan-batch is deprecated. Dynamic DOM scanning is integrated directly into the live application pipeline.');
 }
 
 async function cmdCatalogShow() {
-  const creds = await resolveAuthCredentials();
-  await showWd5CatalogPending(creds.profile);
+  console.log('⚠️  catalog-show is deprecated. Questions and answers are resolved directly via Supabase API and ApplyWizz CRM.');
 }
 
 // ─── BATCH ──────────────────────────────────────────────────────────────────
@@ -703,7 +683,7 @@ async function cmdBatch(file) {
       let status = 'incomplete';
       for (let attempt = 1; attempt <= 3; attempt++) {
         status = await cmdApply(url);
-        if (status === 'submitted' || status === 'skipped' || status === 'review-declined') break;
+        if (status === 'submitted' || status === 'skipped' || status === 'reached-review' || status === 'review-declined') break;
         if (status === 'auth-failed' || status === 'job_not_found') break;
         if (status === 'incomplete' || status === 'error' || !status) {
           console.log(`\n  ↻ This job is not at Review yet (attempt ${attempt}/3). Staying on this URL — not opening the next link.`);
@@ -736,14 +716,24 @@ async function cmdBatch(file) {
   console.log('📊 Batch Summary');
   console.log(`${'═'.repeat(60)}`);
   const submitted = results.filter((r) => r.status === 'submitted').length;
+  const reachedReview = results.filter((r) => r.status === 'reached-review').length;
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const declined = results.filter((r) => r.status === 'review-declined').length;
   const fail = results.filter((r) => r.status === 'error' || r.status === 'auth-failed' || r.status === 'job_not_found').length;
-  console.log(`  ✅ Submitted: ${submitted}`);
-  console.log(`  ⏭️  Skipped:   ${skipped}`);
-  console.log(`  ✋ Stopped:   ${declined}${stopped ? ' (N at Review)' : ''}`);
-  console.log(`  ❌ Failed:    ${fail}`);
+  const incomplete = results.filter((r) => r.status === 'incomplete' || r.status === 'done').length;
+  console.log(`  ✅ Submitted:       ${submitted}`);
+  if (dryRun || reachedReview > 0) {
+    console.log(`  🎯 Reached Review: ${reachedReview}  ← dry-run (not submitted)`);
+  }
+  console.log(`  ⏭️  Skipped:        ${skipped}`);
+  console.log(`  ✋ Stopped:        ${declined}${stopped ? ' (N at Review)' : ''}`);
+  console.log(`  ❌ Failed:         ${fail}`);
+  if (incomplete > 0) console.log(`  ⚠️  Incomplete:    ${incomplete}`);
   console.log(`  Total this window: ${results.length}`);
+  if (dryRun || reachedReview > 0) {
+    const successRate = results.length > 0 ? Math.round(((submitted + reachedReview) / results.length) * 100) : 0;
+    console.log(`  Success rate (reached Review or submitted): ${successRate}%`);
+  }
   if (!stopped && offset + slice.length < targets.length) {
     console.log(`\n  Next batch:\n  node cli.mjs batch "${source}" --offset ${offset + slice.length} --limit ${limit}`);
   }
@@ -751,7 +741,31 @@ async function cmdBatch(file) {
 
 // ─── STATUS ─────────────────────────────────────────────────────────────────
 async function cmdStatus() {
-  const stats = await getStats();
+  const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
+  let total = 0;
+  let submitted = 0;
+  let failed = 0;
+  const byATS = {};
+
+  if (existsSync(csvPath)) {
+    const raw = await readFile(csvPath, 'utf-8');
+    const lines = raw.trim().split('\n');
+    const header = lines[0] || '';
+    const isNewFormat = header.startsWith('date,company,role,url');
+    for (const line of lines.slice(1)) {
+      if (!line.trim()) continue;
+      const parts = parseCSVLine(line);
+      const status = parts[4] || '';
+      const ats = (isNewFormat ? parts[5] : '') || 'workday';
+      total++;
+      if (status === 'submitted') submitted++;
+      else failed++;
+
+      if (!byATS[ats]) byATS[ats] = { total: 0, submitted: 0 };
+      byATS[ats].total++;
+      if (status === 'submitted') byATS[ats].submitted++;
+    }
+  }
 
   console.log(`
 ╔════════════════════════════════════════════════════════╗
@@ -759,30 +773,22 @@ async function cmdStatus() {
 ╚════════════════════════════════════════════════════════╝
 
 Overall:
-  Total applications: ${stats.overall.total}
-  Submitted: ${stats.overall.submitted}
-  Failed: ${stats.overall.failed}
-  Success rate: ${stats.overall.total > 0 ? Math.round(stats.overall.submitted / stats.overall.total * 100) : 0}%
+  Total applications: ${total}
+  Submitted: ${submitted}
+  Failed: ${failed}
+  Success rate: ${total > 0 ? Math.round((submitted / total) * 100) : 0}%
 
 By ATS:`);
 
-  for (const [ats, s] of Object.entries(stats.byATS)) {
-    const rate = s.total > 0 ? Math.round(s.submitted / s.total * 100) : 0;
+  for (const [ats, s] of Object.entries(byATS)) {
+    const rate = s.total > 0 ? Math.round((s.submitted / s.total) * 100) : 0;
     console.log(`  ${ats}: ${s.submitted}/${s.total} (${rate}%)`);
   }
 
-  console.log(`
-Learnings:
-  Field corrections: ${stats.corrections}
-  Option mappings: ${stats.optionMappings}
-  Last run: ${stats.lastRun || 'never'}
-`);
-
-  const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
   if (existsSync(csvPath)) {
     const csv = await readFile(csvPath, 'utf-8');
     const lines = csv.trim().split('\n');
-    console.log(`Recent applications (${lines.length - 1} total):`);
+    console.log(`\nRecent applications (${Math.max(0, lines.length - 1)} total):`);
     lines.slice(-6).forEach(l => console.log(`  ${l}`));
   }
 
@@ -790,8 +796,8 @@ Learnings:
   if (queue.length > 0) {
     const pending = queue.filter(e => e.status === 'pending').length;
     const applied = queue.filter(e => ['submitted', 'applied'].includes(e.status)).length;
-    const failed = queue.filter(e => e.status === 'failed').length;
-    console.log(`\nQueue: ${pending} pending, ${applied} applied, ${failed} failed (${queue.length} total)`);
+    const failCount = queue.filter(e => e.status === 'failed').length;
+    console.log(`\nQueue: ${pending} pending, ${applied} applied, ${failCount} failed (${queue.length} total)`);
     if (pending > 0) console.log(`  Run 'node cli.mjs batch' to process pending queue entries.`);
   }
 }

@@ -54,13 +54,14 @@ export const workdayAdapter = {
 
     // My Information fields are handled by handleStep1MyInformation — skip in orchestrator
     // to prevent stall-break on fields that are already filled by the dedicated handler.
-    if (stepName === 'My Information') {
+    if (stepName === 'My Information' && profile?._step1SourceFilled) {
       const myInfoHandled = /how did you hear about us|phone\s*(number|device\s*type)?|country\s*(\/\s*territory\s*)?phone\s*code|city|state\s*\/\s*(region|province)|address\s*line|postal\s*code|country\s*\(address|^country$/i.test(label);
       if (myInfoHandled) return false;
     }
 
     const raw = fieldForFilter(field);
     const mandatory = isMandatoryField(label, raw, stepName);
+    if (profile?._fillOptionalFields !== true && !mandatory) return false;
     if (field.elementType === 'file' && !mandatory) return false;
     if (isDiscoveredFieldFilled(field._raw || field, label)) return false;
     if (mandatory) return field.elementType !== 'file';
