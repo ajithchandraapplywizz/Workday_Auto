@@ -2011,6 +2011,39 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       || (['Yes', 'No'].includes(String(answer)) && await fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first().isVisible({ timeout: 400 }).catch(() => false))
     ) {
       ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
+    } else if (
+      /date\s*of\s*birth|\bdob\b|birth\s*date|birthday/i.test(label)
+      || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(answer).trim())
+      || /date/i.test(fieldType)
+    ) {
+      const formattedDate = formatToMMDDYYYY(answer);
+      const spinButtons = fieldBox.locator('input[role="spinbutton"], input[data-automation-id*="dateSection"]');
+      const spinCount = await spinButtons.count().catch(() => 0);
+      if (spinCount >= 2 && formattedDate) {
+        const [month, day, year] = formattedDate.split('/');
+        for (let i = 0; i < spinCount; i++) {
+          const sp = spinButtons.nth(i);
+          const hint = (
+            (await sp.getAttribute('aria-label') || '') + ' ' +
+            (await sp.getAttribute('data-automation-id') || '') + ' ' +
+            (await sp.getAttribute('placeholder') || '')
+          ).toLowerCase();
+          if (/month|\bmm\b|datesectionmonth/i.test(hint)) await sp.fill(String(Number(month))).catch(() => {});
+          else if (/day|\bdd\b|datesectionday/i.test(hint)) await sp.fill(String(Number(day))).catch(() => {});
+          else if (/year|yyyy|datesectionyear/i.test(hint)) await sp.fill(year).catch(() => {});
+        }
+        ok = true;
+      }
+      if (!ok) {
+        const input = fieldBox.locator('input[type="date"], input[type="text"], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
+        if (await input.isVisible({ timeout: 600 }).catch(() => false)) {
+          await input.scrollIntoViewIfNeeded().catch(() => {});
+          await input.click({ force: true }).catch(() => {});
+          await input.fill(formattedDate || String(answer));
+          await input.press('Tab').catch(() => {});
+          ok = true;
+        }
+      }
     } else if (/^(text|textarea|number|input|tel|email)$/i.test(fieldType) || !fieldType) {
       const fillValue = isSalaryQuestion(questionLabel)
         ? (compensationInputValue(profile, questionLabel) || answer)

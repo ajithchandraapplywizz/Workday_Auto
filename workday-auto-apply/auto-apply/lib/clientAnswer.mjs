@@ -42,6 +42,7 @@ import {
 } from './questionEngine/intents.mjs';
 import { toTitleCase } from './personName.mjs';
 import { formatToMMDDYYYY } from './fillHandlers.mjs';
+import { extractDobFromResumeText } from './resumeParser.mjs';
 
 function fieldOptions(field = {}) {
   return (field.options || [])
@@ -81,6 +82,10 @@ function profileFactForLabel(label, profile = {}) {
   if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(n)) {
     const rawDob = p.date_of_birth
       || p.dob
+      || profile._supabaseQa?.['date of birth']
+      || profile._supabaseQa?.['date_of_birth']
+      || profile._supabaseQa?.['dob']
+      || profile._supabaseQa?.['birth date']
       || profile._applyWizzQa?.['date of birth']
       || profile._applyWizzQa?.['birth date']
       || profile._applyWizzQa?.['dob']
@@ -201,6 +206,9 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
       return hit || yn;
     }
     return yn;
+  }
+  if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
+    return formatToMMDDYYYY(text) || text;
   }
   return sanitizeExperienceAnswer(label, text, profile, { options, fieldType }) || text;
 }
@@ -407,6 +415,50 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
+  // DOB resolution in Tier 3: Resume text extraction -> Required adult derivation
+  if (!expHit && /date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
+    if (profile._resumeText) {
+      const fromResume = extractDobFromResumeText(profile._resumeText);
+      if (fromResume) {
+        expHit = finish(fromResume, 'resume_extracted_dob');
+        if (expHit && profile._applyWizzId) {
+          recordSupabaseAnswerInMemory(profile, 'date of birth', fromResume);
+          upsertSupabaseAnswer({
+            applywizzId: profile._applyWizzId,
+            question: label,
+            questionNormalized: 'date of birth',
+            answer: fromResume,
+            fieldType: 'date',
+            source: 'resume',
+          }).catch(() => {});
+        }
+      }
+    }
+
+    if (!expHit && (required || opts.forceLlm === true)) {
+      const derivedDob = deriveAdultDobFromProfile(profile);
+      if (derivedDob) {
+        expHit = finish(derivedDob, 'derived_adult_dob');
+        if (expHit && profile._applyWizzId) {
+          recordSupabaseAnswerInMemory(profile, 'date of birth', derivedDob);
+          upsertSupabaseAnswer({
+            applywizzId: profile._applyWizzId,
+            question: label,
+            questionNormalized: 'date of birth',
+            answer: derivedDob,
+            fieldType: 'date',
+            source: 'ai',
+          }).catch(() => {});
+        }
+      }
+    }
+
+    // If NOT required and not found in Supabase or Resume, do NOT fill optional DOB
+    if (!required && opts.forceLlm !== true && !expHit) {
+      return null;
+    }
+  }
+
   if (expHit) {
     trace({
       stage: 'tier3',
@@ -530,6 +582,31 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   return null;
 }
 
+/**
+ * Derives a valid adult Date of Birth (MM/DD/YYYY) when the field is strictly REQUIRED
+ * and missing from Supabase, CRM, and Resume.
+ * Uses candidate's graduation year (grad_year - 22) or experience milestones.
+ */
+export function deriveAdultDobFromProfile(profile = {}) {
+  const gradYear = profile.education?.graduation_year
+    || profile.education?.to_year
+    || profile.education?.from_year
+    || '';
+  const gradNum = parseInt(String(gradYear).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
+  if (gradNum && gradNum >= 1970 && gradNum <= 2030) {
+    const birthYear = gradNum - 22;
+    return `06/15/${birthYear}`;
+  }
 
+  const fromDate = profile.experience?.from_date || profile.experience?.start_date || '';
+  const workStartNum = parseInt(String(fromDate).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
+  if (workStartNum && workStartNum >= 1970 && workStartNum <= 2030) {
+    const birthYear = workStartNum - 22;
+    return `06/15/${birthYear}`;
+  }
+
+  const currentYear = new Date().getFullYear();
+  return `06/15/${currentYear - 25}`;
+}
 
 export { normalizeLabel };

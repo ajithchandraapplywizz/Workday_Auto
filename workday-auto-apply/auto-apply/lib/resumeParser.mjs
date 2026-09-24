@@ -523,3 +523,39 @@ export async function inferFromResumeFile(label, resumePath, field = {}) {
   if (!text) return null;
   return inferAnswerFromResume(label, text, field);
 }
+
+/**
+ * Extract Date of Birth from resume text if explicitly present.
+ * @param {string} text
+ * @returns {string} Formatted MM/DD/YYYY or ''
+ */
+export function extractDobFromResumeText(text = '') {
+  if (!text || typeof text !== 'string') return '';
+  const re = /(?:date\s+of\s+birth|birth\s*date|\bdob\b|birthday)\s*[:\-–]?\s*([0-9]{1,2}[/\-.][0-9]{1,2}[/\-.][0-9]{2,4}|[A-Za-z]{3,9}\s+[0-9]{1,2},?\s+[0-9]{4}|[0-9]{1,2}\s+[A-Za-z]{3,9}\s+[0-9]{4}|[0-9]{4}[/\-.][0-9]{1,2}[/\-.][0-9]{1,2})/i;
+  const match = text.match(re);
+  if (match && match[1]) {
+    const raw = match[1].trim();
+    // Check if directly MM/DD/YYYY or DD/MM/YYYY
+    const slashMatch = raw.match(/^(\d{1,2})[/\-.](\d{1,2})[/\-.](\d{4})$/);
+    if (slashMatch) {
+      let part1 = Number(slashMatch[1]);
+      let part2 = Number(slashMatch[2]);
+      const year = Number(slashMatch[3]);
+      if (year > 1940 && year < 2015) {
+        if (part1 > 12 && part2 <= 12) {
+          // DD/MM/YYYY -> MM/DD/YYYY
+          return `${String(part2).padStart(2, '0')}/${String(part1).padStart(2, '0')}/${year}`;
+        }
+        return `${String(part1).padStart(2, '0')}/${String(part2).padStart(2, '0')}/${year}`;
+      }
+    }
+    const d = new Date(raw);
+    if (!isNaN(d.getTime()) && d.getFullYear() > 1940 && d.getFullYear() < 2015) {
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      const dd = String(d.getDate()).padStart(2, '0');
+      const yyyy = d.getFullYear();
+      return `${mm}/${dd}/${yyyy}`;
+    }
+  }
+  return '';
+}

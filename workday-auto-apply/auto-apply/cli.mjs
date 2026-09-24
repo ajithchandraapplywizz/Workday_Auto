@@ -30,6 +30,10 @@ import {
   isCurrentDateQuestionLabel, 
   getDynamicDateValueForField 
 } from './lib/date-utils.mjs';
+import { readClientJobsCsvFile, parseClientJobsCsvContent } from './lib/csvJobParser.mjs';
+import { runWorkerPool } from './lib/workerPool.mjs';
+import { ingestCsvToBatchQueue, getBatchQueueStats } from './lib/supabaseClient.mjs';
+import { checkAndPreResolveJobForClient, recordDiscoveredJobForm } from './lib/jobFormCache.mjs';
 import { chromium } from 'playwright';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -112,11 +116,15 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--no-skip-auth') scanBatchSkipAuth = false;
   else if (rawArgs[i] === '--no-interactive') scanBatchInteractive = false;
   else if (rawArgs[i] === '--no-wait-review') scanBatchWaitReview = false;
+  else if (rawArgs[i] === '--workers' && rawArgs[i + 1]) {
+    workerCount = Number(rawArgs[++i]) || 3;
+  }
   else if ((rawArgs[i] === '--client' || rawArgs[i] === '--applywizz-id') && rawArgs[i + 1]) {
     process.env.APPLYWIZZ_ID = rawArgs[++i];
   }
   else positionalArgs.push(rawArgs[i]);
 }
+let workerCount = 3;
 const mode = isSignup ? 'signup' : 'signin';
 
 // ─── Find file across candidate paths (cwd, auto-apply, __dirname) ──────────
@@ -474,6 +482,12 @@ async function cmdApply(url, { isBatch = false } = {}) {
   const page = await context.newPage();
 
   try {
+    let cacheHit = false;
+    try {
+      const cacheResult = await checkAndPreResolveJobForClient({ jobUrl: url, profile });
+      cacheHit = cacheResult.hit;
+    } catch {}
+
     console.log('\n── Step 1: Scan form ──');
     const scan = await scanForm(url, {
       browser,
@@ -551,6 +565,19 @@ async function cmdApply(url, { isBatch = false } = {}) {
       dryRun,
       isBatch,
     });
+
+    if (!cacheHit && Array.isArray(scan.fields) && scan.fields.length > 0) {
+      try {
+        await recordDiscoveredJobForm({
+          jobUrl: url,
+          profile,
+          fields: scan.fields,
+          stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
+          company: profile._company || company,
+          roleTitle: profile._roleTitle || profile._jobTitle || '',
+        });
+      } catch {}
+    }
 
     console.log(`\n${'═'.repeat(60)}`);
     console.log(`✅ Pipeline complete: ${status}`);
@@ -734,6 +761,48 @@ async function cmdBatch(file) {
   if (!stopped && offset + slice.length < targets.length) {
     console.log(`\n  Next batch:\n  node cli.mjs batch "${source}" --offset ${offset + slice.length} --limit ${limit}`);
   }
+}
+
+// ─── 3-WORKER PARALLEL BATCH ────────────────────────────────────────────────
+async function cmdBatchWorkers(file) {
+  const defaultCsv = resolve(process.cwd(), 'data', 'clients_jobs.csv');
+  const filePath = file
+    ? (existsSync(file) ? file : resolve(process.cwd(), file))
+    : (existsSync(defaultCsv) ? defaultCsv : '');
+
+  if (!filePath || !existsSync(filePath)) {
+    console.error(`❌ Multi-client CSV file not found: ${file || 'data/clients_jobs.csv'}`);
+    console.log('   Expected format: CSV with columns (applywizz_id, job_url) or rows containing AWL-ID and Workday link.');
+    console.log('   Example:');
+    console.log('   node cli.mjs batch-workers data/clients_jobs.csv --workers 3 --dry-run');
+    process.exit(1);
+  }
+
+  const tasks = await readClientJobsCsvFile(filePath);
+  if (!tasks.length) {
+    console.error(`❌ No valid (AWL_ID, Workday URL) pairs found in ${filePath}`);
+    process.exit(1);
+  }
+
+  console.log(`📦 Loaded ${tasks.length} client application task(s) from ${filePath}`);
+
+  // Ingest to Supabase batch_job_queue if configured
+  try {
+    const ingestRes = await ingestCsvToBatchQueue(tasks);
+    if (ingestRes.inserted > 0) {
+      console.log(`✓ Ingested ${ingestRes.inserted} task(s) into Supabase batch_job_queue.`);
+    }
+  } catch {}
+
+  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+
+  await runWorkerPool(tasks, {
+    concurrency: workerCount,
+    headless: isHeadless,
+    confirmSubmit,
+    dryRun,
+    defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
+  });
 }
 
 // ─── STATUS ─────────────────────────────────────────────────────────────────
@@ -927,6 +996,7 @@ Usage:
   node cli.mjs fill <url> [plan.json]      Fill form (auto-plan if no plan given)
   node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit (asks Y/N/S)
   node cli.mjs batch [data/today.csv]      Apply every Workday URL in today's CSV (or queue)
+  node cli.mjs batch-workers [data/csv]    Run 3 parallel workers for multi-client CSV
   node cli.mjs scan-batch [data/wd5.csv]   Scan DOM questions from wd5.csv (batch)
   node cli.mjs catalog-show                List unanswered questions per company YAML
   node cli.mjs queue add <url> [company]   Add Workday URL to application queue
@@ -973,6 +1043,7 @@ async function main() {
     case 'fill': await cmdFill(positionalArgs[0], positionalArgs[1]); break;
     case 'apply': await cmdApply(positionalArgs[0]); break;
     case 'batch': await cmdBatch(positionalArgs[0]); break;
+    case 'batch-workers': await cmdBatchWorkers(positionalArgs[0]); break;
     case 'scan-batch': await cmdScanBatch(positionalArgs[0]); break;
     case 'catalog-show': await cmdCatalogShow(); break;
     case 'queue': await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;
