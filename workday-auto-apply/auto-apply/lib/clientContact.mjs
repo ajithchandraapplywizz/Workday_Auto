@@ -355,20 +355,18 @@ export function extractContactFromResumeText(text = '') {
     }
   }
 
-  // Ensure Country & Country Phone Code are filled if still unset
+  // Ensure Country & Country Phone Code are filled if still unset (inspect header only)
   if (!out.country) {
-    if (/\bunited states of america\b|\bunited states\b|\bUSA\b|\bU\.S\.A\b|\bU\.S\.\b/i.test(blob)) {
+    const header = blob.slice(0, 1500);
+    if (/\bunited states of america\b|\bunited states\b|\bUSA\b|\bU\.S\.A\b|\bU\.S\.\b/i.test(header)) {
       out.country = US_COUNTRY_NAME;
       out.country_phone_code = US_COUNTRY_PHONE_CODE;
-    } else if (/\bindia\b|\b\+91\b/i.test(blob)) {
+    } else if (/\b(india|\+91)\b/i.test(header)) {
       out.country = IN_COUNTRY_NAME;
       out.country_phone_code = IN_COUNTRY_PHONE_CODE;
-    } else {
-      out.country = US_COUNTRY_NAME;
-      out.country_phone_code = US_COUNTRY_PHONE_CODE;
     }
   } else if (!out.country_phone_code) {
-    out.country_phone_code = workdayPhoneCodeForCountry(out.country) || US_COUNTRY_PHONE_CODE;
+    out.country_phone_code = workdayPhoneCodeForCountry(out.country) || '';
   }
 
   return out;
@@ -523,14 +521,20 @@ export async function savePersonalFieldsToYaml(partial = {}, profilePath) {
  */
 export async function ensureWorkdayContactFromClient(profile = {}) {
   profile.personal = profile.personal || {};
+  const qa = profile._applyWizzQa || {};
+
+  // 1. Supabase / CRM is primary source of truth:
+  if (!profile.personal.country && qa.country) profile.personal.country = qa.country;
+  if (!profile.personal.country_phone_code && (qa['country phone code'] || qa['country territory phone code'])) {
+    profile.personal.country_phone_code = qa['country phone code'] || qa['country territory phone code'];
+  }
+  if (!profile.personal.state && qa.state) profile.personal.state = qa.state;
+  if (!profile.personal.city && qa.city) profile.personal.city = qa.city;
+  if (!profile.personal.postal_code && qa['postal code']) profile.personal.postal_code = qa['postal code'];
+
+  // 2. Merge missing contact facts from resume without overwriting Supabase/CRM values
   mergeResumeContactIntoProfile(profile);
   const p = profile.personal;
-
-  const qa = profile._applyWizzQa || {};
-  if (!p.country && qa.country) p.country = qa.country;
-  if (!p.state && qa.state) p.state = qa.state;
-  if (!p.city && qa.city) p.city = qa.city;
-  if (!p.postal_code && qa['postal code']) p.postal_code = qa['postal code'];
 
   const countryHint = p.country || p.country_phone_code || '';
   const fromApi = normalizePhoneForCountry(
@@ -541,14 +545,14 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
     p.phone = fromApi;
   }
 
-  const codeFromCountry = workdayPhoneCodeForCountry(p.country);
-  if (codeFromCountry) {
-    p.country_phone_code = codeFromCountry;
-  } else if (!p.country_phone_code) {
-    p.country_phone_code = US_COUNTRY_PHONE_CODE;
+  if (p.country) {
+    const codeFromCountry = workdayPhoneCodeForCountry(p.country);
+    if (codeFromCountry) {
+      p.country_phone_code = codeFromCountry;
+    }
   }
 
-  if (/united states|usa/i.test(String(p.country || ''))) {
+  if (/united states|usa|\bu\.s\.\b/i.test(String(p.country || ''))) {
     p.country = US_COUNTRY_NAME;
   } else if (/^india$/i.test(String(p.country || '').trim())) {
     p.country = IN_COUNTRY_NAME;

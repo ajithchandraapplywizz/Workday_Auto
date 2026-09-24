@@ -430,17 +430,26 @@ export function inferAnswerFromResume(label, resumeText, field = {}) {
     return firstMatch(resumeText, /https?:\/\/github\.com\/[\w-]+/i)
       || firstMatch(resumeText, /github:\s*([\w-]+)/i)?.replace(/^github:\s*/i, 'https://github.com/');
   }
-  if (/^city$/i.test(lower)) return firstMatch(resumeText, /([A-Za-z][A-Za-z\s]+),\s*(India|USA|United States)/)?.split(',')[0]?.trim() || null;
+  if (/^city$/i.test(lower)) {
+    const header = resumeText.slice(0, 1500);
+    return firstMatch(header, /([A-Za-z][A-Za-z\s]+),\s*(?:[A-Z]{2}|USA|United States|India)/)?.split(',')[0]?.trim() || null;
+  }
   if (/^country$/i.test(lower) && !/phone\s*code/i.test(lower)) {
-    if (/united states of america/i.test(resumeText)) return 'United States of America';
-    if (/united states|usa|\bU\.S\.\b/i.test(resumeText)) return 'United States of America';
-    if (/india/i.test(resumeText)) return 'India';
+    const header = resumeText.slice(0, 1500);
+    if (/united states of america/i.test(header)) return 'United States of America';
+    if (/united states|usa|\bU\.S\.\b/i.test(header)) return 'United States of America';
+    if (/\bindia\b/i.test(header)) return 'India';
+    return null;
   }
   if (/address\s*line\s*1/i.test(lower)) {
-    return 'Hyderabad';
+    const street = resumeText.slice(0, 1500).match(
+      /\b(\d+\s+[A-Za-z0-9][\w\s.'#-]{2,60}(?:\s+(?:Street|St|Avenue|Ave|Road|Rd|Drive|Dr|Lane|Ln|Boulevard|Blvd|Way|Court|Ct)\.?))(?:\s*,|\s+)/i,
+    );
+    return street?.[1]?.replace(/\s+/g, ' ')?.trim()?.slice(0, 120) || null;
   }
   if (/location|address/i.test(lower)) {
-    return firstMatch(resumeText, /[A-Za-z][A-Za-z\s]+,\s*(India|USA|United States)/);
+    const header = resumeText.slice(0, 1500);
+    return firstMatch(header, /[A-Za-z][A-Za-z\s]+,\s*(?:[A-Z]{2}|USA|United States|India)/);
   }
   if (/university|school|college|institution/i.test(lower)) {
     const raw = firstMatch(education, /—\s*([^,\n]+(?:University|College|Institute)[^,\n]*)/i)

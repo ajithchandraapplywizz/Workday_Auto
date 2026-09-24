@@ -782,48 +782,74 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
   console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
-  let selectedCountry = '';
+  let selectedCountry = profile.personal?.country || profile._applyWizzQa?.['country'] || '';
   try {
     const countryControl = await locateWorkdayFieldByLabel(page, '^country$')
       || page.locator('#address--country, [data-automation-id="address--country"], [data-automation-id="addressSection_country"]')
           .locator('button, [role="combobox"], input').first();
 
-    if (countryControl && await countryControl.isVisible({ timeout: 1200 }).catch(() => false)) {
+    const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1200 }).catch(() => false);
+    if (isCountryVisible) {
       const liveText = ((await countryControl.innerText().catch(() => '')) ||
         (await countryControl.inputValue().catch(() => '')) ||
         (await countryControl.textContent().catch(() => '')) || '').trim();
-      if (liveText && !/select\s*one|select/i.test(liveText)) {
+      if (!selectedCountry && liveText && !/select\s*one|select/i.test(liveText)) {
         selectedCountry = liveText;
-        console.log(`    ✓ Country already selected at top: "${selectedCountry}"`);
+        console.log(`    ✓ Country already selected on form: "${selectedCountry}"`);
       }
     }
 
-    selectedCountry = 'United States of America';
-    profile.personal = profile.personal || {};
-    profile.personal.country = selectedCountry;
-    profile.personal.country_phone_code = 'United States of America (+1)';
+    if (!selectedCountry && profile._resumeText) {
+      const { extractContactFromResumeText } = await import('./clientContact.mjs');
+      const c = extractContactFromResumeText(profile._resumeText);
+      if (c.country) selectedCountry = c.country;
+    }
 
-    // If Country at top exists and is not yet set to selectedCountry, set it now
-    if (countryControl && await countryControl.isVisible({ timeout: 800 }).catch(() => false)) {
-      const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
-      const want = selectedCountry.toLowerCase();
-      if (!cur || !cur.toLowerCase().includes('united states')) {
+    if (isCountryVisible && countryControl) {
+      // If still no country from Supabase or resume, inspect dropdown options
+      if (!selectedCountry) {
         await interactAndRescan(page, async () => {
-          await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+          await countryControl.click({ force: true }).catch(() => countryControl.evaluate(el => el.click()));
         });
-        await handleSearchableDropdown(page, countryControl, 'united states', selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
-        recordFilled(profile, 'Country', selectedCountry);
-        console.log(`    ✅ Country at top set from profile: "${selectedCountry}"`);
+        const promptOptions = await page.$$eval('[role="listbox"] [role="option"], [data-automation-id="promptOption"]', els => els.map(e => (e.textContent || '').trim()).filter(Boolean)).catch(() => []);
+        if (promptOptions.length > 0) {
+          const preferred = promptOptions.find(o => /united states/i.test(o)) || promptOptions.find(o => !/india/i.test(o) && !/select/i.test(o)) || promptOptions[0];
+          if (preferred) {
+            selectedCountry = preferred;
+            console.log(`    ✓ Country chosen from dropdown options: "${selectedCountry}"`);
+          }
+        }
+      }
+
+      if (selectedCountry) {
+        profile.personal = profile.personal || {};
+        profile.personal.country = selectedCountry;
+        if (!profile.personal.country_phone_code) {
+          profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || '';
+        }
+
+        const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
+        if (!cur || !cur.toLowerCase().includes(selectedCountry.toLowerCase())) {
+          await interactAndRescan(page, async () => {
+            await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+          });
+          const query = selectedCountry.toLowerCase();
+          await handleSearchableDropdown(page, countryControl, query, selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
+          recordFilled(profile, 'Country', selectedCountry);
+          console.log(`    ✅ Country at top set: "${selectedCountry}"`);
+        }
       }
     }
   } catch (err) {
     console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
   }
 
-  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code (default: United States of America (+1))...');
+  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code...');
   try {
-    const expectedPhoneCode = 'United States of America (+1)';
-    const query = 'united states';
+    let expectedPhoneCode = profile.personal?.country_phone_code || profile._applyWizzQa?.['country phone code'] || profile._applyWizzQa?.['country territory phone code'] || '';
+    if (!expectedPhoneCode && selectedCountry) {
+      expectedPhoneCode = workdayPhoneCodeForCountry(selectedCountry) || '';
+    }
 
     const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code')
       || page.locator('[data-automation-id="country-phone-code"]')
@@ -838,18 +864,35 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         (await countryPhoneCodeControl.innerText().catch(() => '')) ||
         (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
 
-      const usHint = /united states|\+1/i.test(selectedCountry || '') || /united states|\+1/i.test(expectedPhoneCode || '');
-      const inHint = /india|\+91/i.test(selectedCountry || '') || /india|\+91/i.test(expectedPhoneCode || '');
-      let alreadySelected = false;
-      if (inHint) alreadySelected = /india|\+91/i.test(currentCode);
-      else if (usHint) alreadySelected = /united states|\+1/i.test(currentCode);
-      else alreadySelected = currentCode && !/select\s*one|select/i.test(currentCode) && (
-        currentCode.toLowerCase().includes(query.toLowerCase()) ||
-        currentCode.toLowerCase().includes(selectedCountry.toLowerCase())
+      // If client didn't specify phone code in Supabase or resume, check if already selected
+      if (!expectedPhoneCode && currentCode && !/select\s*one|select/i.test(currentCode)) {
+        expectedPhoneCode = currentCode;
+      }
+
+      // If still empty, read available options from the dropdown
+      if (!expectedPhoneCode) {
+        await interactAndRescan(page, async () => {
+          await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
+        });
+        const promptOptions = await page.$$eval('[role="listbox"] [role="option"], [data-automation-id="promptOption"]', els => els.map(e => (e.textContent || '').trim()).filter(Boolean)).catch(() => []);
+        if (promptOptions.length > 0) {
+          const preferred = promptOptions.find(o => /united states|\+1/i.test(o)) || promptOptions.find(o => !/india|\+91/i.test(o) && !/select/i.test(o)) || promptOptions[0];
+          if (preferred) {
+            expectedPhoneCode = preferred;
+            console.log(`    ✓ Country phone code chosen from dropdown options: "${expectedPhoneCode}"`);
+          }
+        }
+      }
+
+      const query = expectedPhoneCode ? expectedPhoneCode.replace(/\s*\(\+?\d+\)/, '').trim().toLowerCase() : (selectedCountry ? selectedCountry.toLowerCase() : 'united states');
+
+      const alreadySelected = currentCode && !/select\s*one|select/i.test(currentCode) && (
+        (expectedPhoneCode && currentCode.toLowerCase().includes(expectedPhoneCode.toLowerCase())) ||
+        (selectedCountry && currentCode.toLowerCase().includes(selectedCountry.toLowerCase()))
       );
 
       if (alreadySelected) {
-        console.log(`    ✓ Country Phone Code already set and matches top country: "${currentCode}"`);
+        console.log(`    ✓ Country Phone Code already set: "${currentCode}"`);
         recordFilled(profile, 'Country / Territory Phone Code', currentCode);
         logFieldTrace({
           automationId: 'country-phone-code',
@@ -860,7 +903,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           success: true,
           step: 'My Information',
         });
-      } else {
+      } else if (expectedPhoneCode) {
         // Only clear if previous selection was genuinely incorrect
         const clearBtn = page.locator('[data-automation-id="country-phone-code"] [data-automation-id="delete-item"], #phoneNumber--countryPhoneCode [data-automation-id="delete-item"], [data-automation-id="country-phone-code"] [data-automation-id="clear-button"]').first();
         if (await clearBtn.isVisible({ timeout: 500 }).catch(() => false)) {
@@ -875,22 +918,10 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
         });
 
-        // Search with robust dropdown handler that firmly focuses search box before typing
         const optionText = expectedPhoneCode;
         const result = await handleSearchableDropdown(page, countryPhoneCodeControl, query, optionText, { confirmWithEnter: true, alreadyOpen: true });
         if (!result.success) {
-          const candidates = usHint ? [
-            'United States of America (+1)',
-            'United States (+1)',
-            'United States of America',
-            optionText,
-            query,
-          ] : inHint ? [
-            'India (+91)',
-            'India',
-            optionText,
-            query,
-          ] : [
+          const candidates = [
             optionText,
             expectedPhoneCode,
             selectedCountry,
@@ -902,7 +933,6 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
             await page.keyboard.press('Enter').catch(() => {});
             console.log(`    ✓ Country option via DOM text: "${clicked}"`);
           } else {
-            // Direct input check with proper focus and clearing
             const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], [data-automation-id*="search" i], [data-uxi-element-id*="searchBox" i]').filter({ has: page.locator(':visible') }).first();
             if (await searchInput.isVisible({ timeout: 600 }).catch(() => false)) {
               await searchInput.click().catch(() => {});
