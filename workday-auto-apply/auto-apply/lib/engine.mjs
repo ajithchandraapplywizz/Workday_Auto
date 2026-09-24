@@ -2637,7 +2637,7 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, profile: profileIn = null } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, isBatch = false, profile: profileIn = null } = {}) {
   console.log(`📝 Fill mode: ${url}`);
 
   const ats = detectATS(url);
@@ -2716,21 +2716,25 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       console.log(`${'─'.repeat(60)}`);
 
       // Determine hold time before browser close based on outcome:
-      // — quick close for skipped/declined/blocked (no value in waiting)
-      // — extended hold for incomplete/verification states (allow human inspection)
-      // — normal 8s for submitted/review-declined outcomes
+      // — quick close for skipped/declined/blocked/reached-review
+      // — batch mode: never block batch loop with long pauses
+      // — extended hold for incomplete/verification states in interactive single-job mode
       let holdMs;
-      if (statusLabel === 'skipped' || statusLabel === 'review-declined' || statusLabel === 'blocked') {
-        holdMs = 2500;
+      if (dryRun || isBatch || statusLabel === 'reached-review' || statusLabel === 'skipped' || statusLabel === 'review-declined' || statusLabel === 'blocked') {
+        holdMs = isBatch ? 1000 : 2500;
       } else if (statusLabel === 'incomplete' || statusLabel === 'needs-manual-verification' || statusLabel === 'human-required') {
-        holdMs = 120000; // 2 minutes — keep open for manual intervention
+        holdMs = 120000; // 2 minutes — keep open for manual intervention in single-job mode
         console.log(`\n   ⚠️  Bot could not complete automatically (${statusLabel}). Browser stays open for 2 minutes so you can review/fix.`);
       } else {
         holdMs = 8000;
       }
       console.log(`\n   — Closing browser in ${Math.round(holdMs / 1000)}s...`);
-      await page.waitForTimeout(holdMs);
-      await browser.close();
+      try {
+        await page.waitForTimeout(holdMs);
+      } catch {}
+      try {
+        await browser.close();
+      } catch {}
       return status;
     } else if (!existingPage) {
       await discoverApplicationForm(page, url, { mode, profile });
@@ -3118,9 +3122,11 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     console.log(`   Report: data/applied.csv`);
     console.log(`${'─'.repeat(60)}`);
 
-    console.log(`\n   — Ctrl+C to keep it open longer.`);
-    await page.waitForTimeout(15000);
-    await browser.close();
+    console.log(`\n   — Closing browser...`);
+    try {
+      if (!isBatch) await page.waitForTimeout(5000);
+    } catch {}
+    try { await browser.close(); } catch {}
     return status;
 
   } catch (err) {
@@ -3134,7 +3140,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       failureReason: err.message,
     }).catch(() => {});
 
-    if (page && !page.isClosed()) {
+    if (!isBatch && page && !page.isClosed()) {
       try {
         console.log('   Pausing 10s on error page for visual inspection...');
         await page.waitForTimeout(10000);

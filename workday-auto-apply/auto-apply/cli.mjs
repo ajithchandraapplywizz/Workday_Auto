@@ -103,7 +103,7 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--signup') isSignup = true;
   else if (rawArgs[i] === '--signin') isSignup = false;
   else if (rawArgs[i] === '--confirm-submit') confirmSubmit = true;
-  else if (rawArgs[i] === '--dry-run') dryRun = true;
+  else if (/^--dry-?run/i.test(rawArgs[i])) dryRun = true;
   else if (rawArgs[i] === '--offset' && rawArgs[i + 1]) scanBatchOffset = Number(rawArgs[++i]) || 0;
   else if (rawArgs[i] === '--limit' && rawArgs[i + 1]) {
     scanBatchLimit = Number(rawArgs[++i]) || 15;
@@ -425,12 +425,18 @@ async function cmdFill(url, planPath) {
 }
 
 // ─── APPLY (full pipeline) ──────────────────────────────────────────────────
-async function cmdApply(url) {
+async function cmdApply(url, { isBatch = false } = {}) {
   if (!url) {
+    if (isBatch) return 'invalid_url';
     console.log('Usage: node cli.mjs apply <url> [--client <id>] [--signup|--signin] [--confirm-submit]');
     process.exit(1);
   }
-  assertWorkdayUrl(url);
+  const check = validateWorkdayUrl(url);
+  if (!check.valid) {
+    console.error(`❌ ${check.reason}`);
+    if (isBatch) return 'invalid_url';
+    process.exit(1);
+  }
 
   const profilePath = findFilePath('config/profile.yml');
   if (!isApiOnlyAnswerMode() && !existsSync(profilePath)) {
@@ -455,6 +461,7 @@ async function cmdApply(url) {
   console.log(`🔍 ATS: ${ats}`);
   if (ats !== 'workday') {
     console.error('❌ Only Workday career URLs are supported in this build.');
+    if (isBatch) return 'unsupported_ats';
     process.exit(1);
   }
 
@@ -542,6 +549,7 @@ async function cmdApply(url) {
       mode: creds.mode,
       confirmSubmit,
       dryRun,
+      isBatch,
     });
 
     console.log(`\n${'═'.repeat(60)}`);
@@ -551,7 +559,7 @@ async function cmdApply(url) {
   } catch (err) {
     const timestamp = new Date().toISOString();
     console.error(`\n❌ [${timestamp}] Form fill error for ${url}: ${err.message}`);
-    console.log('   Stopping pipeline. Exiting cleanly without reopening job link.\n');
+    console.log('   Stopping pipeline for this URL. Closing browser cleanly.\n');
     try { await browser.close(); } catch { }
     return 'error';
   }
@@ -680,35 +688,24 @@ async function cmdBatch(file) {
     console.log(`${'═'.repeat(60)}`);
 
     try {
-      let status = 'incomplete';
-      for (let attempt = 1; attempt <= 3; attempt++) {
-        status = await cmdApply(url);
-        if (status === 'submitted' || status === 'skipped' || status === 'reached-review' || status === 'review-declined') break;
-        if (status === 'auth-failed' || status === 'job_not_found') break;
-        if (status === 'incomplete' || status === 'error' || !status) {
-          console.log(`\n  ↻ This job is not at Review yet (attempt ${attempt}/3). Staying on this URL — not opening the next link.`);
-          if (attempt < 3) continue;
-        }
-        break;
-      }
+      const status = await cmdApply(url, { isBatch: true });
       results.push({ url, status: status || 'done' });
       if (status === 'review-declined') {
-        console.log('\n🛑 N — batch stopped. Remaining URLs were not opened.');
+        console.log('\n🛑 N — batch stopped by user at Review. Remaining URLs were not opened.');
         stopped = true;
         break;
       }
-      if (status === 'incomplete' || status === 'error') {
-        console.log('\n🛑 Form on this URL is not complete through Review. Next link will not be opened.');
-        console.log('   Re-run the same URL after the remaining required fields are filled.');
-        stopped = true;
-        break;
+      if (status === 'reached-review') {
+        console.log(`\n🎯 Successfully reached Review for [${offset + i + 1}/${targets.length}]. Moving immediately to next link...`);
+      } else if (status === 'submitted') {
+        console.log(`\n✅ Application submitted for [${offset + i + 1}/${targets.length}]. Moving immediately to next link...`);
+      } else {
+        console.log(`\n⚠️  Status "${status}" on [${offset + i + 1}/${targets.length}]. Moving immediately to next link...`);
       }
     } catch (err) {
       console.error(`❌ Failed: ${err.message}`);
       results.push({ url, status: 'error', error: err.message });
-      console.log('\n🛑 Staying on this URL after a crash — next link will not be opened.');
-      stopped = true;
-      break;
+      console.log(`\n⚠️  Error on [${offset + i + 1}/${targets.length}]. Moving immediately to next link...`);
     }
   }
 
@@ -719,7 +716,7 @@ async function cmdBatch(file) {
   const reachedReview = results.filter((r) => r.status === 'reached-review').length;
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const declined = results.filter((r) => r.status === 'review-declined').length;
-  const fail = results.filter((r) => r.status === 'error' || r.status === 'auth-failed' || r.status === 'job_not_found').length;
+  const fail = results.filter((r) => ['error', 'auth-failed', 'job_not_found', 'invalid_url', 'unsupported_ats'].includes(r.status)).length;
   const incomplete = results.filter((r) => r.status === 'incomplete' || r.status === 'done').length;
   console.log(`  ✅ Submitted:       ${submitted}`);
   if (dryRun || reachedReview > 0) {
