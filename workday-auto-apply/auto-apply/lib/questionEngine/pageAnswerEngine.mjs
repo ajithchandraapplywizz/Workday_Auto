@@ -41,6 +41,7 @@ import {
   explicitSponsorship,
   explicitWorkAuth,
   explicitYears,
+  explicitDob,
   profileMentionsTopic,
 } from './profileFacts.mjs';
 import { buildLlmDateContext } from '../date-utils.mjs';
@@ -122,8 +123,15 @@ function deterministicSpecial(field, profile) {
     }
   }
 
+  if (intent === 'date_of_birth' || /date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
+    const dob = explicitDob(profile);
+    if (dob) {
+      return finish(field, 'date_of_birth', dob, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+    }
+  }
+
   // Today's date for signature-companion date fields
-  if (isTodaysDateField(label) || intent === 'date') {
+  if ((isTodaysDateField(label) || intent === 'date') && intent !== 'date_of_birth' && !/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
     const today = new Date();
     const mm = String(today.getMonth() + 1).padStart(2, '0');
     const dd = String(today.getDate()).padStart(2, '0');

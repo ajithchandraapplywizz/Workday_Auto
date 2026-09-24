@@ -229,6 +229,22 @@ export const ANSWER_CONCEPTS = [
     keys: ['email'],
     profilePaths: ['personal.email'],
   },
+  {
+    id: 'date_of_birth',
+    match: [
+      /date\s*of\s*birth/i,
+      /birth\s*date/i,
+      /\bdob\b/i,
+      /\bbirthday\b/i,
+    ],
+    keys: ['date of birth', 'birth date', 'dob', 'birthday'],
+    profilePaths: [
+      'personal.date_of_birth',
+      'personal.dob',
+      'date_of_birth',
+      '_applyWizzClientContext.additional_information.date_of_birth',
+    ],
+  },
 ];
 
 /**

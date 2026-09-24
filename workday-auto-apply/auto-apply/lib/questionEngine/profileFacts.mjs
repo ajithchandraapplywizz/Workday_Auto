@@ -5,6 +5,7 @@
 
 import { extractTopicTokens, buildExperienceContext, topicMatchesExperience } from '../experienceAnswer.mjs';
 import { isApplyWizzConfigured } from '../applyWizzClient.mjs';
+import { formatToMMDDYYYY } from '../fillHandlers.mjs';
 
 function nonEmpty(value) {
   if (value == null) return false;
@@ -52,6 +53,7 @@ export function profileFactPresence(profile = {}) {
     salary: nonEmpty(profile.compensation),
     hourly: nonEmpty(profile.compensation_hourly),
     gender: nonEmpty(eeo.gender),
+    dateOfBirth: Boolean(explicitDob(profile)),
     skills: Array.isArray(profile.skills) ? profile.skills.length : 0,
   };
 }
@@ -144,6 +146,20 @@ export function explicitSalary(profile = {}, hourly = false) {
     }
   }
   return '';
+}
+
+export function explicitDob(profile = {}) {
+  const raw = profile?.personal?.date_of_birth
+    || profile?.personal?.dob
+    || profile?.date_of_birth
+    || profile?._applyWizzQa?.['date of birth']
+    || profile?._applyWizzQa?.['birth date']
+    || profile?._applyWizzQa?.['dob']
+    || profile?._applyWizzClientContext?.additional_information?.date_of_birth
+    || profile?._applyWizzRaw?.date_of_birth
+    || qaGet(profile, 'date of birth', 'birth date', 'dob', 'birthday');
+  if (!raw) return '';
+  return formatToMMDDYYYY(raw) || String(raw).trim();
 }
 
 /**

@@ -35,6 +35,7 @@ import {
   isSpecificManagerOrLocationQuestion,
 } from './questionEngine/intents.mjs';
 import { isApiOnlyAnswerMode, applyApiOnlyProfileGuards } from './apiOnlyProfile.mjs';
+import { formatToMMDDYYYY } from './fillHandlers.mjs';
 
 // ─── Field label → profile key mapping ──────────────────────────────────────
 // Each entry: [regex to match field label, path in profile.yml, optional transform]
@@ -45,6 +46,7 @@ export const FIELD_MAP = [
   [/local\s*given\s*name/i, 'personal.first_name'],
   [/local\s*family\s*name/i, 'personal.last_name'],
   [/^(full\s*)?name$/i, 'personal.full_name'],  // resolved as first + last
+  [/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i, 'personal.date_of_birth'],
   [/^email/i, 'personal.email'],
   [/phone\s*device\s*type/i, '_static.Mobile'],
   [/are\s*you\s*bilingual\?/i, '_static.No'],
@@ -383,6 +385,9 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
+        if (path === 'personal.date_of_birth' || path.includes('date_of_birth')) {
+          return formatToMMDDYYYY(val) || String(val);
+        }
         const res = Array.isArray(val) ? val : String(val);
         if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
           return toTitleCase(res);

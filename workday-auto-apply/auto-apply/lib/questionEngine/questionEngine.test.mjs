@@ -6,6 +6,7 @@ import { mapToExactOption } from './optionMap.mjs';
 import { resolveFieldWithoutLlm, resolveDynamicAnswer, answerPageQuestions } from './pageAnswerEngine.mjs';
 import { REASON } from './answerRecord.mjs';
 import { buildLlmDateContext } from '../date-utils.mjs';
+import { validateBeforeFill } from '../orchestrator/preFillValidator.mjs';
 
 function field(label, extras = {}) {
   return {
@@ -476,4 +477,31 @@ test('offline resolution handles hours limitations, commute ability, and educati
   assert.ok(recEdu);
   assert.equal(recEdu.answer, "Master's Degree");
 });
+
+test('Date of Birth questions resolve to candidate DOB formatted as MM/DD/YYYY', () => {
+  const p = profile({
+    personal: { date_of_birth: '2000-03-10' },
+  });
+
+  const fullLabel = 'Date of Birth (MONTH/DAY/YEAR) (Responses are not seen by Recruiters or anyone involved in the hiring process)*';
+  assert.equal(classifyQuestionIntent(fullLabel), 'date_of_birth');
+
+  const qDob = field(fullLabel, {
+    questionId: 'q-dob',
+    elementType: 'date-picker',
+    fieldType: 'date-picker',
+    options: [],
+  });
+
+  const rec = resolveFieldWithoutLlm(qDob, p);
+  assert.ok(rec, 'Expected DOB question to resolve without LLM');
+  assert.equal(rec.answer, '03/10/2000');
+  assert.equal(rec.intent, 'date_of_birth');
+  assert.equal(rec.requiresReview, false);
+
+  const preFill = validateBeforeFill(qDob, rec, p);
+  assert.equal(preFill.ok, true, `preFillValidator should pass: ${JSON.stringify(preFill)}`);
+  assert.equal(preFill.answer, '03/10/2000');
+});
+
 

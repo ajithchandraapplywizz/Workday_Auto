@@ -33,6 +33,7 @@ const CONCEPT_TO_INTENT = {
   city: 'identity_city',
   phone: 'identity_phone',
   email: 'identity_email',
+  date_of_birth: 'date_of_birth',
 };
 
 const HIGH_RISK = new Set([
@@ -71,6 +72,7 @@ export function isTodaysDateField(label = '') {
   const s = String(label || '').toLowerCase();
   // Never steal a label that is a signature field (sign + name) — those stay as identity_name
   if (isSignatureOrFullNameQuestion(label)) return false;
+  if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(s)) return false;
   return /enter\s+(the|today'?s?)\s*date|please\s+enter\s+(the\s+)?date|today'?s?\s*date|^date:?\s*\*?$|signature\s*date|date\s*(?:of\s*)?signature|date\s*signed/i.test(s);
 }
 
@@ -109,6 +111,7 @@ export function classifyQuestionIntent(label = '', field = {}) {
   if (!text) return 'unknown';
 
   if (isSignatureOrFullNameQuestion(text)) return 'identity_name';
+  if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(text)) return 'date_of_birth';
   if (isTodaysDateField(text)) return 'date';
   if (isShiftOrScheduleQuestion(text)) return 'work_schedule';
   if (/limitation.*(hour|schedule|available)|restriction.*(hour|schedule|available)|limitations?\s+to\s+(the\s+)?hours/i.test(text)) {

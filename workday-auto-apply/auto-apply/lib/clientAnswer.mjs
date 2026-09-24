@@ -41,6 +41,7 @@ import {
   isSpecificManagerOrLocationQuestion,
 } from './questionEngine/intents.mjs';
 import { toTitleCase } from './personName.mjs';
+import { formatToMMDDYYYY } from './fillHandlers.mjs';
 
 function fieldOptions(field = {}) {
   return (field.options || [])
@@ -77,6 +78,20 @@ function profileFactForLabel(label, profile = {}) {
   if (/^(legal\s*)?(middle)\s*name/.test(n) || n === 'middle name') return toTitleCase(p.middle_name) || null;
   if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return toTitleCase(p.last_name) || null;
   if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return toTitleCase(p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name) || null;
+  if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(n)) {
+    const rawDob = p.date_of_birth
+      || p.dob
+      || profile._applyWizzQa?.['date of birth']
+      || profile._applyWizzQa?.['birth date']
+      || profile._applyWizzQa?.['dob']
+      || profile._applyWizzClientContext?.additional_information?.date_of_birth
+      || profile._applyWizzRaw?.date_of_birth
+      || profile.date_of_birth
+      || '';
+    if (rawDob) {
+      return formatToMMDDYYYY(rawDob) || rawDob;
+    }
+  }
   if (/^email/.test(n)) return p.email || null;
   if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(n)) {
     const hint = `${p.country || ''} ${p.country_phone_code || ''}`;

@@ -633,8 +633,10 @@ export function buildApplyWizzQaIndex(client = {}, info = {}) {
   }
   if (info.date_of_birth) {
     const dob = String(info.date_of_birth).trim();
-    put('date of birth', dob);
-    put('birth date', dob);
+    const formatted = isoToMMDDYYYY(dob) || dob;
+    put('date of birth', formatted);
+    put('birth date', formatted);
+    put('dob', formatted);
   }
 
   if (addrFromFull) {
@@ -681,7 +683,7 @@ export function mapApplyWizzToProfile(client = {}, info = {}) {
     country: countryName,
     country_phone_code: workdayPhoneCodeForCountry(countryName) || '',
     source: info.how_did_you_hear || client.source || '',
-    date_of_birth: info.date_of_birth || '',
+    date_of_birth: isoToMMDDYYYY(info.date_of_birth) || info.date_of_birth || '',
   };
   const personal = mergeNonEmpty({}, personalRaw);
 
