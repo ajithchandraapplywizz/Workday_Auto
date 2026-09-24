@@ -63,6 +63,7 @@ import {
   shouldSkipOptionalFill,
   shouldIncludeInScan,
 } from './scanFieldFilter.mjs';
+import { toTitleCase } from './personName.mjs';
 import {
   attachFormMutationObserver,
   detachFormMutationObserver,
@@ -837,6 +838,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         (await countryPhoneCodeControl.innerText().catch(() => '')) ||
         (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
 
+      const usHint = /united states|\+1/i.test(selectedCountry || '') || /united states|\+1/i.test(expectedPhoneCode || '');
+      const inHint = /india|\+91/i.test(selectedCountry || '') || /india|\+91/i.test(expectedPhoneCode || '');
       let alreadySelected = false;
       if (inHint) alreadySelected = /india|\+91/i.test(currentCode);
       else if (usHint) alreadySelected = /united states|\+1/i.test(currentCode);
@@ -873,6 +876,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         });
 
         // Search with robust dropdown handler that firmly focuses search box before typing
+        const optionText = expectedPhoneCode;
         const result = await handleSearchableDropdown(page, countryPhoneCodeControl, query, optionText, { confirmWithEnter: true, alreadyOpen: true });
         if (!result.success) {
           const candidates = usHint ? [
@@ -1118,7 +1122,6 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.personal.state = stateValue;
         profile.qa_answers = profile.qa_answers || {};
         profile.qa_answers.state = stateValue;
-        await saveAnswerToYaml(STATE_LABEL, stateValue).catch(() => {});
         recordFilled(profile, STATE_LABEL, stateValue);
       } else {
         console.log(`    ⚠️  State not verified in DOM (wanted "${stateValue}", got "${stateResult.domValue || '(empty)'}")`);
@@ -1147,6 +1150,13 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         keys: ['personal.first_name', 'first_name'],
       },
       {
+        match: /^(legal\s*name\s*[-–—:]\s*)?(middle)\s*name/i,
+        label: 'Middle Name',
+        autoId: 'legalNameSection_middleName',
+        selector: 'input[data-automation-id*="middleName" i], input#legalNameSection_middleName, input[name*="middleName" i]',
+        keys: ['personal.middle_name', 'middle_name'],
+      },
+      {
         match: /^(legal\s*name\s*[-–—:]\s*)?(last|family|surname)\s*name/i,
         label: 'Last Name',
         autoId: 'legalNameSection_lastName',
@@ -1166,22 +1176,25 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           const v = k.includes('.') ? k.split('.').reduce((o, i) => o?.[i], profile) : profile?.[k];
           if (v) { fillVal = String(v); break; }
         }
-        if (fillVal && (!val || val.trim() === '' || val.trim().toLowerCase() !== fillVal.toLowerCase())) {
-          await interactAndRescan(page, async () => {
-            await inputEl.scrollIntoViewIfNeeded().catch(() => {});
-            await inputEl.fill(fillVal).catch(() => {});
-          });
-          recordFilled(profile, tf.label, fillVal);
-          const verified = await inputEl.inputValue().catch(() => '');
-          logFieldTrace({
-            automationId: tf.autoId,
-            label: tf.label,
-            controlType: 'text',
-            tier: 'tier1_profile_fact',
-            valueAttempted: fillVal,
-            success: verified.trim().toLowerCase() === fillVal.trim().toLowerCase(),
-            step: 'My Information',
-          });
+        if (fillVal) {
+          fillVal = toTitleCase(fillVal);
+          if (!val || val.trim() !== fillVal) {
+            await interactAndRescan(page, async () => {
+              await inputEl.scrollIntoViewIfNeeded().catch(() => {});
+              await inputEl.fill(fillVal).catch(() => {});
+            });
+            recordFilled(profile, tf.label, fillVal);
+            const verified = await inputEl.inputValue().catch(() => '');
+            logFieldTrace({
+              automationId: tf.autoId,
+              label: tf.label,
+              controlType: 'text',
+              tier: 'tier1_profile_fact',
+              valueAttempted: fillVal,
+              success: verified.trim() === fillVal,
+              step: 'My Information',
+            });
+          }
         }
       }
     }
@@ -1552,6 +1565,7 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
       if (repaired > 0) {
         console.log(`  🔧 Repaired ${repaired} flagged field(s) — skipping full re-fill`);
       } else {
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
         await fillCurrentWorkdayStep(page, before, profile, plan);
       }
       await page.waitForTimeout(RAPID.settleMs);
@@ -1608,7 +1622,12 @@ async function advanceWorkdayStep(page, currentStep = '') {
     'button:has-text("Save & Continue")',
     'button[data-automation-id="bottom-navigation-next-button"]',
     'button[data-automation-id="page-footer-next-button"]',
+    'button[data-automation-id*="next-button" i]',
+    'button[data-automation-id*="nextButton" i]',
+    'button:has-text("Next")',
   ];
+
+  await page.keyboard.press('Escape').catch(() => {});
 
   let saveBtn = null;
   for (const sel of saveBtnSelectors) {
@@ -1693,9 +1712,14 @@ async function advanceWorkdayStepWithVerification(page, previousStep) {
 
 /**
  * Always ask before Submit unless --confirm-submit was passed.
- * @returns {'submit'|'decline'|'skip'}
+ * In --dry-run mode, auto-skips (never submits) and signals 'reached-review'.
+ * @returns {'submit'|'decline'|'skip'|'dry-run-skip'}
  */
-async function confirmSubmitInTerminal(autoConfirm) {
+async function confirmSubmitInTerminal(autoConfirm, dryRun = false) {
+  if (dryRun) {
+    console.log('  🎯 --dry-run — reached Review page! Counting as success and skipping (not submitting).');
+    return 'dry-run-skip';
+  }
   if (autoConfirm) {
     console.log('  ✅ --confirm-submit — submitting without prompt');
     return 'submit';
@@ -1782,7 +1806,7 @@ export async function promptScanReviewDecision({ company = '', url = '' } = {}) 
   }
 }
 
-async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = {}) {
+async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dryRun = false } = {}) {
   console.log('\n📋 Review step — parsing DOM before submit.');
 
   if (profile?._humanRequired?.length) {
@@ -1798,6 +1822,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
 
   await takeScreenshot(page, 'workday-review-step');
   await attachFormMutationObserver(page);
+  await acknowledgeAllPageAgreements(page, profile, 'Review');
   const review = await parseReviewDOM(page);
 
   const expected = {
@@ -1818,7 +1843,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
 
   const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
 
-  const decision = await confirmSubmitInTerminal(confirmSubmit);
+  const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
+  if (decision === 'dry-run-skip') {
+    console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
+    await takeScreenshot(page, 'post-submit');
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'dry_run' }).catch(() => {});
+    return 'reached-review';
+  }
   if (decision === 'decline') {
     console.log('  ✋ N — not submitting. Stopping here.');
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'review_declined' }).catch(() => {});
@@ -1862,7 +1893,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false } = 
 }
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
-export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false } = {}) {
+export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false, dryRun = false } = {}) {
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`STARTING WORKDAY WIZARD LOOP (script-only Playwright)`);
   console.log(`  Policy: REQUIRED fields only — no optional / unimportant clicks`);
@@ -1889,7 +1920,6 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   if (tenant) {
     profile._tenant = tenant;
     profile._workdayPlatform = detected?.platform || '';
-    applyTenantOverridesToProfile(profile, tenant);
     if (detected?.platform) {
       console.log(`  🌐 Workday tenant=${tenant} platform=${detected.platform} host=${detected.hostname}`);
     }
@@ -1965,7 +1995,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
 
     if (stepName === 'Review') {
-      return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+      return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
     }
 
     const fingerprint = await computeStepFingerprint(page, stepName);
@@ -2026,7 +2056,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
         status: 'in_progress',
         success: true,
       }).catch(() => {});
-      return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+      return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
     }
 
     if (advanceResult.hasErrors) {
@@ -2097,7 +2127,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       status: 'in_progress',
       success: true,
     }).catch(() => {});
-    return await verifyAndSubmitReview(page, profile, { confirmSubmit });
+    return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
   }
   await recordClientApplication(profile, {
     url: profile._canonicalJobUrl || plan?.url || page.url(),
@@ -2607,7 +2637,7 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, profile: profileIn = null } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, profile: profileIn = null } = {}) {
   console.log(`📝 Fill mode: ${url}`);
 
   const ats = detectATS(url);
@@ -2669,7 +2699,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
       await page.waitForTimeout(1000);
 
-      const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit });
+      const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
       const statusLabel = typeof status === 'object' && status?.status ? status.status : status;

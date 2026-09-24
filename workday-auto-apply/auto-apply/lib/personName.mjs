@@ -5,14 +5,18 @@
  */
 
 /**
- * @param {string} fullName
- * @returns {{ first_name: string, last_name: string }}
+ * @param {string} str
+ * @returns {string} First letter capitalized, remaining letters lowercase
  */
-function toTitleCase(str) {
-  return String(str || '')
+export function toTitleCase(str) {
+  if (!str) return '';
+  return String(str)
+    .trim()
     .toLowerCase()
     .split(/\s+/)
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1))
+    .map(word => {
+      return word.split('-').map(part => part.charAt(0).toUpperCase() + part.slice(1)).join('-');
+    })
     .join(' ');
 }
 

@@ -593,10 +593,25 @@ export async function ensureUsWorkdayContact(profile = {}) {
  */
 export function resolvePostalForWorkday(profile = {}, indiaFallback) {
   const hint = `${profile?.personal?.country_phone_code || ''} ${profile?.personal?.country || ''}`;
+  const isUs = /united states|\+1/i.test(hint) || /^(us|usa)$/i.test(String(profile?.personal?.country || '').trim());
   const usZip = String(profile?.personal?.postal_code || '').trim();
-  if (/united states|\+1/i.test(hint) && /^\d{5}(-\d{4})?$/.test(usZip)) {
-    return usZip.slice(0, 5);
+
+  if (isUs) {
+    if (/^\d{5}(-\d{4})?$/.test(usZip)) {
+      return usZip.slice(0, 5);
+    }
+    const state = String(profile?.personal?.state || profile?.qa_answers?.state || '').toLowerCase();
+    const city = String(profile?.personal?.city || profile?.qa_answers?.city || '').toLowerCase();
+
+    if (state.includes('tx') || state.includes('texas') || city.includes('irving') || city.includes('dallas') || city.includes('austin') || city.includes('houston')) return '75038';
+    if (state.includes('ma') || state.includes('massachusetts') || city.includes('boston')) return '02108';
+    if (state.includes('ca') || state.includes('california') || city.includes('san francisco')) return '94102';
+    if (state.includes('ny') || state.includes('new york')) return '10001';
+    if (state.includes('wa') || state.includes('washington') || city.includes('seattle')) return '98101';
+    if (state.includes('il') || state.includes('illinois') || city.includes('chicago')) return '60601';
+    return '75038';
   }
+
   if (typeof indiaFallback === 'function') return indiaFallback(profile);
-  return usZip || '94102';
+  return usZip || '500001';
 }

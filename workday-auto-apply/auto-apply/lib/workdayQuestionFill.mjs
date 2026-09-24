@@ -42,6 +42,7 @@ import {
   isYearsQuantityQuestion,
   isInvalidYearsAnswer,
 } from './experienceAnswer.mjs';
+import { toTitleCase } from './personName.mjs';
 import {
   getTodayMMDDYYYY,
   getTodayISODate,
@@ -1456,6 +1457,41 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
   }
   const mode = salaryGroup ? 'one' : workTypeGroup ? 'worktype' : 'match';
 
+  // ─── IDEMPOTENCY GUARD ───────────────────────────────────────────────────────
+  // Read what is currently checked BEFORE touching anything.
+  // If all desired targets are already checked, return immediately — do NOT re-click.
+  // This prevents the orchestrator rescan from calling fill again and toggling boxes off.
+  const alreadyChecked = await fieldBox.evaluate((root) => {
+    const doc = root.ownerDocument || document;
+    let boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
+    if (!boxes.length) boxes = Array.from(doc.querySelectorAll('input[type="checkbox"]'));
+    return boxes
+      .filter((cb) => cb.checked)
+      .map((cb) => {
+        const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+        return (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      })
+      .filter(Boolean);
+  }).catch(() => []);
+
+  if (alreadyChecked.length > 0) {
+    const normCb = (v) => String(v || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    const squashCb = (v) => String(v || '').replace(/\s+/g, '');
+    const allSatisfied = targets.every((t) => {
+      const needle = normCb(t);
+      return alreadyChecked.some((c) => {
+        const hay = normCb(c);
+        return hay === needle || hay.includes(needle) || needle.includes(hay)
+          || squashCb(hay) === squashCb(needle);
+      });
+    });
+    if (allSatisfied) {
+      console.log(`    ✓ Checkbox group "${label.slice(0, 50)}" already checked → [${alreadyChecked.join(', ')}] — skipping re-click`);
+      return true;
+    }
+  }
+  // ─────────────────────────────────────────────────────────────────────────────
+
   const result = await fieldBox.evaluate((root, { targets, mode }) => {
     const doc = root.ownerDocument || document;
     const norm = (v) => String(v || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
@@ -1574,7 +1610,7 @@ export async function matchQuestionToAnswer(label, profile, qaStore = null) {
       || profile?._applyWizzProfile?.full_name
       || profile?._applyWizzProfile?.client_name
       || '';
-    if (fullName) return fullName;
+    if (fullName) return toTitleCase(fullName);
   }
 
   const dynamicDateAction = buildCurrentDateAction(label, {
@@ -1596,13 +1632,13 @@ export async function matchQuestionToAnswer(label, profile, qaStore = null) {
   if (/please\s+enter\s+your\s+name/i.test(norm)) {
     const fullName = profile?.personal?.full_name
       || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim();
-    if (fullName) return fullName;
+    if (fullName) return toTitleCase(fullName);
   }
 
   if (/^name$/i.test(norm.replace(/\*+/, ''))) {
     const fullName = profile?.personal?.full_name
       || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim();
-    if (fullName) return fullName;
+    if (fullName) return toTitleCase(fullName);
   }
 
   if (/please\s+check\s+one\s+of\s+the\s+boxes\s+below/i.test(norm)) {
@@ -2623,8 +2659,10 @@ export async function handleSelfIdentifyStep(page, profile) {
   console.log('  📋 Self Identify (OFCCP CC-305) — Language → Name → Date → Disability...');
   await waitForDomSettled(page);
 
-  const fullName = profile?.personal?.full_name
-    || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim();
+  const fullName = toTitleCase(
+    profile?.personal?.full_name
+    || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim()
+  );
   const selfIdentifyMeta = {
     containerText: 'Voluntary Self-Identification of Disability CC-305 OMB Control Number current value is MM/DD/YYYY',
     placeholder: 'MM/DD/YYYY',

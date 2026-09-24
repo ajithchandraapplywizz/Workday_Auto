@@ -40,6 +40,7 @@ import {
   pickShiftOption,
   isSpecificManagerOrLocationQuestion,
 } from './questionEngine/intents.mjs';
+import { toTitleCase } from './personName.mjs';
 
 function fieldOptions(field = {}) {
   return (field.options || [])
@@ -72,9 +73,10 @@ function profileFactForLabel(label, profile = {}) {
   const priorEmployer = priorEmployerAnswer(label, profile);
   if (priorEmployer) return priorEmployer;
 
-  if (/^(legal\s*)?(first|given)\s*name/.test(n) || n === 'first name') return p.first_name || null;
-  if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return p.last_name || null;
-  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || null;
+  if (/^(legal\s*)?(first|given)\s*name/.test(n) || n === 'first name') return toTitleCase(p.first_name) || null;
+  if (/^(legal\s*)?(middle)\s*name/.test(n) || n === 'middle name') return toTitleCase(p.middle_name) || null;
+  if (/^(legal\s*)?(last|family|surname)\s*name/.test(n) || n === 'last name') return toTitleCase(p.last_name) || null;
+  if (isSignatureOrFullNameQuestion(label) || /^full\s*name$|^name$|^legal\s*name$/.test(n) || /enter.*your.*name/i.test(n)) return toTitleCase(p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name) || null;
   if (/^email/.test(n)) return p.email || null;
   if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(n)) {
     const hint = `${p.country || ''} ${p.country_phone_code || ''}`;

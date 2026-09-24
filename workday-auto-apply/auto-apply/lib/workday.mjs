@@ -662,6 +662,9 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
   console.log(`   Workday auth mode: "${mode}"`);
 
   // Mode: "signin" — try login first; on wrong-password / no-account, create account then sign in
+  // Flow: Login → if fails → Create Account (ensures account exists on this tenant) →
+  //        if account already existed (_accountAlreadyExists) → Forgot Password → continue
+  //        if fresh account created → verify + login normally
   if (mode === 'signin') {
     if (email && password) {
       console.log(`   Logging in to Workday as ${email}...`);
@@ -669,35 +672,6 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
       if (loginResult === true) {
         return finishSuccessfulLogin(page, mode, profile);
-      }
-
-      if (loginResult === 'locked' || loginResult === 'wrong-password-or-locked') {
-        console.log('   🔒 Workday reports invalid credentials or account locked — initiating automated Forgot Password recovery via Zoho Mail...');
-        const company = extractWorkdayCompanyName(page.url());
-        const forgotSuccess = await executeWorkdayForgotPassword(page, {
-          email,
-          password,
-          company,
-          timeoutMs: 75000,
-        });
-
-        if (forgotSuccess?.success) {
-          console.log('   ✅ Password reset completed for locked account! Verifying session...');
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-          if (await isWorkdayWizardVisible(page)) {
-            return true;
-          }
-          await handleAdaptiveGateway(page, 'signin');
-          const relogin = await workdayLogin(page, email, password);
-          if (relogin === true) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-          if (await isWorkdayWizardVisible(page)) {
-            return true;
-          }
-        }
       }
 
       if (loginResult === 'needs-verification') {
@@ -723,9 +697,13 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         }
       }
 
-      // If signin was not successful (account does not exist on this tenant, wrong credentials, etc.)
-      // Fall back to Create Account as per workflow: if account not found/logged in, create account and proceed
-      console.log('   ℹ️  Sign-in not completed with existing credentials — falling back to Create Account...');
+      // For ALL other failures (wrong-password, locked, needs-signup, unknown):
+      // Step 1 — Attempt Create Account on this tenant first.
+      //   • If account did NOT exist yet → fresh account is created → verify + login (handled inside fallback)
+      //   • If account ALREADY existed on this tenant → page._accountAlreadyExists is set →
+      //     fallbackCreateAccountAndLogin will detect this and run Forgot Password automatically.
+      // This guarantees we never run Forgot Password on a tenant where the account doesn't exist yet.
+      console.log(`   ℹ️  Login failed (result="${loginResult}") — running Create Account first to ensure account exists on this tenant, then will use Forgot Password if needed...`);
       return fallbackCreateAccountAndLogin(page, {
         email,
         password,

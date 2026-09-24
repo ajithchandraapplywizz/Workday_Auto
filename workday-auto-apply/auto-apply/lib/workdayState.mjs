@@ -12,8 +12,6 @@ export const WORKDAY_DEFAULT_STATE = 'California';
  * @returns {string}
  */
 export function resolveStateValue(profile = {}, tenant = '') {
-
-  // Tenant YAML may expose personal via profile merge elsewhere; prefer profile.
   const fromTenantPersonal = profile?.personal?.state
     || profile?.personal?.State
     || profile?.personal?.province
@@ -21,8 +19,27 @@ export function resolveStateValue(profile = {}, tenant = '') {
     || profile?.qa_answers?.['state / province']
     || profile?.qa_answers?.province;
 
-  return String(fromTenantPersonal || WORKDAY_DEFAULT_STATE).trim();
+  const raw = String(fromTenantPersonal || WORKDAY_DEFAULT_STATE).trim();
+  const lower = raw.toLowerCase();
+  if (US_STATE_MAP[lower]) {
+    const full = US_STATE_MAP[lower];
+    return full.charAt(0).toUpperCase() + full.slice(1);
+  }
+  return raw;
 }
+
+const US_STATE_MAP = {
+  al: 'alabama', ak: 'alaska', az: 'arizona', ar: 'arkansas', ca: 'california',
+  co: 'colorado', ct: 'connecticut', de: 'delaware', fl: 'florida', ga: 'georgia',
+  hi: 'hawaii', id: 'idaho', il: 'illinois', in: 'indiana', ia: 'iowa',
+  ks: 'kansas', ky: 'kentucky', la: 'louisiana', me: 'maine', md: 'maryland',
+  ma: 'massachusetts', mi: 'michigan', mn: 'minnesota', ms: 'mississippi', mo: 'missouri',
+  mt: 'montana', ne: 'nebraska', nv: 'nevada', nh: 'new hampshire', nj: 'new jersey',
+  nm: 'new mexico', ny: 'new york', nc: 'north carolina', nd: 'north dakota', oh: 'ohio',
+  ok: 'oklahoma', or: 'oregon', pa: 'pennsylvania', ri: 'rhode island', sc: 'south carolina',
+  sd: 'south dakota', tn: 'tennessee', tx: 'texas', ut: 'utah', vt: 'vermont',
+  va: 'virginia', wa: 'washington', wv: 'west virginia', wi: 'wisconsin', wy: 'wyoming',
+};
 
 /**
  * Read live State/Province control text from the DOM.
@@ -32,6 +49,7 @@ export function resolveStateValue(profile = {}, tenant = '') {
 export async function getStateDomValue(page) {
   return await page.evaluate(() => {
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+    const isGuid = (s) => /^[0-9a-f]{16,}$/i.test(s);
     const selectors = [
       '#address--countryRegion',
       '#address--countryRegion--countryRegion',
@@ -43,8 +61,10 @@ export async function getStateDomValue(page) {
     for (const sel of selectors) {
       const el = document.querySelector(sel);
       if (!el) continue;
-      const v = norm(el.value || el.textContent || el.getAttribute('value') || '');
-      if (v && !/^select/i.test(v) && v !== '–' && v !== '-') return v;
+      const text = norm(el.textContent || el.getAttribute('aria-label') || '');
+      if (text && !/^select/i.test(text) && text !== '–' && text !== '-' && !isGuid(text)) return text;
+      const v = norm(el.value || el.getAttribute('value') || '');
+      if (v && !/^select/i.test(v) && v !== '–' && v !== '-' && !isGuid(v)) return v;
     }
     for (const labelEl of document.querySelectorAll('label, legend, [data-automation-id*="label"]')) {
       const labelText = norm(labelEl.textContent).replace(/\*+$/, '');
@@ -54,12 +74,12 @@ export async function getStateDomValue(page) {
       const button = field.querySelector('[data-automation-id="selectOneWidget"], button, [role="combobox"]');
       if (button) {
         const v = norm(button.textContent || button.getAttribute('aria-label') || '');
-        if (v && !/^select/i.test(v)) return v;
+        if (v && !/^select/i.test(v) && !isGuid(v)) return v;
       }
       const input = field.querySelector('input:not([type="hidden"])');
       if (input) {
         const v = norm(input.value);
-        if (v) return v;
+        if (v && !isGuid(v)) return v;
       }
     }
     return '';
@@ -75,7 +95,11 @@ export function stateValueMatches(actual, expected) {
   const a = String(actual || '').trim().toLowerCase();
   const e = String(expected || '').trim().toLowerCase();
   if (!a || !e) return false;
-  return a === e || a.includes(e) || e.includes(a);
+  if (a === e || a.includes(e) || e.includes(a)) return true;
+  const aFull = US_STATE_MAP[a] || a;
+  const eFull = US_STATE_MAP[e] || e;
+  if (aFull === eFull || aFull.includes(eFull) || eFull.includes(aFull)) return true;
+  return false;
 }
 
 /**
@@ -99,11 +123,14 @@ export async function fillStateFromDom(page, profile = {}) {
 
   // Try Playwright label-based dropdown / text fill
   try {
+    const escaped = state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const optionRegex = new RegExp(`^${escaped}$|\\b${escaped}\\b`, 'i');
+
     const combobox = page.getByRole('combobox', { name: /state|province/i }).first();
     if (await combobox.isVisible({ timeout: 800 }).catch(() => false)) {
       await combobox.click({ force: true });
       await page.waitForTimeout(300);
-      const option = page.getByRole('option', { name: new RegExp(state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+      const option = page.getByRole('option', { name: optionRegex }).first();
       if (await option.isVisible({ timeout: 1500 }).catch(() => false)) {
         await option.click({ force: true });
       } else {
@@ -114,9 +141,22 @@ export async function fillStateFromDom(page, profile = {}) {
     } else {
       const input = page.getByLabel(/^state|province|state \/ province$/i).first();
       if (await input.isVisible({ timeout: 800 }).catch(() => false)) {
-        await input.click({ force: true });
-        await input.fill(state);
-        await input.press('Tab').catch(() => {});
+        const tagName = await input.evaluate((el) => el.tagName.toLowerCase()).catch(() => '');
+        if (tagName === 'input' || tagName === 'textarea') {
+          await input.click({ force: true });
+          await input.fill(state);
+          await input.press('Tab').catch(() => {});
+        } else {
+          await input.click({ force: true });
+          await page.waitForTimeout(300);
+          const opt = page.getByRole('option', { name: optionRegex }).first();
+          if (await opt.isVisible({ timeout: 1200 }).catch(() => false)) {
+            await opt.click({ force: true });
+          } else {
+            await page.keyboard.type(state, { delay: 40 });
+            await page.keyboard.press('Enter');
+          }
+        }
       } else {
         // data-automation fallbacks
         const locators = [
@@ -128,7 +168,7 @@ export async function fillStateFromDom(page, profile = {}) {
           if (!(await loc.isVisible({ timeout: 500 }).catch(() => false))) continue;
           await loc.click({ force: true });
           await page.waitForTimeout(250);
-          const opt = page.getByRole('option', { name: new RegExp(state.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+          const opt = page.getByRole('option', { name: optionRegex }).first();
           if (await opt.isVisible({ timeout: 1200 }).catch(() => false)) {
             await opt.click({ force: true });
           } else {

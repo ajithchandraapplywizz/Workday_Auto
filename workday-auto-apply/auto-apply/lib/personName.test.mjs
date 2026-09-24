@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { splitGivenFamilyName, normalizePersonalNames } from './personName.mjs';
+import { splitGivenFamilyName, normalizePersonalNames, toTitleCase } from './personName.mjs';
 
 test('family name is last word only; given is all before', () => {
   assert.deepEqual(splitGivenFamilyName('John Michael Smith'), {
@@ -26,3 +26,14 @@ test('normalizePersonalNames fixes wrong YAML split from full name', () => {
   assert.equal(p.first_name, 'John Michael');
   assert.equal(p.last_name, 'Smith');
 });
+
+test('toTitleCase: capitalizes first letter and keeps remaining small', () => {
+  assert.equal(toTitleCase('nikhila'), 'Nikhila');
+  assert.equal(toTitleCase('NIKHILA'), 'Nikhila');
+  assert.equal(toTitleCase('lankela'), 'Lankela');
+  assert.equal(toTitleCase('LANKELA'), 'Lankela');
+  assert.equal(toTitleCase('nikhila yadav'), 'Nikhila Yadav');
+  assert.equal(toTitleCase('NIKHILA YADAV LANKELA'), 'Nikhila Yadav Lankela');
+  assert.equal(toTitleCase('mary-jane watson'), 'Mary-Jane Watson');
+});
+

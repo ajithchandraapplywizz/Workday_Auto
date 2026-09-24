@@ -1895,11 +1895,20 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   if (hasWorkSection) {
-  console.log('\n  ▶ WORK EXPERIENCE');
-  for (const spec of WORK_FIELDS) {
-    const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
-    if (ok) filled++;
-    else failed++;
+    console.log('\n  ▶ WORK EXPERIENCE');
+    const currentlyWorking = profile?.experience?.currently_working === true || await page.evaluate(() => {
+      const cb = document.querySelector('input[type="checkbox"][data-automation-id*="currentlyWork" i], input[type="checkbox"]#currentlyWorkHere');
+      return Boolean(cb?.checked || cb?.getAttribute('aria-checked') === 'true');
+    }).catch(() => false);
+
+    for (const spec of WORK_FIELDS) {
+      if (spec.label === 'To' && currentlyWorking) {
+        console.log('  ┌── Work Experience › To ──\n  │  current job ("I currently work here" checked) — no To date needed\n  └──');
+        continue;
+      }
+      const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
+      if (ok) filled++;
+      else failed++;
     }
   } else {
     skipped += WORK_FIELDS.length;

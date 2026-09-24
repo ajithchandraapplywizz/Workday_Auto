@@ -88,6 +88,7 @@ let workdayEmail = process.env.WORKDAY_EMAIL || '';
 let workdayPassword = process.env.WORKDAY_PASSWORD || '';
 let isSignup = false;
 let confirmSubmit = false;
+let dryRun = false;
 let scanBatchOffset = 0;
 let scanBatchLimit = 15;
 let batchLimitExplicit = false;
@@ -102,6 +103,7 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--signup') isSignup = true;
   else if (rawArgs[i] === '--signin') isSignup = false;
   else if (rawArgs[i] === '--confirm-submit') confirmSubmit = true;
+  else if (rawArgs[i] === '--dry-run') dryRun = true;
   else if (rawArgs[i] === '--offset' && rawArgs[i + 1]) scanBatchOffset = Number(rawArgs[++i]) || 0;
   else if (rawArgs[i] === '--limit' && rawArgs[i + 1]) {
     scanBatchLimit = Number(rawArgs[++i]) || 15;
@@ -539,6 +541,7 @@ async function cmdApply(url) {
       workdayPassword: creds.workdayPassword,
       mode: creds.mode,
       confirmSubmit,
+      dryRun,
     });
 
     console.log(`\n${'═'.repeat(60)}`);
@@ -680,7 +683,7 @@ async function cmdBatch(file) {
       let status = 'incomplete';
       for (let attempt = 1; attempt <= 3; attempt++) {
         status = await cmdApply(url);
-        if (status === 'submitted' || status === 'skipped' || status === 'review-declined') break;
+        if (status === 'submitted' || status === 'skipped' || status === 'reached-review' || status === 'review-declined') break;
         if (status === 'auth-failed' || status === 'job_not_found') break;
         if (status === 'incomplete' || status === 'error' || !status) {
           console.log(`\n  ↻ This job is not at Review yet (attempt ${attempt}/3). Staying on this URL — not opening the next link.`);
@@ -713,14 +716,24 @@ async function cmdBatch(file) {
   console.log('📊 Batch Summary');
   console.log(`${'═'.repeat(60)}`);
   const submitted = results.filter((r) => r.status === 'submitted').length;
+  const reachedReview = results.filter((r) => r.status === 'reached-review').length;
   const skipped = results.filter((r) => r.status === 'skipped').length;
   const declined = results.filter((r) => r.status === 'review-declined').length;
   const fail = results.filter((r) => r.status === 'error' || r.status === 'auth-failed' || r.status === 'job_not_found').length;
-  console.log(`  ✅ Submitted: ${submitted}`);
-  console.log(`  ⏭️  Skipped:   ${skipped}`);
-  console.log(`  ✋ Stopped:   ${declined}${stopped ? ' (N at Review)' : ''}`);
-  console.log(`  ❌ Failed:    ${fail}`);
+  const incomplete = results.filter((r) => r.status === 'incomplete' || r.status === 'done').length;
+  console.log(`  ✅ Submitted:       ${submitted}`);
+  if (dryRun || reachedReview > 0) {
+    console.log(`  🎯 Reached Review: ${reachedReview}  ← dry-run (not submitted)`);
+  }
+  console.log(`  ⏭️  Skipped:        ${skipped}`);
+  console.log(`  ✋ Stopped:        ${declined}${stopped ? ' (N at Review)' : ''}`);
+  console.log(`  ❌ Failed:         ${fail}`);
+  if (incomplete > 0) console.log(`  ⚠️  Incomplete:    ${incomplete}`);
   console.log(`  Total this window: ${results.length}`);
+  if (dryRun || reachedReview > 0) {
+    const successRate = results.length > 0 ? Math.round(((submitted + reachedReview) / results.length) * 100) : 0;
+    console.log(`  Success rate (reached Review or submitted): ${successRate}%`);
+  }
   if (!stopped && offset + slice.length < targets.length) {
     console.log(`\n  Next batch:\n  node cli.mjs batch "${source}" --offset ${offset + slice.length} --limit ${limit}`);
   }

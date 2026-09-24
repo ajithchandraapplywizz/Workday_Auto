@@ -27,7 +27,7 @@ import { resolveUnknownWithLlm } from './openRouterLlm.mjs';
 import { shouldIncludeInScan, isSkippableUnimportantLabel, isMandatoryField, shouldSkipOptionalFill } from './scanFieldFilter.mjs';
 import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
 import { ensureUsWorkdayContact } from './clientContact.mjs';
-import { normalizePersonalNames } from './personName.mjs';
+import { normalizePersonalNames, toTitleCase } from './personName.mjs';
 import { getResumePathForApply } from './resumeParser.mjs';
 import {
   isSignatureOrFullNameQuestion,
@@ -329,7 +329,7 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
   if (isSignatureOrFullNameQuestion(cleanLabel)) {
     const p = profile.personal || {};
     const fullName = p.full_name || [p.first_name, p.last_name].filter(Boolean).join(' ') || profile.name || '';
-    if (fullName) return fullName;
+    if (fullName) return toTitleCase(fullName);
   }
 
   if (isShiftOrScheduleQuestion(cleanLabel)) {
@@ -358,7 +358,11 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
-        return Array.isArray(val) ? val : String(val);
+        const res = Array.isArray(val) ? val : String(val);
+        if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
+          return toTitleCase(res);
+        }
+        return res;
       }
     }
   }
@@ -379,7 +383,11 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
       }
       const val = getNestedValue(profile, path);
       if (val !== undefined && val !== null && val !== '') {
-        return Array.isArray(val) ? val : String(val);
+        const res = Array.isArray(val) ? val : String(val);
+        if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
+          return toTitleCase(res);
+        }
+        return res;
       }
     }
   }

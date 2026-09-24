@@ -362,6 +362,14 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (/can\s+you\s+travel\s+if|willing\s+to\s+travel|able\s+to\s+travel\s+(if|when|as|for)/i.test(t)) {
     return 'Yes';
   }
+  // Travel percentage questions — always answer 50-75%
+  // e.g. "What percentage of travel are you comfortable with?"
+  //      "Should the role require travel, what percentage are you comfortable with?"
+  //      "What percentage of time can you travel?"
+  //      "How much travel are you willing to do?"
+  if (/percentage.*travel|travel.*percentage|comfortable.*travel|travel.*comfortable|percent.*time.*travel|travel.*percent/i.test(t)) {
+    return '50-75%';
+  }
   // "May we contact your current or most recent employer?"
   if (/may\s+we\s+contact\s+your\s+(current|most\s+recent)\s+employer/i.test(t)) {
     return 'Yes';
@@ -798,6 +806,22 @@ export const WORKDAY_DEFAULT_QA = [
   {
     question: 'Are you willing to travel?',
     answer: 'Yes',
+  },
+  {
+    question: 'Should the role you are applying to require travel, what percentage of travel are you comfortable with?',
+    answer: '50-75%',
+  },
+  {
+    question: 'What percentage of travel are you comfortable with?',
+    answer: '50-75%',
+  },
+  {
+    question: 'What percentage of time can you travel?',
+    answer: '50-75%',
+  },
+  {
+    question: 'How much travel are you willing to do?',
+    answer: '50-75%',
   },
   {
     question: 'Are you local to the area in which this job has been advertised?',
