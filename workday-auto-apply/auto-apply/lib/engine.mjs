@@ -289,18 +289,13 @@ function recordFilled(profile, label, value) {
   if (!profile._filledValues) profile._filledValues = {};
   if (label) profile._filledValues[label] = value;
 
-  // Persist submitted answers for random/custom questions permanently to Supabase
+  // Persist submitted answers for random/custom questions permanently to Supabase and memory cache
   if (profile?._applyWizzId && label && value != null && String(value).trim()) {
     import('./supabaseClient.mjs').then((m) => {
-      if (m.isSupabaseConfigured && m.isSupabaseConfigured()) {
-        const normKey = m.normalizeQuestionKey ? m.normalizeQuestionKey(label) : String(label).toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
-        m.upsertSupabaseAnswer({
-          applywizzId: profile._applyWizzId,
-          question: String(label).trim(),
-          questionNormalized: normKey,
-          answer: String(value).trim(),
-          company: profile?._tenant || '',
+      if (m.autoRecordVerifiedFieldAnswer) {
+        m.autoRecordVerifiedFieldAnswer(profile, { label }, value, {
           source: 'submitted_fill',
+          company: profile?._tenant || '',
         }).catch(() => {});
       }
     }).catch(() => {});

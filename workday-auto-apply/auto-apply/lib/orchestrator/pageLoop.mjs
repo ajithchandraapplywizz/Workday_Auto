@@ -23,6 +23,7 @@ import { resolveClientAnswer } from '../clientAnswer.mjs';
 import { trace, logFieldTrace } from '../trace.mjs';
 import { makeGuard } from '../loopGuard.mjs';
 import { verifyProvenance } from '../provenanceGate.mjs';
+import { autoRecordVerifiedFieldAnswer } from '../supabaseClient.mjs';
 
 const MAX_FIELD_RETRIES = 2;
 const MAX_FILLS_PER_CYCLE = 24;
@@ -539,6 +540,11 @@ export async function runPageOrchestrator({
         if (profile._persistAnswers !== false) {
           await saveAnswerToYaml(field.label, gate.answer).catch(() => {});
         }
+        autoRecordVerifiedFieldAnswer(profile, field, gate.answer, {
+          source: decision?.source || 'verified',
+          jobUrl: profile?._currentJobUrl || '',
+          company: profile?._currentCompany || '',
+        }).catch(() => {});
         filled += 1;
         verified += 1;
         break;

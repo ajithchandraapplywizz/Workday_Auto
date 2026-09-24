@@ -14,7 +14,7 @@ function nonEmpty(value) {
 }
 
 function qaGet(profile, ...keys) {
-  const maps = [profile?._applyWizzQa, profile?.qa_answers];
+  const maps = [profile?._supabaseQa, profile?._applyWizzQa, profile?.qa_answers];
   for (const map of maps) {
     if (!map || typeof map !== 'object') continue;
     for (const key of keys) {
