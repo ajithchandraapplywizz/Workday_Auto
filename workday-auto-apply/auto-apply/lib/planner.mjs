@@ -197,7 +197,7 @@ export const FIELD_MAP = [
 ];
 
 // ─── Load profile ───────────────────────────────────────────────────────────
-async function loadProfileFromApiOnly() {
+async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
   const profile = applyApiOnlyProfileGuards({
     personal: {},
     work_auth: {},
@@ -207,8 +207,11 @@ async function loadProfileFromApiOnly() {
     skills: [],
     qa_answers: {},
   });
+  if (applywizzId) {
+    profile._applyWizzId = applywizzId;
+  }
   console.log('  🌐 Profile mode: API-only (Apply Wizz → resume → LLM). Local YAML/Q&A DB disabled.');
-  await hydrateProfileFromApplyWizz(profile);
+  await hydrateProfileFromApplyWizz(profile, { applywizzId });
   if (!profile._applyWizzHydrated && !isApplyWizzConfigured()) {
     console.warn('  ⚠️  Apply Wizz not configured — set APPLYWIZZ_ID in .env; using resume + LLM only.');
   }
@@ -219,13 +222,16 @@ async function loadProfileFromApiOnly() {
   return profile;
 }
 
-export async function loadProfile(profilePath) {
+export async function loadProfile(profilePath, { applywizzId = '' } = {}) {
   if (isApiOnlyAnswerMode()) {
-    return loadProfileFromApiOnly();
+    return loadProfileFromApiOnly({ applywizzId });
   }
 
   const raw = await readFile(profilePath || resolve(process.cwd(), 'config', 'profile.yml'), 'utf-8');
   const profile = yaml.load(raw);
+  if (applywizzId) {
+    profile._applyWizzId = applywizzId;
+  }
 
   if (profile.personal) {
     profile.personal = normalizePersonalNames(profile.personal);
@@ -245,7 +251,7 @@ export async function loadProfile(profilePath) {
   }
 
   mergeWorkdayDefaultAnswers(profile);
-  await hydrateProfileFromApplyWizz(profile);
+  await hydrateProfileFromApplyWizz(profile, { applywizzId });
   if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
   await ensureUsWorkdayContact(profile);
 

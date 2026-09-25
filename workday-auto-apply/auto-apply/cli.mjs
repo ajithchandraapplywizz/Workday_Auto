@@ -31,7 +31,7 @@ import {
   getDynamicDateValueForField 
 } from './lib/date-utils.mjs';
 import { readClientJobsCsvFile, parseClientJobsCsvContent } from './lib/csvJobParser.mjs';
-import { runWorkerPool } from './lib/workerPool.mjs';
+import { runWorkerPool, runQueueWorkerPool } from './lib/workerPool.mjs';
 import { ingestCsvToBatchQueue, getBatchQueueStats } from './lib/supabaseClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm } from './lib/jobFormCache.mjs';
 import { chromium } from 'playwright';
@@ -101,6 +101,9 @@ let scanBatchInteractive = true;
 let scanBatchWaitReview = true;
 const positionalArgs = [];
 
+let workerCount = 10;
+let minClients = 1;
+
 for (let i = 0; i < rawArgs.length; i++) {
   if (rawArgs[i] === '--workday-email' && rawArgs[i + 1]) workdayEmail = rawArgs[++i];
   else if (rawArgs[i] === '--workday-password' && rawArgs[i + 1]) workdayPassword = rawArgs[++i];
@@ -117,14 +120,16 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--no-interactive') scanBatchInteractive = false;
   else if (rawArgs[i] === '--no-wait-review') scanBatchWaitReview = false;
   else if (rawArgs[i] === '--workers' && rawArgs[i + 1]) {
-    workerCount = Number(rawArgs[++i]) || 3;
+    workerCount = Number(rawArgs[++i]) || 10;
+  }
+  else if (rawArgs[i] === '--min-clients' && rawArgs[i + 1]) {
+    minClients = Number(rawArgs[++i]) || 30;
   }
   else if ((rawArgs[i] === '--client' || rawArgs[i] === '--applywizz-id') && rawArgs[i + 1]) {
     process.env.APPLYWIZZ_ID = rawArgs[++i];
   }
   else positionalArgs.push(rawArgs[i]);
 }
-let workerCount = 3;
 const mode = isSignup ? 'signup' : 'signin';
 
 // ─── Find file across candidate paths (cwd, auto-apply, __dirname) ──────────
@@ -778,13 +783,13 @@ async function cmdBatchWorkers(file) {
     process.exit(1);
   }
 
-  const tasks = await readClientJobsCsvFile(filePath);
+  const tasks = await readClientJobsCsvFile(filePath, { minClients });
   if (!tasks.length) {
-    console.error(`❌ No valid (AWL_ID, Workday URL) pairs found in ${filePath}`);
+    console.error(`❌ No tasks found in ${filePath}${minClients > 1 ? ` matching at least ${minClients} clients per link` : ''}`);
     process.exit(1);
   }
 
-  console.log(`📦 Loaded ${tasks.length} client application task(s) from ${filePath}`);
+  console.log(`📦 Loaded ${tasks.length} client application task(s) from ${filePath}${minClients > 1 ? ` (filtered to links with >= ${minClients} candidates)` : ''}`);
 
   // Ingest to Supabase batch_job_queue if configured
   try {
@@ -797,6 +802,19 @@ async function cmdBatchWorkers(file) {
   const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
 
   await runWorkerPool(tasks, {
+    concurrency: workerCount,
+    headless: isHeadless,
+    confirmSubmit,
+    dryRun,
+    defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
+  });
+}
+
+// ─── 10-WORKER SUPABASE QUEUE RUNNER ─────────────────────────────────────────
+async function cmdRunQueue() {
+  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+
+  await runQueueWorkerPool({
     concurrency: workerCount,
     headless: isHeadless,
     confirmSubmit,
@@ -996,7 +1014,8 @@ Usage:
   node cli.mjs fill <url> [plan.json]      Fill form (auto-plan if no plan given)
   node cli.mjs apply <url>                 Full pipeline: scan → plan → fill → submit (asks Y/N/S)
   node cli.mjs batch [data/today.csv]      Apply every Workday URL in today's CSV (or queue)
-  node cli.mjs batch-workers [data/csv]    Run 3 parallel workers for multi-client CSV
+  node cli.mjs batch-workers [data/csv]    Run 10 parallel workers for multi-client CSV
+  node cli.mjs run-queue                   Run 10 parallel workers directly from Supabase batch_job_queue
   node cli.mjs scan-batch [data/wd5.csv]   Scan DOM questions from wd5.csv (batch)
   node cli.mjs catalog-show                List unanswered questions per company YAML
   node cli.mjs queue add <url> [company]   Add Workday URL to application queue
@@ -1007,6 +1026,8 @@ Usage:
   node cli.mjs status                      Show stats & learnings
 
 Options:
+  --workers <n>                Number of parallel browser workers (default: 10)
+  --min-clients <n>            Only process links shared by at least N clients (default: 1, recommended: 30)
   --signin / --signup          Workday auth mode (default: signin — tries login, then Create Account if no account exists on that tenant)
   --confirm-submit             Auto-submit at Review (skips Y/N/S prompt)
   --offset <n>                 Batch start index (default 0)
@@ -1021,6 +1042,8 @@ Env (Apply Wizz client — optional, one fetch per run):
 Scope: Workday career sites only (myworkdayjobs.com). Headed browser always.
 
 Examples:
+  node cli.mjs run-queue --workers 10 --dry-run
+  node cli.mjs batch-workers data/clients_jobs.csv --workers 10 --min-clients 30
   node cli.mjs apply https://company.wd5.myworkdayjobs.com/en-US/company/job/123
   node cli.mjs batch data/today.csv
   node cli.mjs batch data/today.csv --offset 0 --limit 15
@@ -1044,6 +1067,7 @@ async function main() {
     case 'apply': await cmdApply(positionalArgs[0]); break;
     case 'batch': await cmdBatch(positionalArgs[0]); break;
     case 'batch-workers': await cmdBatchWorkers(positionalArgs[0]); break;
+    case 'run-queue': await cmdRunQueue(); break;
     case 'scan-batch': await cmdScanBatch(positionalArgs[0]); break;
     case 'catalog-show': await cmdCatalogShow(); break;
     case 'queue': await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;

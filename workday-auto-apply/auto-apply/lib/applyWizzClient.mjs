@@ -80,9 +80,9 @@ export function resolveCompanyEmail(client = {}, fullName = '') {
   return '';
 }
 
-let cache = null;
-/** @type {Promise<void>|null} */
-let hydrateInFlight = null;
+const clientCaches = new Map();
+/** @type {Map<string, Promise<any>>} */
+const hydrateInFlightMap = new Map();
 
 async function fetchJsonWithRetry(url) {
   const res = await httpsJsonWithRetry(
@@ -802,17 +802,21 @@ export function buildResumeAnswerEntries(parsed = {}) {
  */
 export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
   const cfg = resolveApplyWizzConfig();
-  if (!cfg.configured) return profile;
+  const id = String(opts.applywizzId || profile?._applyWizzId || profile?.applywizz_id || cfg.id || '').trim();
+  if (!id) return profile;
 
-  const id = cfg.id;
-  if (profile._applyWizzHydrated && cache?.id === id) {
+  profile._applyWizzId = id;
+
+  if (profile._applyWizzHydrated && clientCaches.get(id)?.id === id) {
     return profile;
   }
 
+  let clientCache = clientCaches.get(id);
+
   try {
-    if (!cache || cache.id !== id) {
-      if (!hydrateInFlight) {
-        hydrateInFlight = (async () => {
+    if (!clientCache || clientCache.id !== id) {
+      if (!hydrateInFlightMap.has(id)) {
+        const inFlight = (async () => {
           let data;
           let cachedResumeProfile = null;
           let cachedAnswers = [];
@@ -854,7 +858,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
                 // Also fetch Apply Wizz API in parallel — Supabase clients table does NOT store address/state/zip.
                 // Merge API address/contact fields as base; non-empty Supabase values always win.
                 try {
-                  const apiData = await fetchApplyWizzClient();
+                  const apiData = await fetchApplyWizzClient(id);
                   const ai = apiData.additional_information || {};
                   const ac = apiData.client || {};
                   const mergeApiField = (field, apiValue) => {
@@ -906,7 +910,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
           }
           if (!data) {
             console.log(`  🌐 Apply Wizz API — loading client ${id}...`);
-            data = await fetchApplyWizzClient();
+            data = await fetchApplyWizzClient(id);
           }
           const overlay = mapApplyWizzToProfile(data.client || {}, data.additional_information || {});
           const qaIndex = buildApplyWizzQaIndex(data.client || {}, data.additional_information || {});
@@ -929,7 +933,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
               console.log(`  ⚠️  Supabase answer load skipped: ${err.message?.slice(0, 100) || err}`);
             }
           }
-          cache = {
+          const entry = {
             id,
             overlay,
             apiQaIndex,
@@ -940,24 +944,29 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
             cachedResumeProfile,
             degreeClassification,
           };
+          clientCaches.set(id, entry);
           console.log(`  ✓ Apply Wizz loaded: ${overlay.personal?.first_name || ''} ${overlay.personal?.last_name || ''} | ${Object.keys(qaIndex).length} Q&A keys`);
+          return entry;
         })().finally(() => {
-          hydrateInFlight = null;
+          hydrateInFlightMap.delete(id);
         });
+        hydrateInFlightMap.set(id, inFlight);
       }
-      await hydrateInFlight;
+      clientCache = await hydrateInFlightMap.get(id);
     }
+
+    if (!clientCache) return profile;
 
     // Supabase is the shared answer source of truth for this client. Keep any
     // local values, but let the hydrated Supabase/API index take precedence.
-    profile._applyWizzQa = { ...(profile._applyWizzQa || {}), ...(cache.qaIndex || {}) };
-    profile._applyWizzId = cache.id;
-    profile._degreeClassification = cache.degreeClassification || null;
+    profile._applyWizzQa = { ...(profile._applyWizzQa || {}), ...(clientCache.qaIndex || {}) };
+    profile._applyWizzId = clientCache.id;
+    profile._degreeClassification = clientCache.degreeClassification || null;
     // In-memory only: gives the final LLM fallback the complete client context,
     // while excluding credentials/tokens. It is not written to profile.yml.
-    profile._applyWizzClientContext = cache.clientContext || {};
+    profile._applyWizzClientContext = clientCache.clientContext || {};
 
-    const o = cache.overlay;
+    const o = clientCache.overlay;
     const { mergeApplyWizzContact, mergeNonEmpty } = await import('./clientContact.mjs');
     profile.personal = mergeNonEmpty(profile.personal || {}, o.personal || {});
     mergeApplyWizzContact(profile, o.personal || {});
@@ -986,9 +995,9 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
       ...(o.education?.major ? { major: o.education.major } : {}),
       ...(o.education?.to_year ? { to_year: o.education.to_year } : {}),
     };
-    profile.education.university = cache.qaIndex?.['school or university'] || 'Other';
+    profile.education.university = clientCache.qaIndex?.['school or university'] || 'Other';
     if (!profile.personal?.phone) {
-      const storedPhone = cache.qaIndex?.phone || cache.qaIndex?.primary_phone || '';
+      const storedPhone = clientCache.qaIndex?.phone || clientCache.qaIndex?.primary_phone || '';
       if (storedPhone) profile.personal.phone = storedPhone;
     }
     if (o.compensation) profile.compensation = o.compensation;
@@ -999,7 +1008,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
     profile.qa_answers = profile.qa_answers || {};
     const { isApiOnlyAnswerMode } = await import('./apiOnlyProfile.mjs');
     if (!isApiOnlyAnswerMode()) {
-      for (const [k, v] of Object.entries(cache.qaIndex || {})) {
+      for (const [k, v] of Object.entries(clientCache.qaIndex || {})) {
         if (!profile.qa_answers[k]) profile.qa_answers[k] = v;
       }
     }
@@ -1037,8 +1046,8 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
         workFrom: experience.from_date || '',
         workTo: experience.currently_working ? '' : (experience.to_date || ''),
       });
-      if (cache?.apiQaIndex) {
-        const saved = await upsertSupabaseAnswers(profile._applyWizzId, Object.entries(cache.apiQaIndex).map(([questionNormalized, answer]) => ({
+      if (clientCache?.apiQaIndex) {
+        const saved = await upsertSupabaseAnswers(profile._applyWizzId, Object.entries(clientCache.apiQaIndex).map(([questionNormalized, answer]) => ({
           question: questionNormalized,
           questionNormalized,
           answer,
@@ -1054,7 +1063,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
   try {
     const { ensureClientResumeFromApplyWizz, parseClientResumeText } = await import('./applyWizzResume.mjs');
     const { parseResumeProfile } = await import('./resumeParser.mjs');
-    let parsed = cache?.cachedResumeProfile || null;
+    let parsed = clientCache?.cachedResumeProfile || null;
     await ensureClientResumeFromApplyWizz(profile).catch(() => {});
     if (profile._resumeText) {
       parsed = parseResumeProfile(profile._resumeText);
@@ -1069,11 +1078,11 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
       profile.education = {
         ...(profile.education || {}),
         ...parsed.education,
-        university: profile.education?.university || parsed.education?.university || cache.qaIndex?.['school or university'] || 'Other',
+        university: profile.education?.university || parsed.education?.university || clientCache.qaIndex?.['school or university'] || 'Other',
       };
     }
     if (profile.education) {
-      profile.education.university = profile.education.university || cache.qaIndex?.['school or university'] || 'Other';
+      profile.education.university = profile.education.university || clientCache.qaIndex?.['school or university'] || 'Other';
     }
     if (Array.isArray(parsed.skills) && parsed.skills.length) {
       profile.skills = [...new Set([...(profile.skills || []), ...parsed.skills.map((skill) => String(skill).trim()).filter(Boolean)])].slice(0, 2);

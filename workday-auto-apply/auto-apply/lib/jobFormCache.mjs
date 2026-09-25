@@ -10,7 +10,7 @@
  *   3. Fills with zero discovery or LLM delay.
  */
 
-import { loadJobFormSchema, upsertJobFormSchema, canonicalJobPostingUrl } from './supabaseClient.mjs';
+import { loadJobFormSchema, upsertJobFormSchema, canonicalJobPostingUrl, getPendingQueueTasksForUrl, updateQueueTaskStatus } from './supabaseClient.mjs';
 import { resolveClientAnswer } from './clientAnswer.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 
@@ -103,10 +103,13 @@ export async function recordDiscoveredJobForm({
   const resolvedRole = roleTitle || profile._roleTitle || profile._jobTitle || '';
   const applywizzId = profile._applyWizzId || profile.applywizz_id || '';
 
-  // Deduplicate fields by normalized label
+  // Deduplicate and filter ONLY REQUIRED fields per requirement
   const deduped = [];
   const seen = new Set();
   for (const f of fields) {
+    const isRequired = Boolean(f.required || f.is_required);
+    if (!isRequired) continue; // Only store required fields in the single cell schema
+
     const label = f.label || f.id || '';
     const norm = normalizeLabel(label);
     if (!norm || seen.has(norm)) continue;
@@ -117,7 +120,7 @@ export async function recordDiscoveredJobForm({
       normalized_label: norm,
       step: f.step || f.stepName || 'Application',
       field_type: f.fieldType || f.type || 'input',
-      is_required: Boolean(f.required || f.is_required),
+      is_required: true,
       options: Array.isArray(f.options) ? f.options.slice(0, 40) : [],
       automation_id: f.automationId || f.dataAutomationId || f.id || '',
     });
@@ -134,8 +137,93 @@ export async function recordDiscoveredJobForm({
   });
 
   if (success) {
-    console.log(`  💾 Saved job form schema to Supabase (${deduped.length} fields) for future candidate reuse.`);
+    console.log(`  💾 Saved required job form schema to Supabase single cell (${deduped.length} required fields) for future candidate reuse.`);
   }
 
   return success;
+}
+
+/**
+ * Pre-resolve all required answers for a candidate and return as a single JSON object.
+ */
+export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} }) {
+  if (!schema?.fields_schema?.length) return {};
+  const answersMap = {};
+  for (const field of schema.fields_schema) {
+    const norm = field.normalized_label || normalizeLabel(field.label);
+    if (!norm) continue;
+    try {
+      const resolved = await resolveClientAnswer({
+        ...field,
+        label: field.label,
+        required: true,
+      }, profile, {
+        url: jobUrl,
+        tenant: schema.tenant,
+        company: schema.company,
+        forceLlm: false,
+      });
+      if (resolved?.answer != null) {
+        answersMap[norm] = String(resolved.answer);
+      }
+    } catch {}
+  }
+  return answersMap;
+}
+
+/**
+ * Pre-resolve answers for ALL remaining 'pending' tasks sharing the same job URL.
+ * Called immediately after Client 1 saves the form schema (first-scan only).
+ *
+ * Flow:
+ *  1. Fetch all pending queue rows for this canonical job URL.
+ *  2. For each row, load that client's profile via the injected loadProfileFn.
+ *  3. Resolve every required field answer from their profile/resume/LLM.
+ *  4. Write the answers JSON to pre_resolved_answers cell in batch_job_queue.
+ *  5. Flip that row's status from 'pending' → 'pre_resolved'.
+ *
+ * @param {object} params
+ * @param {string} params.jobUrl
+ * @param {object} params.schema   — the saved job_form_schemas row (has fields_schema array)
+ * @param {Function} params.loadProfileFn — async (applywizzId) => profile object
+ *                                          injected from workerPool to avoid circular imports
+ */
+export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn }) {
+  if (!jobUrl || !schema?.fields_schema?.length || typeof loadProfileFn !== 'function') return;
+
+  let pendingTasks = [];
+  try {
+    pendingTasks = await getPendingQueueTasksForUrl(jobUrl);
+  } catch (err) {
+    console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
+    return;
+  }
+
+  if (!pendingTasks.length) {
+    console.log(`  ℹ️  bulkPreResolveForJobUrl: No other pending tasks found for this URL.`);
+    return;
+  }
+
+  console.log(`\n  🔄 Bulk pre-resolving for ${pendingTasks.length} pending task(s) sharing the same job URL...`);
+
+  for (const row of pendingTasks) {
+    const awlId = row.applywizz_id;
+    try {
+      const profile = await loadProfileFn(awlId);
+      const answersMap = await preResolveClientAnswersMap({ jobUrl, schema, profile });
+      const count = Object.keys(answersMap).length;
+
+      await updateQueueTaskStatus(row.id, {
+        status: 'pre_resolved',
+        preResolvedAnswers: answersMap,
+      });
+
+      console.log(`  ✅ Pre-resolved ${count} field(s) for ${awlId} → status set to pre_resolved.`);
+    } catch (err) {
+      console.log(`  ⚠️  Failed to pre-resolve for ${awlId}: ${err.message}`);
+      // Non-fatal: task remains 'pending' and will fall back to live discovery
+    }
+  }
+
+  console.log(`  ✅ Bulk pre-resolution complete for ${pendingTasks.length} queued task(s).\n`);
 }

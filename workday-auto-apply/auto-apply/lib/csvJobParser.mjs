@@ -97,7 +97,62 @@ export function parseClientJobsCsvContent(content = '') {
   return results;
 }
 
-export async function readClientJobsCsvFile(filePath) {
+export async function readClientJobsCsvFile(filePath, { minClients = 1 } = {}) {
   const content = await readFile(filePath, 'utf-8');
-  return parseClientJobsCsvContent(content);
+  const tasks = parseClientJobsCsvContent(content);
+  if (minClients > 1) {
+    const { qualifying } = groupAndFilterByMinClients(tasks, minClients);
+    return qualifying;
+  }
+  return tasks;
+}
+
+/**
+ * Group CSV tasks by canonical job URL and filter for links appearing for >= minClients.
+ * @param {Array<{ applywizzId: string, jobUrl: string }>} tasks
+ * @param {number} minClients
+ */
+export function groupAndFilterByMinClients(tasks = [], minClients = 30) {
+  const normalize = (u = '') => {
+    return String(u || '').trim()
+      .replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '')
+      .replace(/%2C/gi, ',');
+  };
+
+  const groups = new Map();
+  for (const t of tasks) {
+    const normUrl = normalize(t.jobUrl);
+    if (!groups.has(normUrl)) {
+      groups.set(normUrl, []);
+    }
+    groups.get(normUrl).push(t);
+  }
+
+  const qualifying = [];
+  const linkStats = [];
+
+  for (const [normUrl, clientTasks] of groups.entries()) {
+    const count = clientTasks.length;
+    linkStats.push({
+      jobUrl: normUrl,
+      clientCount: count,
+      meetsThreshold: count >= minClients,
+    });
+    if (count >= minClients) {
+      qualifying.push(...clientTasks);
+    }
+  }
+
+  // Sort descending by client count
+  linkStats.sort((a, b) => b.clientCount - a.clientCount);
+
+  return {
+    qualifying: qualifying.length ? qualifying : (minClients <= 1 ? tasks : []),
+    groups,
+    linkStats,
+    totalOriginalTasks: tasks.length,
+    totalUniqueLinks: groups.size,
+    qualifyingLinksCount: linkStats.filter((s) => s.meetsThreshold).length,
+    qualifyingTasksCount: qualifying.length,
+  };
 }

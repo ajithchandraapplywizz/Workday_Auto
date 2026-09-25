@@ -762,16 +762,16 @@ export async function upsertJobFormSchema({
 /**
  * Batch Queue Methods for Multi-Client 3-Worker Pipeline
  */
-export async function ingestCsvToBatchQueue(items = []) {
+export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}) {
   if (!isSupabaseConfigured() || !Array.isArray(items) || !items.length) return { inserted: 0 };
   const rows = items
-    .filter((it) => it?.applywizzId && it?.jobUrl)
+    .filter((it) => (it?.applywizzId || it?.applywizz_id) && (it?.jobUrl || it?.job_url))
     .map((it) => ({
-      applywizz_id: String(it.applywizzId).trim(),
-      candidate_email: it.candidateEmail ? String(it.candidateEmail).trim() : null,
-      job_url: String(it.jobUrl).trim(),
+      applywizz_id: String(it.applywizzId || it.applywizz_id).trim(),
+      candidate_email: it.candidateEmail || it.candidate_email ? String(it.candidateEmail || it.candidate_email).trim() : null,
+      job_url: String(it.jobUrl || it.job_url).trim(),
       company: it.company ? String(it.company).trim() : null,
-      role_title: it.roleTitle ? String(it.roleTitle).trim() : null,
+      role_title: it.roleTitle || it.role_title ? String(it.roleTitle || it.role_title).trim() : null,
       status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -779,25 +779,30 @@ export async function ingestCsvToBatchQueue(items = []) {
 
   if (!rows.length) return { inserted: 0 };
 
-  try {
-    await request('batch_job_queue', {
-      method: 'POST',
-      query: '?on_conflict=applywizz_id%2Cjob_url',
-      prefer: 'resolution=ignore-duplicates,return=minimal',
-      body: rows,
-    });
-    return { inserted: rows.length };
-  } catch (err) {
-    console.log(`  ⚠️  ingestCsvToBatchQueue error: ${err.message?.slice(0, 100)}`);
-    return { inserted: 0, error: err.message };
+  let totalInserted = 0;
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
+    try {
+      await request('batch_job_queue', {
+        method: 'POST',
+        query: '?on_conflict=applywizz_id%2Cjob_url',
+        prefer: 'resolution=ignore-duplicates,return=minimal',
+        body: chunk,
+      });
+      totalInserted += chunk.length;
+    } catch (err) {
+      console.log(`  ⚠️  ingestCsvToBatchQueue chunk error: ${err.message?.slice(0, 100)}`);
+    }
   }
+
+  return { inserted: totalInserted };
 }
 
 export async function leaseNextQueueTask(workerId = 'worker-1') {
   if (!isSupabaseConfigured()) return null;
   try {
     const tasks = await request('batch_job_queue', {
-      query: `?status=eq.pending&order=created_at.asc&limit=1`,
+      query: `?status=in.(pending,pre_resolved)&order=created_at.asc&limit=1`,
     });
     const task = tasks?.[0];
     if (!task) return null;
@@ -812,14 +817,19 @@ export async function leaseNextQueueTask(workerId = 'worker-1') {
       updated_at: now,
     };
 
-    await request('batch_job_queue', {
+    const patched = await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?id=eq.${encode(task.id)}&status=eq.pending`,
-      prefer: 'return=minimal',
+      query: `?id=eq.${encode(task.id)}&status=in.(pending,pre_resolved)`,
+      prefer: 'return=representation',
       body: patchBody,
     });
 
-    return { ...task, ...patchBody };
+    if (!Array.isArray(patched) || !patched.length) {
+      // Optimistic lock contention: another worker leased it first; retry next task
+      return await leaseNextQueueTask(workerId);
+    }
+
+    return { ...task, ...patched[0] };
   } catch (err) {
     console.log(`  ⚠️  leaseNextQueueTask error for ${workerId}: ${err.message?.slice(0, 100)}`);
     return null;
@@ -830,6 +840,7 @@ export async function updateQueueTaskStatus(taskId, {
   status = 'completed',
   errorMessage = null,
   screenshotPath = null,
+  preResolvedAnswers = undefined,
 } = {}) {
   if (!isSupabaseConfigured() || !taskId) return false;
   const now = new Date().toISOString();
@@ -842,6 +853,7 @@ export async function updateQueueTaskStatus(taskId, {
   }
   if (errorMessage !== undefined) body.error_message = errorMessage;
   if (screenshotPath !== undefined) body.screenshot_path = screenshotPath;
+  if (preResolvedAnswers !== undefined) body.pre_resolved_answers = preResolvedAnswers;
 
   try {
     await request('batch_job_queue', {
@@ -880,6 +892,24 @@ export async function getBatchQueueStats() {
     return stats;
   } catch (err) {
     return null;
+  }
+}
+
+/**
+ * Returns all 'pending' queue tasks for a specific job URL (excluding tasks that are
+ * already processing, pre_resolved, or done). Used by bulkPreResolveForJobUrl.
+ */
+export async function getPendingQueueTasksForUrl(jobUrl) {
+  if (!isSupabaseConfigured() || !jobUrl) return [];
+  try {
+    const canonical = canonicalJobPostingUrl(jobUrl);
+    const rows = await request('batch_job_queue', {
+      query: `?job_url=eq.${encode(canonical)}&status=eq.pending&select=id,applywizz_id,job_url,company,role_title`,
+    });
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    console.log(`  ⚠️  getPendingQueueTasksForUrl error: ${err.message?.slice(0, 100)}`);
+    return [];
   }
 }
 
