@@ -1,0 +1,4 @@
+# Workday job URLs — one per line. Optional company label after |
+
+# Example:
+# https://company.wd5.myworkdayjobs.com/en-US/Company/job/Role_123 | Example Company

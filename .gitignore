@@ -84,6 +84,8 @@ workday-cascading-dropdown-master-prompt.md
 # Generated reports
 reports/
 tests/reports/
+runs/
+**/runs/
 
 # Generated scan / runtime data
 data/*.json

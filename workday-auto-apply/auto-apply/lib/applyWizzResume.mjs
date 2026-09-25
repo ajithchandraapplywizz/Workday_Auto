@@ -6,7 +6,7 @@ import { mkdir, writeFile, unlink } from 'fs/promises';
 import { existsSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
 import https from 'node:https';
-import { URL } from 'node:url';
+import { URL, fileURLToPath } from 'node:url';
 import { loadResumeText } from './resumeParser.mjs';
 import { formatHttpError, isTlsCertError } from './httpClient.mjs';
 

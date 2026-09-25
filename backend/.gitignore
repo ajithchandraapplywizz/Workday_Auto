@@ -1,0 +1,52 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# User data (never commit)
+.env
+.env.*
+*.env*
+**/*.env*
+!.env.example
+
+# YAML files (ignore all yml/yaml files)
+*.yml
+*.yaml
+**/*.yml
+**/*.yaml
+!**/*.example.yml
+!**/*.example.yaml
+
+targets.txt
+sync_ids.txt
+resumes/*.pdf
+data/applied.csv
+data/queue.csv
+data/today.csv
+data/jobs.csv
+data/learnings.json
+data/qa-store.json
+data/llm-qa-store.json
+data/required-fields-db.json
+data/application-clients.json
+data/client-resumes/
+data/manual-review.json
+data/workday200.csv
+data/*.csv
+data/*.json
+
+# Generated files
+tests/reports/metrics.ndjson
+forms/*
+!forms/.gitkeep
+screenshots/*
+!screenshots/.gitkeep
+runs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/

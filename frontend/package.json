@@ -1,0 +1,20 @@
+{
+  "name": "workday-auto-frontend",
+  "version": "1.0.0",
+  "description": "Enterprise Control Dashboard & Monitoring System for Workday Auto-Apply",
+  "type": "module",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "keywords": [
+    "workday",
+    "automation",
+    "dashboard",
+    "applywizz",
+    "frontend"
+  ],
+  "author": "ApplyWizz Automation Team",
+  "license": "ISC"
+}

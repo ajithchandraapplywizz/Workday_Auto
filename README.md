@@ -9,7 +9,9 @@
 | | |
 |---|---|
 | **Repository** | [github.com/ajithchandraapplywizz/Workday_Auto](https://github.com/ajithchandraapplywizz/Workday_Auto) |
-| **Application root** | `workday-auto-apply/auto-apply/` |
+| **Backend Engine** | `backend/` (or legacy `workday-auto-apply/auto-apply/`) |
+| **Frontend Dashboard** | `frontend/` |
+| **Database & Migrations**| `database/migrations/` & `migrations/` |
 | **Runtime** | Node.js 18+, Playwright Chromium |
 | **Scope** | Workday tenants only (`*.myworkdayjobs.com`) |
 

@@ -1,0 +1,203 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Dry-run Workday-style wizard</title>
+  <style>
+    body { font-family: sans-serif; max-width: 720px; margin: 24px auto; }
+    .page[hidden], [hidden] { display: none !important; }
+    .wd-field { margin: 14px 0; }
+    [role="listbox"] { border: 1px solid #bbb; list-style: none; padding: 4px; }
+    [role="option"] { cursor: pointer; padding: 4px; }
+    .err { color: #b00; }
+  </style>
+</head>
+<body>
+  <h1 data-page-title="My Information" id="pageTitle">My Information</h1>
+  <p id="stepHint">PAGE 1</p>
+
+  <form id="wizard" onsubmit="return false;">
+    <section class="page" data-page="1">
+      <div class="wd-field" data-automation-id="formField-firstName" data-test-field="firstName" data-control="text" data-required="true">
+        <label data-automation-id="formField-firstName-label" for="firstName">First Name *</label>
+        <input id="firstName" type="text" required />
+      </div>
+      <div class="wd-field" data-automation-id="formField-lastName" data-test-field="lastName" data-control="text" data-required="true">
+        <label data-automation-id="formField-lastName-label" for="lastName">Last Name *</label>
+        <input id="lastName" type="text" required />
+      </div>
+      <div class="wd-field" data-automation-id="formField-email" data-test-field="email" data-control="email" data-required="true">
+        <label data-automation-id="formField-email-label" for="email">Email Address *</label>
+        <input id="email" type="email" required />
+      </div>
+      <div class="wd-field" data-automation-id="formField-phone" data-test-field="phone" data-control="tel" data-required="true">
+        <label data-automation-id="formField-phone-label" for="phone">Phone Number *</label>
+        <input id="phone" type="tel" required />
+      </div>
+      <div class="wd-field" data-automation-id="formField-workAuth" data-test-field="workAuth" data-control="radio" data-required="true">
+        <div data-automation-id="formField-workAuth-label">Are you legally authorized to work in the United States? *</div>
+        <input type="radio" name="workAuth" id="p1Yes" value="Yes" />
+        <label for="p1Yes">Yes</label>
+        <input type="radio" name="workAuth" id="p1No" value="No" />
+        <label for="p1No">No</label>
+      </div>
+    </section>
+
+    <section class="page" data-page="2" hidden>
+      <div class="wd-field" data-automation-id="formField-degree" data-test-field="degree" data-control="dropdown" data-required="true">
+        <div data-automation-id="formField-degree-label">Degree *</div>
+        <div data-automation-id="selectOne">
+          <button type="button" aria-haspopup="listbox" aria-label="Degree">Select One</button>
+          <span data-automation-id="selectedItem"></span>
+          <ul role="listbox" hidden>
+            <li role="option">B.Tech Computer Science</li>
+            <li role="option">Bachelor's</li>
+          </ul>
+        </div>
+      </div>
+      <div class="wd-field" data-automation-id="formField-university" data-test-field="university" data-control="text" data-required="true">
+        <label data-automation-id="formField-university-label" for="university">University *</label>
+        <input id="university" type="text" required />
+      </div>
+      <div class="wd-field" data-automation-id="formField-grad" data-test-field="gradDate" data-control="date">
+        <label data-automation-id="formField-grad-label" for="gradDate">Graduation date</label>
+        <input id="gradDate" type="date" />
+      </div>
+      <div class="wd-field" data-automation-id="formField-skills" data-test-field="skills" data-control="checkbox-group">
+        <div data-automation-id="formField-skills-label">Skills (select all that apply)</div>
+        <input type="checkbox" id="sReact" value="React" />
+        <label for="sReact">React</label>
+        <input type="checkbox" id="sPython" value="Python" />
+        <label for="sPython">Python</label>
+        <input type="checkbox" id="sSql" value="SQL" />
+        <label for="sSql">SQL</label>
+      </div>
+    </section>
+
+    <section class="page" data-page="3" hidden>
+      <div class="wd-field" data-automation-id="formField-react" data-test-field="reactExp" data-control="radio" data-required="true">
+        <div data-automation-id="formField-react-label">Do you have experience with React? *</div>
+        <input type="radio" name="react" id="rxYes" value="Yes" />
+        <label for="rxYes">Yes</label>
+        <input type="radio" name="react" id="rxNo" value="No" />
+        <label for="rxNo">No</label>
+      </div>
+      <div class="wd-field" data-automation-id="formField-python" data-test-field="pythonExp" data-control="radio" data-required="true">
+        <div data-automation-id="formField-python-label">Do you have experience with Python? *</div>
+        <input type="radio" name="python" id="pyYes" value="Yes" />
+        <label for="pyYes">Yes</label>
+        <input type="radio" name="python" id="pyNo" value="No" />
+        <label for="pyNo">No</label>
+      </div>
+      <div class="wd-field" data-automation-id="formField-years" data-test-field="years" data-control="number">
+        <label data-automation-id="formField-years-label" for="years">How many years of professional work experience do you have?</label>
+        <input id="years" type="number" />
+      </div>
+      <div class="wd-field" data-automation-id="formField-license" data-test-field="license" data-control="radio">
+        <div data-automation-id="formField-license-label">Do you have a driver's license?</div>
+        <input type="radio" name="license" id="licYes" value="Yes" />
+        <label for="licYes">Yes</label>
+        <input type="radio" name="license" id="licNo" value="No" />
+        <label for="licNo">No</label>
+      </div>
+      <div class="wd-field" id="licenseNumWrap" hidden data-automation-id="formField-licenseNumber" data-test-field="licenseNumber" data-control="text" data-required="true">
+        <label data-automation-id="formField-licenseNumber-label" for="licenseNumber">Driver's license number *</label>
+        <input id="licenseNumber" type="text" />
+      </div>
+    </section>
+
+    <section class="page" data-page="4" hidden>
+      <div class="wd-field" data-automation-id="formField-optional" data-test-field="optionalNote" data-control="textarea">
+        <label data-automation-id="formField-optional-label" for="optionalNote">Anything else we should know?</label>
+        <textarea id="optionalNote"></textarea>
+      </div>
+      <div class="wd-field" data-automation-id="formField-confirm" data-test-field="confirm" data-control="radio" data-required="true">
+        <div data-automation-id="formField-confirm-label">I certify that my answers are true and complete. *</div>
+        <input type="radio" name="confirm" id="cYes" value="Yes" />
+        <label for="cYes">Yes</label>
+        <input type="radio" name="confirm" id="cNo" value="No" />
+        <label for="cNo">No</label>
+      </div>
+      <p id="reviewBanner">Final review — dry run must not submit.</p>
+    </section>
+
+    <p class="err" id="pageError" hidden data-test-error>Please complete required fields.</p>
+
+    <button type="button" id="nextBtn">Next</button>
+    <button type="button" id="submitBtn">Submit Application</button>
+  </form>
+
+  <script>
+    window.__dryRun = { page: 1, submitted: false, nextClicks: 0 };
+    const titles = {
+      1: 'My Information',
+      2: 'Education',
+      3: 'Application Questions',
+      4: 'Review',
+    };
+
+    function showPage(n) {
+      window.__dryRun.page = n;
+      document.querySelectorAll('.page').forEach((el) => {
+        el.hidden = Number(el.getAttribute('data-page')) !== n;
+      });
+      document.getElementById('pageTitle').textContent = titles[n];
+      document.getElementById('pageTitle').setAttribute('data-page-title', titles[n]);
+      document.getElementById('stepHint').textContent = 'PAGE ' + n;
+      document.getElementById('nextBtn').hidden = n >= 4;
+      document.getElementById('pageError').hidden = true;
+    }
+
+    function pageRequiredEmpty(n) {
+      const root = document.querySelector('.page[data-page="' + n + '"]');
+      const required = root.querySelectorAll('[data-required="true"]:not([hidden])');
+      return Array.from(required).some((field) => {
+        if (field.hidden) return false;
+        const radio = field.querySelector('input[type="radio"]');
+        if (radio) return !field.querySelector('input[type="radio"]:checked');
+        const input = field.querySelector('input, textarea');
+        const selected = field.querySelector('[data-automation-id="selectedItem"]');
+        if (selected && selected.textContent.trim()) return false;
+        return input && !String(input.value || '').trim();
+      });
+    }
+
+    document.getElementById('nextBtn').addEventListener('click', () => {
+      const n = window.__dryRun.page;
+      if (pageRequiredEmpty(n)) {
+        document.getElementById('pageError').hidden = false;
+        return;
+      }
+      window.__dryRun.nextClicks += 1;
+      showPage(n + 1);
+    });
+
+    document.getElementById('submitBtn').addEventListener('click', () => {
+      window.__dryRun.submitted = true;
+    });
+
+    document.querySelectorAll('input[name="license"]').forEach((el) => {
+      el.addEventListener('change', () => {
+        document.getElementById('licenseNumWrap').hidden = !(el.checked && el.value === 'Yes');
+      });
+    });
+
+    function wireList(root) {
+      const btn = root.querySelector('button[aria-haspopup="listbox"]');
+      const list = root.querySelector('[role="listbox"]');
+      const selected = root.querySelector('[data-automation-id="selectedItem"]');
+      if (!btn || !list) return;
+      btn.addEventListener('click', () => { list.hidden = !list.hidden; });
+      list.querySelectorAll('[role="option"]').forEach((opt) => {
+        opt.addEventListener('click', () => {
+          if (selected) selected.textContent = opt.textContent.trim();
+          btn.textContent = opt.textContent.trim();
+          list.hidden = true;
+        });
+      });
+    }
+    document.querySelectorAll('[data-automation-id="selectOne"]').forEach(wireList);
+    showPage(1);
+  </script>
+</body>
+</html>

@@ -1,0 +1,80 @@
+{
+  "name": "job-auto-apply",
+  "version": "1.2.0",
+  "description": "Autonomous job application engine — Playwright-based Workday form filler with self-learning",
+  "type": "module",
+  "bin": {
+    "auto-apply": "./cli.mjs"
+  },
+  "files": [
+    "cli.mjs",
+    "lib/",
+    "config/profile.example.yml",
+    "config/resumes.example.yml",
+    "targets.example.txt",
+    ".env.example",
+    ".claude/",
+    "CLAUDE.md",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "setup": "node cli.mjs setup",
+    "scan": "node cli.mjs scan",
+    "fill": "node cli.mjs fill",
+    "apply": "node cli.mjs apply",
+    "batch": "node cli.mjs batch",
+    "queue": "node cli.mjs queue",
+    "status": "node cli.mjs status",
+    "test": "node --test lib/**/*.test.mjs tests/**/*.test.mjs",
+    "test:lib": "node --test lib/**/*.test.mjs",
+    "test:agent": "node tests/run-report.mjs",
+    "postinstall": "npx playwright install chromium 2>/dev/null || echo 'Run: npx playwright install chromium'"
+  },
+  "keywords": [
+    "job-application",
+    "automation",
+    "playwright",
+    "form-filler",
+    "ats",
+    "greenhouse",
+    "ashby",
+    "lever",
+    "workday",
+    "claude-code",
+    "self-learning",
+    "job-search",
+    "career",
+    "apply",
+    "npx"
+  ],
+  "author": "Devdatta Talele",
+  "license": "MIT",
+  "homepage": "https://github.com/devdattatalele/auto-apply#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/devdattatalele/auto-apply.git"
+  },
+  "bugs": {
+    "url": "https://github.com/devdattatalele/auto-apply/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.127.0",
+    "@aws-sdk/client-s3": "^3.1136.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "dotenv": "^18.0.1",
+    "fuzzball": "^2.2.6",
+    "js-yaml": "^4.1.1",
+    "p-limit": "^7.3.3",
+    "pdf-parse": "^2.4.5",
+    "playwright": "^1.63.0",
+    "yaml": "^2.9.1",
+    "zod": "^4.6.5"
+  },
+  "devDependencies": {
+    "vitest": "^5.0.1"
+  }
+}

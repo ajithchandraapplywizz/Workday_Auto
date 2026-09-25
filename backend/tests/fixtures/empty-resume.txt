@@ -1,0 +1,4 @@
+Test User resume fixture. Not a real CV.
+Skills: Python, JavaScript, React, SQL.
+Project A. Project B.
+Software Intern at Test Company.

@@ -1,0 +1,26 @@
+{
+  "client": {
+    "full_name": "Test User",
+    "personal_email": "test.user@example.test",
+    "applywizz_id": "TEST-000",
+    "salary_range": "80k-100k",
+    "sponsorship": false,
+    "job_role_preferences": ["Software Intern"]
+  },
+  "additional_information": {
+    "eligible_to_work_in_us": true,
+    "require_future_sponsorship": false,
+    "primary_phone": "+1-555-0100",
+    "email": "test.user@example.test",
+    "university_name": "Test University",
+    "highest_education": "B.Tech Computer Science",
+    "main_subject": "Computer Science",
+    "graduation_year": "2024",
+    "experience": 2,
+    "role": "Software Intern",
+    "full_address": "1 Test Street, Austin, TX 78701",
+    "linked_in_url": "https://linkedin.com/in/test-user-example",
+    "date_of_birth": "1999-01-15",
+    "willing_to_relocate": true
+  }
+}

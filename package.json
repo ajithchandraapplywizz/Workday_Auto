@@ -4,18 +4,23 @@
   "private": true,
   "type": "module",
   "workspaces": [
+    "backend",
+    "frontend",
     "workday-auto-apply"
   ],
   "scripts": {
-    "setup": "node workday-auto-apply/auto-apply/cli.mjs setup",
-    "scan": "node workday-auto-apply/auto-apply/cli.mjs scan",
-    "fill": "node workday-auto-apply/auto-apply/cli.mjs fill",
-    "apply": "node workday-auto-apply/auto-apply/cli.mjs apply",
-    "batch": "node workday-auto-apply/auto-apply/cli.mjs batch",
-    "queue": "node workday-auto-apply/auto-apply/cli.mjs queue",
-    "status": "node workday-auto-apply/auto-apply/cli.mjs status",
+    "setup": "node backend/cli.mjs setup",
+    "scan": "node backend/cli.mjs scan",
+    "fill": "node backend/cli.mjs fill",
+    "apply": "node backend/cli.mjs apply",
+    "batch": "node backend/cli.mjs batch",
+    "queue": "node backend/cli.mjs queue",
+    "status": "node backend/cli.mjs status",
+    "test": "node --test backend/tests/clientQaRecord.test.mjs backend/tests/jobFormCache.test.mjs backend/tests/csvJobParser.test.mjs",
+    "backend:dev": "node backend/cli.mjs",
+    "frontend:dev": "npm --prefix frontend start",
     "lint": "eslint . --ext .js,.mjs",
-    "typecheck": "node --check workday-auto-apply/auto-apply/cli.mjs"
+    "typecheck": "node --check backend/cli.mjs"
   },
   "dependencies": {
     "dotenv": "^17.4.2",

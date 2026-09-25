@@ -1,0 +1,343 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Workday Auto-Apply | Enterprise Automation &amp; Queue Control</title>
+  <meta name="description" content="Production control dashboard for Workday multi-worker automated job applications, Supabase form schema caching, and candidate answer memory.">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="src/style.css">
+</head>
+<body>
+  <div class="app-container">
+    <!-- Sidebar Navigation -->
+    <aside class="sidebar">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M13 2L3 14h9l-1 8 10-12h-9l1-8z"/>
+          </svg>
+        </div>
+        <div class="brand-text">
+          <h1>Workday Auto</h1>
+          <p>Enterprise Edition</p>
+        </div>
+      </div>
+
+      <nav>
+        <ul class="nav-menu">
+          <li>
+            <a href="#" class="nav-item active" data-target="panel-overview" id="nav-overview">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <rect x="3" y="3" width="7" height="7"/>
+                <rect x="14" y="3" width="7" height="7"/>
+                <rect x="14" y="14" width="7" height="7"/>
+                <rect x="3" y="14" width="7" height="7"/>
+              </svg>
+              <span>Overview</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="nav-item" data-target="panel-workers" id="nav-workers">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>
+                <circle cx="9" cy="7" r="4"/>
+                <path d="M22 21v-2a4 4 0 0 0-3-3.87"/>
+                <path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+              <span>Worker Fleet</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="nav-item" data-target="panel-queue" id="nav-queue">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <line x1="8" y1="6" x2="21" y2="6"/>
+                <line x1="8" y1="12" x2="21" y2="12"/>
+                <line x1="8" y1="18" x2="21" y2="18"/>
+                <line x1="3" y1="6" x2="3.01" y2="6"/>
+                <line x1="3" y1="12" x2="3.01" y2="12"/>
+                <line x1="3" y1="18" x2="3.01" y2="18"/>
+              </svg>
+              <span>Job Queue</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="nav-item" data-target="panel-schemas" id="nav-schemas">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
+                <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
+              </svg>
+              <span>Schema Cache</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="nav-item" data-target="panel-clients" id="nav-clients">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/>
+                <circle cx="12" cy="7" r="4"/>
+              </svg>
+              <span>Candidates</span>
+            </a>
+          </li>
+          <li>
+            <a href="#" class="nav-item" data-target="panel-logs" id="nav-logs">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="4 17 10 11 4 5"/>
+                <line x1="12" y1="19" x2="20" y2="19"/>
+              </svg>
+              <span>Console Logs</span>
+            </a>
+          </li>
+        </ul>
+      </nav>
+
+      <div class="sidebar-footer">
+        <div class="status-dot"></div>
+        <div class="status-text">
+          <h4>Engine Live</h4>
+          <p>Supabase Connected</p>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Main Content Area -->
+    <main class="main-content">
+      <header class="top-header">
+        <div class="page-title">
+          <h2 id="page-heading">Overview</h2>
+          <p>Multi-Worker Parallel Application Engine &amp; Cache Monitor</p>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary" id="btn-sync-supabase">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+            Sync Supabase
+          </button>
+          <button class="btn btn-primary" id="btn-trigger-batch">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polygon points="5 3 19 12 5 21 5 3"/>
+            </svg>
+            Dispatch Queue
+          </button>
+        </div>
+      </header>
+
+      <!-- Key Performance Metrics Grid -->
+      <section class="stats-grid">
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Applications Processed</span>
+            <div class="stat-icon" style="background: rgba(56, 189, 248, 0.1); color: var(--primary);">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+            </div>
+          </div>
+          <div class="stat-value" id="stat-total-apps">0</div>
+          <div class="stat-desc">Across all 200+ clients</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Review Reach Rate</span>
+            <div class="stat-icon" style="background: rgba(52, 211, 153, 0.1); color: var(--accent-green);">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"/></svg>
+            </div>
+          </div>
+          <div class="stat-value" id="stat-success-rate">98.4%</div>
+          <div class="stat-desc">Zero manual field blockers</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Form Cache Hit Rate</span>
+            <div class="stat-icon" style="background: rgba(192, 132, 252, 0.1); color: var(--accent-purple);">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 14 14"/></svg>
+            </div>
+          </div>
+          <div class="stat-value" id="stat-cache-hit">84.6%</div>
+          <div class="stat-desc">Bypasses discovery steps</div>
+        </div>
+
+        <div class="stat-card">
+          <div class="stat-header">
+            <span class="stat-label">Active Worker Fleet</span>
+            <div class="stat-icon" style="background: rgba(251, 191, 36, 0.1); color: var(--accent-amber);">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+            </div>
+          </div>
+          <div class="stat-value" id="stat-active-workers">3 Active</div>
+          <div class="stat-desc">Max concurrency: 10</div>
+        </div>
+      </section>
+
+      <!-- Panel: Overview -->
+      <div id="panel-overview" class="tab-panel active">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Active Parallel Workers</h3>
+            <span class="badge badge-active">Real-time</span>
+          </div>
+          <div class="worker-grid" id="workers-grid-container">
+            <!-- Rendered by JS -->
+          </div>
+        </div>
+
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Recent Queue Ingestion &amp; Applications</h3>
+            <a href="#" class="btn btn-secondary" style="font-size: 0.75rem; padding: 6px 12px;" onclick="document.getElementById('nav-queue').click(); return false;">View All</a>
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Queue ID</th>
+                  <th>Candidate</th>
+                  <th>Company</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Pre-Resolution</th>
+                  <th>Timestamp</th>
+                </tr>
+              </thead>
+              <tbody id="queue-table-body">
+                <!-- Rendered by JS -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel: Worker Fleet -->
+      <div id="panel-workers" class="tab-panel">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Worker Pool Configuration &amp; Telemetry</h3>
+          </div>
+          <p style="color: var(--text-muted); font-size: 0.9rem; margin-bottom: 20px;">
+            The engine executes parallel Playwright browser instances managed by <code>lib/workerPool.mjs</code>. When multiple candidates share a job posting, Worker 1 scans and caches the form schema in Supabase; subsequent workers bypass discovery and fill instantly.
+          </p>
+          <div class="worker-grid">
+            <!-- Full fleet display -->
+            <div class="worker-node busy">
+              <div class="worker-header"><span class="worker-name">Worker-1</span><span class="badge badge-active">Running</span></div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">Task: AWL-32732 (Yagnesh Kumar)</div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">URL: Formula One - Biggin Hill</div>
+              <div style="font-size: 0.75rem; color: var(--accent-green); margin-top: 4px;">Memory: 182 MB · CPU: 12%</div>
+            </div>
+            <div class="worker-node busy">
+              <div class="worker-header"><span class="worker-name">Worker-2</span><span class="badge badge-active">Running</span></div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">Task: AWL-31385 (Prabhavathi)</div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">URL: Formula One - Biggin Hill</div>
+              <div style="font-size: 0.75rem; color: var(--accent-green); margin-top: 4px;">Memory: 174 MB · CPU: 11%</div>
+            </div>
+            <div class="worker-node busy">
+              <div class="worker-header"><span class="worker-name">Worker-3</span><span class="badge badge-active">Running</span></div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">Task: AWL-35245 (Manisha D)</div>
+              <div style="font-size: 0.8rem; color: var(--text-dim);">URL: Formula One - Biggin Hill</div>
+              <div style="font-size: 0.75rem; color: var(--accent-green); margin-top: 4px;">Memory: 189 MB · CPU: 15%</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel: Job Queue -->
+      <div id="panel-queue" class="tab-panel">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Enterprise Batch Job Queue</h3>
+            <input type="text" class="search-input" id="queue-search-input" placeholder="Filter by AWL ID or company...">
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Queue ID</th>
+                  <th>Candidate</th>
+                  <th>Company</th>
+                  <th>Role</th>
+                  <th>Status</th>
+                  <th>Pre-Resolution</th>
+                  <th>Timestamp</th>
+                </tr>
+              </thead>
+              <tbody id="queue-table-body-full">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel: Schema Cache -->
+      <div id="panel-schemas" class="tab-panel">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Discovered Job Form Schemas (Supabase Table: <code>job_form_schemas</code>)</h3>
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>Tenant / Domain</th>
+                  <th>Role Title</th>
+                  <th>Discovered Step Sequence</th>
+                  <th>Total Fields</th>
+                  <th>Last Cached</th>
+                </tr>
+              </thead>
+              <tbody id="schemas-table-body">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel: Candidate Directory -->
+      <div id="panel-clients" class="tab-panel">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Candidate Fact Store &amp; Verification (Supabase: <code>clients</code> &amp; <code>client_facts</code>)</h3>
+            <input type="text" class="search-input" id="client-search-input" placeholder="Search candidate name or AWL ID...">
+          </div>
+          <div class="table-wrapper">
+            <table>
+              <thead>
+                <tr>
+                  <th>ApplyWizz ID</th>
+                  <th>Candidate Name</th>
+                  <th>Candidate Email</th>
+                  <th>Date of Birth (MM/DD/YYYY)</th>
+                  <th>Work Authorization</th>
+                  <th>Resume Status</th>
+                </tr>
+              </thead>
+              <tbody id="clients-table-body">
+                <!-- Rendered dynamically -->
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <!-- Panel: Console Logs -->
+      <div id="panel-logs" class="tab-panel">
+        <div class="dashboard-card">
+          <div class="card-title-bar">
+            <h3>Live Worker Engine Console</h3>
+            <span class="badge badge-success">Live Stream</span>
+          </div>
+          <div class="terminal-window" id="terminal-content">
+            <!-- Dynamic log feed -->
+          </div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script src="src/app.js"></script>
+</body>
+</html>
