@@ -13,7 +13,7 @@ import {
 import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
 
 export default function OperatorDashboard({ operatorView = 'dashboard' }) {
-  const { user, date, timeframe } = useAuth();
+  const { user, date, setDate, timeframe } = useAuth();
 
   // Active CA identity (strictly scoped to logged-in operator session)
   const [caRoster, setCaRoster] = useState([]);
@@ -80,16 +80,22 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   };
 
   // Load candidate directory assigned to this CA on the active date (with holiday rollback)
-  const loadAssignedClients = async () => {
+  const loadAssignedClients = async (overrideDate) => {
     setLoading(true);
+    const targetDate = overrideDate || date;
     try {
       const res = await fetchAssignedClientsForCA({
         caEmail: sessionCaEmail,
-        atDate: date,
+        atDate: targetDate,
       });
 
-      setActiveWorkDate(res.activeDate || date);
-      setIsFallbackDate(Boolean(res.isFallback));
+      if (res.activeDate) {
+        setActiveWorkDate(res.activeDate);
+        setIsFallbackDate(Boolean(res.isFallback));
+        if (res.activeDate !== date && setDate) {
+          setDate(res.activeDate);
+        }
+      }
 
       if (res.success && res.assignments?.length) {
         const mapped = res.assignments.map((a) => ({
@@ -128,9 +134,14 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     try {
       const res = await syncLiveCAData({ caEmail: sessionCaEmail, dateStr: date });
       if (res.success) {
-        const fbTag = res.isFallback ? ' (Fallback)' : '';
+        if (res.activeDate && res.activeDate !== date && setDate) {
+          setDate(res.activeDate);
+        }
+        setActiveWorkDate(res.activeDate || date);
+        setIsFallbackDate(Boolean(res.isFallback));
+        const fbTag = res.isFallback ? ' (Previous Active Day)' : '';
         setSyncMessage(`Synced ${res.count} clients for ${res.activeDate}${fbTag}`);
-        await loadAssignedClients();
+        await loadAssignedClients(res.activeDate);
       } else {
         setSyncMessage(res.message || 'Sync completed');
       }
@@ -219,11 +230,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
   // Overall counts for this CA in this period
   const totals = useMemo(() => {
-    const total = applications.length;
-    const submitted = applications.filter((a) => a.status === 'submitted').length;
-    const failed = applications.filter((a) => a.status === 'failed').length;
-    return { total, submitted, failed };
-  }, [applications]);
+    const totalCandidatesApps = candidates.reduce((acc, c) => acc + (Number(c.jobs_applied) || 0), 0);
+    const totalCandidatesSubmitted = candidates.reduce((acc, c) => acc + (Number(c.emails_submitted) || 0), 0);
+    const currentTotal = applications.length;
+    const currentSubmitted = applications.filter((a) => a.status === 'submitted').length;
+    const currentFailed = applications.filter((a) => a.status === 'failed').length;
+    return {
+      total: Math.max(totalCandidatesApps, currentTotal),
+      submitted: Math.max(totalCandidatesSubmitted, currentSubmitted),
+      failed: currentFailed,
+    };
+  }, [applications, candidates]);
 
   // Filtered candidate list with safe null checks
   const filteredCandidates = useMemo(() => {
@@ -445,7 +462,9 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     </div>
                     <div className="cci-id-row" style={{ display: 'flex', justifyContent: 'space-between' }}>
                       <span className="cci-awl">{c.id}</span>
-                      <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>0 Apps</span>
+                      <span style={{ fontSize: '0.72rem', color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8', fontWeight: (c.jobs_applied || 0) > 0 ? 'bold' : 'normal' }}>
+                        {c.jobs_applied || 0} Apps
+                      </span>
                     </div>
                   </div>
                 ))

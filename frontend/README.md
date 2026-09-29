@@ -1,25 +1,16 @@
-# Workday Auto-Apply Frontend Dashboard
+# React + Vite
 
-A modern, responsive control panel and real-time monitoring interface for the Workday Automated Application Engine.
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
 
-## Features
-- **Live Worker Fleet Tracking**: View real-time active status, memory, current job link, and throughput for Worker 1 to 10.
-- **Batch Queue Monitor**: Filter, search, and inspect entries in Supabase `batch_job_queue`.
-- **Schema Cache Browser**: Inspect discovered Workday form steps, field types, and question schemas stored in `job_form_schemas`.
-- **Candidate Facts Inspector**: Verify normalized candidate facts (DOB MM/DD/YYYY, work authorization, contact details).
-- **Live Console**: Real-time event log stream for debugging automation runs.
+Currently, two official plugins are available:
 
-## Running Locally
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
 
-From the project root:
-```bash
-npm run frontend:dev
-```
+## React Compiler
 
-Or directly from the `frontend/` directory:
-```bash
-cd frontend
-npm start
-```
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
 
-Visit [http://localhost:3000](http://localhost:3000) in your browser.
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.

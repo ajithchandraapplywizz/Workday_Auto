@@ -19,6 +19,7 @@
     "test": "node --test backend/tests/clientQaRecord.test.mjs backend/tests/jobFormCache.test.mjs backend/tests/csvJobParser.test.mjs",
     "backend:dev": "node backend/cli.mjs",
     "frontend:dev": "npm --prefix frontend start",
+    "dev": "node node_modules/vite/bin/vite.js frontend",
     "lint": "eslint . --ext .js,.mjs",
     "typecheck": "node --check backend/cli.mjs"
   },

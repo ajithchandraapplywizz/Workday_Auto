@@ -1,4 +1,4 @@
-import { supabase, SUPABASE_URL } from '../config/supabase';
+import { supabase, SUPABASE_URL } from '../config/supabase.js';
 export { supabase };
 
 const CA_MANAGEMENT_BASE = 'https://applywizz-ca-management.vercel.app/api/ca';
@@ -377,9 +377,66 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
     if (managerId && managerId !== 'All') {
       query = query.eq('manager_id', managerId);
     }
-    const { data, error } = await query;
+    const { data: opsData, error } = await query;
     if (error) throw error;
-    return { success: true, operators: data || [] };
+
+    // Concurrently fetch auth_users, assignment counts and applications counts
+    const [authRes, assignRes, clientRes, appRes] = await Promise.all([
+      supabase.from('auth_users').select('email, status, last_sign_in'),
+      supabase.from('client_assignment_log').select('ca_email'),
+      supabase.from('clients').select('current_ca_email'),
+      supabase.from('applications').select('ca_id'),
+    ]);
+
+    const authMap = new Map();
+    (authRes.data || []).forEach((u) => {
+      const em = (u.email || '').toLowerCase().trim();
+      if (em) authMap.set(em, u);
+    });
+
+    const clientCountMap = new Map();
+    (assignRes.data || []).forEach((a) => {
+      const em = (a.ca_email || '').toLowerCase().trim();
+      if (em) clientCountMap.set(em, (clientCountMap.get(em) || 0) + 1);
+    });
+
+    (clientRes.data || []).forEach((c) => {
+      const em = (c.current_ca_email || '').toLowerCase().trim();
+      if (em && !clientCountMap.has(em)) {
+        clientCountMap.set(em, 1);
+      }
+    });
+
+    const appCountMap = new Map();
+    (appRes.data || []).forEach((a) => {
+      const em = (a.ca_id || '').toLowerCase().trim();
+      if (em) appCountMap.set(em, (appCountMap.get(em) || 0) + 1);
+    });
+
+    const enriched = (opsData || []).map((op) => {
+      const em = (op.email || '').toLowerCase().trim();
+      const authUser = authMap.get(em);
+
+      // Determine real dynamic active status:
+      // Active if authUser status is 'active' or op has an active session / recent sign-in
+      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
+      let effectiveStatus = (op.status || 'offline').toLowerCase();
+      if (authUser?.status) {
+        effectiveStatus = authUser.status.toLowerCase();
+      } else if (!effectiveLastSignIn) {
+        effectiveStatus = 'offline';
+      }
+
+      return {
+        ...op,
+        status: effectiveStatus,
+        last_sign_in: effectiveLastSignIn,
+        assigned_clients: clientCountMap.get(em) || 0,
+        applications_count: appCountMap.get(em) || 0,
+      };
+    });
+
+    return { success: true, operators: enriched };
   } catch (err) {
     console.warn('operators table read fallback to /api/ca/emails:', err);
     const fallback = await fetchCAEmails();
@@ -388,9 +445,11 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
       name: u.name,
       email: u.email,
       role: u.role || 'CA',
-      status: 'active',
+      status: 'offline',
       manager_id: '9dc9376e-fbc5-440b-932f-38da10b89a70',
       last_sign_in: null,
+      assigned_clients: 0,
+      applications_count: 0,
     }));
     return { success: true, operators: mapped };
   }
@@ -502,7 +561,40 @@ export async function fetchApplicationsDynamic({
 
     const { data, error } = await query;
     if (error) throw error;
-    return { success: true, applications: data || [] };
+    let list = data || [];
+
+    // If querying by candidate, merge active tasks from batch_job_queue so assigned links appear immediately
+    if (applywizzId) {
+      const cleanId = String(applywizzId).trim().toUpperCase();
+      const { data: queueTasks } = await supabase
+        .from('batch_job_queue')
+        .select('*')
+        .eq('applywizz_id', cleanId)
+        .order('created_at', { ascending: false });
+
+      if (queueTasks && queueTasks.length > 0) {
+        const seenUrls = new Set(list.map((a) => (a.job_url || a.url || '').split('?')[0].trim().toLowerCase()));
+        for (const qt of queueTasks) {
+          const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
+          if (cleanQtUrl && !seenUrls.has(cleanQtUrl)) {
+            seenUrls.add(cleanQtUrl);
+            list.push({
+              id: qt.id,
+              applywizz_id: qt.applywizz_id,
+              job_title: qt.role_title || 'Workday Position',
+              company: qt.company || 'Workday Tenant',
+              ats: 'Workday',
+              status: qt.status || 'ready_for_review',
+              job_url: qt.job_url,
+              pre_resolved_answers: qt.pre_resolved_answers,
+              created_at: qt.created_at,
+            });
+          }
+        }
+      }
+    }
+
+    return { success: true, applications: list };
   } catch (err) {
     console.error('Failed to fetch dynamic applications:', err);
     return { success: false, applications: [], error: err.message };
@@ -609,24 +701,67 @@ export async function fetchAutomationTrace(applicationId) {
 /**
  * 20. Work History with Date Fallback (Handles holidays/weekends by walking back)
  */
-export async function fetchCAWorkHistoryWithFallback({ caEmail = '', dateStr = '', maxDaysBack = 7 } = {}) {
+export async function fetchCAWorkHistoryWithFallback({ caEmail = '', dateStr = '', maxDaysBack = 21 } = {}) {
   const cleanDateStr = formatLocalDate(dateStr) || formatLocalDate(new Date());
-  let curr = parseLocalDate(cleanDateStr);
 
-  for (let i = 0; i < maxDaysBack; i++) {
-    const d = formatLocalDate(curr);
-    const dayOfWeek = curr.getDay();
+  try {
+    // 1. Fast range query covering past 21 days
+    const startObj = parseLocalDate(cleanDateStr);
+    startObj.setDate(startObj.getDate() - maxDaysBack);
+    const startStr = formatLocalDate(startObj);
 
-    // If stepping back (i > 0), skip weekend days (Saturday = 6, Sunday = 0)
-    if (i > 0 && (dayOfWeek === 0 || dayOfWeek === 6)) {
-      curr.setDate(curr.getDate() - 1);
-      continue;
+    let rangeUrl = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(startStr)}&to=${encodeURIComponent(cleanDateStr)}`;
+    if (caEmail) {
+      rangeUrl += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
     }
 
+    const res = await fetch(rangeUrl);
+    if (res.ok) {
+      const data = await res.json();
+      const allRecords = data.records || [];
+
+      if (allRecords.length > 0) {
+        // Check if records exist on the requested date
+        const todayRecords = allRecords.filter((r) => r.date === cleanDateStr);
+        if (todayRecords.length > 0) {
+          return {
+            success: true,
+            activeDate: cleanDateStr,
+            isFallback: false,
+            daysBack: 0,
+            total: todayRecords.length,
+            records: todayRecords,
+          };
+        }
+
+        // If today has 0 records, find most recent active date with records
+        const activeDates = [...new Set(allRecords.map((r) => r.date))].sort().reverse();
+        if (activeDates.length > 0) {
+          const mostRecentActiveDate = activeDates[0];
+          const activeDayRecords = allRecords.filter((r) => r.date === mostRecentActiveDate);
+          return {
+            success: true,
+            activeDate: mostRecentActiveDate,
+            isFallback: true,
+            daysBack: Math.max(1, Math.round((new Date(cleanDateStr) - new Date(mostRecentActiveDate)) / 86400000)),
+            total: activeDayRecords.length,
+            records: activeDayRecords,
+          };
+        }
+      }
+    }
+  } catch (err) {
+    console.warn(`Fast range work history check failed:`, err);
+  }
+
+  // 2. Sequential fallback if range query returned nothing
+  let curr = parseLocalDate(cleanDateStr);
+  for (let i = 0; i < 7; i++) {
+    const d = formatLocalDate(curr);
     try {
       let url = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(d)}&to=${encodeURIComponent(d)}`;
       if (caEmail) {
-        url += `&ca_email=${encodeURIComponent(caEmail)}`;
+        url += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
       }
       const res = await fetch(url);
       if (res.ok) {
@@ -642,10 +777,9 @@ export async function fetchCAWorkHistoryWithFallback({ caEmail = '', dateStr = '
           };
         }
       }
-    } catch (err) {
-      console.warn(`Work history check failed for ${d}:`, err);
+    } catch {
+      // continue walk back
     }
-    // Step back 1 day
     curr.setDate(curr.getDate() - 1);
   }
 
@@ -661,68 +795,115 @@ export async function fetchCAWorkHistoryWithFallback({ caEmail = '', dateStr = '
 
 /**
  * 21. CA Candidate Directory Query: Strictly queries work-history and assignment log
- * (Zero random clients; for Sana, returns only her real 6 clients)
+ * and enriches each candidate with OUR Supabase application tracking (applications & batch_job_queue)
  */
 export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
-  if (!caEmail) return { success: true, assignments: [], activeDate: atDate };
+  if (!caEmail) return { success: true, assignments: [], activeDate: atDate, isFallback: false };
 
   try {
     // 1. First check live CA work-history with date fallback (nearest active workday)
     const historyRes = await fetchCAWorkHistoryWithFallback({
       caEmail,
       dateStr: atDate,
-      maxDaysBack: 7,
+      maxDaysBack: 21,
     });
 
-    if (historyRes.success && historyRes.records.length > 0) {
-      // Deduplicate by applywizz_id
-      const clientMap = new Map();
+    const clientMap = new Map();
+
+    if (historyRes.success && historyRes.records?.length > 0) {
       for (const r of historyRes.records) {
-        if (!clientMap.has(r.applywizz_id)) {
-          clientMap.set(r.applywizz_id, {
-            applywizz_id: r.applywizz_id,
-            client_name: r.client_name,
-            client_email: r.client_email,
-            ca_email: r.ca_email,
-            ca_name: r.ca_name,
+        if (!r.applywizz_id) continue;
+        const normId = r.applywizz_id.trim().toUpperCase();
+        if (!clientMap.has(normId)) {
+          clientMap.set(normId, {
+            applywizz_id: normId,
+            client_name: r.client_name || normId,
+            client_email: r.client_email || '',
+            ca_email: r.ca_email || caEmail,
+            ca_name: r.ca_name || '',
             jobs_applied: 0,
             emails_submitted: 0,
-            date: r.date,
+            date: r.date || historyRes.activeDate,
           });
         }
       }
-      return {
-        success: true,
-        assignments: Array.from(clientMap.values()),
-        activeDate: historyRes.activeDate,
-        isFallback: historyRes.isFallback,
-      };
     }
 
-    // 2. Check client_assignment_log in Supabase
+    // 2. Also check client_assignment_log in Supabase for additional assignments
     const atIso = atDate ? new Date(atDate).toISOString() : new Date().toISOString();
-    const { data: logData, error: logErr } = await supabase
+    const { data: logData } = await supabase
       .from('client_assignment_log')
       .select('*')
-      .eq('ca_email', caEmail)
+      .ilike('ca_email', caEmail)
       .lte('effective_from', atIso)
       .or(`effective_to.is.null,effective_to.gt.${atIso}`);
 
-    if (!logErr && logData && logData.length > 0) {
-      return {
-        success: true,
-        assignments: logData.map((l) => ({
-          applywizz_id: l.applywizz_id,
-          client_name: l.client_name || l.applywizz_id,
-          ca_email: l.ca_email,
-        })),
-        activeDate: atDate,
-        isFallback: false,
-      };
+    if (logData && logData.length > 0) {
+      for (const l of logData) {
+        if (!l.applywizz_id) continue;
+        const normId = l.applywizz_id.trim().toUpperCase();
+        if (!clientMap.has(normId)) {
+          clientMap.set(normId, {
+            applywizz_id: normId,
+            client_name: l.client_name || normId,
+            client_email: l.client_email || '',
+            ca_email: l.ca_email || caEmail,
+            ca_name: l.ca_name || '',
+            jobs_applied: 0,
+            emails_submitted: 0,
+            date: l.assignment_date || historyRes.activeDate || atDate,
+          });
+        }
+      }
     }
 
-    // 3. If no work history or assignment log, return empty array (do NOT dump unrelated clients!)
-    return { success: true, assignments: [], activeDate: atDate, isFallback: false };
+    const candidateIds = Array.from(clientMap.keys());
+
+    // 3. Enrich strictly with OUR Supabase applications & batch_job_queue tracking
+    if (candidateIds.length > 0) {
+      const [appsRes, queueRes] = await Promise.all([
+        supabase.from('applications').select('applywizz_id, status').in('applywizz_id', candidateIds),
+        supabase.from('batch_job_queue').select('applywizz_id, status').in('applywizz_id', candidateIds),
+      ]);
+
+      const appsCountMap = new Map();
+      const submittedCountMap = new Map();
+
+      (appsRes.data || []).forEach((a) => {
+        const cid = (a.applywizz_id || '').trim().toUpperCase();
+        if (cid) {
+          appsCountMap.set(cid, (appsCountMap.get(cid) || 0) + 1);
+          if (a.status === 'submitted') {
+            submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
+          }
+        }
+      });
+
+      (queueRes.data || []).forEach((q) => {
+        const cid = (q.applywizz_id || '').trim().toUpperCase();
+        if (cid) {
+          if (!appsCountMap.has(cid)) {
+            appsCountMap.set(cid, 1);
+          }
+          if (q.status === 'submitted') {
+            submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
+          }
+        }
+      });
+
+      // Update candidate records with our actual tracking metrics
+      for (const [cid, cand] of clientMap.entries()) {
+        cand.jobs_applied = appsCountMap.get(cid) || 0;
+        cand.emails_submitted = submittedCountMap.get(cid) || 0;
+      }
+    }
+
+    return {
+      success: true,
+      assignments: Array.from(clientMap.values()),
+      activeDate: historyRes.activeDate || atDate,
+      isFallback: historyRes.isFallback || false,
+    };
   } catch (err) {
     console.error('Failed to fetch assigned clients for CA:', err);
     return { success: false, assignments: [], activeDate: atDate, isFallback: false };
@@ -740,7 +921,7 @@ export async function syncLiveCAData({ caEmail, dateStr }) {
     const historyRes = await fetchCAWorkHistoryWithFallback({
       caEmail,
       dateStr: d,
-      maxDaysBack: 7,
+      maxDaysBack: 21,
     });
 
     const records = historyRes.records || [];
@@ -758,11 +939,13 @@ export async function syncLiveCAData({ caEmail, dateStr }) {
     let synced = 0;
     for (const r of records) {
       if (!r.applywizz_id) continue;
+      const normId = r.applywizz_id.trim().toUpperCase();
+
       await supabase.from('client_assignment_log').upsert({
-        applywizz_id: r.applywizz_id,
+        applywizz_id: normId,
         client_id: r.client_id,
         ca_id: r.ca_id || caEmail,
-        ca_email: caEmail,
+        ca_email: caEmail.trim().toLowerCase(),
         assignment_date: historyRes.activeDate,
         effective_from: new Date(`${historyRes.activeDate}T00:00:00Z`).toISOString(),
       }, { onConflict: 'applywizz_id,assignment_date' });
@@ -771,10 +954,10 @@ export async function syncLiveCAData({ caEmail, dateStr }) {
       await supabase
         .from('clients')
         .update({
-          current_ca_email: caEmail,
+          current_ca_email: caEmail.trim().toLowerCase(),
           assigned_at: new Date().toISOString(),
         })
-        .eq('applywizz_id', r.applywizz_id);
+        .eq('applywizz_id', normId);
 
       synced++;
     }
@@ -969,6 +1152,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
   if (!applywizzId) return { success: false, error: 'applywizzId is required' };
   try {
     const cleanId = String(applywizzId).trim().toUpperCase();
+    const cleanUrl = (jobUrl || '').split('?')[0].trim();
 
     // 1. Fetch task row from batch_job_queue
     let queueTask = null;
@@ -980,6 +1164,16 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
         .eq('job_url', jobUrl)
         .limit(1);
       queueTask = tasks?.[0] || null;
+
+      if (!queueTask && cleanUrl) {
+        const { data: cTasks } = await supabase
+          .from('batch_job_queue')
+          .select('*')
+          .eq('applywizz_id', cleanId)
+          .ilike('job_url', `${cleanUrl}%`)
+          .limit(1);
+        queueTask = cTasks?.[0] || null;
+      }
     }
 
     if (!queueTask) {
@@ -994,14 +1188,15 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     }
 
     const effectiveUrl = jobUrl || queueTask?.job_url || '';
+    const effectiveCleanUrl = effectiveUrl.split('?')[0].trim();
 
-    // 2. Fetch schema for this job URL
+    // 2. Fetch schema from job_form_schemas using canonical_job_url
     let schema = null;
-    if (effectiveUrl) {
+    if (effectiveCleanUrl) {
       const { data: schemas } = await supabase
         .from('job_form_schemas')
         .select('*')
-        .eq('job_url', effectiveUrl)
+        .or(`canonical_job_url.eq.${effectiveCleanUrl},canonical_job_url.ilike.%${effectiveCleanUrl}%`)
         .limit(1);
       schema = schemas?.[0] || null;
     }
@@ -1037,28 +1232,28 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
 
     // Helper to determine field source badge
     const determineSource = (label, rawSource, isIdentity) => {
-      if (isIdentity) return { key: 'identity', label: 'Identity / DB', icon: '👤', color: 'amber' };
+      if (isIdentity) return { key: 'identity', label: 'Solved with Identity', icon: '👤', color: 'amber' };
       const s = String(rawSource || '').toLowerCase();
       if (s.includes('ai') || s.includes('llm') || s.includes('gemini') || s.includes('gpt')) {
-        return { key: 'ai', label: 'AI / LLM', icon: '🤖', color: 'purple' };
+        return { key: 'ai', label: 'Solved with AI', icon: '🤖', color: 'purple' };
       }
       if (s.includes('resume') || s.includes('experience') || /years|skills|experience/i.test(label)) {
-        return { key: 'resume', label: 'Resume Facts', icon: '📄', color: 'blue' };
+        return { key: 'resume', label: 'Solved with Resume', icon: '📄', color: 'blue' };
       }
-      if (s.includes('supabase') || s.includes('manual') || s.includes('db')) {
-        return { key: 'supabase', label: 'Supabase DB', icon: '💾', color: 'emerald' };
+      if (s.includes('supabase') || s.includes('manual') || s.includes('db') || s.includes('database')) {
+        return { key: 'supabase', label: 'Solved with Supabase', icon: '💾', color: 'emerald' };
       }
       // Heuristic fallback
       if (/name|email|phone|address|city|postal|zip/i.test(label)) {
-        return { key: 'identity', label: 'Identity / DB', icon: '👤', color: 'amber' };
+        return { key: 'identity', label: 'Solved with Identity', icon: '👤', color: 'amber' };
       }
-      if (/authorized|sponsorship|visa|relocate|clearance/i.test(label)) {
-        return { key: 'supabase', label: 'Supabase DB', icon: '💾', color: 'emerald' };
+      if (/authorized|sponsorship|visa|relocate|clearance|felony|gender|veteran|disability/i.test(label)) {
+        return { key: 'supabase', label: 'Solved with Supabase', icon: '💾', color: 'emerald' };
       }
-      return { key: 'ai', label: 'AI / LLM', icon: '🤖', color: 'purple' };
+      return { key: 'ai', label: 'Solved with AI', icon: '🤖', color: 'purple' };
     };
 
-    // If schema fields exist, use them
+    // If schema fields exist, use the exact required DOM questions extracted from Workday
     if (schema?.fields_schema && Array.isArray(schema.fields_schema) && schema.fields_schema.length > 0) {
       for (const sf of schema.fields_schema) {
         const rawLabel = sf.label || sf.question_label || '';
@@ -1071,21 +1266,21 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
 
         const isIdentityField = /name|email|phone|address|city|postal/i.test(rawLabel);
         if (!val && isIdentityField && client) {
-          if (/first\s*name/i.test(rawLabel)) val = client.first_name || '';
-          else if (/last\s*name/i.test(rawLabel)) val = client.last_name || '';
+          if (/first\s*name|given\s*name/i.test(rawLabel)) val = client.first_name || client.client_name?.split(' ')[0] || '';
+          else if (/last\s*name|family\s*name/i.test(rawLabel)) val = client.last_name || client.client_name?.split(' ').slice(1).join(' ') || '';
           else if (/email/i.test(rawLabel)) val = client.company_email || client.client_email || '';
-          else if (/phone/i.test(rawLabel)) val = client.phone || '';
+          else if (/phone/i.test(rawLabel)) val = client.callable_phone || client.whatsapp_number || client.phone || '';
           else if (/address/i.test(rawLabel)) val = client.address_line1 || '';
           else if (/city/i.test(rawLabel)) val = client.current_city || '';
         }
 
-        const sourceMeta = determineSource(rawLabel, qMatch?.answer_source, isIdentityField);
+        const sourceMeta = determineSource(rawLabel, qMatch?.answer_source || (preResolved[rawLabel] ? 'ai' : ''), isIdentityField);
 
         fields.push({
           id: sf.automation_id || sf.id || `field_${fields.length + 1}`,
           label: rawLabel,
           value: val || '',
-          step: sf.step || 'Application',
+          step: sf.step || 'Application Questions',
           fieldType: sf.field_type || (sf.options?.length ? 'select' : 'text'),
           required: Boolean(sf.is_required || sf.required || rawLabel.includes('*')),
           options: sf.options || [],
@@ -1098,7 +1293,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       }
     }
 
-    // Also include any preResolved answers not in schema
+    // Also include preResolved answers from batch_job_queue
     for (const [ansLabel, ansVal] of Object.entries(preResolved)) {
       const normKey = normalizeLabelKey(ansLabel);
       if (seenLabels.has(normKey)) continue;
@@ -1106,7 +1301,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
 
       const qMatch = questionMap.get(normKey);
       const isIdentity = /name|email|phone|address/i.test(ansLabel);
-      const sourceMeta = determineSource(ansLabel, qMatch?.answer_source, isIdentity);
+      const sourceMeta = determineSource(ansLabel, qMatch?.answer_source || 'ai', isIdentity);
 
       fields.push({
         id: `field_${fields.length + 1}`,
@@ -1124,23 +1319,50 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       });
     }
 
-    // Default basic Workday fields if completely empty
-    if (fields.length === 0) {
-      const defaults = [
-        { label: 'Given Name(s)*', val: client?.first_name || 'Candidate', step: 'My Information', src: 'identity', req: true },
-        { label: 'Family Name*', val: client?.last_name || '', step: 'My Information', src: 'identity', req: true },
-        { label: 'Email*', val: client?.company_email || client?.client_email || 'candidate@applywizard.ai', step: 'My Information', src: 'identity', req: true },
-        { label: 'Phone Number*', val: client?.phone || '408-555-0199', step: 'My Information', src: 'identity', req: true },
-        { label: 'How Did You Hear About Us?*', val: 'LinkedIn', step: 'My Information', src: 'supabase', req: true },
-        { label: 'Previously worked for company?*', val: 'No', step: 'My Information', src: 'supabase', req: true },
-        { label: 'Total Years of Professional Experience*', val: client?.years_of_experience || '3 years', step: 'My Experience', src: 'resume', req: true },
-        { label: 'Primary Skills & Core Technologies*', val: client?.skills || 'Python, Distributed Systems, PyTorch', step: 'My Experience', src: 'resume', req: true },
+    // Also include verified candidate questions from client_questions
+    (clientQuestions || []).forEach((cq) => {
+      const qText = cq.question_raw || cq.question_normalized || '';
+      const normKey = normalizeLabelKey(qText);
+      if (!qText || seenLabels.has(normKey) || !cq.answer) return;
+      seenLabels.add(normKey);
+
+      const isIdentity = /name|email|phone|address|city/i.test(qText);
+      const sourceMeta = determineSource(qText, cq.answer_source || 'supabase', isIdentity);
+
+      // Capitalize first letter of label for neat display
+      const displayLabel = qText.charAt(0).toUpperCase() + qText.slice(1);
+
+      fields.push({
+        id: `cq_${cq.id || fields.length + 1}`,
+        label: displayLabel,
+        value: String(cq.answer || ''),
+        step: isIdentity ? 'My Information' : 'Application Questions',
+        fieldType: cq.field_type || (cq.options?.length ? 'select' : 'text'),
+        required: true,
+        options: cq.options || [],
+        source: sourceMeta.key,
+        sourceLabel: sourceMeta.label,
+        sourceIcon: sourceMeta.icon,
+        sourceColor: sourceMeta.color,
+        isModified: false,
+      });
+    });
+
+    // If fields are still empty (e.g. brand new client with no prior questions), use candidate facts
+    if (fields.length === 0 && client) {
+      const facts = [
+        { label: 'Given Name(s)*', val: client.first_name || client.client_name?.split(' ')[0] || '', step: 'My Information', src: 'identity', req: true },
+        { label: 'Family Name*', val: client.last_name || client.client_name?.split(' ').slice(1).join(' ') || '', step: 'My Information', src: 'identity', req: true },
+        { label: 'Email*', val: client.company_email || client.client_email || '', step: 'My Information', src: 'identity', req: true },
+        { label: 'Phone Number*', val: client.callable_phone || client.whatsapp_number || client.phone || '', step: 'My Information', src: 'identity', req: true },
+        { label: 'Primary Visa Status*', val: client.visa_type || 'F1 - OPT/CPT', step: 'Application Questions', src: 'supabase', req: true },
+        { label: 'Will you now or in future require sponsorship?*', val: client.sponsorship ? 'Yes' : 'No', step: 'Application Questions', src: 'supabase', req: true },
         { label: 'Legally authorized to work in the United States?*', val: 'Yes', step: 'Application Questions', src: 'supabase', req: true },
-        { label: 'Will you now or in future require sponsorship?*', val: client?.sponsorship ? 'Yes' : 'No', step: 'Application Questions', src: 'supabase', req: true },
-        { label: 'Relevant domain project summary*', val: 'Designed and deployed distributed ML pipeline achieving high throughput and low inference latency.', step: 'Application Questions', src: 'ai', req: true },
+        { label: 'Total Years of Professional Experience*', val: client.years_of_experience || '3 years', step: 'My Experience', src: 'resume', req: true },
+        { label: 'Primary Skills & Core Technologies*', val: client.skills || 'Python, Machine Learning, Distributed Systems', step: 'My Experience', src: 'resume', req: true },
       ];
 
-      defaults.forEach((df, idx) => {
+      facts.forEach((df, idx) => {
         const sourceMeta = determineSource(df.label, df.src, df.src === 'identity');
         fields.push({
           id: `field_${idx + 1}`,

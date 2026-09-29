@@ -6,6 +6,7 @@ import {
   submitApplicationRecord,
   fetchClients
 } from '../services/api';
+import { supabase } from '../config/supabase';
 import {
   User,
   Search,
@@ -37,8 +38,11 @@ export default function CADashboard() {
   const [questionSearch, setQuestionSearch] = useState('');
   const [candidateList, setCandidateList] = useState([]);
 
-  // Workday Auto-Apply Simulator state
-  const [jobUrl, setJobUrl] = useState('https://nvidia.wd5.myworkdayjobs.com/en-US/NVIDIAExternalCareerSite/job/USA-CA-Santa-Clara/Senior-AI-Software-Engineer_JR1985420');
+  // Workday Auto-Apply Dynamic state
+  const [activeTask, setActiveTask] = useState(null);
+  const [companyName, setCompanyName] = useState('Workday Partner');
+  const [roleTitle, setRoleTitle] = useState('Workday Application');
+  const [jobUrl, setJobUrl] = useState('');
   const [applyStep, setApplyStep] = useState(0); // 0: idle, 1: scanning, 2: matching, 3: filled, 4: submitted
   const [applyLog, setApplyLog] = useState([]);
   const [submitting, setSubmitting] = useState(false);
@@ -72,7 +76,7 @@ export default function CADashboard() {
     loadCandidates();
   }, []);
 
-  // Fetch client details & their questions
+  // Fetch client details, questions, and active queue task
   const loadClientProfile = async (idToLoad) => {
     const id = idToLoad || applywizzId;
     if (!id) return;
@@ -81,9 +85,10 @@ export default function CADashboard() {
     setApplyLog([]);
 
     try {
-      const [detailsRes, qaRes] = await Promise.all([
+      const [detailsRes, qaRes, queueRes] = await Promise.all([
         fetchClientDetails(id),
         fetchClientQuestions({ applywizzId: id, limit: 50 }),
+        supabase.from('batch_job_queue').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }).limit(1),
       ]);
 
       if (detailsRes.success && detailsRes.client) {
@@ -94,6 +99,38 @@ export default function CADashboard() {
 
       if (qaRes.success) {
         setQuestions(qaRes.questions || []);
+      }
+
+      const task = queueRes?.data?.[0] || null;
+      setActiveTask(task);
+
+      if (task) {
+        if (task.job_url) setJobUrl(task.job_url);
+        if (task.company) setCompanyName(task.company);
+        if (task.role_title) setRoleTitle(task.role_title);
+
+        if (task.status === 'reached_review' || task.status === 'pre_resolved') {
+          setApplyStep(3);
+          setApplyLog([
+            `[Task ${task.id.slice(0, 8)}] Scanned job application: ${task.company} (${task.role_title})`,
+            `[Workday Engine] Extracted required DOM questions and pre-resolved form fields.`,
+            `[Ready for Review] Reached Review screen. Click Review Form Fields to inspect and confirm submission.`,
+          ]);
+        } else if (task.status === 'submitted') {
+          setApplyStep(4);
+          setApplyLog([
+            `[Task ${task.id.slice(0, 8)}] Application already submitted for ${task.company} — ${task.role_title}.`,
+          ]);
+        } else {
+          setApplyLog([
+            `[Task ${task.id.slice(0, 8)}] Active task in queue (${task.status})`,
+            `[Target Job] ${task.company || 'Workday Partner'} — ${task.role_title || 'Workday Job'}`,
+          ]);
+        }
+      } else {
+        setJobUrl('https://unitytech.wd1.myworkdayjobs.com/Unity/job/Mountain-View-CA-USA/Principal-Machine-Learning-Engineer--Ads-Modeling_JOBREQ-2616596');
+        setCompanyName('Unity Technologies');
+        setRoleTitle('Principal Machine Learning Engineer');
       }
     } catch (err) {
       console.error('Failed to load candidate details:', err);
@@ -146,8 +183,8 @@ export default function CADashboard() {
       const res = await submitApplicationRecord({
         applywizzId: clientData?.applywizz_id || applywizzId,
         jobUrl,
-        company: 'NVIDIA (Workday)',
-        roleTitle: 'Senior AI Software Engineer',
+        company: companyName || 'Workday Partner',
+        roleTitle: roleTitle || 'Workday Application',
         status: 'submitted',
       });
 
@@ -576,8 +613,8 @@ export default function CADashboard() {
           onClose={() => setShowReviewModal(false)}
           applywizzId={clientData?.applywizz_id || applywizzId}
           jobUrl={jobUrl}
-          companyName="NVIDIA (Workday)"
-          roleTitle="Senior AI Software Engineer"
+          companyName={companyName}
+          roleTitle={roleTitle}
           onSubmitted={handleReviewSubmitted}
         />
       )}
