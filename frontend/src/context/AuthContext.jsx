@@ -102,10 +102,14 @@ export function AuthProvider({ children }) {
         manager_id: authUser.manager_id,
       };
 
-      // Update last sign in on auth_users
+      // Update last sign in and active status on auth_users
       await supabase
         .from('auth_users')
-        .update({ last_sign_in: new Date().toISOString() })
+        .update({
+          status: 'active',
+          last_sign_in: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
         .eq('id', authUser.id);
     } else {
       // Auto-resolve role based on system rules
@@ -117,12 +121,13 @@ export function AuthProvider({ children }) {
         manager_id: auto.manager_id,
       };
 
-      // Persist new user in auth_users
+      // Persist new user in auth_users with active status
       await supabase.from('auth_users').insert({
         email: normalizedEmail,
         name: auto.name,
         role: auto.role,
         manager_id: auto.manager_id,
+        status: 'active',
         verification_code: code || '000000',
         last_sign_in: new Date().toISOString(),
       });
@@ -186,16 +191,26 @@ export function AuthProvider({ children }) {
 
   const logout = async () => {
     if (user?.email) {
+      const em = user.email.toLowerCase().trim();
       try {
-        await supabase
-          .from('operators')
-          .update({
-            status: 'offline',
-            updated_at: new Date().toISOString(),
-          })
-          .ilike('email', user.email.toLowerCase().trim());
+        await Promise.all([
+          supabase
+            .from('operators')
+            .update({
+              status: 'inactive',
+              updated_at: new Date().toISOString(),
+            })
+            .ilike('email', em),
+          supabase
+            .from('auth_users')
+            .update({
+              status: 'inactive',
+              updated_at: new Date().toISOString(),
+            })
+            .ilike('email', em),
+        ]);
       } catch (err) {
-        console.warn('Failed to set operator offline:', err);
+        console.warn('Failed to set operator inactive:', err);
       }
     }
     localStorage.removeItem('applywizz_auth_session');

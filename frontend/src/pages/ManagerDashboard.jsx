@@ -4,6 +4,7 @@ import {
   fetchManagers,
   fetchManagerTeamWorkHistory,
   fetchApplicationsDynamic,
+  syncGlobalCompanyData,
 } from '../services/api';
 
 export default function ManagerDashboard() {
@@ -13,6 +14,8 @@ export default function ManagerDashboard() {
   const [selectedCA, setSelectedCA] = useState('All');
   const [dateRange, setDateRange] = useState(timeframe || 'Today');
   const [opsMode, setOpsMode] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  const [syncToast, setSyncToast] = useState(null);
 
   // Managers roster
   const [managers, setManagers] = useState([]);
@@ -61,47 +64,68 @@ export default function ManagerDashboard() {
   };
 
   // Strictly pre-scoped query to manager_id (Zero data duplication between Balaji & Ramakrishna)
-  useEffect(() => {
-    let isMounted = true;
-    async function loadManagerData() {
-      setLoading(true);
-      setSelectedCA('All');
-      try {
-        const [teamRes, appsRes] = await Promise.all([
-          fetchManagerTeamWorkHistory({
-            managerId: activeManagerId,
-            dateStr: date,
-          }),
-          fetchApplicationsDynamic({
-            managerId: activeManagerId,
-            dateStr: date,
-            timeframe,
-            limit: 200,
-          }),
-        ]);
+  const loadManagerData = React.useCallback(async () => {
+    setLoading(true);
+    setSelectedCA('All');
+    try {
+      const [teamRes, appsRes] = await Promise.all([
+        fetchManagerTeamWorkHistory({
+          managerId: activeManagerId,
+          dateStr: date,
+        }),
+        fetchApplicationsDynamic({
+          managerId: activeManagerId,
+          dateStr: date,
+          timeframe,
+          limit: 200,
+        }),
+      ]);
 
-        if (!isMounted) return;
-
-        if (teamRes.success) {
-          setOperators(teamRes.operators || []);
-          setTeamClients(teamRes.clients || []);
-          setActiveWorkDate(teamRes.activeDate || date);
-          setIsFallbackDate(Boolean(teamRes.isFallback));
-        }
-
-        if (appsRes.success) {
-          setApplications(appsRes.applications || []);
-        }
-      } catch (err) {
-        console.error('Error loading manager data:', err);
-      } finally {
-        if (isMounted) setLoading(false);
+      if (teamRes.success) {
+        setOperators(teamRes.operators || []);
+        setTeamClients(teamRes.clients || []);
+        setActiveWorkDate(teamRes.activeDate || date);
+        setIsFallbackDate(Boolean(teamRes.isFallback));
       }
-    }
 
-    loadManagerData();
-    return () => { isMounted = false; };
+      if (appsRes.success) {
+        setApplications(appsRes.applications || []);
+      }
+    } catch (err) {
+      console.error('Error loading manager data:', err);
+    } finally {
+      setLoading(false);
+    }
   }, [activeManagerId, date, timeframe]);
+
+  useEffect(() => {
+    loadManagerData();
+  }, [loadManagerData]);
+
+  // Sync team data directly from CA portal with fallback
+  const handleTeamSync = async () => {
+    setIsSyncing(true);
+    setSyncToast(null);
+    try {
+      const res = await syncGlobalCompanyData({ dateStr: date });
+      if (res.success) {
+        setSyncToast({
+          type: 'success',
+          text: `✓ ${res.message || 'Team allocations and work history refreshed successfully.'}`,
+        });
+        await loadManagerData();
+      } else {
+        setSyncToast({
+          type: 'error',
+          text: `Sync Error: ${res.error || 'Failed to sync team data.'}`,
+        });
+      }
+    } catch (err) {
+      setSyncToast({ type: 'error', text: `Sync error: ${err.message}` });
+    } finally {
+      setIsSyncing(false);
+    }
+  };
 
   // Active manager display object
   const currentManager = useMemo(() => {
@@ -252,13 +276,56 @@ export default function ManagerDashboard() {
           </button>
           <button
             type="button"
+            disabled={isSyncing}
             className="video-btn-refresh"
-            onClick={() => window.location.reload()}
+            style={{
+              background: '#0284c7',
+              color: '#ffffff',
+              borderColor: '#38bdf8',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '4px',
+              fontWeight: 'bold',
+            }}
+            onClick={handleTeamSync}
+            title={`Sync live allocations and work history for ${currentManager.name}'s team`}
+          >
+            <span style={{ animation: isSyncing ? 'spin 1s linear infinite' : 'none' }}>🔄</span>
+            {isSyncing ? 'Syncing...' : 'Sync Team Data'}
+          </button>
+          <button
+            type="button"
+            className="video-btn-refresh"
+            onClick={() => loadManagerData()}
           >
             Refresh
           </button>
         </div>
       </div>
+
+      {/* Sync Toast Notification */}
+      {syncToast && (
+        <div style={{
+          padding: '8px 16px',
+          background: syncToast.type === 'success' ? '#064e3b' : '#7f1d1d',
+          color: syncToast.type === 'success' ? '#6ee7b7' : '#fca5a5',
+          borderBottom: `1px solid ${syncToast.type === 'success' ? '#059669' : '#dc2626'}`,
+          fontSize: '0.85rem',
+          fontWeight: '600',
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{syncToast.text}</span>
+          <button
+            type="button"
+            onClick={() => setSyncToast(null)}
+            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1rem' }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {/* Holiday / Weekend Date Notice */}
       {isFallbackDate && (

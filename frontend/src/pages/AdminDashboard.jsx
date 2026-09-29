@@ -7,6 +7,7 @@ import {
   reconcileOperatorsWithAPI,
   fetchDynamicKPIMetrics,
   fetchApplicationsDynamic,
+  syncGlobalCompanyData,
   supabase,
 } from '../services/api';
 
@@ -42,38 +43,38 @@ export default function AdminDashboard() {
     answerSources: { total: 0, supabasePct: 0, aiPct: 0, resumePct: 0 },
   });
   const [loading, setLoading] = useState(false);
+  const [isSyncingCompany, setIsSyncingCompany] = useState(false);
+  const [syncToast, setSyncToast] = useState(null);
 
   // Tabs as specified in Master Prompt section 5
   const tabs = ['Overview', 'Managers', 'Operators', 'Applications', 'Guide'];
 
   // Load all dynamic data with real-time updates
+  const loadData = React.useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const [reconRes, mgrsRes, opsRes, kpiRes, appsRes] = await Promise.all([
+        reconcileOperatorsWithAPI(),
+        fetchManagers(),
+        fetchOperators(),
+        fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
+        fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
+      ]);
+
+      if (reconRes.success) setReconciliation(reconRes);
+      if (mgrsRes.success) setManagers(mgrsRes.managers);
+      if (opsRes.success) setOperators(opsRes.operators);
+      if (kpiRes.success) setKpis(kpiRes);
+      if (appsRes.success) setApplications(appsRes.applications);
+    } catch (err) {
+      console.error('Error loading Admin dashboard data:', err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [date, timeframe]);
+
   useEffect(() => {
     let isMounted = true;
-    async function loadData(silent = false) {
-      if (!silent) setLoading(true);
-      try {
-        const [reconRes, mgrsRes, opsRes, kpiRes, appsRes] = await Promise.all([
-          reconcileOperatorsWithAPI(),
-          fetchManagers(),
-          fetchOperators(),
-          fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
-          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
-        ]);
-
-        if (!isMounted) return;
-
-        if (reconRes.success) setReconciliation(reconRes);
-        if (mgrsRes.success) setManagers(mgrsRes.managers);
-        if (opsRes.success) setOperators(opsRes.operators);
-        if (kpiRes.success) setKpis(kpiRes);
-        if (appsRes.success) setApplications(appsRes.applications);
-      } catch (err) {
-        console.error('Error loading Admin dashboard data:', err);
-      } finally {
-        if (isMounted && !silent) setLoading(false);
-      }
-    }
-
     loadData(false);
 
     // Dynamic 3s interval for live updates
@@ -81,11 +82,13 @@ export default function AdminDashboard() {
       loadData(true);
     }, 3000);
 
-    // Supabase Realtime channel
+    // Supabase Realtime channel for instant push updates
     const channel = supabase
       .channel('admin-dashboard-realtime')
       .on('postgres_changes', { event: '*', schema: 'public', table: 'applications' }, () => loadData(true))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'batch_job_queue' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'client_assignment_log' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'operators' }, () => loadData(true))
       .subscribe();
 
     return () => {
@@ -93,7 +96,32 @@ export default function AdminDashboard() {
       clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
-  }, [date, timeframe]);
+  }, [loadData]);
+
+  // Global Sync for all CAs across Balaji & Ramakrishna
+  const handleGlobalSync = async () => {
+    setIsSyncingCompany(true);
+    setSyncToast(null);
+    try {
+      const res = await syncGlobalCompanyData({ dateStr: date });
+      if (res.success) {
+        setSyncToast({
+          type: 'success',
+          text: `✓ ${res.message || 'Global Sync Complete: Allotted CAs and clients synchronized.'}`,
+        });
+        await loadData(false);
+      } else {
+        setSyncToast({
+          type: 'error',
+          text: `Sync Error: ${res.error || 'Failed to sync company data.'}`,
+        });
+      }
+    } catch (err) {
+      setSyncToast({ type: 'error', text: `Sync failed: ${err.message}` });
+    } finally {
+      setIsSyncingCompany(false);
+    }
+  };
 
   // Dynamic counts for Active / Inactive operators
   const activeOpsCount = useMemo(() => {
@@ -153,19 +181,71 @@ export default function AdminDashboard() {
 
   return (
     <div className="dashboard-container">
-      {/* Sub Tab Bar */}
-      <div className="sub-tab-bar">
-        {tabs.map((tab) => (
-          <button
-            key={tab}
-            type="button"
-            className={`sub-tab-btn ${activeTab === tab ? 'active' : ''}`}
-            onClick={() => setActiveTab(tab)}
-          >
-            {tab}
-          </button>
-        ))}
+      {/* Top Header / Sub Tab Bar with Global Sync */}
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+        <div className="sub-tab-bar" style={{ marginBottom: 0 }}>
+          {tabs.map((tab) => (
+            <button
+              key={tab}
+              type="button"
+              className={`sub-tab-btn ${activeTab === tab ? 'active' : ''}`}
+              onClick={() => setActiveTab(tab)}
+            >
+              {tab}
+            </button>
+          ))}
+        </div>
+
+        <button
+          type="button"
+          disabled={isSyncingCompany}
+          onClick={handleGlobalSync}
+          style={{
+            background: isSyncingCompany ? '#0369a1' : '#0284c7',
+            color: '#ffffff',
+            border: '1px solid #38bdf8',
+            borderRadius: '6px',
+            padding: '7px 16px',
+            fontSize: '0.85rem',
+            fontWeight: '700',
+            cursor: isSyncingCompany ? 'wait' : 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '8px',
+            boxShadow: '0 2px 6px rgba(2, 132, 199, 0.3)',
+            transition: 'all 0.2s ease',
+          }}
+          title="Sync Allotted Clients and Work History for All CAs across Balaji & Ramakrishna"
+        >
+          <span style={{ fontSize: '1.05rem', animation: isSyncingCompany ? 'spin 1s linear infinite' : 'none' }}>🔄</span>
+          {isSyncingCompany ? 'Syncing All CAs & Managers...' : 'Global Sync All CAs & Managers'}
+        </button>
       </div>
+
+      {syncToast && (
+        <div style={{
+          padding: '10px 16px',
+          marginBottom: '1rem',
+          borderRadius: '6px',
+          fontSize: '0.85rem',
+          fontWeight: '600',
+          background: syncToast.type === 'success' ? '#064e3b' : '#7f1d1d',
+          color: syncToast.type === 'success' ? '#6ee7b7' : '#fca5a5',
+          border: `1px solid ${syncToast.type === 'success' ? '#059669' : '#dc2626'}`,
+          display: 'flex',
+          justifyContent: 'space-between',
+          alignItems: 'center',
+        }}>
+          <span>{syncToast.text}</span>
+          <button
+            type="button"
+            onClick={() => setSyncToast(null)}
+            style={{ background: 'transparent', border: 'none', color: 'inherit', cursor: 'pointer', fontSize: '1.1rem', lineHeight: 1 }}
+          >
+            ×
+          </button>
+        </div>
+      )}
 
       {loading && <div className="loading-indicator">Synchronizing live company data from Supabase...</div>}
 
@@ -187,19 +267,47 @@ export default function AdminDashboard() {
                 </span>
               )}
             </span>
+            <button
+              type="button"
+              disabled={isSyncingCompany}
+              onClick={handleGlobalSync}
+              style={{
+                background: 'transparent',
+                border: '1px solid #38bdf8',
+                color: '#38bdf8',
+                borderRadius: '4px',
+                padding: '3px 10px',
+                fontSize: '0.75rem',
+                cursor: 'pointer',
+                fontWeight: 'bold',
+              }}
+            >
+              {isSyncingCompany ? 'Syncing...' : '🔄 Re-Sync All CAs'}
+            </button>
           </div>
 
           {/* Grid of Dynamic Metric Tiles */}
           <div className="video-admin-kpi-grid">
+            {/* Total Operators Tile (Clickable) */}
+            <div
+              className="video-kpi-box"
+              style={{ cursor: 'pointer' }}
+              onClick={() => handleOperatorFilterClick('All')}
+              title="Click to view All Operators"
+            >
+              <span className="vkpi-label">TOTAL OPERATORS</span>
+              <span className="vkpi-val">{operators.length}</span>
+            </div>
+
             {/* Active Operators Tile (Clickable) */}
             <div
               className="video-kpi-box"
               style={{ cursor: 'pointer' }}
               onClick={() => handleOperatorFilterClick('active')}
-              title="Click to view Active Operators"
+              title="Click to view Active Operators (Logged In on Website)"
             >
               <span className="vkpi-label">ACTIVE OPERATORS</span>
-              <span className="vkpi-val">{activeOpsCount}</span>
+              <span className="vkpi-val" style={{ color: '#10b981' }}>{activeOpsCount}</span>
             </div>
 
             {/* Inactive Operators Tile (Clickable) */}
@@ -210,7 +318,7 @@ export default function AdminDashboard() {
               title="Click to view Inactive Operators"
             >
               <span className="vkpi-label">INACTIVE OPERATORS</span>
-              <span className="vkpi-val">{inactiveOpsCount}</span>
+              <span className="vkpi-val" style={{ color: '#94a3b8' }}>{inactiveOpsCount}</span>
             </div>
 
             {/* Submitted */}

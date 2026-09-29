@@ -418,14 +418,10 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
       const authUser = authMap.get(em);
 
       // Determine real dynamic active status:
-      // Active if authUser status is 'active' or op has an active session / recent sign-in
+      // Active ONLY if the user is currently authenticated and active on our website session
       const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
-      let effectiveStatus = (op.status || 'offline').toLowerCase();
-      if (authUser?.status) {
-        effectiveStatus = authUser.status.toLowerCase();
-      } else if (!effectiveLastSignIn) {
-        effectiveStatus = 'offline';
-      }
+      const isCurrentlyActive = Boolean(authUser?.status === 'active' && effectiveLastSignIn);
+      const effectiveStatus = isCurrentlyActive ? 'active' : 'inactive';
 
       return {
         ...op,
@@ -976,38 +972,187 @@ export async function syncLiveCAData({ caEmail, dateStr }) {
 }
 
 /**
- * 22. Fetch Manager Scoped Team Data from Supabase Operators and Client Assignment Log
+ * 22. Global Sync All CAs & Clients Company-Wide for Balaji and Ramakrishna with Previous Day Fallback
+ */
+export async function syncGlobalCompanyData({ dateStr = '', maxDaysBack = 21 } = {}) {
+  const targetDate = formatLocalDate(dateStr) || formatLocalDate(new Date());
+
+  try {
+    // 1. Fetch work history from external CA management API with fallback
+    let currentCheckDate = new Date(`${targetDate}T00:00:00Z`);
+    let records = [];
+    let resolvedDate = targetDate;
+    let isFallback = false;
+
+    for (let i = 0; i <= maxDaysBack; i++) {
+      const dStr = formatLocalDate(currentCheckDate);
+      const res = await fetchCAWorkHistory({ from: dStr, to: dStr });
+      if (res.success && res.records && res.records.length > 0) {
+        records = res.records;
+        resolvedDate = dStr;
+        isFallback = i > 0;
+        break;
+      }
+      // Step back 1 calendar day
+      currentCheckDate.setUTCDate(currentCheckDate.getUTCDate() - 1);
+    }
+
+    if (records.length === 0) {
+      return {
+        success: true,
+        count: 0,
+        uniqueCAs: 0,
+        activeDate: resolvedDate,
+        isFallback: false,
+        message: 'No CA work records found within the fallback window.',
+      };
+    }
+
+    // 2. Fetch operators and managers to map ca_email -> manager_id & manager_name
+    const [opsRes, mgrsRes] = await Promise.all([
+      supabase.from('operators').select('email, manager_id, name'),
+      supabase.from('managers').select('id, name'),
+    ]);
+
+    const opManagerMap = new Map();
+    (opsRes.data || []).forEach((op) => {
+      const em = (op.email || '').toLowerCase().trim();
+      if (em) opManagerMap.set(em, op.manager_id);
+    });
+
+    const mgrMap = new Map();
+    (mgrsRes.data || []).forEach((m) => {
+      mgrMap.set(m.id, m.name);
+    });
+
+    // 3. Prepare batch rows and update clients
+    const syncedCAs = new Set();
+    const logRows = [];
+
+    for (const r of records) {
+      if (!r.applywizz_id) continue;
+      const normId = r.applywizz_id.trim().toUpperCase();
+      const normCaEmail = (r.ca_email || '').trim().toLowerCase();
+      const managerId = opManagerMap.get(normCaEmail) || null;
+      const managerName = mgrMap.get(managerId) || '';
+
+      syncedCAs.add(normCaEmail);
+
+      logRows.push({
+        applywizz_id: normId,
+        client_id: r.client_id || null,
+        ca_id: r.ca_id || normCaEmail,
+        ca_email: normCaEmail,
+        manager_id: managerId,
+        manager_email: managerName ? `${managerName.toLowerCase().replace(/\s+/g, '')}@applywizz.com` : null,
+        assignment_date: resolvedDate,
+        effective_from: new Date(`${resolvedDate}T00:00:00Z`).toISOString(),
+      });
+    }
+
+    // Fast batch upsert into client_assignment_log
+    if (logRows.length > 0) {
+      const { error: upsertErr } = await supabase
+        .from('client_assignment_log')
+        .upsert(logRows, { onConflict: 'applywizz_id,assignment_date' });
+      if (upsertErr) console.warn('Note: batch log upsert warning:', upsertErr.message);
+
+      // Concurrent update of master clients table pointers
+      await Promise.all(
+        logRows.map((row) =>
+          supabase
+            .from('clients')
+            .update({
+              current_ca_email: row.ca_email,
+              current_manager_id: row.manager_id,
+              career_associate_manager_id: row.manager_id,
+              operational_manager_name: mgrMap.get(row.manager_id) || null,
+              assigned_at: new Date().toISOString(),
+            })
+            .eq('applywizz_id', row.applywizz_id)
+        )
+      );
+    }
+
+    return {
+      success: true,
+      count: logRows.length,
+      uniqueCAs: syncedCAs.size,
+      activeDate: resolvedDate,
+      isFallback,
+      message: `Successfully synchronized ${logRows.length} client allotments across ${syncedCAs.size} CAs for ${resolvedDate}.`,
+    };
+  } catch (err) {
+    console.error('Failed to run global company data sync:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * 23. Fetch Manager Scoped Team Data from Supabase Operators, Client Assignment Log, and Live Applications
  */
 export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
   try {
-    // 1. Fetch all CAs assigned to this manager from Supabase operators table
-    const { data: dbOperators, error: opErr } = await supabase
-      .from('operators')
-      .select('*')
-      .eq('manager_id', managerId)
-      .order('name', { ascending: true });
+    const targetDate = formatLocalDate(dateStr) || formatLocalDate(new Date());
 
-    if (opErr) throw opErr;
+    // 1. Fetch all CAs assigned to this manager from Supabase operators table and auth_users
+    const [opsRes, authRes] = await Promise.all([
+      supabase
+        .from('operators')
+        .select('*')
+        .eq('manager_id', managerId)
+        .order('name', { ascending: true }),
+      supabase.from('auth_users').select('email, status, last_sign_in'),
+    ]);
 
-    const managerOps = dbOperators || [];
+    if (opsRes.error) throw opsRes.error;
+
+    const authMap = new Map();
+    (authRes.data || []).forEach((u) => {
+      const em = (u.email || '').toLowerCase().trim();
+      if (em) authMap.set(em, u);
+    });
+
+    const managerOps = opsRes.data || [];
     const caEmails = managerOps.map((o) => o.email.toLowerCase().trim());
-    const caEmailSet = new Set(caEmails);
 
-    // 2. Fetch clients assigned to this manager
-    // A. First check client_assignment_log for the manager
-    let clientsQuery = supabase
+    // 2. Fetch clients assigned to this manager with date fallback
+    let logClients = [];
+    let resolvedDate = targetDate;
+    let isFallback = false;
+
+    // Check specific targetDate first
+    const { data: directLogs } = await supabase
       .from('client_assignment_log')
       .select('*')
-      .eq('manager_id', managerId);
+      .eq('manager_id', managerId)
+      .eq('assignment_date', targetDate);
 
-    if (dateStr) {
-      clientsQuery = clientsQuery.eq('assignment_date', dateStr);
+    if (directLogs && directLogs.length > 0) {
+      logClients = directLogs;
+    } else {
+      // Automatic fallback to nearest previous active assignment date
+      const { data: fallbackDateRow } = await supabase
+        .from('client_assignment_log')
+        .select('assignment_date')
+        .eq('manager_id', managerId)
+        .order('assignment_date', { ascending: false })
+        .limit(1);
+
+      if (fallbackDateRow && fallbackDateRow.length > 0 && fallbackDateRow[0].assignment_date) {
+        resolvedDate = fallbackDateRow[0].assignment_date;
+        isFallback = resolvedDate !== targetDate;
+        const { data: fallbackLogs } = await supabase
+          .from('client_assignment_log')
+          .select('*')
+          .eq('manager_id', managerId)
+          .eq('assignment_date', resolvedDate);
+        logClients = fallbackLogs || [];
+      }
     }
 
-    const { data: logClients, error: logErr } = await clientsQuery;
-
-    // B. Also query clients table
-    const { data: masterClients, error: clientErr } = await supabase
+    // Also query clients table
+    const { data: masterClients } = await supabase
       .from('clients')
       .select('applywizz_id, client_name, company_email, current_ca_email')
       .eq('career_associate_manager_id', managerId);
@@ -1017,71 +1162,134 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
     const caClientCount = new Map();
 
     // Fill from assignment log
-    if (logClients && logClients.length > 0) {
-      for (const log of logClients) {
-        const caEmail = (log.ca_email || '').toLowerCase().trim();
-        caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
+    for (const log of logClients) {
+      const caEmail = (log.ca_email || '').toLowerCase().trim();
+      caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
 
-        if (!clientMap.has(log.applywizz_id)) {
-          clientMap.set(log.applywizz_id, {
-            applywizz_id: log.applywizz_id,
-            name: log.client_name || log.applywizz_id,
-            client_email: log.client_email,
-            apps: 0,
-            submitted: 0,
-            applied: 0,
-            pending: 0,
-            failed: 0,
-            assigned: log.ca_email,
-            ca_name: log.ca_email?.split('@')[0],
-          });
-        }
+      if (!clientMap.has(log.applywizz_id)) {
+        clientMap.set(log.applywizz_id, {
+          applywizz_id: log.applywizz_id,
+          name: log.client_name || log.applywizz_id,
+          client_email: log.client_email,
+          apps: 0,
+          submitted: 0,
+          applied: 0,
+          pending: 0,
+          failed: 0,
+          assigned: log.ca_email,
+          ca_name: log.ca_email?.split('@')[0],
+        });
       }
     }
 
     // Complement from master clients
-    if (masterClients && masterClients.length > 0) {
-      for (const mc of masterClients) {
-        if (!clientMap.has(mc.applywizz_id)) {
-          const caEmail = (mc.current_ca_email || '').toLowerCase().trim();
-          if (caEmail) {
-            caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
-          }
-          clientMap.set(mc.applywizz_id, {
-            applywizz_id: mc.applywizz_id,
-            name: mc.client_name || mc.applywizz_id,
-            client_email: mc.company_email,
-            apps: 0,
-            submitted: 0,
-            applied: 0,
-            pending: 0,
-            failed: 0,
-            assigned: mc.current_ca_email || 'Unassigned',
-            ca_name: mc.current_ca_email?.split('@')[0] || 'Unassigned',
-          });
+    for (const mc of masterClients || []) {
+      if (!clientMap.has(mc.applywizz_id)) {
+        const caEmail = (mc.current_ca_email || '').toLowerCase().trim();
+        if (caEmail) {
+          caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
         }
+        clientMap.set(mc.applywizz_id, {
+          applywizz_id: mc.applywizz_id,
+          name: mc.client_name || mc.applywizz_id,
+          client_email: mc.company_email,
+          apps: 0,
+          submitted: 0,
+          applied: 0,
+          pending: 0,
+          failed: 0,
+          assigned: mc.current_ca_email || 'Unassigned',
+          ca_name: mc.current_ca_email?.split('@')[0] || 'Unassigned',
+        });
       }
     }
 
-    // Format operators with assigned client counts
+    // 4. Fetch real application and queue metrics dynamically for these clients
+    const clientIds = Array.from(clientMap.keys());
+    if (clientIds.length > 0) {
+      const [appsRes, queueRes] = await Promise.all([
+        supabase
+          .from('applications')
+          .select('applywizz_id, status, ca_id')
+          .in('applywizz_id', clientIds),
+        supabase
+          .from('batch_job_queue')
+          .select('applywizz_id, status')
+          .in('applywizz_id', clientIds),
+      ]);
+
+      const clientAppsMap = new Map();
+      (appsRes.data || []).forEach((a) => {
+        const id = a.applywizz_id;
+        if (!clientAppsMap.has(id)) clientAppsMap.set(id, []);
+        clientAppsMap.get(id).push(a);
+      });
+
+      const clientQueueMap = new Map();
+      (queueRes.data || []).forEach((q) => {
+        const id = q.applywizz_id;
+        if (!clientQueueMap.has(id)) clientQueueMap.set(id, []);
+        clientQueueMap.get(id).push(q);
+      });
+
+      // Compute dynamic metrics per client
+      for (const [id, c] of clientMap.entries()) {
+        const appList = clientAppsMap.get(id) || [];
+        const queueList = clientQueueMap.get(id) || [];
+
+        const submittedCount = appList.filter((a) => (a.status || '').toLowerCase() === 'submitted').length;
+        const appliedCount =
+          appList.filter((a) => ['in_progress', 'started', 'completed', 'applied'].includes((a.status || '').toLowerCase())).length +
+          queueList.filter((q) => ['in_progress', 'running', 'processing'].includes((q.status || '').toLowerCase())).length;
+        const pendingCount = queueList.filter((q) => ['pending', 'queued', 'ready_for_review'].includes((q.status || '').toLowerCase())).length;
+        const failedCount =
+          appList.filter((a) => ['failed', 'error'].includes((a.status || '').toLowerCase())).length +
+          queueList.filter((q) => ['failed', 'error'].includes((q.status || '').toLowerCase())).length;
+
+        c.submitted = submittedCount;
+        c.applied = appliedCount;
+        c.pending = pendingCount;
+        c.failed = failedCount;
+        c.apps = Math.max(appList.length + queueList.length, submittedCount + appliedCount + pendingCount + failedCount);
+      }
+    }
+
+    // 5. Compute dynamic metrics per CA (operator)
+    const caSubmittedMap = new Map();
+    const caAppliedMap = new Map();
+    for (const c of clientMap.values()) {
+      const em = (c.assigned || '').toLowerCase().trim();
+      if (em) {
+        caSubmittedMap.set(em, (caSubmittedMap.get(em) || 0) + (c.submitted || 0));
+        caAppliedMap.set(em, (caAppliedMap.get(em) || 0) + (c.applied || 0));
+      }
+    }
+
+    // Format operators with strictly real active status and metrics
     const operators = managerOps.map((op) => {
       const email = op.email.toLowerCase().trim();
+      const authUser = authMap.get(email);
+      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
+      const isCurrentlyActive = Boolean(authUser?.status === 'active' && effectiveLastSignIn);
+      const status = isCurrentlyActive ? 'active' : 'inactive';
+
       return {
         id: op.id,
         name: op.name,
         email: op.email,
         role: op.role,
-        status: op.status,
-        submitted: 0,
-        applied: 0,
+        status,
+        last_sign_in: effectiveLastSignIn,
+        submitted: caSubmittedMap.get(email) || 0,
+        applied: caAppliedMap.get(email) || 0,
         assigned: caClientCount.get(email) || 0,
       };
     });
 
     return {
       success: true,
-      activeDate: dateStr || new Date().toISOString().split('T')[0],
-      isFallback: false,
+      activeDate: resolvedDate,
+      isFallback,
       operators,
       clients: Array.from(clientMap.values()),
       totalRecords: clientMap.size,
@@ -1100,25 +1308,42 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
 }
 
 /**
- * 23. Fetch All 59 Operators with Manager Names for Developer Telemetry
+ * 24. Fetch All 59 Operators with Manager Names and Strict Active Status for Developer Telemetry
  */
 export async function fetchAllOperators() {
   try {
-    const { data, error } = await supabase
-      .from('operators')
-      .select('id, name, email, role, manager_id, status, last_sign_in, updated_at')
-      .order('name', { ascending: true });
+    const [opsRes, mgrsRes, authRes] = await Promise.all([
+      supabase
+        .from('operators')
+        .select('id, name, email, role, manager_id, status, last_sign_in, updated_at')
+        .order('name', { ascending: true }),
+      supabase.from('managers').select('id, name'),
+      supabase.from('auth_users').select('email, status, last_sign_in'),
+    ]);
 
-    if (error) throw error;
+    if (opsRes.error) throw opsRes.error;
 
-    // Get manager names
-    const { data: mgrs } = await supabase.from('managers').select('id, name');
-    const mgrMap = new Map((mgrs || []).map((m) => [m.id, m.name]));
+    const mgrMap = new Map((mgrsRes.data || []).map((m) => [m.id, m.name]));
+    const authMap = new Map();
+    (authRes.data || []).forEach((u) => {
+      const em = (u.email || '').toLowerCase().trim();
+      if (em) authMap.set(em, u);
+    });
 
-    const mapped = (data || []).map((op) => ({
-      ...op,
-      manager_name: mgrMap.get(op.manager_id) || 'Unassigned',
-    }));
+    const mapped = (opsRes.data || []).map((op) => {
+      const em = (op.email || '').toLowerCase().trim();
+      const authUser = authMap.get(em);
+      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
+      const isCurrentlyActive = Boolean(authUser?.status === 'active' && effectiveLastSignIn);
+      const effectiveStatus = isCurrentlyActive ? 'active' : 'inactive';
+
+      return {
+        ...op,
+        status: effectiveStatus,
+        last_sign_in: effectiveLastSignIn,
+        manager_name: mgrMap.get(op.manager_id) || 'Unassigned',
+      };
+    });
 
     return { success: true, operators: mapped };
   } catch (err) {
