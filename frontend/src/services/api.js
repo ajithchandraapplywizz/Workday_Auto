@@ -636,11 +636,36 @@ export async function fetchApplicationsDynamic({
           const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
           if (cleanQtUrl && !seenUrls.has(cleanQtUrl)) {
             seenUrls.add(cleanQtUrl);
+
+            // Extract company and role from URL if null
+            let parsedCompany = qt.company;
+            let parsedTitle = qt.role_title;
+            if ((!parsedCompany || !parsedTitle) && qt.job_url) {
+              try {
+                const u = new URL(qt.job_url);
+                if (!parsedCompany) {
+                  const hostParts = u.hostname.split('.');
+                  const pathParts = u.pathname.split('/').filter(Boolean);
+                  const tenantSlug = pathParts[0] || hostParts[0];
+                  parsedCompany = tenantSlug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+                }
+                if (!parsedTitle) {
+                  const segments = u.pathname.split('/').filter(Boolean);
+                  const lastSeg = segments[segments.length - 1] || '';
+                  parsedTitle = decodeURIComponent(lastSeg)
+                    .replace(/[-_]+/g, ' ')
+                    .replace(/\b(REQ|JR|R)?\d+(-\d+)?\b/gi, '')
+                    .replace(/\s+/g, ' ')
+                    .trim();
+                }
+              } catch (_) {}
+            }
+
             list.push({
               id: qt.id,
               applywizz_id: qt.applywizz_id,
-              job_title: qt.role_title || 'Workday Position',
-              company: qt.company || 'Workday Tenant',
+              job_title: parsedTitle || 'Workday Position',
+              company: parsedCompany || 'Workday Employer',
               ats: 'Workday',
               status: qt.status || 'ready_for_review',
               job_url: qt.job_url,
@@ -985,13 +1010,15 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         if (id) dbClientMap.set(id, c);
       });
 
-      const appsCountMap = new Map();
+      const candidateJobsSet = new Map();
       const submittedCountMap = new Map();
 
       (appsRes.data || []).forEach((a) => {
         const cid = (a.applywizz_id || '').trim().toUpperCase();
         if (cid) {
-          appsCountMap.set(cid, (appsCountMap.get(cid) || 0) + 1);
+          if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
+          const key = (a.job_url || a.id || '').toLowerCase().trim();
+          candidateJobsSet.get(cid).add(key);
           if (a.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
@@ -1001,9 +1028,9 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       (queueRes.data || []).forEach((q) => {
         const cid = (q.applywizz_id || '').trim().toUpperCase();
         if (cid) {
-          if (!appsCountMap.has(cid)) {
-            appsCountMap.set(cid, 1);
-          }
+          if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
+          const key = (q.job_url || q.id || '').toLowerCase().trim();
+          candidateJobsSet.get(cid).add(key);
           if (q.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
@@ -1012,7 +1039,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
 
       // Update candidate records with our actual tracking metrics and official company email
       for (const [cid, cand] of clientMap.entries()) {
-        cand.jobs_applied = appsCountMap.get(cid) || 0;
+        cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
         const dbClient = dbClientMap.get(cid);
         cand.client_email = formatClientCompanyEmail(cand.client_name, cand.client_email, dbClient?.company_email);

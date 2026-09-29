@@ -9,6 +9,7 @@ import {
   fetchAutomationTrace,
   getISTDateBounds,
   syncLiveCAData,
+  formatClientCompanyEmail,
 } from '../services/api';
 import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
 
@@ -503,7 +504,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     </div>
 
                     <div style={{ textAlign: 'right', fontSize: '0.85rem', color: '#94a3b8' }}>
-                      <div>Work Email: <strong style={{ color: '#38bdf8' }}>{clientDetails?.company_email || '—'}</strong></div>
+                      <div>Work Email: <strong style={{ color: '#38bdf8' }}>{formatClientCompanyEmail(clientDetails?.full_name || selectedCandidate.name, clientDetails?.email || selectedCandidate.client_email, clientDetails?.company_email)}</strong></div>
                       <div>Phone: <strong>{clientDetails?.callable_phone || clientDetails?.whatsapp_number || '—'}</strong></div>
                     </div>
                   </div>
@@ -530,14 +531,16 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     <h3 style={{ color: '#e2e8f0', fontSize: '1.1rem', margin: 0 }}>
                       Assigned Workday Application Queue
                     </h3>
-                    <button
-                      type="button"
-                      className="video-btn-start"
-                      style={{ padding: '5px 14px', fontSize: '0.8rem', background: '#0284c7', borderColor: '#38bdf8' }}
-                      onClick={() => handleOpenReview(selectedApp || { applywizz_id: selectedCandidate.id, company: 'Workday Partner', role_title: 'Workday Application' })}
-                    >
-                      📋 Review Application Form
-                    </button>
+                    {applications.length > 0 && (
+                      <button
+                        type="button"
+                        className="video-btn-start"
+                        style={{ padding: '5px 14px', fontSize: '0.8rem', background: '#0284c7', borderColor: '#38bdf8' }}
+                        onClick={() => handleOpenReview(selectedApp || applications[0])}
+                      >
+                        📋 Review Application Form
+                      </button>
+                    )}
                   </div>
 
                   <div className="video-table-container">
@@ -568,52 +571,84 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                               <td>{app.company || 'Workday Tenant'}</td>
                               <td>{app.ats || 'Workday'}</td>
                               <td>
-                                {app.status === 'failed' ? (
-                                  <span className="video-status-tag failed" title={app.failure_reason}>
-                                    Failed – {app.error_category || app.failure_reason || 'Unknown error'}
-                                  </span>
-                                ) : (
-                                  <span className={`video-status-tag ${app.status?.toLowerCase() || 'ready_for_review'}`}>
-                                    {app.status?.toUpperCase() || 'READY_FOR_REVIEW'}
-                                  </span>
-                                )}
+                                {(() => {
+                                  const s = (app.status || '').toLowerCase();
+                                  if (s === 'failed') {
+                                    return (
+                                      <span className="video-status-tag failed" title={app.failure_reason}>
+                                        Failed – {app.error_category || app.failure_reason || 'Unknown error'}
+                                      </span>
+                                    );
+                                  }
+                                  if (s === 'submitted') {
+                                    return <span className="video-status-tag submitted">SUBMITTED</span>;
+                                  }
+                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress') {
+                                    return <span className="video-status-tag in_flight">RUNNING IN BACKGROUND</span>;
+                                  }
+                                  if (s === 'ready_for_review' || s === 'reached_review') {
+                                    return <span className="video-status-tag ready_for_review">READY TO REVIEW & SUBMIT</span>;
+                                  }
+                                  if (s === 'pending' || s === 'queued') {
+                                    return <span className="video-status-tag queued">IN QUEUE</span>;
+                                  }
+                                  return <span className={`video-status-tag ${s || 'queued'}`}>{(app.status || 'QUEUED').toUpperCase()}</span>;
+                                })()}
                               </td>
                               <td>
-                                <button
-                                  type="button"
-                                  className="video-btn-start"
-                                  style={{
-                                    padding: '4px 12px',
-                                    fontSize: '0.8rem',
-                                    background: app.status === 'submitted' ? '#065f46' : '#0284c7',
-                                    borderColor: app.status === 'submitted' ? '#10b981' : '#38bdf8'
-                                  }}
-                                  onClick={(e) => {
-                                    e.stopPropagation();
-                                    handleSelectApp(app);
-                                    handleOpenReview(app);
-                                  }}
-                                >
-                                  {app.status === 'submitted' ? 'View Submitted Form' : 'Review & Confirm'}
-                                </button>
+                                {app.status === 'submitted' ? (
+                                  <button
+                                    type="button"
+                                    className="video-btn-start"
+                                    style={{
+                                      padding: '4px 12px',
+                                      fontSize: '0.8rem',
+                                      background: '#065f46',
+                                      borderColor: '#10b981'
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSelectApp(app);
+                                      handleOpenReview(app);
+                                    }}
+                                  >
+                                    View Submitted Form
+                                  </button>
+                                ) : (app.status === 'in_flight' || app.status === 'processing') ? (
+                                  <span style={{ fontSize: '0.78rem', color: '#38bdf8', fontWeight: 'bold' }}>
+                                    ⚡ In Progress...
+                                  </span>
+                                ) : (
+                                  <button
+                                    type="button"
+                                    className="video-btn-start"
+                                    style={{
+                                      padding: '4px 12px',
+                                      fontSize: '0.8rem',
+                                      background: '#0284c7',
+                                      borderColor: '#38bdf8'
+                                    }}
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      handleSelectApp(app);
+                                      handleOpenReview(app);
+                                    }}
+                                  >
+                                    Review & Confirm
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           ))
                         ) : (
                           <tr>
-                            <td colSpan={5} style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
-                              <div style={{ fontWeight: 'bold' }}>No applications recorded yet in database for {selectedCandidate.id}.</div>
-                              <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.25rem', marginBottom: '0.75rem' }}>
-                                Ready for Workday batch CSV submission / queue worker run.
+                            <td colSpan={5} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                              <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
+                                No applications recorded or queued yet for {selectedCandidate.id}.
                               </div>
-                              <button
-                                type="button"
-                                className="video-btn-start"
-                                style={{ padding: '6px 14px', fontSize: '0.82rem', background: '#1e293b', borderColor: '#38bdf8' }}
-                                onClick={() => handleOpenReview({ applywizz_id: selectedCandidate.id, company: 'Workday Partner', role_title: 'Workday Application' })}
-                              >
-                                📋 Inspect Pre-filled Form Answers for {selectedCandidate.id}
-                              </button>
+                              <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
+                                Application links will appear here once ingested for processing.
+                              </div>
                             </td>
                           </tr>
                         )}
