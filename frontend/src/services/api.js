@@ -222,7 +222,14 @@ export async function checkAllApiHealth() {
       name: 'EMAIL / OTP',
       service: 'Microsoft / M365 Zoho Gateway',
       runner: async () => {
-        return { ok: true, status: 'OK', time: 32, meta: 'Applywizz / M365 sender configured' };
+        const start = performance.now();
+        try {
+          const res = await fetch('https://zoho-mail-reader.onrender.com/health', { signal: AbortSignal.timeout(5000) });
+          const latency = Math.round(performance.now() - start);
+          return { ok: res.ok, status: res.ok ? 'OK' : 'ERROR', time: latency, meta: res.ok ? 'Zoho Mail Gateway online' : 'Gateway unresponsive' };
+        } catch {
+          return { ok: false, status: 'ERROR', time: Math.round(performance.now() - start), meta: 'Offline / connection failed' };
+        }
       },
     },
     {
@@ -230,7 +237,14 @@ export async function checkAllApiHealth() {
       name: 'ZOHO',
       service: 'ApplyWizz CRM Zoho Mail',
       runner: async () => {
-        return { ok: true, status: 'OK', time: 45, meta: 'HTTP 200 (connected)' };
+        const start = performance.now();
+        try {
+          const res = await fetch('https://zoho-mail-reader.onrender.com/health', { signal: AbortSignal.timeout(5000) });
+          const latency = Math.round(performance.now() - start);
+          return { ok: res.ok, status: res.ok ? 'OK' : 'ERROR', time: latency, meta: res.ok ? 'HTTP 200 (live connected)' : 'Zoho Mail Reader error' };
+        } catch {
+          return { ok: false, status: 'ERROR', time: Math.round(performance.now() - start), meta: 'Zoho Mail Reader unreachable' };
+        }
       },
     },
     {

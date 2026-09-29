@@ -1033,3 +1033,31 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
   }
 }
 
+/**
+ * Update candidate Zoho mail status dynamically in Supabase clients table.
+ * @param {string} email - Candidate company email or personal email
+ * @param {string} status - 'active' | 'connected' | 'auth_failed' | 'disconnected'
+ * @param {boolean} connected - Boolean connection flag
+ */
+export async function updateClientZohoStatus(email, { status = 'active', connected = true } = {}) {
+  if (!isSupabaseConfigured() || !email) return false;
+  try {
+    const cleanMail = String(email).trim().toLowerCase();
+    const payload = {
+      zoho_status: String(status),
+      zoho_connected: Boolean(connected),
+      zoho_last_synced: new Date().toISOString(),
+    };
+    await request('clients', {
+      method: 'PATCH',
+      query: `?company_email=eq.${encode(cleanMail)}`,
+      prefer: 'return=minimal',
+      body: payload,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+
