@@ -11,6 +11,7 @@ import {
   supabase,
 } from '../services/api';
 import CAClientDetailsModal from '../components/CAClientDetailsModal';
+import OperatorDetailsPage from './OperatorDetailsPage';
 
 export default function AdminDashboard() {
   const { date, timeframe } = useAuth();
@@ -23,6 +24,7 @@ export default function AdminDashboard() {
   const [appManagerFilter, setAppManagerFilter] = useState('All');
   const [appCaFilter, setAppCaFilter] = useState('All');
   const [selectedOperatorForModal, setSelectedOperatorForModal] = useState(null);
+  const [selectedOperatorDetails, setSelectedOperatorDetails] = useState(null);
 
   // Real dynamic states
   const [reconciliation, setReconciliation] = useState({
@@ -181,10 +183,64 @@ export default function AdminDashboard() {
     });
   }, [applications, appStatusFilter, appManagerFilter, appCaFilter]);
 
+  // Page redirection handler for operator details
+  const handleOpenOperatorDetails = (op, mgrName) => {
+    const fullOp = {
+      ...op,
+      manager_name: mgrName || managers.find((m) => m.id === op.manager_id)?.name || 'Assigned Manager',
+    };
+    setSelectedOperatorDetails(fullOp);
+    window.history.pushState(
+      { page: 'operator-details', email: op.email },
+      '',
+      `#operator-details?email=${encodeURIComponent(op.email)}`
+    );
+  };
+
+  const handleBackFromDetails = () => {
+    setSelectedOperatorDetails(null);
+    if (window.location.hash.startsWith('#operator-details')) {
+      window.history.pushState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+
+  // Synchronize with URL hash for browser Back/Forward navigation and direct links
+  useEffect(() => {
+    const checkHash = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#operator-details')) {
+        const params = new URLSearchParams(hash.replace('#operator-details?', ''));
+        const email = params.get('email');
+        if (email && operators.length > 0) {
+          const found = operators.find((o) => o.email.toLowerCase() === email.toLowerCase());
+          if (found) {
+            const mgr = managers.find((m) => m.id === found.manager_id);
+            setSelectedOperatorDetails({ ...found, manager_name: mgr?.name });
+          }
+        }
+      } else {
+        setSelectedOperatorDetails(null);
+      }
+    };
+
+    checkHash();
+    window.addEventListener('hashchange', checkHash);
+    return () => window.removeEventListener('hashchange', checkHash);
+  }, [operators, managers]);
+
   return (
     <div className="dashboard-container">
-      {/* Top Header / Sub Tab Bar with Global Sync */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
+      {selectedOperatorDetails ? (
+        <OperatorDetailsPage
+          operator={selectedOperatorDetails}
+          onBack={handleBackFromDetails}
+          dateStr={date}
+          sourceDashboard="admin"
+        />
+      ) : (
+        <>
+          {/* Top Header / Sub Tab Bar with Global Sync */}
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1rem', flexWrap: 'wrap', gap: '0.75rem' }}>
         <div className="sub-tab-bar" style={{ marginBottom: 0 }}>
           {tabs.map((tab) => (
             <button
@@ -504,7 +560,7 @@ export default function AdminDashboard() {
                         <td style={{ textAlign: 'center' }}>
                           <button
                             type="button"
-                            onClick={() => setSelectedOperatorForModal({ ...op, manager_name: mgr?.name })}
+                            onClick={() => handleOpenOperatorDetails(op, mgr?.name)}
                             style={{
                               background: (op.assigned_clients || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
                               border: `1px solid ${(op.assigned_clients || 0) > 0 ? '#0284c7' : '#334155'}`,
@@ -532,7 +588,7 @@ export default function AdminDashboard() {
                         <td style={{ textAlign: 'center' }}>
                           <button
                             type="button"
-                            onClick={() => setSelectedOperatorForModal({ ...op, manager_name: mgr?.name })}
+                            onClick={() => handleOpenOperatorDetails(op, mgr?.name)}
                             style={{
                               background: '#1e293b',
                               border: '1px solid #334155',
@@ -674,6 +730,8 @@ export default function AdminDashboard() {
             </ul>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* CA Allotted Clients & History Details Modal */}

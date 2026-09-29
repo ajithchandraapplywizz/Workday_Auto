@@ -7,6 +7,7 @@ import {
   syncGlobalCompanyData,
 } from '../services/api';
 import CAClientDetailsModal from '../components/CAClientDetailsModal';
+import OperatorDetailsPage from './OperatorDetailsPage';
 
 export default function ManagerDashboard() {
   const { user, date, timeframe, setTimeframe } = useAuth();
@@ -18,6 +19,7 @@ export default function ManagerDashboard() {
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState(null);
   const [selectedOperatorForModal, setSelectedOperatorForModal] = useState(null);
+  const [selectedOperatorDetails, setSelectedOperatorDetails] = useState(null);
 
   // Managers roster
   const [managers, setManagers] = useState([]);
@@ -165,10 +167,60 @@ export default function ManagerDashboard() {
     return user?.role === 'manager' || (user?.email || '').toLowerCase().includes('balaji') || (user?.email || '').toLowerCase().includes('ramakrishna');
   }, [user]);
 
+  // Page redirection handler for operator details
+  const handleOpenOperatorDetails = (op) => {
+    const fullOp = { ...op, manager_name: currentManager.name };
+    setSelectedOperatorDetails(fullOp);
+    window.history.pushState(
+      { page: 'operator-details', email: op.email },
+      '',
+      `#operator-details?email=${encodeURIComponent(op.email)}`
+    );
+  };
+
+  const handleBackFromDetails = () => {
+    setSelectedOperatorDetails(null);
+    if (window.location.hash.startsWith('#operator-details')) {
+      window.history.pushState(null, '', window.location.pathname + window.location.search);
+    }
+  };
+
+  // Synchronize with URL hash for browser Back/Forward navigation
+  useEffect(() => {
+    const checkHash = () => {
+      const hash = window.location.hash;
+      if (hash.startsWith('#operator-details')) {
+        const params = new URLSearchParams(hash.replace('#operator-details?', ''));
+        const email = params.get('email');
+        if (email && operators.length > 0) {
+          const found = operators.find((o) => o.email.toLowerCase() === email.toLowerCase());
+          if (found) {
+            setSelectedOperatorDetails({ ...found, manager_name: currentManager.name });
+          }
+        }
+      } else {
+        setSelectedOperatorDetails(null);
+      }
+    };
+
+    checkHash();
+    window.addEventListener('hashchange', checkHash);
+    return () => window.removeEventListener('hashchange', checkHash);
+  }, [operators, currentManager]);
+
   return (
     <div className="dashboard-container">
-      {/* Top Manager Filter Controls */}
-      <div className="manager-top-control-bar">
+      {selectedOperatorDetails ? (
+        <OperatorDetailsPage
+          operator={selectedOperatorDetails}
+          onBack={handleBackFromDetails}
+          dateStr={activeWorkDate || date}
+          sourceDashboard="manager"
+        />
+      ) : (
+        <>
+          {/* Top Manager Filter Controls */}
+          <div className="manager-top-control-bar">
         <div className="mtc-left">
           {/* Sub Tabs */}
           <div className="sub-tab-bar">
@@ -467,7 +519,7 @@ export default function ManagerDashboard() {
                       <td>
                         <button
                           type="button"
-                          onClick={() => setSelectedOperatorForModal({ ...op, manager_name: currentManager.name })}
+                          onClick={() => handleOpenOperatorDetails(op)}
                           style={{
                             background: (op.assigned || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
                             border: `1px solid ${(op.assigned || 0) > 0 ? '#0284c7' : '#334155'}`,
@@ -496,7 +548,7 @@ export default function ManagerDashboard() {
                       <td style={{ textAlign: 'center' }}>
                         <button
                           type="button"
-                          onClick={() => setSelectedOperatorForModal({ ...op, manager_name: currentManager.name })}
+                          onClick={() => handleOpenOperatorDetails(op)}
                           style={{
                             background: '#1e293b',
                             border: '1px solid #334155',
@@ -613,6 +665,8 @@ export default function ManagerDashboard() {
             </ul>
           </div>
         </div>
+      )}
+        </>
       )}
 
       {/* CA Allotted Clients & History Details Modal */}
