@@ -49,13 +49,6 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 </button>
                 <button
                   type="button"
-                  className={`operator-pill-btn ${operatorView === 'review' ? 'active' : ''}`}
-                  onClick={() => onOperatorViewChange('review')}
-                >
-                  Form Review &amp; Submit
-                </button>
-                <button
-                  type="button"
                   className={`operator-pill-btn ${operatorView === 'stats' ? 'active' : ''}`}
                   onClick={() => onOperatorViewChange('stats')}
                 >

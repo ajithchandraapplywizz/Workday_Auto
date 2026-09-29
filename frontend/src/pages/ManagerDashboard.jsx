@@ -150,14 +150,15 @@ export default function ManagerDashboard() {
 
   // Team summary KPIs
   const teamMetrics = useMemo(() => {
-    const totalApps = filteredClientRows.reduce((acc, c) => acc + (c.apps || 0), 0);
-    const totalSubmitted = filteredClientRows.reduce((acc, c) => acc + (c.submitted || 0), 0);
-    const totalApplied = filteredClientRows.reduce((acc, c) => acc + (c.applied || 0), 0);
+    const hasClientRows = filteredClientRows.length > 0;
+    const totalApps = filteredClientRows.reduce((acc, c) => acc + (Number(c.apps) || 0), 0);
+    const totalSubmitted = filteredClientRows.reduce((acc, c) => acc + (Number(c.submitted) || 0), 0);
+    const totalApplied = filteredClientRows.reduce((acc, c) => acc + (Number(c.applied) || 0), 0);
 
     return {
-      total: totalApps || applications.length,
-      submitted: totalSubmitted || applications.filter((a) => a.status === 'submitted').length,
-      applied: totalApplied || applications.filter((a) => a.status === 'in_progress' || a.status === 'started').length,
+      total: hasClientRows ? totalApps : applications.length,
+      submitted: hasClientRows ? totalSubmitted : applications.filter((a) => a.status === 'submitted').length,
+      applied: hasClientRows ? totalApplied : applications.filter((a) => a.status === 'in_progress' || a.status === 'started').length,
     };
   }, [filteredClientRows, applications]);
 
@@ -603,7 +604,27 @@ export default function ManagerDashboard() {
                       <td><span className="assigned-email-link">{c.assigned}</span></td>
                       <td>{c.submitted}</td>
                       <td>{c.applied}</td>
-                      <td><span className="video-status-tag submitted">COMPLETED</span></td>
+                      <td>
+                        {(() => {
+                          const statusStr = (c.status || '').toLowerCase();
+                          let label = 'QUEUED';
+                          let cls = 'queued';
+                          if (statusStr === 'submitted' || (Number(c.submitted) || 0) > 0) {
+                            label = 'SUBMITTED';
+                            cls = 'submitted';
+                          } else if (statusStr === 'in_flight' || statusStr === 'processing' || statusStr === 'in_progress') {
+                            label = 'IN FLIGHT';
+                            cls = 'in_flight';
+                          } else if (statusStr === 'applying' || (Number(c.applied) || 0) > 0) {
+                            label = 'APPLIED';
+                            cls = 'applying';
+                          } else if (statusStr === 'failed') {
+                            label = 'FAILED';
+                            cls = 'failed';
+                          }
+                          return <span className={`video-status-tag ${cls}`}>{label}</span>;
+                        })()}
+                      </td>
                     </tr>
                   ))
                 ) : (

@@ -702,14 +702,24 @@ export function canonicalJobPostingUrl(rawUrl = '') {
  * @param {string} jobUrl
  * @returns {Promise<object|null>}
  */
-export async function loadJobFormSchema(jobUrl) {
+export async function loadJobFormSchema(jobUrl, { maxAgeHours = 24 } = {}) {
   if (!isSupabaseConfigured() || !jobUrl) return null;
   const canonical = canonicalJobPostingUrl(jobUrl);
   try {
     const rows = await request('job_form_schemas', {
       query: `?canonical_job_url=eq.${encode(canonical)}&select=*&limit=1`,
     });
-    return rows?.[0] || null;
+    const schema = rows?.[0] || null;
+    if (!schema) return null;
+    // 24-hour TTL check: if schema was created more than 24h ago, expire it
+    if (schema.created_at) {
+      const ageHours = (Date.now() - new Date(schema.created_at).getTime()) / (1000 * 60 * 60);
+      if (ageHours > maxAgeHours) {
+        console.log(`  ℹ️  Cached form schema for ${canonical} is older than ${maxAgeHours}h (${ageHours.toFixed(1)}h). Expiring cache.`);
+        return null;
+      }
+    }
+    return schema;
   } catch (err) {
     console.log(`  ⚠️  loadJobFormSchema query error: ${err.message?.slice(0, 100)}`);
     return null;
@@ -987,3 +997,39 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
 
   return true;
 }
+
+/**
+ * Update worker state in Supabase worker_status table.
+ * State can be 'idle', 'in_flight', 'applying'.
+ */
+export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null } = {}) {
+  if (!isSupabaseConfigured() || !workerId) return false;
+  try {
+    const row = {
+      worker_id: String(workerId),
+      state: String(state),
+      current_application_id: current_application_id || null,
+      updated_at: new Date().toISOString(),
+    };
+    await request('worker_status', {
+      method: 'POST',
+      query: '?on_conflict=worker_id',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: row,
+    });
+    return true;
+  } catch (err) {
+    try {
+      await request('worker_status', {
+        method: 'PATCH',
+        query: `?worker_id=eq.${encode(workerId)}`,
+        prefer: 'return=minimal',
+        body: { state: String(state), updated_at: new Date().toISOString() },
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  }
+}
+

@@ -584,6 +584,8 @@
 .video-status-tag.otp_required { background: #fed7aa; color: #9a3412; }
 .video-status-tag.active { background: #bbf7d0; color: #166534; }
 .video-status-tag.inactive { background: #f1f5f9; color: #64748b; }
+.video-status-tag.queued { background: #f1f5f9; color: #475569; }
+.video-status-tag.in_flight { background: #dbeafe; color: #1e40af; }
 
 .ats-workday-tag {
   font-size: 0.7rem;
