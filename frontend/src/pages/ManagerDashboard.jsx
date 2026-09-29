@@ -6,6 +6,7 @@ import {
   fetchApplicationsDynamic,
   syncGlobalCompanyData,
 } from '../services/api';
+import CAClientDetailsModal from '../components/CAClientDetailsModal';
 
 export default function ManagerDashboard() {
   const { user, date, timeframe, setTimeframe } = useAuth();
@@ -16,6 +17,7 @@ export default function ManagerDashboard() {
   const [opsMode, setOpsMode] = useState(false);
   const [isSyncing, setIsSyncing] = useState(false);
   const [syncToast, setSyncToast] = useState(null);
+  const [selectedOperatorForModal, setSelectedOperatorForModal] = useState(null);
 
   // Managers roster
   const [managers, setManagers] = useState([]);
@@ -437,6 +439,7 @@ export default function ManagerDashboard() {
                   <th>ASSIGNED CLIENTS</th>
                   <th>SUBMITTED</th>
                   <th>APPLIED</th>
+                  <th style={{ textAlign: 'center' }}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
@@ -452,22 +455,63 @@ export default function ManagerDashboard() {
                         <span className="op-email">{op.email}</span>
                       </td>
                       <td>
-                        <span className={`video-status-tag ${(op.status || 'active').toLowerCase()}`}>
-                          {(op.status || 'active').toUpperCase()}
+                        <span className={`video-status-tag ${(op.status || 'inactive').toLowerCase()}`}>
+                          {(op.status || 'inactive').toUpperCase()}
                         </span>
                       </td>
-                      <td><strong>{op.assigned}</strong></td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedOperatorForModal({ ...op, manager_name: currentManager.name })}
+                          style={{
+                            background: (op.assigned || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                            border: `1px solid ${(op.assigned || 0) > 0 ? '#0284c7' : '#334155'}`,
+                            color: (op.assigned || 0) > 0 ? '#38bdf8' : '#94a3b8',
+                            padding: '4px 10px',
+                            borderRadius: '6px',
+                            fontWeight: 'bold',
+                            fontSize: '0.82rem',
+                            cursor: 'pointer',
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            transition: 'all 0.2s',
+                          }}
+                          title="Click to view allotted clients & details"
+                        >
+                          <span>{op.assigned || 0} Clients</span>
+                        </button>
+                      </td>
                       <td>
                         <span style={{ color: op.submitted > 0 ? '#10b981' : '#94a3b8', fontWeight: 'bold' }}>
                           {op.submitted}
                         </span>
                       </td>
                       <td>{op.applied}</td>
+                      <td style={{ textAlign: 'center' }}>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedOperatorForModal({ ...op, manager_name: currentManager.name })}
+                          style={{
+                            background: '#1e293b',
+                            border: '1px solid #334155',
+                            color: '#38bdf8',
+                            padding: '4px 10px',
+                            borderRadius: '4px',
+                            fontSize: '0.78rem',
+                            fontWeight: '600',
+                            cursor: 'pointer',
+                          }}
+                          title="Inspect CA allotted clients & history"
+                        >
+                          View Details
+                        </button>
+                      </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No operators currently assigned under {currentManager.name}.
                     </td>
                   </tr>
@@ -565,6 +609,14 @@ export default function ManagerDashboard() {
           </div>
         </div>
       )}
+
+      {/* CA Allotted Clients & History Details Modal */}
+      <CAClientDetailsModal
+        isOpen={Boolean(selectedOperatorForModal)}
+        onClose={() => setSelectedOperatorForModal(null)}
+        operator={selectedOperatorForModal}
+        dateStr={activeWorkDate || date}
+      />
     </div>
   );
 }

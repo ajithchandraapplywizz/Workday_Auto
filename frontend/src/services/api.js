@@ -382,7 +382,17 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
     const { data: opsData, error } = await query;
     if (error) throw error;
 
-    // Fetch auth_users, client assignments with date fallback, and master clients
+    // Fetch live backend records with previous active day fallback, plus local logs and master clients
+    let backendRecords = [];
+    try {
+      const backendRes = await fetchCAWorkHistoryWithFallback({ dateStr: targetDate, maxDaysBack: 21 });
+      if (backendRes.success && backendRes.records?.length > 0) {
+        backendRecords = backendRes.records;
+      }
+    } catch (err) {
+      console.warn('Live backend work history fetch error:', err);
+    }
+
     let logClients = [];
     const { data: directLogs } = await supabase
       .from('client_assignment_log')
@@ -419,9 +429,18 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
       if (em) authMap.set(em, u);
     });
 
-    // Map unique client -> assigned CA email
+    // Map unique client -> assigned CA email directly from backend + local log + master clients
     const clientMap = new Map();
     const caClientCount = new Map();
+
+    for (const r of backendRecords) {
+      const em = (r.ca_email || '').toLowerCase().trim();
+      const normId = (r.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        clientMap.set(normId, em);
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+      }
+    }
 
     for (const log of (logClients || [])) {
       const em = (log.ca_email || '').toLowerCase().trim();
@@ -1157,12 +1176,27 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
     const managerOps = opsRes.data || [];
     const caEmails = managerOps.map((o) => o.email.toLowerCase().trim());
 
-    // 2. Fetch clients assigned to this manager with date fallback
-    let logClients = [];
+    // 2. Fetch live backend records with previous active day fallback, plus local logs and master clients
+    let backendRecords = [];
     let resolvedDate = targetDate;
     let isFallback = false;
 
-    // Check specific targetDate first
+    const caEmailSet = new Set(caEmails);
+
+    try {
+      const backendRes = await fetchCAWorkHistoryWithFallback({ dateStr: targetDate, maxDaysBack: 21 });
+      if (backendRes.success && backendRes.records?.length > 0) {
+        backendRecords = backendRes.records.filter((r) => caEmailSet.has((r.ca_email || '').toLowerCase().trim()));
+        if (backendRes.isFallback) {
+          isFallback = true;
+          resolvedDate = backendRes.activeDate || targetDate;
+        }
+      }
+    } catch (err) {
+      console.warn('Manager live backend work history fetch error:', err);
+    }
+
+    let logClients = [];
     const { data: directLogs } = await supabase
       .from('client_assignment_log')
       .select('*')
@@ -1181,13 +1215,16 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
         .limit(1);
 
       if (fallbackDateRow && fallbackDateRow.length > 0 && fallbackDateRow[0].assignment_date) {
-        resolvedDate = fallbackDateRow[0].assignment_date;
-        isFallback = resolvedDate !== targetDate;
+        const logDate = fallbackDateRow[0].assignment_date;
+        if (!backendRecords.length) {
+          resolvedDate = logDate;
+          isFallback = resolvedDate !== targetDate;
+        }
         const { data: fallbackLogs } = await supabase
           .from('client_assignment_log')
           .select('*')
           .eq('manager_id', managerId)
-          .eq('assignment_date', resolvedDate);
+          .eq('assignment_date', logDate);
         logClients = fallbackLogs || [];
       }
     }
@@ -1198,19 +1235,39 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
       .select('applywizz_id, client_name, company_email, current_ca_email')
       .eq('career_associate_manager_id', managerId);
 
-    // 3. Aggregate unique clients
+    // 3. Aggregate unique clients from backend records, assignment log, and master clients
     const clientMap = new Map();
     const caClientCount = new Map();
 
+    // Fill from live backend records first
+    for (const r of backendRecords) {
+      const em = (r.ca_email || '').toLowerCase().trim();
+      const normId = (r.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        clientMap.set(normId, {
+          applywizz_id: normId,
+          name: r.client_name || normId,
+          client_email: r.client_email || '',
+          apps: (r.jobs_applied || 0) + (r.emails_submitted || 0),
+          submitted: r.emails_submitted || 0,
+          applied: r.jobs_applied || 0,
+          pending: 0,
+          failed: 0,
+          assigned: r.ca_email || em,
+          ca_name: r.ca_name || em.split('@')[0],
+        });
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+      }
+    }
+
     // Fill from assignment log
     for (const log of logClients) {
-      const caEmail = (log.ca_email || '').toLowerCase().trim();
-      caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
-
-      if (!clientMap.has(log.applywizz_id)) {
-        clientMap.set(log.applywizz_id, {
-          applywizz_id: log.applywizz_id,
-          name: log.client_name || log.applywizz_id,
+      const em = (log.ca_email || '').toLowerCase().trim();
+      const normId = (log.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        clientMap.set(normId, {
+          applywizz_id: normId,
+          name: log.client_name || normId,
           client_email: log.client_email,
           apps: 0,
           submitted: 0,
@@ -1220,19 +1277,18 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
           assigned: log.ca_email,
           ca_name: log.ca_email?.split('@')[0],
         });
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
       }
     }
 
     // Complement from master clients
     for (const mc of masterClients || []) {
-      if (!clientMap.has(mc.applywizz_id)) {
-        const caEmail = (mc.current_ca_email || '').toLowerCase().trim();
-        if (caEmail) {
-          caClientCount.set(caEmail, (caClientCount.get(caEmail) || 0) + 1);
-        }
-        clientMap.set(mc.applywizz_id, {
-          applywizz_id: mc.applywizz_id,
-          name: mc.client_name || mc.applywizz_id,
+      const normId = (mc.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        const em = (mc.current_ca_email || '').toLowerCase().trim();
+        clientMap.set(normId, {
+          applywizz_id: normId,
+          name: mc.client_name || normId,
           client_email: mc.company_email,
           apps: 0,
           submitted: 0,
@@ -1242,6 +1298,7 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
           assigned: mc.current_ca_email || 'Unassigned',
           ca_name: mc.current_ca_email?.split('@')[0] || 'Unassigned',
         });
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
       }
     }
 

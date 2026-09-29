@@ -10,6 +10,7 @@ import {
   syncGlobalCompanyData,
   supabase,
 } from '../services/api';
+import CAClientDetailsModal from '../components/CAClientDetailsModal';
 
 export default function AdminDashboard() {
   const { date, timeframe } = useAuth();
@@ -21,6 +22,7 @@ export default function AdminDashboard() {
   const [appStatusFilter, setAppStatusFilter] = useState('All');
   const [appManagerFilter, setAppManagerFilter] = useState('All');
   const [appCaFilter, setAppCaFilter] = useState('All');
+  const [selectedOperatorForModal, setSelectedOperatorForModal] = useState(null);
 
   // Real dynamic states
   const [reconciliation, setReconciliation] = useState({
@@ -399,8 +401,8 @@ export default function AdminDashboard() {
               <tbody>
                 {managers.map((mgr) => {
                   const mgrOps = operators.filter((o) => o.manager_id === mgr.id);
-                  const activeCount = mgrOps.filter((o) => (o.status || 'active').toLowerCase() === 'active').length;
-                  const inactiveCount = mgrOps.filter((o) => (o.status || 'active').toLowerCase() === 'inactive').length;
+                  const activeCount = mgrOps.filter((o) => (o.status || 'inactive').toLowerCase() === 'active').length;
+                  const inactiveCount = mgrOps.length - activeCount;
                   const mgrApps = applications.filter((a) => a.manager_id === mgr.id).length;
 
                   return (
@@ -410,11 +412,11 @@ export default function AdminDashboard() {
                       </td>
                       <td>{mgr.email}</td>
                       <td>
-                        <strong>{mgrOps.length || (mgr.name.toLowerCase().includes('balaji') ? 30 : 29)}</strong>
+                        <strong>{mgrOps.length}</strong>
                       </td>
                       <td>
-                        <span style={{ color: '#10b981', fontWeight: 'bold' }}>
-                          {activeCount || (mgr.name.toLowerCase().includes('balaji') ? 30 : 29)}
+                        <span style={{ color: activeCount > 0 ? '#10b981' : '#94a3b8', fontWeight: 'bold' }}>
+                          {activeCount}
                         </span>
                       </td>
                       <td>
@@ -481,6 +483,7 @@ export default function AdminDashboard() {
                   <th style={{ textAlign: 'center' }}>ASSIGNED CLIENTS</th>
                   <th style={{ textAlign: 'center' }}>BOT APPS</th>
                   <th>LAST SIGN-IN</th>
+                  <th style={{ textAlign: 'center' }}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
@@ -499,9 +502,26 @@ export default function AdminDashboard() {
                         </td>
                         <td>{mgr?.name || 'Assigned Manager'}</td>
                         <td style={{ textAlign: 'center' }}>
-                          <span style={{ fontWeight: 'bold', color: (op.assigned_clients || 0) > 0 ? '#38bdf8' : '#94a3b8' }}>
-                            {op.assigned_clients || 0}
-                          </span>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedOperatorForModal({ ...op, manager_name: mgr?.name })}
+                            style={{
+                              background: (op.assigned_clients || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
+                              border: `1px solid ${(op.assigned_clients || 0) > 0 ? '#0284c7' : '#334155'}`,
+                              color: (op.assigned_clients || 0) > 0 ? '#38bdf8' : '#94a3b8',
+                              padding: '4px 10px',
+                              borderRadius: '6px',
+                              fontWeight: 'bold',
+                              fontSize: '0.82rem',
+                              cursor: 'pointer',
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              gap: '4px',
+                            }}
+                            title="Click to view allotted clients & details"
+                          >
+                            <span>{op.assigned_clients || 0} Clients</span>
+                          </button>
                         </td>
                         <td style={{ textAlign: 'center' }}>
                           <span style={{ fontWeight: 'bold', color: (op.applications_count || 0) > 0 ? '#10b981' : '#94a3b8' }}>
@@ -509,12 +529,31 @@ export default function AdminDashboard() {
                           </span>
                         </td>
                         <td>{op.last_sign_in ? new Date(op.last_sign_in).toLocaleString() : 'Never'}</td>
+                        <td style={{ textAlign: 'center' }}>
+                          <button
+                            type="button"
+                            onClick={() => setSelectedOperatorForModal({ ...op, manager_name: mgr?.name })}
+                            style={{
+                              background: '#1e293b',
+                              border: '1px solid #334155',
+                              color: '#38bdf8',
+                              padding: '4px 10px',
+                              borderRadius: '4px',
+                              fontSize: '0.78rem',
+                              fontWeight: '600',
+                              cursor: 'pointer',
+                            }}
+                            title="Inspect CA allotted clients & history"
+                          >
+                            View Details
+                          </button>
+                        </td>
                       </tr>
                     );
                   })
                 ) : (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={9} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No operators found matching the criteria.
                     </td>
                   </tr>
@@ -636,6 +675,14 @@ export default function AdminDashboard() {
           </div>
         </div>
       )}
+
+      {/* CA Allotted Clients & History Details Modal */}
+      <CAClientDetailsModal
+        isOpen={Boolean(selectedOperatorForModal)}
+        onClose={() => setSelectedOperatorForModal(null)}
+        operator={selectedOperatorForModal}
+        dateStr={date}
+      />
     </div>
   );
 }
