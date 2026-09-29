@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
+import { useAuth } from '../context/AuthContext';
 import {
   fetchClientDetails,
   fetchClientQuestions,
   saveClientQuestion,
   submitApplicationRecord,
-  fetchClients
+  fetchClients,
+  fetchAssignedClientsForCA,
 } from '../services/api';
 import { supabase } from '../config/supabase';
 import {
@@ -31,12 +33,21 @@ import {
 import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
 
 export default function CADashboard() {
-  const [applywizzId, setApplywizzId] = useState('AWL-34133');
+  const { user, date } = useAuth();
+
+  const [applywizzId, setApplywizzId] = useState('');
   const [loadingClient, setLoadingClient] = useState(false);
   const [clientData, setClientData] = useState(null);
   const [questions, setQuestions] = useState([]);
   const [questionSearch, setQuestionSearch] = useState('');
   const [candidateList, setCandidateList] = useState([]);
+
+  // Active CA email from authenticated session
+  const sessionCaEmail = useMemo(() => {
+    return user?.email && user?.email.includes('@')
+      ? user.email.toLowerCase().trim()
+      : 'sana@applywizz.com';
+  }, [user?.email]);
 
   // Workday Auto-Apply Dynamic state
   const [activeTask, setActiveTask] = useState(null);
@@ -65,16 +76,51 @@ export default function CADashboard() {
     ]);
   };
 
-  // Load popular candidate IDs from Supabase on mount
+  // Dynamically load assigned candidates for this CA on the active date
   useEffect(() => {
-    async function loadCandidates() {
-      const res = await fetchClients({ limit: 10 });
-      if (res.success && res.clients) {
-        setCandidateList(res.clients);
+    let isMounted = true;
+    async function loadAssignedCandidates() {
+      setLoadingClient(true);
+      try {
+        const res = await fetchAssignedClientsForCA({
+          caEmail: sessionCaEmail,
+          atDate: date,
+        });
+
+        if (!isMounted) return;
+
+        if (res.success && res.assignments && res.assignments.length > 0) {
+          const list = res.assignments.map((a) => ({
+            applywizz_id: a.applywizz_id,
+            client_name: a.client_name || a.applywizz_id,
+            company_email: a.client_email || '',
+            date: a.date,
+          }));
+          setCandidateList(list);
+          const firstId = list[0].applywizz_id;
+          setApplywizzId(firstId);
+          loadClientProfile(firstId);
+        } else {
+          // Fallback to recent onboarded clients
+          const fb = await fetchClients({ limit: 10 });
+          if (!isMounted) return;
+          if (fb.success && fb.clients && fb.clients.length > 0) {
+            setCandidateList(fb.clients);
+            const firstId = fb.clients[0].applywizz_id;
+            setApplywizzId(firstId);
+            loadClientProfile(firstId);
+          }
+        }
+      } catch (err) {
+        console.error('Failed to load CA assigned clients:', err);
+      } finally {
+        if (isMounted) setLoadingClient(false);
       }
     }
-    loadCandidates();
-  }, []);
+
+    loadAssignedCandidates();
+    return () => { isMounted = false; };
+  }, [sessionCaEmail, date]);
 
   // Fetch client details, questions, and active queue task
   const loadClientProfile = async (idToLoad) => {
@@ -238,21 +284,52 @@ export default function CADashboard() {
             Live candidate profile lookup, Workday auto-apply automation engine, and semantic Q&A answer manager.
           </p>
         </div>
-        <div className="candidate-quick-pills">
-          <span className="quick-label">SAMPLE CANDIDATES:</span>
-          {['AWL-34133', 'AWL-26828', 'AWL-31780'].map((cid) => (
-            <button
-              key={cid}
-              type="button"
-              className={`pill-btn ${applywizzId === cid ? 'active' : ''}`}
-              onClick={() => {
-                setApplywizzId(cid);
-                loadClientProfile(cid);
-              }}
-            >
-              {cid}
-            </button>
-          ))}
+        <div className="candidate-quick-pills" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+          <span className="quick-label" style={{ fontWeight: 'bold', color: '#94a3b8' }}>
+            ALLOTTED CLIENTS ({candidateList.length}):
+          </span>
+          {candidateList.length > 0 ? (
+            candidateList.map((c) => {
+              const cid = c.applywizz_id;
+              const cname = c.client_name || cid;
+              const isSelected = applywizzId === cid;
+              return (
+                <button
+                  key={cid}
+                  type="button"
+                  className={`pill-btn ${isSelected ? 'active' : ''}`}
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '5px',
+                    padding: '4px 10px',
+                    borderRadius: '16px',
+                    fontSize: '0.78rem',
+                    fontWeight: isSelected ? 'bold' : 'normal',
+                    background: isSelected ? '#0284c7' : '#1e293b',
+                    color: isSelected ? '#ffffff' : '#cbd5e1',
+                    border: isSelected ? '1px solid #38bdf8' : '1px solid #334155',
+                    cursor: 'pointer',
+                    transition: 'all 0.15s ease',
+                  }}
+                  onClick={() => {
+                    setApplywizzId(cid);
+                    loadClientProfile(cid);
+                  }}
+                  title={`${cname} (${cid})`}
+                >
+                  <strong>{cid}</strong>
+                  {c.client_name && c.client_name !== cid && (
+                    <span style={{ opacity: 0.85, fontSize: '0.72rem', maxWidth: '85px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      &bull; {cname.split(' ')[0]}
+                    </span>
+                  )}
+                </button>
+              );
+            })
+          ) : (
+            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>No clients allotted for today</span>
+          )}
         </div>
       </div>
 

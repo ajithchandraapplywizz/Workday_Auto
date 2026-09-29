@@ -56,7 +56,7 @@ export default function AdminDashboard() {
       const [reconRes, mgrsRes, opsRes, kpiRes, appsRes] = await Promise.all([
         reconcileOperatorsWithAPI(),
         fetchManagers(),
-        fetchOperators(),
+        fetchOperators({ dateStr: date }),
         fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
         fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
       ]);

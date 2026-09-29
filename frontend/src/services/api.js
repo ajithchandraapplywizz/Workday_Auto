@@ -368,8 +368,10 @@ export async function fetchManagers() {
 /**
  * 14. Supabase: Fetch Operators (with optional manager or status filter)
  */
-export async function fetchOperators({ status = '', managerId = '' } = {}) {
+export async function fetchOperators({ status = '', managerId = '', dateStr = '' } = {}) {
   try {
+    const targetDate = formatLocalDate(dateStr) || formatLocalDate(new Date());
+
     let query = supabase.from('operators').select('*').order('name');
     if (status && status !== 'All') {
       query = query.eq('status', status.toLowerCase());
@@ -380,12 +382,35 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
     const { data: opsData, error } = await query;
     if (error) throw error;
 
-    // Concurrently fetch auth_users, assignment counts and applications counts
-    const [authRes, assignRes, clientRes, appRes] = await Promise.all([
+    // Fetch auth_users, client assignments with date fallback, and master clients
+    let logClients = [];
+    const { data: directLogs } = await supabase
+      .from('client_assignment_log')
+      .select('applywizz_id, ca_email, assignment_date')
+      .eq('assignment_date', targetDate);
+
+    if (directLogs && directLogs.length > 0) {
+      logClients = directLogs;
+    } else {
+      const { data: fallbackDateRow } = await supabase
+        .from('client_assignment_log')
+        .select('assignment_date')
+        .order('assignment_date', { ascending: false })
+        .limit(1);
+
+      if (fallbackDateRow && fallbackDateRow.length > 0 && fallbackDateRow[0].assignment_date) {
+        const { data: fallbackLogs } = await supabase
+          .from('client_assignment_log')
+          .select('applywizz_id, ca_email, assignment_date')
+          .eq('assignment_date', fallbackDateRow[0].assignment_date);
+        logClients = fallbackLogs || [];
+      }
+    }
+
+    const [authRes, clientRes, appRes] = await Promise.all([
       supabase.from('auth_users').select('email, status, last_sign_in'),
-      supabase.from('client_assignment_log').select('ca_email'),
-      supabase.from('clients').select('current_ca_email'),
-      supabase.from('applications').select('ca_id'),
+      supabase.from('clients').select('applywizz_id, current_ca_email'),
+      supabase.from('applications').select('applywizz_id, ca_id, status'),
     ]);
 
     const authMap = new Map();
@@ -394,24 +419,40 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
       if (em) authMap.set(em, u);
     });
 
-    const clientCountMap = new Map();
-    (assignRes.data || []).forEach((a) => {
-      const em = (a.ca_email || '').toLowerCase().trim();
-      if (em) clientCountMap.set(em, (clientCountMap.get(em) || 0) + 1);
-    });
+    // Map unique client -> assigned CA email
+    const clientMap = new Map();
+    const caClientCount = new Map();
 
-    (clientRes.data || []).forEach((c) => {
-      const em = (c.current_ca_email || '').toLowerCase().trim();
-      if (em && !clientCountMap.has(em)) {
-        clientCountMap.set(em, 1);
+    for (const log of (logClients || [])) {
+      const em = (log.ca_email || '').toLowerCase().trim();
+      const normId = (log.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        clientMap.set(normId, em);
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
       }
-    });
+    }
 
-    const appCountMap = new Map();
-    (appRes.data || []).forEach((a) => {
-      const em = (a.ca_id || '').toLowerCase().trim();
-      if (em) appCountMap.set(em, (appCountMap.get(em) || 0) + 1);
-    });
+    for (const mc of (clientRes.data || [])) {
+      const em = (mc.current_ca_email || '').toLowerCase().trim();
+      const normId = (mc.applywizz_id || '').trim().toUpperCase();
+      if (normId && !clientMap.has(normId)) {
+        clientMap.set(normId, em);
+        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+      }
+    }
+
+    // Map applications to CA via clientMap or ca_id
+    const caAppCounts = new Map();
+    for (const a of (appRes.data || [])) {
+      let caEmail = (a.ca_id || '').toLowerCase().trim();
+      const normId = (a.applywizz_id || '').trim().toUpperCase();
+      if (!caEmail && normId) {
+        caEmail = clientMap.get(normId) || '';
+      }
+      if (caEmail) {
+        caAppCounts.set(caEmail, (caAppCounts.get(caEmail) || 0) + 1);
+      }
+    }
 
     const enriched = (opsData || []).map((op) => {
       const em = (op.email || '').toLowerCase().trim();
@@ -427,8 +468,8 @@ export async function fetchOperators({ status = '', managerId = '' } = {}) {
         ...op,
         status: effectiveStatus,
         last_sign_in: effectiveLastSignIn,
-        assigned_clients: clientCountMap.get(em) || 0,
-        applications_count: appCountMap.get(em) || 0,
+        assigned_clients: caClientCount.get(em) || 0,
+        applications_count: caAppCounts.get(em) || 0,
       };
     });
 
