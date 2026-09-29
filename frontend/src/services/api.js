@@ -433,30 +433,32 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
     const clientMap = new Map();
     const caClientCount = new Map();
 
-    for (const r of backendRecords) {
-      const em = (r.ca_email || '').toLowerCase().trim();
-      const normId = (r.applywizz_id || '').trim().toUpperCase();
-      if (normId && !clientMap.has(normId)) {
-        clientMap.set(normId, em);
-        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+    if (backendRecords.length > 0) {
+      for (const r of backendRecords) {
+        const em = (r.ca_email || '').toLowerCase().trim();
+        const normId = (r.applywizz_id || '').trim().toUpperCase();
+        if (normId && !clientMap.has(normId)) {
+          clientMap.set(normId, em);
+          if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+        }
       }
-    }
-
-    for (const log of (logClients || [])) {
-      const em = (log.ca_email || '').toLowerCase().trim();
-      const normId = (log.applywizz_id || '').trim().toUpperCase();
-      if (normId && !clientMap.has(normId)) {
-        clientMap.set(normId, em);
-        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+    } else {
+      for (const log of (logClients || [])) {
+        const em = (log.ca_email || '').toLowerCase().trim();
+        const normId = (log.applywizz_id || '').trim().toUpperCase();
+        if (normId && !clientMap.has(normId)) {
+          clientMap.set(normId, em);
+          if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+        }
       }
-    }
 
-    for (const mc of (clientRes.data || [])) {
-      const em = (mc.current_ca_email || '').toLowerCase().trim();
-      const normId = (mc.applywizz_id || '').trim().toUpperCase();
-      if (normId && !clientMap.has(normId)) {
-        clientMap.set(normId, em);
-        if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+      for (const mc of (clientRes.data || [])) {
+        const em = (mc.current_ca_email || '').toLowerCase().trim();
+        const normId = (mc.applywizz_id || '').trim().toUpperCase();
+        if (normId && !clientMap.has(normId)) {
+          clientMap.set(normId, em);
+          if (em) caClientCount.set(em, (caClientCount.get(em) || 0) + 1);
+        }
       }
     }
 
@@ -755,98 +757,150 @@ export async function fetchAutomationTrace(applicationId) {
 }
 
 /**
- * 20. Work History with Date Fallback (Handles holidays/weekends by walking back)
+ * Utility: Checks if an email belongs to an official company domain
+ */
+export function isOfficialCompanyEmail(email) {
+  if (!email || typeof email !== 'string') return false;
+  const em = email.toLowerCase().trim();
+  if (
+    em.includes('@gmail.') ||
+    em.includes('@yahoo.') ||
+    em.includes('@hotmail.') ||
+    em.includes('@outlook.') ||
+    em.includes('@icloud.')
+  ) {
+    return false;
+  }
+  return (
+    em.endsWith('@applywizard.ai') ||
+    em.endsWith('@applywizz.ai') ||
+    em.endsWith('@applywizz.com') ||
+    em.endsWith('@apply-wizz.me')
+  );
+}
+
+/**
+ * Utility: Generates or sanitizes a client's official enterprise email
+ * Prioritizes Supabase clients.company_email -> existing official email -> clean derived <first>.<last>@applywizard.ai
+ */
+export function formatClientCompanyEmail(clientName, rawEmail, dbCompanyEmail) {
+  if (dbCompanyEmail && isOfficialCompanyEmail(dbCompanyEmail)) {
+    return dbCompanyEmail.toLowerCase().trim();
+  }
+  if (rawEmail && isOfficialCompanyEmail(rawEmail)) {
+    return rawEmail.toLowerCase().trim();
+  }
+  if (clientName) {
+    const parts = clientName
+      .trim()
+      .replace(/[^a-zA-Z\s]/g, '')
+      .split(/\s+/)
+      .filter(Boolean);
+    if (parts.length >= 2) {
+      const first = parts[0].toLowerCase();
+      const last = parts[parts.length - 1].toLowerCase();
+      return `${first}.${last}@applywizard.ai`;
+    } else if (parts.length === 1) {
+      return `${parts[0].toLowerCase()}@applywizard.ai`;
+    }
+  }
+  return 'client@applywizard.ai';
+}
+
+/**
+ * 20. Live CA Work History with Date Fallback and Full Multi-Page Pagination
+ * Fetches 100% of all assigned clients across all CAs without capping at 50 records.
  */
 export async function fetchCAWorkHistoryWithFallback({ caEmail = '', dateStr = '', maxDaysBack = 21 } = {}) {
   const cleanDateStr = formatLocalDate(dateStr) || formatLocalDate(new Date());
 
   try {
-    // 1. Fast range query covering past 21 days
+    // 1. Fast range query covering past 21 days to detect active dates
     const startObj = parseLocalDate(cleanDateStr);
     startObj.setDate(startObj.getDate() - maxDaysBack);
     const startStr = formatLocalDate(startObj);
 
-    let rangeUrl = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(startStr)}&to=${encodeURIComponent(cleanDateStr)}`;
+    let rangeUrl = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(startStr)}&to=${encodeURIComponent(cleanDateStr)}&pageSize=200`;
     if (caEmail) {
       rangeUrl += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
     }
 
-    const res = await fetch(rangeUrl);
-    if (res.ok) {
-      const data = await res.json();
-      const allRecords = data.records || [];
+    const rangeRes = await fetch(rangeUrl);
+    let resolvedDate = cleanDateStr;
+    let isFallback = false;
 
-      if (allRecords.length > 0) {
-        // Check if records exist on the requested date
-        const todayRecords = allRecords.filter((r) => r.date === cleanDateStr);
-        if (todayRecords.length > 0) {
-          return {
-            success: true,
-            activeDate: cleanDateStr,
-            isFallback: false,
-            daysBack: 0,
-            total: todayRecords.length,
-            records: todayRecords,
-          };
-        }
-
-        // If today has 0 records, find most recent active date with records
+    if (rangeRes.ok) {
+      const rangeData = await rangeRes.json();
+      const allRecords = rangeData.records || [];
+      const hasRequestedDate = allRecords.some((r) => r.date === cleanDateStr);
+      if (hasRequestedDate) {
+        resolvedDate = cleanDateStr;
+        isFallback = false;
+      } else {
         const activeDates = [...new Set(allRecords.map((r) => r.date))].sort().reverse();
         if (activeDates.length > 0) {
-          const mostRecentActiveDate = activeDates[0];
-          const activeDayRecords = allRecords.filter((r) => r.date === mostRecentActiveDate);
-          return {
-            success: true,
-            activeDate: mostRecentActiveDate,
-            isFallback: true,
-            daysBack: Math.max(1, Math.round((new Date(cleanDateStr) - new Date(mostRecentActiveDate)) / 86400000)),
-            total: activeDayRecords.length,
-            records: activeDayRecords,
-          };
+          resolvedDate = activeDates[0];
+          isFallback = true;
         }
       }
     }
+
+    // 2. Fetch full paginated records for resolvedDate (handling all pages)
+    let baseUrl = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(resolvedDate)}&to=${encodeURIComponent(resolvedDate)}&page=1&pageSize=200`;
+    if (caEmail) {
+      baseUrl += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
+    }
+
+    const p1Res = await fetch(baseUrl);
+    if (!p1Res.ok) {
+      throw new Error(`Failed to fetch work history: ${p1Res.statusText}`);
+    }
+
+    const p1Data = await p1Res.json();
+    let records = p1Data.records || [];
+    const total = p1Data.total || 0;
+
+    if (total > records.length) {
+      const totalPages = Math.ceil(total / 200);
+      const promises = [];
+      for (let p = 2; p <= totalPages; p++) {
+        let pageUrl = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(resolvedDate)}&to=${encodeURIComponent(resolvedDate)}&page=${p}&pageSize=200`;
+        if (caEmail) {
+          pageUrl += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
+        }
+        promises.push(fetch(pageUrl).then((r) => (r.ok ? r.json() : { records: [] })));
+      }
+      const rest = await Promise.all(promises);
+      for (const r of rest) {
+        if (r.records && r.records.length > 0) {
+          records.push(...r.records);
+        }
+      }
+    }
+
+    const daysBack = isFallback
+      ? Math.max(1, Math.round((new Date(cleanDateStr) - new Date(resolvedDate)) / 86400000))
+      : 0;
+
+    return {
+      success: true,
+      activeDate: resolvedDate,
+      isFallback,
+      daysBack,
+      total: records.length,
+      records,
+    };
   } catch (err) {
-    console.warn(`Fast range work history check failed:`, err);
+    console.warn(`Work history fetch failed:`, err);
+    return {
+      success: true,
+      activeDate: cleanDateStr,
+      isFallback: false,
+      daysBack: 0,
+      total: 0,
+      records: [],
+    };
   }
-
-  // 2. Sequential fallback if range query returned nothing
-  let curr = parseLocalDate(cleanDateStr);
-  for (let i = 0; i < 7; i++) {
-    const d = formatLocalDate(curr);
-    try {
-      let url = `${CA_MANAGEMENT_BASE}/work-history?from=${encodeURIComponent(d)}&to=${encodeURIComponent(d)}`;
-      if (caEmail) {
-        url += `&ca_email=${encodeURIComponent(caEmail.trim().toLowerCase())}`;
-      }
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.records && data.records.length > 0) {
-          return {
-            success: true,
-            activeDate: d,
-            isFallback: i > 0,
-            daysBack: i,
-            total: data.total || data.records.length,
-            records: data.records,
-          };
-        }
-      }
-    } catch {
-      // continue walk back
-    }
-    curr.setDate(curr.getDate() - 1);
-  }
-
-  return {
-    success: true,
-    activeDate: cleanDateStr,
-    isFallback: false,
-    daysBack: 0,
-    total: 0,
-    records: [],
-  };
 }
 
 /**
@@ -885,42 +939,51 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       }
     }
 
-    // 2. Also check client_assignment_log in Supabase for additional assignments
-    const atIso = atDate ? new Date(atDate).toISOString() : new Date().toISOString();
-    const { data: logData } = await supabase
-      .from('client_assignment_log')
-      .select('*')
-      .ilike('ca_email', caEmail)
-      .lte('effective_from', atIso)
-      .or(`effective_to.is.null,effective_to.gt.${atIso}`);
+    // 2. Fallback to client_assignment_log in Supabase ONLY if live work-history returned no records
+    if (clientMap.size === 0) {
+      const atIso = atDate ? new Date(atDate).toISOString() : new Date().toISOString();
+      const { data: logData } = await supabase
+        .from('client_assignment_log')
+        .select('*')
+        .ilike('ca_email', caEmail)
+        .lte('effective_from', atIso)
+        .or(`effective_to.is.null,effective_to.gt.${atIso}`);
 
-    if (logData && logData.length > 0) {
-      for (const l of logData) {
-        if (!l.applywizz_id) continue;
-        const normId = l.applywizz_id.trim().toUpperCase();
-        if (!clientMap.has(normId)) {
-          clientMap.set(normId, {
-            applywizz_id: normId,
-            client_name: l.client_name || normId,
-            client_email: l.client_email || '',
-            ca_email: l.ca_email || caEmail,
-            ca_name: l.ca_name || '',
-            jobs_applied: 0,
-            emails_submitted: 0,
-            date: l.assignment_date || historyRes.activeDate || atDate,
-          });
+      if (logData && logData.length > 0) {
+        for (const l of logData) {
+          if (!l.applywizz_id) continue;
+          const normId = l.applywizz_id.trim().toUpperCase();
+          if (!clientMap.has(normId)) {
+            clientMap.set(normId, {
+              applywizz_id: normId,
+              client_name: l.client_name || normId,
+              client_email: l.client_email || '',
+              ca_email: l.ca_email || caEmail,
+              ca_name: l.ca_name || '',
+              jobs_applied: 0,
+              emails_submitted: 0,
+              date: l.assignment_date || historyRes.activeDate || atDate,
+            });
+          }
         }
       }
     }
 
     const candidateIds = Array.from(clientMap.keys());
 
-    // 3. Enrich strictly with OUR Supabase applications & batch_job_queue tracking
+    // 3. Enrich strictly with OUR Supabase applications, batch_job_queue tracking, AND official company emails
     if (candidateIds.length > 0) {
-      const [appsRes, queueRes] = await Promise.all([
+      const [appsRes, queueRes, dbClientsRes] = await Promise.all([
         supabase.from('applications').select('applywizz_id, status').in('applywizz_id', candidateIds),
         supabase.from('batch_job_queue').select('applywizz_id, status').in('applywizz_id', candidateIds),
+        supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
       ]);
+
+      const dbClientMap = new Map();
+      (dbClientsRes.data || []).forEach((c) => {
+        const id = (c.applywizz_id || '').trim().toUpperCase();
+        if (id) dbClientMap.set(id, c);
+      });
 
       const appsCountMap = new Map();
       const submittedCountMap = new Map();
@@ -947,10 +1010,12 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         }
       });
 
-      // Update candidate records with our actual tracking metrics
+      // Update candidate records with our actual tracking metrics and official company email
       for (const [cid, cand] of clientMap.entries()) {
         cand.jobs_applied = appsCountMap.get(cid) || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
+        const dbClient = dbClientMap.get(cid);
+        cand.client_email = formatClientCompanyEmail(cand.client_name, cand.client_email, dbClient?.company_email);
       }
     }
 
@@ -1235,6 +1300,12 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
       .select('applywizz_id, client_name, company_email, current_ca_email')
       .eq('career_associate_manager_id', managerId);
 
+    const masterClientMap = new Map();
+    (masterClients || []).forEach((mc) => {
+      const id = (mc.applywizz_id || '').trim().toUpperCase();
+      if (id) masterClientMap.set(id, mc);
+    });
+
     // 3. Aggregate unique clients from backend records, assignment log, and master clients
     const clientMap = new Map();
     const caClientCount = new Map();
@@ -1244,10 +1315,11 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
       const em = (r.ca_email || '').toLowerCase().trim();
       const normId = (r.applywizz_id || '').trim().toUpperCase();
       if (normId && !clientMap.has(normId)) {
+        const mc = masterClientMap.get(normId);
         clientMap.set(normId, {
           applywizz_id: normId,
-          name: r.client_name || normId,
-          client_email: r.client_email || '',
+          name: r.client_name || mc?.client_name || normId,
+          client_email: formatClientCompanyEmail(r.client_name || mc?.client_name, r.client_email, mc?.company_email),
           apps: (r.jobs_applied || 0) + (r.emails_submitted || 0),
           submitted: r.emails_submitted || 0,
           applied: r.jobs_applied || 0,
@@ -1265,10 +1337,11 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
       const em = (log.ca_email || '').toLowerCase().trim();
       const normId = (log.applywizz_id || '').trim().toUpperCase();
       if (normId && !clientMap.has(normId)) {
+        const mc = masterClientMap.get(normId);
         clientMap.set(normId, {
           applywizz_id: normId,
-          name: log.client_name || normId,
-          client_email: log.client_email,
+          name: log.client_name || mc?.client_name || normId,
+          client_email: formatClientCompanyEmail(log.client_name || mc?.client_name, log.client_email, mc?.company_email),
           apps: 0,
           submitted: 0,
           applied: 0,
@@ -1289,7 +1362,7 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
         clientMap.set(normId, {
           applywizz_id: normId,
           name: mc.client_name || normId,
-          client_email: mc.company_email,
+          client_email: formatClientCompanyEmail(mc.client_name, mc.company_email, mc.company_email),
           apps: 0,
           submitted: 0,
           applied: 0,

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { X, ExternalLink, Search, RefreshCw, User, Briefcase, Mail } from 'lucide-react';
-import { fetchAssignedClientsForCA } from '../services/api';
+import { fetchAssignedClientsForCA, formatClientCompanyEmail } from '../services/api';
 
 export default function CAClientDetailsModal({
   isOpen,
@@ -208,8 +208,8 @@ export default function CAClientDetailsModal({
                       </a>
                     </td>
                     <td>
-                      <span style={{ color: '#94a3b8', fontSize: '0.85rem' }}>
-                        {c.client_email || '—'}
+                      <span style={{ color: '#38bdf8', fontSize: '0.85rem', fontWeight: '500' }}>
+                        {formatClientCompanyEmail(c.client_name, c.client_email)}
                       </span>
                     </td>
                     <td style={{ textAlign: 'center' }}>

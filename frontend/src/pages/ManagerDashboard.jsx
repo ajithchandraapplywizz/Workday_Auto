@@ -381,6 +381,11 @@ export default function ManagerDashboard() {
                     <tr key={row.applywizz_id}>
                       <td>
                         <span className="client-bold-tag">{row.name}</span>
+                        {row.client_email && (
+                          <div style={{ fontSize: '0.78rem', color: '#38bdf8', marginTop: '2px' }}>
+                            {row.client_email}
+                          </div>
+                        )}
                       </td>
                       <td>
                         <a
