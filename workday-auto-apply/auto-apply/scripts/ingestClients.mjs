@@ -1,8 +1,8 @@
+import '../lib/polyfills.mjs';
 import { createClient } from '@supabase/supabase-js';
 import pLimit from 'p-limit';
 import dotenv from 'dotenv';
 import { S3Client, GetObjectCommand } from '@aws-sdk/client-s3';
-import pdfParse from 'pdf-parse';
 import { z } from 'zod';
 import { Anthropic } from '@anthropic-ai/sdk';
 import fs from 'fs';
@@ -112,6 +112,7 @@ async function processClient(clientId) {
     const pdfBuffer = await downloadResume(s3Key);
     if (!pdfBuffer) throw new Error('Resume download failed');
     
+    const { default: pdfParse } = await import('pdf-parse');
     const pdfData = await pdfParse(pdfBuffer);
     const resumeText = pdfData.text;
 

@@ -12,6 +12,7 @@
  *   node scripts/run_queue.mjs --workers 10 --dry-run
  */
 
+import '../lib/polyfills.mjs';
 import { loadLocalEnvOnce, isSupabaseConfigured } from '../lib/supabaseClient.mjs';
 import { runQueueWorkerPool } from '../lib/workerPool.mjs';
 

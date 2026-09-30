@@ -2,12 +2,12 @@
  * resumeParser.mjs — Extract text from resume PDF and infer factual answers
  */
 
+import './polyfills.mjs';
 import { readFile, readdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import { basename, dirname, isAbsolute, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import yaml from 'js-yaml';
-import { PDFParse } from 'pdf-parse';
 import { fuzzyScore } from './fields.mjs';
 
 export const DEFAULT_RESUME_PATH = 'resumes/Ajithchandra_Resume_AIPractice_Intern.pdf';
@@ -20,6 +20,7 @@ function appRootCandidates() {
   return [
     process.cwd(),
     resolve(MODULE_DIR, '..'),
+    resolve(process.cwd(), 'backend'),
     resolve(process.cwd(), 'auto-apply'),
     resolve(MODULE_DIR, '..', '..'),
     resolve(process.cwd(), 'workday-auto-apply', 'auto-apply'),
@@ -171,6 +172,7 @@ export async function loadResumeText(resumePath) {
 
   try {
     const buffer = await readFile(abs);
+    const { PDFParse } = await import('pdf-parse');
     const parser = new PDFParse({ data: buffer });
     const result = await parser.getText();
     await parser.destroy().catch(() => {});

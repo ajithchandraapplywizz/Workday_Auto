@@ -17,6 +17,7 @@
  *   node scripts/queue_daemon.mjs [--workers 10] [--dry-run] [--headful]
  */
 
+import '../lib/polyfills.mjs';
 import {
   loadLocalEnvOnce,
   isSupabaseConfigured,
