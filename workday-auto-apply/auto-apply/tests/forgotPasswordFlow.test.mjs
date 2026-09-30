@@ -126,6 +126,14 @@ test('4. executeWorkdayForgotPassword: fills email, avoids honeypot, clicks rese
     waitForTimeout: async () => {},
     waitForLoadState: async () => {},
     waitForSelector: async () => {},
+    evaluate: async () => true,
+    locator: () => ({
+      first: () => ({
+        isVisible: async () => false,
+        click: async () => {},
+        fill: async () => {},
+      }),
+    }),
   };
 
   // Mock global fetch for Zoho Mail API

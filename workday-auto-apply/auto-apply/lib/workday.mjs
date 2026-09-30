@@ -230,6 +230,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       timeoutMs: 75000,
     });
 
+    if (forgotResult?.reason === 'mailbox_not_connected') {
+      console.log('   ⚠️ Zoho mail connection unverified/offline for client — skipping recovery.');
+      return 'mailbox_not_connected';
+    }
+
     if (forgotResult?.success) {
       console.log('   ✅ Forgot Password recovery succeeded! Logging in / verifying wizard entry...');
       await page.waitForTimeout(3000);
@@ -264,6 +269,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     console.warn(`   ⚠️  [WorkdayBot] Verification poll note: ${err.message}`);
     return null;
   });
+
+  if (verified?.reason === 'mailbox_not_connected') {
+    return 'mailbox_not_connected';
+  }
 
   if (verified?.success) {
     console.log('   ✅ Email verification resolved! Proceeding to application / login...');
@@ -325,6 +334,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       timeoutMs: 75000,
     });
 
+    if (forgotResult?.reason === 'mailbox_not_connected') {
+      return 'mailbox_not_connected';
+    }
+
     if (forgotResult?.success) {
       console.log('   ✅ Forgot Password recovery succeeded! Verifying entry into application wizard...');
       await page.waitForTimeout(3000);
@@ -370,9 +383,11 @@ export async function isWorkdayLogin(page) {
   const url = page.url();
   if (!/workday|myworkday/i.test(url)) return false;
 
+  if (await isWorkdayWizardVisible(page)) return false;
+
   const scan = await prescanGatewayElements(page);
   if (scan.hasWizardFields) return false;
-  if (scan.hasApplyBtn) return false;
+  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword && !scan.hasEmailInput) return false;
 
   return !!(
     scan.hasEmailInput ||
@@ -415,7 +430,18 @@ export async function workdayLogin(page, email, password) {
   } catch {}
 
   // 3. Fill visible email
-  const emailInputs = await page.$$('input[data-automation-id="email"], input[data-automation-id="userName"], input[type="email"], input[name="email"], input[name="userName"]');
+  const emailInputs = await page.$$([
+    'input[data-automation-id*="email" i]',
+    'input[data-automation-id*="user" i]',
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[name*="user" i]',
+    'input[id*="email" i]',
+    'input[id*="user" i]',
+    'input[aria-label*="email" i]',
+    'input[aria-label*="username" i]',
+    'input[placeholder*="email" i]'
+  ].join(', '));
   let emailFilled = false;
   for (const inp of emailInputs) {
     if (await inp.isVisible().catch(() => false)) {
@@ -427,7 +453,12 @@ export async function workdayLogin(page, email, password) {
   }
 
   // 4. Fill visible password
-  const passwordInputs = await page.$$('input[data-automation-id="password"], input[type="password"], input[name="password"]');
+  const passwordInputs = await page.$$([
+    'input[data-automation-id*="password" i]:not([data-automation-id*="verify" i])',
+    'input[type="password"]',
+    'input[name*="password" i]:not([name*="verify" i])',
+    'input[id*="password" i]:not([id*="verify" i])'
+  ].join(', '));
   let passwordFilled = false;
   for (const inp of passwordInputs) {
     if (await inp.isVisible().catch(() => false)) {
@@ -435,6 +466,37 @@ export async function workdayLogin(page, email, password) {
       await page.waitForTimeout(200);
       passwordFilled = true;
       break;
+    }
+  }
+
+  if (emailFilled && !passwordFilled) {
+    console.log('    📧 Email entered on single-step gateway — advancing to password step...');
+    const advanceBtn = await page.$([
+      'button[data-automation-id="signInSubmitButton"]:visible',
+      'button[data-automation-id*="next" i]:visible',
+      'button[type="submit"]:visible',
+      'button:has-text("Next"):visible',
+      'button:has-text("Continue"):visible',
+      'button:has-text("Sign In"):visible',
+    ].join(', ')).catch(() => null);
+
+    if (advanceBtn && !await isInNavOrHeader(advanceBtn)) {
+      await advanceBtn.click({ force: true }).catch(() => advanceBtn.evaluate(el => el.click()));
+    } else {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForTimeout(2500);
+    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+
+    const newPasswordInputs = await page.$$('input[data-automation-id="password"], input[type="password"], input[name="password"]');
+    for (const inp of newPasswordInputs) {
+      if (await inp.isVisible().catch(() => false)) {
+        await inp.fill(password);
+        await page.waitForTimeout(200);
+        passwordFilled = true;
+        break;
+      }
     }
   }
 
@@ -655,8 +717,15 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
   }
 
   if (!await isWorkdayLogin(page)) {
-    console.log('   Already authenticated on Workday (pre-wizard page).');
-    return true;
+    await handleAdaptiveGateway(page, mode);
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   Already authenticated on Workday application form.');
+      return true;
+    }
+    if (!await isWorkdayLogin(page)) {
+      console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
+      return false;
+    }
   }
 
   console.log(`   Workday auth mode: "${mode}"`);
@@ -686,6 +755,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           console.warn(`   ⚠️  [WorkdayBot] Verification failed: ${err.message}`);
           return null;
         });
+
+        if (verified?.reason === 'mailbox_not_connected') {
+          return 'mailbox_not_connected';
+        }
 
         if (verified?.success) {
           console.log('   ✅ Email verification resolved! Logging in...');
@@ -781,6 +854,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
             timeoutMs: 60000,
           }).catch(() => null);
 
+          if (retryVerified?.reason === 'mailbox_not_connected') {
+            return 'mailbox_not_connected';
+          }
+
           if (retryVerified?.success) {
             console.log('   ✅ Email verification completed on retry! Logging in...');
             await handleAdaptiveGateway(page, 'signin');
@@ -801,6 +878,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
             company,
             timeoutMs: 75000,
           });
+
+          if (forgotSuccess?.reason === 'mailbox_not_connected') {
+            return 'mailbox_not_connected';
+          }
 
           if (forgotSuccess?.success) {
             console.log('   ✅ Forgot Password recovery completed! Verifying application wizard...');

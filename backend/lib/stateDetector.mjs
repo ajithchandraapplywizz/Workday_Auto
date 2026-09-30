@@ -19,20 +19,15 @@ export const WORKDAY_STATES = {
  */
 export async function detectWorkdayStep(page) {
   return await page.evaluate(() => {
-    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"], legend'));
-    for (const h of headings) {
-      const text = (h.textContent || '').trim();
-      if (/my\s*information/i.test(text)) return 'My Information';
-      if (/my\s*experience/i.test(text)) return 'My Experience';
-      if (/application\s*questions/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
-      if (/self\s*identify/i.test(text)) return 'Self Identify';
-      if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
-    }
+    // 1. If visible password/auth fields or Create Account/Sign In active step exist, it is NOT a wizard form step
+    const pwdVisible = Array.from(document.querySelectorAll('input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"]'))
+      .some((el) => el.offsetParent !== null);
+    if (pwdVisible) return 'Unknown';
 
-    const activeStep = document.querySelector('[data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
+    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
     if (activeStep) {
       const text = (activeStep.textContent || '').trim();
+      if (/create\s*account|sign\s*in/i.test(text)) return 'Unknown';
       if (/my\s*information/i.test(text)) return 'My Information';
       if (/my\s*experience/i.test(text)) return 'My Experience';
       if (/application\s*questions/i.test(text)) return 'Application Questions';
@@ -41,14 +36,28 @@ export async function detectWorkdayStep(page) {
       if (/review/i.test(text)) return 'Review';
     }
 
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"], legend'));
+    for (const h of headings) {
+      const text = (h.textContent || '').trim();
+      if (/^(create\s*account|sign\s*in|create\s*account\s*\/\s*sign\s*in)$/i.test(text)) return 'Unknown';
+      if (/^my\s*information$/i.test(text)) return 'My Information';
+      if (/^my\s*experience$/i.test(text)) return 'My Experience';
+      if (/^application\s*questions/i.test(text)) return 'Application Questions';
+      if (/^voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
+      if (/^self\s*identify/i.test(text)) return 'Self Identify';
+      if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
+    }
+
     const bodyText = document.body?.innerText || '';
-    if (/My Information/i.test(bodyText) && (/How Did You Hear/i.test(bodyText) || /Address Line/i.test(bodyText))) return 'My Information';
-    if (/My Experience/i.test(bodyText) || (/Work Experience/i.test(bodyText) && /Resume/i.test(bodyText))) return 'My Experience';
-    if (/Application Questions/i.test(bodyText) || /Conflict of Interest/i.test(bodyText)) return 'Application Questions';
-    if (/Voluntary Disclosures/i.test(bodyText) || /terms and conditions/i.test(bodyText)) return 'Voluntary Disclosures';
-    if (/Self\s*Identify/i.test(bodyText) || (/CC-305/i.test(bodyText) && /Voluntary Self-Identification of Disability/i.test(bodyText))) return 'Self Identify';
+    if (/How Did You Hear About Us/i.test(bodyText) || /Country\s*\/\s*Territory\s*Phone\s*Code/i.test(bodyText) || Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"]'))) {
+      return 'My Information';
+    }
+    if (/Work Experience/i.test(bodyText) && (/Resume\/CV|Education|Skills/i.test(bodyText))) return 'My Experience';
+    if (/Conflict of Interest/i.test(bodyText)) return 'Application Questions';
+    if (/Voluntary Self-Identification of Disability/i.test(bodyText) || /CC-305/i.test(bodyText)) return 'Self Identify';
     if (/Review/i.test(bodyText) && (document.querySelector('button[data-automation-id*="submit"], button:has-text("Submit")') || /Review/i.test(document.title))) return 'Review';
 
     return 'Unknown';
   });
 }
+

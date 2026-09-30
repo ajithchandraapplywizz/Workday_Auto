@@ -190,6 +190,18 @@ export async function runPageOrchestrator({
     }
 
     let decision = decisionForField(pack, field);
+    const isPassword = field.controlType === 'password' || field.elementType === 'password' || /password/i.test(field.label);
+    if (isPassword && (!decision || !decision.answer || decision.answer === '')) {
+      const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+      decision = {
+        questionId: field.questionId,
+        intent: 'password',
+        answer: pwd,
+        confidence: 1.0,
+        requiresReview: false,
+        source: 'default_password',
+      };
+    }
     let gate = validateBeforeFill(field, decision, profile);
     const mandatory = field.required === true || isMandatoryField(field.label, field, step);
     if (!gate.ok && mandatory && gate.reason !== 'high_risk_missing_data') {

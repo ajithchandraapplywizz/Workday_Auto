@@ -12,6 +12,9 @@ import { readFile } from 'fs/promises';
 import { validateWorkdayUrl } from './discovery.mjs';
 
 function parseCSVLine(line = '') {
+  if (line.includes('\t')) {
+    return line.split('\t').map((p) => p.trim().replace(/^["']|["']$/g, ''));
+  }
   const parts = [];
   let current = '';
   let inQuotes = false;
@@ -21,12 +24,12 @@ function parseCSVLine(line = '') {
       if (inQuotes && line[i + 1] === '"') { current += '"'; i++; }
       else inQuotes = !inQuotes;
     } else if (ch === ',' && !inQuotes) {
-      parts.push(current.trim()); current = '';
+      parts.push(current.trim().replace(/^["']|["']$/g, '')); current = '';
     } else {
       current += ch;
     }
   }
-  parts.push(current.trim());
+  parts.push(current.trim().replace(/^["']|["']$/g, ''));
   return parts;
 }
 
@@ -38,7 +41,7 @@ export function parseClientJobsCsvContent(content = '') {
   const firstParts = parseCSVLine(lines[0]);
   const lowerFirst = firstParts.map((p) => p.toLowerCase().replace(/[^a-z0-9]/g, ''));
 
-  let idIdx = lowerFirst.findIndex((p) => ['applywizzid', 'awlid', 'clientid', 'candidateid', 'client'].includes(p));
+  let idIdx = lowerFirst.findIndex((p) => ['applywizzid', 'awlid', 'clientid', 'candidateid', 'client', 'clients', 'awlids'].includes(p));
   let urlIdx = lowerFirst.findIndex((p) => ['joburl', 'url', 'link', 'joblink'].includes(p));
   let companyIdx = lowerFirst.findIndex((p) => ['company', 'companyname', 'organization'].includes(p));
   let roleIdx = lowerFirst.findIndex((p) => ['role', 'title', 'roletitle', 'jobtitle'].includes(p));
@@ -47,49 +50,70 @@ export function parseClientJobsCsvContent(content = '') {
   const dataLines = hasHeader ? lines.slice(1) : lines;
 
   const results = [];
-  const awlRegex = /\b(AWL[-_]?\d+)\b/i;
-  const urlRegex = /https?:\/\/[^\s,"']+\.myworkdayjobs\.com[^\s,"']*/i;
+  const awlRegex = /\b(AWL[-_]?\d+)\b/gi;
+  const urlRegex = /https?:\/\/[^\s,"'\t]+\.myworkdayjobs\.com[^\s,"'\t]*/i;
 
   for (const line of dataLines) {
     const parts = parseCSVLine(line);
     if (!parts.length || (parts.length === 1 && !parts[0])) continue;
 
-    let applywizzId = '';
+    let explicitIdPart = '';
     let jobUrl = '';
     let company = '';
     let roleTitle = '';
 
     if (hasHeader) {
-      if (idIdx !== -1 && parts[idIdx]) applywizzId = parts[idIdx];
+      if (idIdx !== -1 && parts[idIdx]) explicitIdPart = parts[idIdx];
       if (urlIdx !== -1 && parts[urlIdx]) jobUrl = parts[urlIdx];
       if (companyIdx !== -1 && parts[companyIdx]) company = parts[companyIdx];
       if (roleIdx !== -1 && parts[roleIdx]) roleTitle = parts[roleIdx];
     }
 
+    // Extract ALL AWL IDs from the line or ID column (supports comma-separated list of 40+ clients!)
+    let awlList = [];
+    if (explicitIdPart) {
+      const matches = [...explicitIdPart.matchAll(awlRegex)].map((m) => m[1].toUpperCase());
+      if (matches.length > 0) awlList = matches;
+    }
+
     // Auto-detect if missing or headerless
-    if (!applywizzId || !jobUrl) {
+    if (!jobUrl || !awlList.length) {
       for (const part of parts) {
-        if (!applywizzId) {
-          const matchAwl = part.match(awlRegex);
-          if (matchAwl) applywizzId = matchAwl[1].toUpperCase();
-        }
         if (!jobUrl) {
           const matchUrl = part.match(urlRegex);
           if (matchUrl) jobUrl = matchUrl[0];
         }
+        if (!awlList.length) {
+          const matches = [...part.matchAll(awlRegex)].map((m) => m[1].toUpperCase());
+          if (matches.length > 0) awlList = matches;
+        }
       }
     }
 
-    if (applywizzId && jobUrl) {
+    // Full line fallback for unescaped rows
+    if (!awlList.length) {
+      const lineMatches = [...line.matchAll(awlRegex)].map((m) => m[1].toUpperCase());
+      if (lineMatches.length > 0) awlList = lineMatches;
+    }
+    if (!jobUrl) {
+      const lineUrl = line.match(urlRegex);
+      if (lineUrl) jobUrl = lineUrl[0];
+    }
+
+    if (awlList.length > 0 && jobUrl) {
       const cleanUrl = jobUrl.replace(/[)\].,;]+$/g, '').trim();
       const check = validateWorkdayUrl(cleanUrl);
       if (check.valid) {
-        results.push({
-          applywizzId: applywizzId.toUpperCase(),
-          jobUrl: cleanUrl,
-          company: company || undefined,
-          roleTitle: roleTitle || undefined,
-        });
+        // Deduplicate AWL IDs in this row
+        const uniqueAwls = [...new Set(awlList)];
+        for (const applywizzId of uniqueAwls) {
+          results.push({
+            applywizzId,
+            jobUrl: cleanUrl,
+            company: company || undefined,
+            roleTitle: roleTitle || undefined,
+          });
+        }
       }
     }
   }

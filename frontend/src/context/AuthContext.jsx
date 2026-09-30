@@ -1,5 +1,6 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useCallback } from 'react';
 import { supabase } from '../config/supabase';
+import { syncLiveCAData } from '../services/api';
 
 const AuthContext = createContext(null);
 
@@ -34,6 +35,9 @@ export function AuthProvider({ children }) {
   const [date, setDate] = useState(getTodayDateStr());
   const [timeframe, setTimeframe] = useState('day');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
+  // Smart Auto-Sync state: 'idle' | 'syncing' | 'synced' | 'failed'
+  const [smartSyncStatus, setSmartSyncStatus] = useState('idle');
+  const [smartSyncMessage, setSmartSyncMessage] = useState('');
 
   useEffect(() => {
     if (user) {
@@ -156,6 +160,40 @@ export function AuthProvider({ children }) {
 
     setUser(sessionUser);
     setIsAuthModalOpen(false);
+
+    // ── Smart Auto-Sync on Login (only for CA / operator role) ──────────
+    // Runs fully in background — CA sees their portal immediately.
+    if (resolvedProfile.role === 'operator') {
+      const syncEmail = resolvedProfile.email;
+      const syncDate = date || getTodayDateStr();
+      setSmartSyncStatus('syncing');
+      setSmartSyncMessage(`Auto-syncing clients for ${syncEmail}...`);
+
+      (async () => {
+        try {
+          const syncRes = await syncLiveCAData({ caEmail: syncEmail, dateStr: syncDate });
+          if (syncRes.success) {
+            const fbTag = syncRes.isFallback ? ' (fallback date)' : '';
+            setSmartSyncStatus('synced');
+            setSmartSyncMessage(`✅ Auto-synced ${syncRes.count} clients for ${syncRes.activeDate}${fbTag}`);
+          } else {
+            setSmartSyncStatus('failed');
+            setSmartSyncMessage(syncRes.message || 'Auto-sync completed with no records.');
+          }
+        } catch (err) {
+          setSmartSyncStatus('failed');
+          setSmartSyncMessage(`Auto-sync error: ${err.message}`);
+        } finally {
+          // Clear the status banner after 8 seconds
+          setTimeout(() => {
+            setSmartSyncStatus('idle');
+            setSmartSyncMessage('');
+          }, 8000);
+        }
+      })();
+    }
+    // ────────────────────────────────────────────────────────────────────
+
     return sessionUser;
   };
 
@@ -233,6 +271,8 @@ export function AuthProvider({ children }) {
         setIsAuthModalOpen,
         loginWithAuthenticator,
         sendVerificationCode,
+        smartSyncStatus,
+        smartSyncMessage,
       }}
     >
       {children}

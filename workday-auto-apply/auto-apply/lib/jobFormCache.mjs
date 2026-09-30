@@ -29,6 +29,13 @@ export async function checkAndPreResolveJobForClient({ jobUrl, profile = {} }) {
   if (!schema || !Array.isArray(schema.fields_schema) || !schema.fields_schema.length) {
     return { hit: false, preResolvedCount: 0 };
   }
+  const validSchemaFields = schema.fields_schema.filter(
+    (f) => !/password/i.test(f.field_type || '') && !/password/i.test(f.automation_id || '') && !/^(password|verify\s*new\s*password)\*?$/i.test((f.label || '').trim())
+  );
+  if (validSchemaFields.length === 0) {
+    return { hit: false, preResolvedCount: 0 };
+  }
+  schema.fields_schema = validSchemaFields;
 
   const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.personal?.email || 'unknown';
   console.log(`\n📋 [Cache Hit] Found cached form schema for job in Supabase! (${schema.fields_schema.length} fields across steps)`);
@@ -103,7 +110,7 @@ export async function recordDiscoveredJobForm({
   const resolvedRole = roleTitle || profile._roleTitle || profile._jobTitle || '';
   const applywizzId = profile._applyWizzId || profile.applywizz_id || '';
 
-  // Deduplicate and filter ONLY REQUIRED fields per requirement
+  // Deduplicate and filter ONLY REQUIRED application fields (never auth/password inputs)
   const deduped = [];
   const seen = new Set();
   for (const f of fields) {
@@ -111,6 +118,12 @@ export async function recordDiscoveredJobForm({
     if (!isRequired) continue; // Only store required fields in the single cell schema
 
     const label = f.label || f.id || '';
+    const autoId = f.automationId || f.dataAutomationId || f.id || '';
+    const fType = f.fieldType || f.type || 'input';
+    if (/password/i.test(fType) || /password/i.test(autoId) || /^(password|verify\s*new\s*password)\*?$/i.test(label.trim())) {
+      continue;
+    }
+
     const norm = normalizeLabel(label);
     if (!norm || seen.has(norm)) continue;
     seen.add(norm);
@@ -119,12 +132,14 @@ export async function recordDiscoveredJobForm({
       label,
       normalized_label: norm,
       step: f.step || f.stepName || 'Application',
-      field_type: f.fieldType || f.type || 'input',
+      field_type: fType,
       is_required: true,
       options: Array.isArray(f.options) ? f.options.slice(0, 40) : [],
-      automation_id: f.automationId || f.dataAutomationId || f.id || '',
+      automation_id: autoId,
     });
   }
+
+  if (deduped.length === 0) return false;
 
   const success = await upsertJobFormSchema({
     jobUrl,
@@ -188,12 +203,12 @@ export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} 
  * @param {Function} params.loadProfileFn — async (applywizzId) => profile object
  *                                          injected from workerPool to avoid circular imports
  */
-export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn }) {
+export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, allowedCandidateIds = null }) {
   if (!jobUrl || !schema?.fields_schema?.length || typeof loadProfileFn !== 'function') return;
 
   let pendingTasks = [];
   try {
-    pendingTasks = await getPendingQueueTasksForUrl(jobUrl);
+    pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
   } catch (err) {
     console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
     return;

@@ -21,7 +21,7 @@ import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
-import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, getBatchQueueStats } from './supabaseClient.mjs';
+import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -48,9 +48,10 @@ export async function executeWorkerTask({
 }) {
   const {
     headless = true,
-    confirmSubmit = false,
     dryRun = false,
+    confirmSubmit = !dryRun,
     defaultPassword = process.env.WORKDAY_PASSWORD || '',
+    allowedCandidateIds = null,
   } = options;
 
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
@@ -101,6 +102,19 @@ export async function executeWorkerTask({
     if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err });
     return { status: 'auth_missing', error: err };
   }
+
+  // Immediately notify Supabase & Frontend dashboard of Active / In-Progress status
+  await updateWorkerStatus(workerId, { state: 'in_flight' }).catch(() => {});
+  if (queueTaskId) {
+    await updateQueueTaskStatus(queueTaskId, { status: 'processing', workerId }).catch(() => {});
+  }
+  await upsertSupabaseApplication({
+    applywizzId,
+    jobUrl,
+    company,
+    roleTitle: profile._roleTitle || profile._jobTitle || 'Workday Application',
+    status: 'in_progress',
+  }).catch(() => {});
 
   // 4. Check Job Form Cache in Supabase (Duplicate Link Detection & Pre-Resolved Cell)
   let cacheHit = false;
@@ -159,9 +173,34 @@ export async function executeWorkerTask({
     if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
       const wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
       if (!wizardNow) {
+        const isMailboxNotConnected = scan.authReason === 'mailbox_not_connected' || scan.reason === 'mailbox_not_connected';
+        if (isMailboxNotConnected) {
+          console.log(`   ⚠️ [${workerId}] Skipping ${applywizzId}: Zoho mail not connected for password reset/verification (193 pool).`);
+          await browser.close().catch(() => {});
+          if (queueTaskId) {
+            await updateQueueTaskStatus(queueTaskId, { status: 'skipped', errorMessage: 'zoho_email_not_connected' });
+          }
+          await upsertSupabaseApplication({
+            applywizzId,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            status: 'skipped',
+            failureReason: 'Zoho mail verification not connected (193 pool)',
+          }).catch(() => {});
+          return { status: 'skipped', reason: 'zoho_email_not_connected' };
+        }
         console.log(`   ❌ [${workerId}] Authentication failed for ${workdayEmail}.`);
-        await browser.close();
+        await browser.close().catch(() => {});
         if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'auth_failed' });
+        await upsertSupabaseApplication({
+          applywizzId,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          status: 'failed',
+          failureReason: 'Authentication failed',
+        }).catch(() => {});
         return { status: 'auth_failed' };
       }
     }
@@ -206,19 +245,23 @@ export async function executeWorkerTask({
     });
 
     // Step E: Save newly discovered form schema to Supabase if unique link
-    if (!cacheHit && Array.isArray(scan.fields) && scan.fields.length > 0) {
+    const combinedFields = [
+      ...(Array.isArray(scan.fields) ? scan.fields : []),
+      ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
+    ].filter((f) => f && f.type !== 'password' && !/password/i.test(f.name || '') && !/password/i.test(f.label || ''));
+
+    if (!cacheHit && combinedFields.length > 0) {
       try {
         const saved = await recordDiscoveredJobForm({
           jobUrl,
           profile,
-          fields: scan.fields,
+          fields: combinedFields,
           stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
           company,
           roleTitle,
         });
 
-        // Immediately bulk-pre-resolve for all other pending clients sharing this URL.
-        // loadProfileFn is injected here to avoid circular imports between jobFormCache ↔ planner.
+        // Immediately bulk-pre-resolve for all other pending clients sharing this URL (scoped to active CAs).
         if (saved) {
           const { loadJobFormSchema: getSchema } = await import('./supabaseClient.mjs');
           const savedSchema = await getSchema(jobUrl).catch(() => null);
@@ -227,6 +270,7 @@ export async function executeWorkerTask({
             await bulkPreResolveForJobUrl({
               jobUrl,
               schema: savedSchema,
+              allowedCandidateIds,
               loadProfileFn: async (awlId) => {
                 const p = await loadProfile(existsSync(profilePath) ? profilePath : null, { applywizzId: awlId });
                 p._applyWizzId = awlId;
@@ -250,13 +294,24 @@ export async function executeWorkerTask({
       applywizzId,
       jobUrl,
       company,
-      roleTitle,
+      roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
       status,
+      failureReason: status === 'submitted' || status === 'reached-review' || status === 'reached_review'
+        ? null
+        : `Stopped at status: ${status}`,
     }).catch(() => {});
 
     if (queueTaskId) {
-      const finalStatus = (status === 'submitted') ? 'submitted' : (status === 'reached-review') ? 'reached_review' : 'completed';
-      await updateQueueTaskStatus(queueTaskId, { status: finalStatus });
+      const finalStatus = (status === 'submitted')
+        ? 'submitted'
+        : (status === 'reached-review' || status === 'reached_review')
+          ? 'reached_review'
+          : (status === 'skipped' ? 'skipped' : 'failed');
+      const answersMap = profile._supabaseQa || (profile._answerCache ? Object.fromEntries(profile._answerCache) : {});
+      await updateQueueTaskStatus(queueTaskId, {
+        status: finalStatus,
+        preResolvedAnswers: answersMap,
+      });
     }
 
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
@@ -268,15 +323,16 @@ export async function executeWorkerTask({
     }
     return { status: 'error', error: err.message, cacheHit };
   } finally {
+    try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
     try { await browser.close(); } catch {}
   }
 }
 
 /**
- * Run tasks using a pool of N concurrent workers (default 10).
+ * Run tasks using a pool of N concurrent workers (default 3).
  */
 export async function runWorkerPool(tasks = [], {
-  concurrency = 10,
+  concurrency = 3,
   headless = true,
   confirmSubmit = false,
   dryRun = false,
@@ -353,26 +409,57 @@ export async function runWorkerPool(tasks = [], {
 
 /**
  * Run workers directly against Supabase batch_job_queue.
- * Concurrently leases and processes tasks until queue is empty.
+ * ─────────────────────────────────────────────────────
+ * Link-Clustered Fair-Share Scheduler
+ * ─────────────────────────────────────────────────────
+ * Strategy:
+ *   1. Fetch ALL pending tasks for active CAs in one query.
+ *   2. Group tasks by job_url (cluster).
+ *   3. Sort into fair-share round-robin order across CA emails.
+ *   4. Within each URL cluster: first task = "Blueprint Worker"
+ *      (scans form, writes schema to Supabase job_form_schemas).
+ *      Subsequent tasks = "Cache-Fill Workers" (wait for blueprint
+ *      to populate cache, then fill instantly in 3-5s).
+ *   5. Workers atomically claim their pre-assigned task by ID.
  */
 export async function runQueueWorkerPool({
-  concurrency = 10,
+  concurrency = 3,
   headless = true,
-  confirmSubmit = false,
   dryRun = false,
+  confirmSubmit = !dryRun,
   defaultPassword = '',
   maxTasks = Infinity,
+  activeCaOnly = false,
+  caEmails = null,
 } = {}) {
-  const stats = await getBatchQueueStats();
-  const pendingCount = (stats?.pending || 0) + (stats?.pre_resolved || 0);
+  // ── 1. Resolve active CA candidate scope ───────────────────────────
+  let allowedCandidateIds = null;
+  let activeEmails = [];
+  let clientToCaMap = {};
+  if (activeCaOnly || caEmails) {
+    const caScope = await getActiveCaCandidateIds({ caEmails });
+    allowedCandidateIds = caScope.candidateIds;
+    activeEmails = caScope.activeEmails;
+    clientToCaMap = caScope.clientToCaMap || {};
+    console.log(`\n🔒 ACTIVE CA LEASING SCOPE:`);
+    console.log(`   Active CA(s): ${activeEmails.length ? activeEmails.join(', ') : 'None'}`);
+    console.log(`   Assigned Clients (${allowedCandidateIds.length}): ${allowedCandidateIds.join(', ') || 'None'}`);
+    if (allowedCandidateIds.length === 0) {
+      console.log('   ⚠️ No candidates found for active CA(s). No tasks will be leased.');
+      return [];
+    }
+  }
+
+  // ── 2. Bulk-fetch all pending tasks for cluster analysis ────────────
+  const allTasks = await fetchPendingTasksForActiveCAs(allowedCandidateIds);
+  const pendingCount = allTasks.length;
 
   console.log(`\n${'═'.repeat(70)}`);
-  console.log(`⚡ ${concurrency}-WORKER SUPABASE QUEUE CONTROLLER`);
-  console.log(`   Pending/Pre-resolved Tasks in Queue: ${pendingCount}`);
-  if (stats) {
-    console.log(`   [Stats: Pending=${stats.pending} | Pre-resolved=${stats.pre_resolved} | Processing=${stats.processing} | Submitted=${stats.submitted}]`);
-  }
-  console.log(`   Parallel Workers: ${concurrency}`);
+  console.log(`⚡ ${concurrency}-WORKER LINK-CLUSTERED FAIR-SHARE QUEUE CONTROLLER`);
+  console.log(`   Mode: ${headless ? 'Headless (background)' : 'Headful (visible browser windows)'}`);
+  console.log(`   Active CA Filter: ${activeCaOnly || caEmails ? 'ENABLED' : 'ALL PENDING'}`);
+  console.log(`   Auto-Submit: ${confirmSubmit && !dryRun ? 'ENABLED' : 'DISABLED (Review / Dry-Run)'}`);
+  console.log(`   Total Pending Tasks: ${pendingCount}`);
   console.log(`${'═'.repeat(70)}\n`);
 
   if (pendingCount === 0) {
@@ -380,84 +467,222 @@ export async function runQueueWorkerPool({
     return [];
   }
 
-  const results = [];
-  let processedCount = 0;
-  let activeWorkers = 0;
+  // ── 3. Build Link-Cluster Map ───────────────────────────────────────
+  // urlClusterMap: normalizedUrl → [task, ...]  (first is blueprint)
+  const urlClusterMap = new Map();
+  for (const t of allTasks) {
+    const url = String(t.job_url || '').replace(/\s+/g, '').trim();
+    if (!urlClusterMap.has(url)) urlClusterMap.set(url, []);
+    urlClusterMap.get(url).push(t);
+  }
 
+  const uniqueUrls = urlClusterMap.size;
+  const repeatedUrls = [...urlClusterMap.values()].filter((g) => g.length > 1).length;
+  console.log(`📊 Link-Cluster Analysis:`);
+  console.log(`   Unique Job URLs: ${uniqueUrls}  |  Repeated URLs (cache-fill eligible): ${repeatedUrls}`);
+
+  // ── 4. Fair-Share Round-Robin ordering across CAs AND Clients ───────
+  // First group by CA email -> then round-robin across clients within each CA
+  const caClientBuckets = new Map();
+  for (const t of allTasks) {
+    const awlId = String(t.applywizz_id || '').trim();
+    const caEmail = (t.ca_email || clientToCaMap[awlId] || '').toLowerCase().trim() || 'unassigned';
+    if (!caClientBuckets.has(caEmail)) caClientBuckets.set(caEmail, new Map());
+    const clientMap = caClientBuckets.get(caEmail);
+    if (!clientMap.has(awlId)) clientMap.set(awlId, []);
+    clientMap.get(awlId).push(t);
+  }
+
+  // Within each CA, interleave across assigned clients so workers don't collide on the same client
+  const caTaskBuckets = new Map();
+  for (const [caEmail, clientMap] of caClientBuckets.entries()) {
+    const interleavedClientTasks = [];
+    const clientIters = [...clientMap.values()].map((arr) => arr[Symbol.iterator]());
+    let hasMore = true;
+    while (hasMore) {
+      hasMore = false;
+      for (const it of clientIters) {
+        const nxt = it.next();
+        if (!nxt.done) {
+          interleavedClientTasks.push(nxt.value);
+          hasMore = true;
+        }
+      }
+    }
+    caTaskBuckets.set(caEmail, interleavedClientTasks);
+  }
+
+  // Interleave across CAs in round-robin order
+  const orderedTasks = [];
+  const caIterators = [...caTaskBuckets.values()].map((b) => b[Symbol.iterator]());
+  let progress = true;
+  while (progress) {
+    progress = false;
+    for (const iter of caIterators) {
+      const next = iter.next();
+      if (!next.done) {
+        orderedTasks.push(next.value);
+        progress = true;
+      }
+    }
+  }
+
+  // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks
+  const urlOrder = new Map();
+  const blueprintTasks = [];
+  const cacheFillTasks = [];
+  for (const t of orderedTasks) {
+    const url = String(t.job_url || '').replace(/\s+/g, '').trim();
+    if (!urlOrder.has(url)) {
+      urlOrder.set(url, 'blueprint');
+      blueprintTasks.push(t);
+    } else {
+      cacheFillTasks.push(t);
+    }
+  }
+  const fairTasks = [...blueprintTasks, ...cacheFillTasks];
+
+  console.log(`   Fair-Share Order Built: ${fairTasks.length} tasks across ${caTaskBuckets.size} active CA(s)\n`);
+
+  // ── 5. Cluster Synchronization Primitives ──────────────────────────
+  // urlCluster: URL → { state: 'scanning'|'cached'|'failed', resolve: fn }
+  const urlCluster = new Map();
+
+  function markUrlScanning(url) {
+    if (!urlCluster.has(url)) {
+      let resolveFn;
+      const waitPromise = new Promise((res) => { resolveFn = res; });
+      urlCluster.set(url, { state: 'scanning', waitPromise, resolveFn });
+    }
+  }
+
+  function markUrlCached(url) {
+    const entry = urlCluster.get(url);
+    if (entry) {
+      entry.state = 'cached';
+      entry.resolveFn?.(); // release any waiting workers
+    } else {
+      urlCluster.set(url, { state: 'cached', waitPromise: Promise.resolve(), resolveFn: () => {} });
+    }
+  }
+
+  async function waitForUrlCache(url, timeoutMs = 120_000) {
+    const entry = urlCluster.get(url);
+    if (!entry || entry.state === 'cached') return true;
+    const timeout = new Promise((res) => setTimeout(() => res(false), timeoutMs));
+    const cached = entry.waitPromise.then(() => true);
+    return Promise.race([cached, timeout]);
+  }
+
+  // ── 6. Shared Task Queue (index pointer, atomic via closure) ────────
+  const results = [];
+  let taskPointer = 0;
+  const taskLimit = Math.min(fairTasks.length, maxTasks);
+
+  // ── 7. Worker Loop ──────────────────────────────────────────────────
   async function queueWorkerLoop(workerNumber) {
     const workerId = `Worker-${workerNumber}`;
-    activeWorkers++;
 
-    while (processedCount < maxTasks) {
-      const task = await leaseNextQueueTask(workerId);
-      if (!task) {
-        // Wait briefly and try one more time in case bulk pre-resolution is running
-        await new Promise((r) => setTimeout(r, 1500));
-        const retryTask = await leaseNextQueueTask(workerId);
-        if (!retryTask) {
-          console.log(`   💤 [${workerId}] Queue drained. Worker exiting.`);
-          break;
+    while (taskPointer < taskLimit) {
+      // Atomically grab next task index
+      const myIndex = taskPointer++;
+      if (myIndex >= taskLimit) break;
+
+      const taskMeta = fairTasks[myIndex];
+      if (!taskMeta) break;
+
+      const url = String(taskMeta.job_url || '').replace(/\s+/g, '').trim();
+      const clusterEntry = urlCluster.get(url);
+      const isBlueprint = !clusterEntry; // first time we see this URL → blueprint role
+
+      if (isBlueprint) {
+        // Mark this URL as being scanned by this worker
+        markUrlScanning(url);
+        console.log(`   🔍 [${workerId}] BLUEPRINT  → ${taskMeta.applywizz_id} @ ${url.slice(0, 60)}`);
+      } else {
+        // Cache-fill: wait for blueprint to finish scanning
+        console.log(`   ⏳ [${workerId}] CACHE-FILL → ${taskMeta.applywizz_id} @ ${url.slice(0, 60)} (waiting for blueprint...)`);
+        const cacheReady = await waitForUrlCache(url, 120_000);
+        if (cacheReady) {
+          console.log(`   ⚡ [${workerId}] Cache ready! Proceeding with instant pre-resolved fill.`);
+        } else {
+          console.log(`   ⚠️  [${workerId}] Cache wait timeout for URL. Proceeding anyway (will scan independently).`);
         }
       }
 
-      processedCount++;
-      const currentTaskNumber = processedCount;
+      // Atomically claim this specific task by ID from Supabase
+      const claimedTask = await leaseSpecificQueueTask(taskMeta.id, workerId);
+      if (!claimedTask) {
+        // Already claimed by another worker (race condition on restart, skip)
+        console.log(`   ↩️  [${workerId}] Task ${taskMeta.id} already claimed by another worker. Skipping.`);
+        if (isBlueprint) markUrlCached(url); // don't block cache-fill workers
+        continue;
+      }
 
       const result = await executeWorkerTask({
         task: {
-          ...task,
-          queueTaskId: task.id,
-          applywizzId: task.applywizz_id,
-          jobUrl: task.job_url,
+          ...claimedTask,
+          queueTaskId: claimedTask.id,
+          applywizzId: claimedTask.applywizz_id,
+          jobUrl: claimedTask.job_url,
         },
         workerId,
-        taskIndex: currentTaskNumber,
-        totalTasks: pendingCount,
+        taskIndex: myIndex + 1,
+        totalTasks: taskLimit,
         options: {
           headless,
           confirmSubmit,
           dryRun,
           defaultPassword,
+          allowedCandidateIds,
         },
       });
 
+      // After blueprint finishes (success or failure), release cache-fill workers
+      if (isBlueprint) {
+        markUrlCached(url);
+        if (result.status === 'submitted' || result.cacheHit === false) {
+          console.log(`   ✅ [${workerId}] Blueprint DONE for ${url.slice(0, 60)} — cache-fill workers unblocked.`);
+        }
+      }
+
       results.push({
-        applywizzId: task.applywizz_id,
-        jobUrl: task.job_url,
-        company: task.company,
+        applywizzId: claimedTask.applywizz_id,
+        jobUrl: claimedTask.job_url,
+        company: claimedTask.company,
         status: result.status,
         cacheHit: result.cacheHit || false,
+        isBlueprint,
         error: result.error,
       });
     }
-
-    activeWorkers--;
   }
 
+  // ── 8. Launch Workers ───────────────────────────────────────────────
   const workerPromises = [];
   for (let w = 1; w <= concurrency; w++) {
     workerPromises.push(queueWorkerLoop(w));
   }
-
   await Promise.all(workerPromises);
 
-  // Print Summary
+  // ── 9. Summary ──────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(70)}`);
-  console.log(`📊 ${concurrency}-WORKER QUEUE EXECUTION SUMMARY`);
+  console.log(`📊 ${concurrency}-WORKER LINK-CLUSTERED FAIR-SHARE SUMMARY`);
   console.log(`${'═'.repeat(70)}`);
   const submitted = results.filter((r) => r.status === 'submitted').length;
-  const reachedReview = results.filter((r) => r.status === 'reached-review').length;
+  const reachedReview = results.filter((r) => r.status === 'reached_review' || r.status === 'reached-review').length;
   const cacheHits = results.filter((r) => r.cacheHit).length;
+  const blueprints = results.filter((r) => r.isBlueprint).length;
+  const cacheFills = results.filter((r) => !r.isBlueprint && r.cacheHit).length;
   const failed = results.filter((r) => ['error', 'auth_failed', 'invalid_url', 'profile_load_failed', 'auth_missing'].includes(r.status)).length;
-  const incomplete = results.length - (submitted + reachedReview + failed);
 
   console.log(`  Total Tasks Processed: ${results.length}`);
   console.log(`  ✅ Submitted:            ${submitted}`);
   console.log(`  🎯 Reached Review:       ${reachedReview}`);
-  console.log(`  ⚡ Form Cache Hits:      ${cacheHits} (instant pre-resolved repeat links)`);
-  console.log(`  🔍 Unique Form Scans:    ${results.length - cacheHits} (harvested to Supabase)`);
+  console.log(`  🔍 Blueprint Scans:      ${blueprints} (unique URLs scanned & cached)`);
+  console.log(`  ⚡ Cache-Fill Hits:      ${cacheFills} (instant fills from blueprint cache)`);
   console.log(`  ❌ Failed:               ${failed}`);
-  if (incomplete > 0) console.log(`  ⚠️  Incomplete:           ${incomplete}`);
+  console.log(`  🏆 Cache Efficiency:     ${results.length > 0 ? Math.round((cacheHits / results.length) * 100) : 0}%`);
   console.log(`${'═'.repeat(70)}\n`);
 
   return results;

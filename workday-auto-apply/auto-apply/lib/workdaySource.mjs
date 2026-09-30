@@ -927,6 +927,7 @@ export async function fillSourceFieldAuto(page, profile = {}) {
     return { success: true, selected: current };
   }
 
+  let display = '';
   // Referral source is intentionally not a client fact. Pick a valid live
   // dropdown path first so stale profile/YAML values cannot be submitted.
   console.log('    🎲 Source fallback: picking a live dropdown option...');
@@ -940,7 +941,7 @@ export async function fillSourceFieldAuto(page, profile = {}) {
 
   // 1) Hierarchical + flat attempts from workdayDefaults.mjs
   let result = await fillHowDidYouHearFromDom(page, profile);
-  let display = await getReferralSourceDisplay(page);
+  display = await getReferralSourceDisplay(page);
   if (result.success && isReferralSourceFullySelected(display)) {
     return { success: true, selected: result.selected || display, domOptions: result.domOptions };
   }

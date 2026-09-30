@@ -16,7 +16,7 @@
 import { chromium } from 'playwright';
 import { writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
-import { discoverApplicationForm, detectATS } from './discovery.mjs';
+import { discoverApplicationForm, detectATS, isWorkdayWizardVisible } from './discovery.mjs';
 import { handleWorkday } from './workday.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 
@@ -418,32 +418,43 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
 
     // Step 2: Authenticate if Workday
     if (ats === 'workday') {
-      console.log(`   Authenticating on Workday (${mode} mode) before scanning form fields...`);
-      const authOk = await handleWorkday(page, {
-        email: workdayEmail,
-        password: workdayPassword,
-        mode,
-      });
+      if (await isWorkdayWizardVisible(page)) {
+        console.log('   Already on Workday application form wizard — skipping authentication.');
+        try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+        await page.waitForTimeout(2000);
+        try {
+          await page.waitForSelector('input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
+        } catch {}
+      } else {
+        console.log(`   Authenticating on Workday (${mode} mode) before scanning form fields...`);
+        const authOk = await handleWorkday(page, {
+          email: workdayEmail,
+          password: workdayPassword,
+          mode,
+          profile,
+        });
 
-      if (!authOk) {
-        console.log('   ⚠️  Workday authentication was not completed — skipping premature gateway scan.');
-        return {
-          url: page.url(),
-          original_url: url,
-          title: await page.title(),
-          scanned_at: new Date().toISOString(),
-          field_count: 0,
-          fields: [],
-          submit_buttons: [],
-          authFailed: true,
-        };
+        if (!authOk || authOk === 'mailbox_not_connected') {
+          console.log('   ⚠️  Workday authentication was not completed — skipping premature gateway scan.');
+          return {
+            url: page.url(),
+            original_url: url,
+            title: await page.title(),
+            scanned_at: new Date().toISOString(),
+            field_count: 0,
+            fields: [],
+            submit_buttons: [],
+            authFailed: true,
+            authReason: authOk === 'mailbox_not_connected' ? 'mailbox_not_connected' : 'auth_failed',
+          };
+        }
+
+        try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+        await page.waitForTimeout(3000);
+        try {
+          await page.waitForSelector('input:not([type="hidden"]), select, textarea, [data-automation-id*="form"], [data-automation-id*="page"], [data-automation-id*="Section"], button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
+        } catch {}
       }
-
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-      await page.waitForTimeout(3000);
-      try {
-        await page.waitForSelector('input:not([type="hidden"]), select, textarea, [data-automation-id*="form"], [data-automation-id*="page"], [data-automation-id*="Section"]', { timeout: 10000 });
-      } catch {}
       formUrl = page.url();
     }
 

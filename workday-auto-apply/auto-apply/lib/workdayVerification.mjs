@@ -491,15 +491,30 @@ export async function resolveWorkdayVerification(page, { email, password, compan
   while (Date.now() < deadline) {
     await page.waitForTimeout(pollInterval);
     try {
-      const zohoHost = process.env.ZOHO_MAIL_READER_HOST || '127.0.0.1';
-      const url = new URL(`http://${zohoHost}:5000/api/zoho/workday-verification`);
+      const rawHost = process.env.ZOHO_MAIL_READER_HOST || process.env.ZOHO_MAIL_READER_URL || '127.0.0.1';
+      const baseUrl = /^https?:\/\//i.test(rawHost) ? rawHost.replace(/\/+$/, '') : `http://${rawHost}:5000`;
+      const url = new URL(`${baseUrl}/api/zoho/workday-verification`);
       url.searchParams.set('email', email);
       if (effectiveCompany) url.searchParams.set('company', effectiveCompany);
       url.searchParams.set('receivedAfter', String(cutoff));
 
-      const res = await fetch(url.toString());
+      let res;
+      try {
+        res = await fetch(url.toString(), { signal: AbortSignal.timeout(10000) });
+      } catch (fetchErr) {
+        notConnectedCount++;
+        if (notConnectedCount >= 2) {
+          console.log(`   ℹ️  [WorkdayBot] Mailbox ${email} cannot connect to Zoho Mail Reader — skipping.`);
+          return { success: false, reason: 'mailbox_not_connected' };
+        }
+        continue;
+      }
+
       if (!res.ok) {
-        console.warn(`   ⚠️  [WorkdayBot] Mail reader returned HTTP ${res.status}`);
+        notConnectedCount++;
+        if (notConnectedCount >= 2) {
+          return { success: false, reason: 'mailbox_not_connected' };
+        }
         continue;
       }
       const data = await res.json();
@@ -588,24 +603,23 @@ export async function resolveWorkdayVerification(page, { email, password, compan
           try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
           return { success: true, type: 'code', code: data.verificationCode };
         }
-      } else {
-        if (data.reason === 'mailbox_not_connected') {
-          notConnectedCount++;
-          if (notConnectedCount >= 3) {
-            console.log(`   ℹ️  [WorkdayBot] Mailbox ${email} is not connected to Zoho Mail Reader — skipping automated email poll.`);
-            return { success: false, reason: 'mailbox_not_connected' };
-          }
-          console.log(`   ⏳ [WorkdayBot] Mailbox ${email} checking connection... (${notConnectedCount}/3)`);
-          continue;
+        if (data.reason === 'mailbox_not_connected' || data.connected === false) {
+          console.log(`   ℹ️  [WorkdayBot] Candidate ${email} is not in the connected Zoho mail pool (193 pool) — skipping.`);
+          return { success: false, reason: 'mailbox_not_connected' };
         }
         console.log(`   ⏳ [WorkdayBot] Waiting for email... (${data.reason || 'pending'})`);
       }
     } catch (err) {
       console.warn('   ⚠️  [WorkdayBot] Polling error:', err.message);
+      notConnectedCount++;
+      if (notConnectedCount >= 2) {
+        return { success: false, reason: 'mailbox_not_connected' };
+      }
     }
   }
 
-  throw new Error(`[WorkdayBot] Verification email timed out for ${email}`);
+  console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout.`);
+  return { success: false, reason: 'timeout' };
 }
 
 /**

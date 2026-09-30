@@ -187,12 +187,14 @@ export async function isWorkdayJobPageMissing(page) {
 }
 
 const WORKDAY_WIZARD_SELECTORS = [
+  'button[data-automation-id="pageFooterNextButton"]',
+  'button[data-automation-id="bottom-navigation-next-button"]',
   'button:has-text("Save and Continue")',
   'button:has-text("Save & Continue")',
-  'button[data-automation-id="bottom-navigation-next-button"]',
   'input[data-automation-id="legalNameSection_firstName"]',
+  'input[id*="legalName--firstName"]',
+  'input[name*="legalName--firstName"]',
   'input[data-automation-id="phone-number"]',
-  '[data-automation-id*="wizardStep"]',
 ].join(', ');
 
 const CONTINUE_APPLICATION_SELECTORS = [
@@ -209,13 +211,14 @@ const CONTINUE_APPLICATION_SELECTORS = [
   'button:has-text("Continue application")',
 ];
 
-/** True when the multi-step application wizard is visible (not JD / login). */
+/** True when the multi-step application wizard is visible (not JD / login / Create Account). */
 export async function isWorkdayWizardVisible(page) {
   if (!page || typeof page.$ !== 'function') return false;
   const url = typeof page.url === 'function' ? page.url() : '';
   if (/\/login(?:\?|$)/i.test(url)) return false;
 
-  // If on login, registration, or Social SSO screen, it is NOT the wizard
+  // 1. Always check for login, registration, or Social SSO screen FIRST.
+  // Workday renders Create Account / Sign In at /apply/applyManually and /apply/useMyLastApplication!
   const isAuth = await page.$([
     'input[data-automation-id="password"]:visible',
     'input[type="password"]:visible',
@@ -225,11 +228,41 @@ export async function isWorkdayWizardVisible(page) {
     'button[data-automation-id="createAccountSubmitButton"]:visible',
     'button[data-automation-id="createAccountLink"]:visible',
     'button[data-automation-id="signInLink"]:visible',
+    'button:has-text("Create Account"):visible',
+    'button:has-text("Sign in with email"):visible',
   ].join(', ')).catch(() => null);
   if (isAuth) return false;
 
+  // 2. Also check if the active progress bar step or heading is "Create Account" / "Sign In"
+  const isAuthHeadingOrStep = await page.evaluate(() => {
+    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
+    if (activeStep && /create\s*account|sign\s*in|log\s*in/i.test(activeStep.textContent || '')) {
+      return true;
+    }
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"]'));
+    if (headings.some((h) => /^(create\s*account|sign\s*in|create\s*account\s*\/\s*sign\s*in)$/i.test((h.textContent || '').trim()))) {
+      return true;
+    }
+    if (/^(create\s*account|sign\s*in)$/i.test((document.title || '').trim())) {
+      return true;
+    }
+    return false;
+  }).catch(() => false);
+  if (isAuthHeadingOrStep) return false;
+
+  // 3. Check for genuine application wizard controls (Save and Continue, legalName, etc.)
   const el = await page.$(WORKDAY_WIZARD_SELECTORS).catch(() => null);
-  return Boolean(el && await el.isVisible().catch(() => false));
+  if (el && await el.isVisible().catch(() => false)) return true;
+
+  // 4. Check if active progress step is explicitly one of the authenticated form steps
+  const hasAuthenticatedActiveStep = await page.evaluate(() => {
+    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"]');
+    if (!activeStep) return false;
+    const t = (activeStep.textContent || '').trim();
+    return /^(my\s*information|my\s*experience|application\s*questions|voluntary\s*disclosures|self\s*identify|review)$/i.test(t);
+  }).catch(() => false);
+
+  return Boolean(hasAuthenticatedActiveStep);
 }
 
 /**
@@ -417,7 +450,17 @@ export async function prescanGatewayElements(page) {
       return (t === 'sign in' || autoId === 'signInLink' || autoId === 'signInTab') && !inNav && !isSubmit && b.offsetParent !== null;
     });
 
-    const hasWizardFields = !!document.querySelector('input[data-automation-id="legalNameSection_firstName"], button[data-automation-id="bottom-navigation-next-button"], [data-automation-id*="wizardStep"]');
+    const isAuthGateway = hasPasswordInput || hasVerifyPassword || ssoWithEmailBtn || hasCreateAccountBtn || hasSignInUnderCreateAccount;
+    const hasWizardFields = !isAuthGateway && !!(
+      document.querySelector([
+        'button[data-automation-id="pageFooterNextButton"]',
+        'button[data-automation-id="bottom-navigation-next-button"]',
+        'input[data-automation-id="legalNameSection_firstName"]',
+        'input[id*="legalName--firstName"]',
+        'input[name*="legalName--firstName"]',
+        'input[data-automation-id="phone-number"]',
+      ].join(', '))
+    );
 
     const hasApplyBtn = buttons.some(b => {
       const autoId = b.getAttribute('data-automation-id') || '';
@@ -469,7 +512,13 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
 
   // Wait for gateway or form elements to hydrate before scanning
   try {
+    await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+  } catch {}
+  try {
     await page.waitForSelector([
+      'input',
+      'button',
+      '[role="dialog"]',
       'button[data-automation-id="SignInWithEmailButton"]',
       'button:has-text("Sign in with email")',
       'input[data-automation-id="password"]',
@@ -482,9 +531,9 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
       'button[data-automation-id="bottom-navigation-next-button"]',
       'button:has-text("Save and Continue")',
       'button:has-text("Save & Continue")',
-    ].join(', '), { timeout: 10000 });
+    ].join(', '), { timeout: 8000 });
   } catch {}
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(800);
 
   const scan = await prescanGatewayElements(page);
   console.log('   Pre-scan elements:', JSON.stringify(scan));
@@ -883,11 +932,20 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       }
 
       // 3. Post-Apply Gateway Handling with adaptive element pre-scan
-      await handleAdaptiveGateway(page, mode);
-
+      await page.waitForTimeout(2000);
       try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-      await page.waitForTimeout(2000);
+
+      if (await isWorkdayWizardVisible(page)) {
+        console.log('   ✅ Application wizard active post-apply — waiting for field hydration...');
+        try {
+          await page.waitForSelector('input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
+        } catch {}
+        return page.url();
+      }
+
+      await handleAdaptiveGateway(page, mode);
+      await page.waitForTimeout(1000);
       return page.url();
     }
 

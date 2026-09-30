@@ -1918,7 +1918,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 }
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
-export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false, dryRun = false } = {}) {
+export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false, dryRun = false, workdayEmail = '', workdayPassword = '', mode = 'signin' } = {}) {
   console.log(`\n${'═'.repeat(60)}`);
   console.log(`STARTING WORKDAY WIZARD LOOP (script-only Playwright)`);
   console.log(`  Policy: REQUIRED fields only — no optional / unimportant clicks`);
@@ -1928,6 +1928,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
   // Fresh session markers for THIS job URL — never reuse prior page fingerprints/skips.
   resetPerApplicationSessionState(profile);
+  profile._discoveredSteps = new Set();
+  profile._harvestedFields = [];
 
   const initialJobUrl = plan?.url || profile._jobUrl || page.url();
   profile._canonicalJobUrl = profile._canonicalJobUrl || initialJobUrl;
@@ -2004,11 +2006,22 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     let stepName = await detectWorkdayStep(page);
 
     if (stepName === 'Unknown' && !await isWorkdayWizardVisible(page)) {
-      console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply...');
-      const entry = await ensureWorkdayApplicationWizard(page, { mode: 'signin' });
+      console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply / Auth Gateway...');
+      const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
       if (entry.entered) {
         console.log(`  ✅ Entered wizard via ${entry.method}`);
-        stepName = await detectWorkdayStep(page);
+      }
+      if (!await isWorkdayWizardVisible(page)) {
+        const effEmail = workdayEmail || profile?.personal?.email || '';
+        const effPwd = workdayPassword || process.env.WORKDAY_PASSWORD || '';
+        if (effEmail && effPwd) {
+          const authOk = await handleWorkday(page, { email: effEmail, password: effPwd, mode, profile });
+          if (authOk === 'mailbox_not_connected') return 'skipped';
+          if (!authOk) return 'auth-failed';
+        }
+      }
+      stepName = await detectWorkdayStep(page);
+      if (await isWorkdayWizardVisible(page)) {
         await tryUsePreviousApplication(page, profile).catch(() => false);
       }
     }
@@ -2020,6 +2033,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
 
     if (stepName === 'Review') {
+      profile._discoveredSteps?.add('Review');
       return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
     }
 
@@ -2029,6 +2043,16 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     await detachFormMutationObserver(page);
     await attachFormMutationObserver(page);
     const liveFields = await discoverWorkdayFields(page);
+    if (stepName && stepName !== 'Unknown') {
+      profile._discoveredSteps?.add(stepName);
+      if ( Array.isArray(liveFields) && liveFields.length > 0) {
+        for (const lf of liveFields) {
+          if (lf && !/password/i.test(lf.type || '') && !/password/i.test(lf.automationId || '')) {
+            profile._harvestedFields.push({ ...lf, step: stepName });
+          }
+        }
+      }
+    }
     console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
 
     await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
@@ -2707,7 +2731,12 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           mode,
           profile,
         });
-        if (!wdOk) {
+        if (!wdOk || wdOk === 'mailbox_not_connected') {
+          if (wdOk === 'mailbox_not_connected') {
+            console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — skipping client cleanly.');
+            if (ownBrowser) await browser.close();
+            return 'skipped';
+          }
           console.log('  ❌ Workday authentication could not be confirmed — aborting wizard loop.');
           if (ownBrowser) await browser.close();
           return 'auth-failed';
@@ -2718,13 +2747,29 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         if (entry.entered) {
           console.log(`  ✅ Entered application wizard via ${entry.method}`);
         }
+        if (!await isWorkdayWizardVisible(page)) {
+          const wdRetry = await handleWorkday(page, {
+            email: workdayEmail,
+            password: workdayPassword,
+            mode,
+            profile,
+          });
+          if (wdRetry === 'mailbox_not_connected') {
+            if (ownBrowser) await browser.close();
+            return 'skipped';
+          }
+          if (!wdRetry) {
+            if (ownBrowser) await browser.close();
+            return 'auth-failed';
+          }
+        }
       }
 
       console.log('  ✅ Workday authentication confirmed — starting 5-step wizard loop...');
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
       await page.waitForTimeout(1000);
 
-      const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun });
+      const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
 
       const postSubmitSS = await takeScreenshot(page, 'post-submit');
       const statusLabel = typeof status === 'object' && status?.status ? status.status : status;

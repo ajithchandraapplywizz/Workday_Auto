@@ -25,14 +25,27 @@ if (!isSupabaseConfigured()) {
 const args = process.argv.slice(2);
 
 let workers = 10;
-const workersIdx = args.indexOf('--workers');
+const workersIdx = args.indexOf('--workers') !== -1 ? args.indexOf('--workers') : args.indexOf('--concurrency');
 if (workersIdx !== -1 && args[workersIdx + 1]) {
   workers = Number(args[workersIdx + 1]) || 10;
 }
 
+let maxTasks = Infinity;
+const maxTasksIdx = args.indexOf('--max-tasks');
+if (maxTasksIdx !== -1 && args[maxTasksIdx + 1]) {
+  maxTasks = Number(args[maxTasksIdx + 1]) || Infinity;
+}
+
+const caIdx = args.indexOf('--ca');
+const caEmails = caIdx !== -1 && args[caIdx + 1] ? args[caIdx + 1].split(',').map((e) => e.trim().toLowerCase()) : null;
+
+// Active CA filtering is enabled by default or with --active-ca-only, unless explicitly overridden with --all-candidates
+const activeCaOnly = !args.includes('--all-candidates');
+
 const dryRun = args.includes('--dry-run');
-const confirmSubmit = args.includes('--confirm-submit');
-const isHeadless = args.includes('--headless') || process.env.HEADLESS === 'true';
+const confirmSubmit = !dryRun && !args.includes('--no-submit');
+// If --headful is passed, or if --headless is not explicitly specified, honor headful mode
+const isHeadless = args.includes('--headless') && !args.includes('--headful');
 
 await runQueueWorkerPool({
   concurrency: workers,
@@ -40,4 +53,7 @@ await runQueueWorkerPool({
   confirmSubmit,
   dryRun,
   defaultPassword: process.env.WORKDAY_PASSWORD || '',
+  activeCaOnly,
+  caEmails,
+  maxTasks,
 });

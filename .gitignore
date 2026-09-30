@@ -43,6 +43,11 @@ supabase/.temp/
 **/test-resume.pdf
 signup.png
 **/signup.png
+*.png
+**/*.png
+scratch/
+**/scratch/
+**/scratch/**
 
 # WhatsApp Baileys session storage (never commit private keys)
 sessions/
@@ -52,6 +57,7 @@ sessions/
 # Local scratch scripts
 test-tele.js
 **/test-tele.js
+*scratch*
 
 # GitHub Actions workflows (kept local for now)
 .github/

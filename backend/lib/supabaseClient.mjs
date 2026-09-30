@@ -808,12 +808,51 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
   return { inserted: totalInserted };
 }
 
-export async function leaseNextQueueTask(workerId = 'worker-1') {
+export async function getActiveCaCandidateIds({ caEmails = null } = {}) {
+  if (!isSupabaseConfigured()) return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
+  try {
+    let activeEmails = Array.isArray(caEmails) ? caEmails : (caEmails ? [String(caEmails).trim()] : null);
+    if (!activeEmails || !activeEmails.length) {
+      const ops = await request('operators', { query: '?status=eq.active&select=email' });
+      activeEmails = (ops || []).map((o) => o.email?.toLowerCase()?.trim()).filter(Boolean);
+      if (!activeEmails.length) {
+        const authUsers = await request('auth_users', { query: '?status=eq.active&role=eq.operator&select=email' });
+        activeEmails = (authUsers || []).map((o) => o.email?.toLowerCase()?.trim()).filter(Boolean);
+      }
+    }
+    if (!activeEmails.length) return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
+
+    const clients = await request('clients', {
+      query: `?current_ca_email=in.(${activeEmails.map(encodeURIComponent).join(',')})&select=applywizz_id,current_ca_email`,
+    });
+    const clientToCaMap = {};
+    for (const c of (clients || [])) {
+      if (c.applywizz_id) {
+        clientToCaMap[c.applywizz_id] = (c.current_ca_email || '').toLowerCase().trim();
+      }
+    }
+    const candidateIds = Array.from(new Set((clients || []).map((c) => c.applywizz_id).filter(Boolean)));
+    return { activeEmails, candidateIds, clientToCaMap };
+  } catch (err) {
+    console.log(`  ⚠️  getActiveCaCandidateIds error: ${err.message?.slice(0, 100)}`);
+    return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
+  }
+}
+
+export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandidateIds = null } = {}) {
   if (!isSupabaseConfigured()) return null;
   try {
-    const tasks = await request('batch_job_queue', {
-      query: `?status=in.(pending,pre_resolved)&order=created_at.asc&limit=1`,
-    });
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length === 0) {
+      return null;
+    }
+
+    let filter = '?status=in.(pending,pre_resolved)';
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
+      filter += `&applywizz_id=in.(${allowedCandidateIds.join(',')})`;
+    }
+    filter += '&order=created_at.asc&limit=1';
+
+    const tasks = await request('batch_job_queue', { query: filter });
     const task = tasks?.[0];
     if (!task) return null;
 
@@ -836,7 +875,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1') {
 
     if (!Array.isArray(patched) || !patched.length) {
       // Optimistic lock contention: another worker leased it first; retry next task
-      return await leaseNextQueueTask(workerId);
+      return await leaseNextQueueTask(workerId, { allowedCandidateIds });
     }
 
     return { ...task, ...patched[0] };
@@ -909,13 +948,16 @@ export async function getBatchQueueStats() {
  * Returns all 'pending' queue tasks for a specific job URL (excluding tasks that are
  * already processing, pre_resolved, or done). Used by bulkPreResolveForJobUrl.
  */
-export async function getPendingQueueTasksForUrl(jobUrl) {
+export async function getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds = null) {
   if (!isSupabaseConfigured() || !jobUrl) return [];
   try {
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length === 0) return [];
     const canonical = canonicalJobPostingUrl(jobUrl);
-    const rows = await request('batch_job_queue', {
-      query: `?job_url=eq.${encode(canonical)}&status=eq.pending&select=id,applywizz_id,job_url,company,role_title`,
-    });
+    let q = `?job_url=eq.${encode(canonical)}&status=eq.pending&select=id,applywizz_id,job_url,company,role_title`;
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
+      q += `&applywizz_id=in.(${allowedCandidateIds.join(',')})`;
+    }
+    const rows = await request('batch_job_queue', { query: q });
     return Array.isArray(rows) ? rows : [];
   } catch (err) {
     console.log(`  ⚠️  getPendingQueueTasksForUrl error: ${err.message?.slice(0, 100)}`);
@@ -1060,4 +1102,113 @@ export async function updateClientZohoStatus(email, { status = 'active', connect
   }
 }
 
+
+/**
+ * Atomically lease a specific task by ID (used by Link-Clustered Fair-Share scheduler
+ * which pre-selects the task order before workers run).
+ * Returns the leased task or null if already claimed by another worker.
+ */
+export async function leaseSpecificQueueTask(taskId, workerId = 'worker-1') {
+  if (!isSupabaseConfigured() || !taskId) return null;
+  try {
+    const now = new Date().toISOString();
+    const patched = await request('batch_job_queue', {
+      method: 'PATCH',
+      query: `?id=eq.${encode(taskId)}&status=in.(pending,pre_resolved)`,
+      prefer: 'return=representation',
+      body: {
+        status: 'processing',
+        worker_id: workerId,
+        locked_at: now,
+        started_at: now,
+        updated_at: now,
+      },
+    });
+    if (!Array.isArray(patched) || !patched.length) return null; // already claimed
+    return patched[0];
+  } catch (err) {
+    console.log(`  ⚠️  leaseSpecificQueueTask error: ${err.message?.slice(0, 100)}`);
+    return null;
+  }
+}
+
+/**
+ * Bulk-fetch all pending/pre_resolved tasks for the active CA scope.
+ * Returns tasks sorted by: (1) unique URLs first (blueprint priority),
+ * then (2) alphabetically by applywizz_id for fair-share ordering.
+ * @param {string[]} allowedCandidateIds - AWL IDs allowed for leasing
+ * @returns {Promise<object[]>} Ordered task list
+ */
+export async function fetchPendingTasksForActiveCAs(allowedCandidateIds = null) {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    let filter = '?status=in.(pending,pre_resolved)&order=created_at.asc&limit=500';
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
+      filter = `?status=in.(pending,pre_resolved)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
+    }
+    const tasks = await request('batch_job_queue', { query: filter });
+    return Array.isArray(tasks) ? tasks : [];
+  } catch (err) {
+    console.log(`  ⚠️  fetchPendingTasksForActiveCAs error: ${err.message?.slice(0, 100)}`);
+    return [];
+  }
+}
+
+/**
+ * Update the queue_daemon_state table with the current daemon lifecycle state for a CA.
+ * Used by the background daemon to track which CAs have been detected, synced, dispatched.
+ * @param {string} caEmail
+ * @param {object} opts
+ */
+export async function updateDaemonCaState(caEmail, {
+  caName = null,
+  state = 'detected',
+  syncedDate = null,
+  candidateIds = null,
+  workersAssigned = 0,
+  tasksDispatched = 0,
+} = {}) {
+  if (!isSupabaseConfigured() || !caEmail) return false;
+  try {
+    const row = {
+      ca_email: caEmail.trim().toLowerCase(),
+      state,
+      last_heartbeat: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+    if (caName) row.ca_name = caName;
+    if (syncedDate) row.synced_date = syncedDate;
+    if (Array.isArray(candidateIds)) row.candidate_ids = candidateIds;
+    if (workersAssigned > 0) row.workers_assigned = workersAssigned;
+    if (tasksDispatched > 0) row.tasks_dispatched = tasksDispatched;
+    if (state === 'dispatched') row.triggered_at = new Date().toISOString();
+
+    await request('queue_daemon_state', {
+      method: 'POST',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: row,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Get all currently active CA operators from the operators table.
+ * Used by the daemon to detect newly signed-in CAs.
+ * @returns {Promise<object[]>} Array of {email, name, status, last_sign_in}
+ */
+export async function getActiveOperators() {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const ops = await request('operators', {
+      query: '?status=eq.active&select=email,name,status,last_sign_in,updated_at&order=last_sign_in.desc',
+    });
+    return Array.isArray(ops) ? ops : [];
+  } catch (err) {
+    console.log(`  ⚠️  getActiveOperators error: ${err.message?.slice(0, 100)}`);
+    return [];
+  }
+}
 

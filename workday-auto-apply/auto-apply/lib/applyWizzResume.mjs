@@ -99,11 +99,11 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
 
   const cached = cachePathForClient(profile);
   const applicationKey = String(profile._jobUrl || profile._currentJobUrl || '').trim();
-  if (profile._resumeDownloadedForApplication
-    && profile._resumeApplicationKey === applicationKey
-    && existsSync(cached)) {
+  if (existsSync(cached)) {
     profile._resumePath = cached;
     profile._resumeUrl = url;
+    profile._resumeDownloadedForApplication = true;
+    profile._resumeApplicationKey = applicationKey;
     return cached;
   }
 
@@ -133,22 +133,11 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   }
 }
 
-/** Delete only the temporary Apply Wizz copy after a confirmed submission. */
+/** Retain cached client resume in data/client-resumes/ so concurrent workers never unlink an active PDF. */
 export async function cleanupClientResume(profile = {}) {
   const path = String(profile._resumePath || '');
-  const cached = cachePathForClient(profile);
-  if (!path || resolve(path) !== cached) return false;
-  try {
-    await unlink(path);
-    profile._resumePath = '';
-    profile._resumeDownloadedForApplication = false;
-    console.log(`  🧹 Temporary resume removed after submission: ${basename(path)}`);
-    return true;
-  } catch (err) {
-    if (err?.code === 'ENOENT') return true;
-    console.log(`  ⚠️  Temporary resume cleanup failed: ${err.message?.slice(0, 100) || err}`);
-    return false;
-  }
+  if (!path) return false;
+  return true;
 }
 
 /**
