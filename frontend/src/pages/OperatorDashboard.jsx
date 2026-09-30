@@ -14,15 +14,17 @@ import {
 import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
 
 export default function OperatorDashboard({ operatorView = 'dashboard' }) {
-  const { user, date, setDate, timeframe } = useAuth();
+  const { user, date, setDate, timeframe, smartSyncStatus, smartSyncMessage } = useAuth();
+
+  // Local manual-sync state (backup button only)
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
 
   // Active CA identity (strictly scoped to logged-in operator session)
   const [caRoster, setCaRoster] = useState([]);
   const [sessionCaEmail, setSessionCaEmail] = useState(
     user?.email && user?.email.includes('@') ? user.email.toLowerCase().trim() : 'manasa@applywizz.com'
   );
-  const [syncing, setSyncing] = useState(false);
-  const [syncMessage, setSyncMessage] = useState('');
 
   // Synchronize with logged in operator session
   useEffect(() => {
@@ -200,6 +202,35 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     }
   };
 
+  // Live polling: automatically reflects real-time background bot progress in CA portal
+  useEffect(() => {
+    if (!selectedCandidate?.id) return;
+    let isMounted = true;
+
+    const refreshActiveCandidateApps = async () => {
+      try {
+        const appsRes = await fetchApplicationsDynamic({ applywizzId: selectedCandidate.id, limit: 50 });
+        if (!isMounted) return;
+        if (appsRes.success && appsRes.applications) {
+          setApplications(appsRes.applications);
+          setSelectedApp((curr) => {
+            if (!curr) return appsRes.applications[0] || null;
+            const updated = appsRes.applications.find((a) => a.id === curr.id);
+            return updated || curr;
+          });
+        }
+      } catch (err) {
+        console.warn('Silent live polling error:', err);
+      }
+    };
+
+    const intervalId = setInterval(refreshActiveCandidateApps, 3500);
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, [selectedCandidate?.id]);
+
   // Load Work History for Stats Tab with IST bounds
   useEffect(() => {
     if (operatorView !== 'stats') return;
@@ -255,7 +286,49 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
   return (
     <div className="operator-portal-layout">
-      {/* Top Bar with Scoped Operator Identity */}
+
+      {/* ── Smart Auto-Sync Banner ──────────────────────────────────── */}
+      {(smartSyncStatus !== 'idle' || syncMessage) && (
+        <div style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '0.6rem',
+          padding: '0.45rem 1.25rem',
+          fontSize: '0.82rem',
+          fontWeight: '600',
+          background: smartSyncStatus === 'syncing' ? 'rgba(124,58,237,0.18)'
+                    : smartSyncStatus === 'synced'  ? 'rgba(16,185,129,0.15)'
+                    : smartSyncStatus === 'failed'  ? 'rgba(239,68,68,0.12)'
+                    : 'rgba(255,255,255,0.06)',
+          borderBottom: smartSyncStatus === 'syncing' ? '1px solid rgba(124,58,237,0.4)'
+                      : smartSyncStatus === 'synced'  ? '1px solid rgba(16,185,129,0.35)'
+                      : '1px solid rgba(239,68,68,0.3)',
+          color: smartSyncStatus === 'syncing' ? '#a78bfa'
+               : smartSyncStatus === 'synced'  ? '#34d399'
+               : '#f87171',
+          letterSpacing: '0.02em',
+          transition: 'all 0.4s ease',
+        }}>
+          <span style={{ fontSize: '1rem' }}>
+            {smartSyncStatus === 'syncing' ? '🔄' : smartSyncStatus === 'synced' ? '✅' : '⚠️'}
+          </span>
+          <span>
+            {smartSyncStatus === 'syncing' ? 'Smart Sync running — loading your clients automatically...' : (smartSyncMessage || syncMessage)}
+          </span>
+          {smartSyncStatus === 'syncing' && (
+            <span style={{
+              width: '10px', height: '10px',
+              borderRadius: '50%',
+              background: '#7c3aed',
+              display: 'inline-block',
+              animation: 'pulse 1.2s infinite',
+              marginLeft: '4px',
+            }} />
+          )}
+        </div>
+      )}
+
+
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.6rem 1.25rem', background: '#0b1120', borderBottom: '1px solid #1e293b' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
           <span style={{ fontSize: '0.75rem', color: '#94a3b8', textTransform: 'uppercase', letterSpacing: '0.05em', fontWeight: 'bold' }}>
@@ -562,7 +635,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                               style={{ background: selectedApp?.id === app.id ? '#1e293b' : 'transparent', cursor: 'pointer' }}
                               onClick={() => {
                                 handleSelectApp(app);
-                                handleOpenReview(app);
+                                const s = (app.status || '').toLowerCase();
+                                if (['ready_for_review', 'reached_review', 'pre_resolved', 'submitted', 'completed'].includes(s)) {
+                                  handleOpenReview(app);
+                                }
                               }}
                             >
                               <td>
@@ -596,47 +672,125 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                 })()}
                               </td>
                               <td>
-                                {app.status === 'submitted' ? (
-                                  <button
-                                    type="button"
-                                    className="video-btn-start"
-                                    style={{
-                                      padding: '4px 12px',
-                                      fontSize: '0.8rem',
-                                      background: '#065f46',
-                                      borderColor: '#10b981'
-                                    }}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleSelectApp(app);
-                                      handleOpenReview(app);
-                                    }}
-                                  >
-                                    View Submitted Form
-                                  </button>
-                                ) : (app.status === 'in_flight' || app.status === 'processing') ? (
-                                  <span style={{ fontSize: '0.78rem', color: '#38bdf8', fontWeight: 'bold' }}>
-                                    ⚡ In Progress...
-                                  </span>
-                                ) : (
-                                  <button
-                                    type="button"
-                                    className="video-btn-start"
-                                    style={{
-                                      padding: '4px 12px',
-                                      fontSize: '0.8rem',
-                                      background: '#0284c7',
-                                      borderColor: '#38bdf8'
-                                    }}
-                                    onClick={(e) => {
-                                      e.stopPropagation();
-                                      handleSelectApp(app);
-                                      handleOpenReview(app);
-                                    }}
-                                  >
-                                    Review & Confirm
-                                  </button>
-                                )}
+                                {(() => {
+                                  const s = (app.status || '').toLowerCase();
+                                  if (s === 'submitted' || s === 'completed') {
+                                    return (
+                                      <button
+                                        type="button"
+                                        className="video-btn-start"
+                                        style={{
+                                          padding: '5px 12px',
+                                          fontSize: '0.8rem',
+                                          background: '#065f46',
+                                          borderColor: '#10b981',
+                                          color: '#ecfdf5',
+                                          cursor: 'pointer',
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectApp(app);
+                                          handleOpenReview(app);
+                                        }}
+                                      >
+                                        ✓ View Submitted Form
+                                      </button>
+                                    );
+                                  }
+                                  if (s === 'ready_for_review' || s === 'reached_review' || s === 'pre_resolved') {
+                                    return (
+                                      <button
+                                        type="button"
+                                        className="video-btn-start"
+                                        style={{
+                                          padding: '5px 14px',
+                                          fontSize: '0.8rem',
+                                          fontWeight: 'bold',
+                                          background: 'linear-gradient(135deg, #0284c7 0%, #2563eb 100%)',
+                                          borderColor: '#38bdf8',
+                                          color: '#ffffff',
+                                          boxShadow: '0 0 10px rgba(56, 189, 248, 0.4)',
+                                          cursor: 'pointer',
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectApp(app);
+                                          handleOpenReview(app);
+                                        }}
+                                      >
+                                        📋 Review & Confirm
+                                      </button>
+                                    );
+                                  }
+                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress' || s === 'started' || s === 'applying') {
+                                    return (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
+                                          fontSize: '0.78rem',
+                                          color: '#38bdf8',
+                                          fontWeight: 'bold',
+                                          background: 'rgba(56, 189, 248, 0.1)',
+                                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                        }}
+                                      >
+                                        ⚡ Bot Filling Form...
+                                      </span>
+                                    );
+                                  }
+                                  if (s === 'pending' || s === 'queued' || s === 'in_queue') {
+                                    return (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
+                                          fontSize: '0.78rem',
+                                          color: '#94a3b8',
+                                          background: 'rgba(148, 163, 184, 0.08)',
+                                          border: '1px solid rgba(148, 163, 184, 0.2)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                        }}
+                                      >
+                                        ⏳ Queued (Waiting for Bot)
+                                      </span>
+                                    );
+                                  }
+                                  if (s === 'failed') {
+                                    return (
+                                      <button
+                                        type="button"
+                                        className="video-btn-start"
+                                        style={{
+                                          padding: '4px 10px',
+                                          fontSize: '0.78rem',
+                                          background: 'rgba(239, 68, 68, 0.15)',
+                                          borderColor: 'rgba(239, 68, 68, 0.4)',
+                                          color: '#fca5a5',
+                                          cursor: 'pointer',
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectApp(app);
+                                          handleOpenReview(app);
+                                        }}
+                                        title={app.failure_reason || app.error_category || 'View failure details'}
+                                      >
+                                        ⚠️ View Error
+                                      </button>
+                                    );
+                                  }
+                                  return (
+                                    <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
+                                      {app.status ? app.status.toUpperCase() : 'QUEUED'}
+                                    </span>
+                                  );
+                                })()}
                               </td>
                             </tr>
                           ))

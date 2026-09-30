@@ -189,6 +189,43 @@ export default function CADashboard() {
     loadClientProfile('AWL-34133');
   }, []);
 
+  // Live polling: automatically reflects background bot progress for selected candidate
+  useEffect(() => {
+    if (!applywizzId) return;
+    let isMounted = true;
+
+    const intervalId = setInterval(async () => {
+      try {
+        const { data: queueTasks } = await supabase
+          .from('batch_job_queue')
+          .select('*')
+          .eq('applywizz_id', applywizzId)
+          .order('created_at', { ascending: false })
+          .limit(1);
+
+        if (!isMounted) return;
+        const task = queueTasks?.[0];
+        if (task) {
+          setActiveTask(task);
+          if (task.status === 'reached_review' || task.status === 'pre_resolved') {
+            setApplyStep(3);
+          } else if (task.status === 'submitted') {
+            setApplyStep(4);
+          } else if (task.status === 'processing' || task.status === 'in_flight' || task.status === 'in_progress') {
+            setApplyStep(2);
+          }
+        }
+      } catch (err) {
+        // silent polling catch
+      }
+    }, 3500);
+
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, [applywizzId]);
+
   // Handle Workday Auto-Apply Automation Flow
   const handleRunAutoApply = async () => {
     if (!jobUrl || !clientData) return;
