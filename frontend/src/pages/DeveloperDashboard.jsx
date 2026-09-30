@@ -203,6 +203,11 @@ export default function DeveloperDashboard() {
     return map;
   }, [operators]);
 
+  // Filtered failed applications for Errors tab
+  const failedApps = useMemo(() => {
+    return applications.filter((app) => (app.status || '').toLowerCase() === 'failed');
+  }, [applications]);
+
   // Filtered failed applications for individual audit
   const filteredFailedApps = useMemo(() => {
     return failedApps.filter((app) => {
