@@ -8,7 +8,9 @@
     "frontend",
     "workday-auto-apply"
   ],
+  "main": "backend/scripts/queue_daemon.mjs",
   "scripts": {
+    "start": "node backend/scripts/queue_daemon.mjs",
     "setup": "node backend/cli.mjs setup",
     "scan": "node backend/cli.mjs scan",
     "fill": "node backend/cli.mjs fill",

@@ -6,6 +6,7 @@
   "bin": {
     "auto-apply": "./cli.mjs"
   },
+  "main": "scripts/queue_daemon.mjs",
   "files": [
     "cli.mjs",
     "lib/",
@@ -19,6 +20,7 @@
     "LICENSE"
   ],
   "scripts": {
+    "start": "node scripts/queue_daemon.mjs",
     "setup": "node cli.mjs setup",
     "scan": "node cli.mjs scan",
     "fill": "node cli.mjs fill",
