@@ -45,6 +45,51 @@ export function AuthProvider({ children }) {
     }
   }, [user]);
 
+  // 30s Heartbeat & Browser Disconnect Lifecycle
+  useEffect(() => {
+    if (!user?.email) return;
+    const em = user.email.toLowerCase().trim();
+
+    // 1. Initial touch on mount/login
+    supabase
+      .from('operators')
+      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .ilike('email', em)
+      .then(() => {})
+      .catch(() => {});
+
+    // 2. Periodic heartbeat every 30s
+    const heartbeatTimer = setInterval(() => {
+      supabase
+        .from('operators')
+        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .ilike('email', em)
+        .then(() => {})
+        .catch(() => {});
+    }, 30000);
+
+    // 3. Browser disconnect on tab/window close
+    const handleBeforeUnload = () => {
+      const nowIso = new Date().toISOString();
+      const payload = JSON.stringify({ updated_at: nowIso });
+      try {
+        const url = `${supabase.supabaseUrl}/rest/v1/operators?email=ilike.${encodeURIComponent(em)}`;
+        if (navigator.sendBeacon) {
+          navigator.sendBeacon(url, payload);
+        }
+      } catch {}
+    };
+
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handleBeforeUnload);
+
+    return () => {
+      clearInterval(heartbeatTimer);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handleBeforeUnload);
+    };
+  }, [user?.email]);
+
   /**
    * Determine role from email if not already in DB
    */
@@ -235,20 +280,20 @@ export function AuthProvider({ children }) {
           supabase
             .from('operators')
             .update({
-              status: 'inactive',
+              status: 'logged_out',
               updated_at: new Date().toISOString(),
             })
             .ilike('email', em),
           supabase
             .from('auth_users')
             .update({
-              status: 'inactive',
+              status: 'logged_out',
               updated_at: new Date().toISOString(),
             })
             .ilike('email', em),
         ]);
       } catch (err) {
-        console.warn('Failed to set operator inactive:', err);
+        console.warn('Failed to set operator logged_out:', err);
       }
     }
     localStorage.removeItem('applywizz_auth_session');

@@ -285,6 +285,33 @@ export async function upsertSupabaseAnswers(applywizzId, entries = []) {
   return true;
 }
 
+export async function uploadStorageScreenshot(bucketName, filename, buffer, contentType = 'image/jpeg') {
+  if (!isSupabaseConfigured() || !buffer) return null;
+  const { url, key } = config();
+  try {
+    const res = await fetch(`${url}/storage/v1/object/${bucketName}/${filename}`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': contentType,
+        'x-upsert': 'true',
+      },
+      body: buffer,
+    });
+    if (!res.ok) {
+      const errText = await res.text().catch(() => '');
+      console.warn(`[Supabase Storage] Upload failed (${res.status}): ${errText}`);
+      return null;
+    }
+    const publicUrl = `${url}/storage/v1/object/public/${bucketName}/${filename}`;
+    return publicUrl;
+  } catch (err) {
+    console.warn(`[Supabase Storage] Upload exception: ${err.message}`);
+    return null;
+  }
+}
+
 export async function upsertSupabaseApplication({
   applywizzId,
   jobUrl,
@@ -292,6 +319,8 @@ export async function upsertSupabaseApplication({
   roleTitle = '',
   status = 'started',
   failureReason = '',
+  failureScreenshotUrl = '',
+  stoppedAtStep = '',
 } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
   const cleanUrl = String(jobUrl).trim()
@@ -304,16 +333,28 @@ export async function upsertSupabaseApplication({
         : (status === 'incomplete' || status === 'error'
             ? 'failed'
             : (status === 'review-declined' || status === 'review_declined' ? 'skipped' : 'started')));
+
+  let fullReason = failureReason || '';
+  if (failureScreenshotUrl && !fullReason.includes(failureScreenshotUrl)) {
+    fullReason += ` [screenshot: ${failureScreenshotUrl}]`;
+  }
+  if (stoppedAtStep && !fullReason.includes(stoppedAtStep)) {
+    fullReason += ` [step: ${stoppedAtStep}]`;
+  }
+
   const row = {
     applywizz_id: String(applywizzId),
     job_url: cleanUrl,
     company: company || null,
     role_title: roleTitle || null,
     status: normalizedStatus,
-    failure_reason: failureReason || null,
+    failure_reason: fullReason || null,
     updated_at: new Date().toISOString(),
   };
   if (normalizedStatus === 'submitted') row.submitted_at = new Date().toISOString();
+  if (failureScreenshotUrl) row.failure_screenshot_url = failureScreenshotUrl;
+  if (stoppedAtStep) row.stopped_at_step = stoppedAtStep;
+
   try {
     await request('applications', {
       method: 'POST',
@@ -322,6 +363,22 @@ export async function upsertSupabaseApplication({
       body: row,
     });
   } catch (err) {
+    if (/column.*does not exist|42703/i.test(String(err.message || ''))) {
+      delete row.failure_screenshot_url;
+      delete row.stopped_at_step;
+      try {
+        await request('applications', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id%2Cjob_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: row,
+        });
+        return true;
+      } catch (innerErr) {
+        err = innerErr;
+      }
+    }
+
     if (!/42P10|unique or exclusion constraint/i.test(String(err.message || ''))) throw err;
 
     // Older deployments may have the table but not the unique pair constraint.
