@@ -733,7 +733,7 @@ export default function DeveloperDashboard() {
                   <th style={{ width: '13%' }}>JOB POSTING</th>
                   <th style={{ width: '16%' }}>STOPPED AT</th>
                   <th style={{ width: '23%' }}>FAILURE REASON</th>
-                  <th style={{ width: '8%' }}>SHOT</th>
+                  <th style={{ width: '11%' }}>SCREENSHOT</th>
                   <th style={{ width: '8%' }}>ACTION</th>
                 </tr>
               </thead>
@@ -869,27 +869,31 @@ export default function DeveloperDashboard() {
                         {/* 6. Failure Screenshot URL */}
                         <td>
                           {screenshotUrl ? (
-                            <button
-                              type="button"
-                              onClick={() => setSelectedErrorScreenshot(screenshotUrl)}
+                            <a
+                              href={screenshotUrl}
+                              target="_blank"
+                              rel="noreferrer"
                               style={{
                                 background: 'rgba(16, 185, 129, 0.15)',
                                 border: '1px solid rgba(16, 185, 129, 0.4)',
                                 color: '#34d399',
-                                padding: '3px 8px',
+                                padding: '4px 8px',
                                 borderRadius: '4px',
                                 fontSize: '0.72rem',
                                 fontWeight: 'bold',
-                                cursor: 'pointer',
+                                textDecoration: 'none',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
                                 whiteSpace: 'nowrap',
                               }}
-                              title="View error screenshot"
+                              title="Click to open full failure screenshot in new tab"
                             >
-                              📸 View
-                            </button>
+                              📸 Screenshot ↗
+                            </a>
                           ) : (
                             <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                              None
+                              —
                             </span>
                           )}
                         </td>
