@@ -17,7 +17,10 @@ export default function DeveloperDashboard() {
 
   const [activeTab, setActiveTab] = useState('System');
   const [statusFilter, setStatusFilter] = useState('All');
-  const [errorCategoryFilter, setErrorCategoryFilter] = useState('All');
+  const [stoppedBlockFilter, setStoppedBlockFilter] = useState('All');
+  const [errorSearchQuery, setErrorSearchQuery] = useState('');
+  const [selectedErrorScreenshot, setSelectedErrorScreenshot] = useState(null);
+  const [selectedErrorLog, setSelectedErrorLog] = useState(null);
   const [debugSearch, setDebugSearch] = useState('');
   const [selectedDebugApp, setSelectedDebugApp] = useState(null);
   const [debugTrace, setDebugTrace] = useState([]);
@@ -35,6 +38,8 @@ export default function DeveloperDashboard() {
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
   const [operators, setOperators] = useState([]);
+  const [managers, setManagers] = useState([]);
+  const [clientToCaMap, setClientToCaMap] = useState(new Map());
   const [operatorSearch, setOperatorSearch] = useState('');
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
@@ -55,13 +60,15 @@ export default function DeveloperDashboard() {
     async function loadData(silent = false) {
       if (!silent) setLoading(true);
       try {
-        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes] = await Promise.all([
+        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes] = await Promise.all([
           fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
           fetchWorkerStatuses(),
           checkAllApiHealth(),
-          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 100 }),
+          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 300 }),
           fetchBatchQueue(),
           fetchAllOperators(),
+          supabase.from('managers').select('*'),
+          supabase.from('client_assignment_log').select('applywizz_id, ca_email, client_name').order('assignment_date', { ascending: false }).limit(500),
         ]);
 
         if (!isMounted) return;
@@ -92,6 +99,21 @@ export default function DeveloperDashboard() {
 
         if (opsRes.success) {
           setOperators(opsRes.operators || []);
+        }
+
+        if (mgrsRes.data) {
+          setManagers(mgrsRes.data || []);
+        }
+
+        if (logsRes.data) {
+          const cMap = new Map();
+          for (const l of logsRes.data) {
+            const id = (l.applywizz_id || '').trim().toUpperCase();
+            if (id && !cMap.has(id)) {
+              cMap.set(id, { caEmail: (l.ca_email || '').toLowerCase().trim(), clientName: l.client_name || '' });
+            }
+          }
+          setClientToCaMap(cMap);
         }
       } catch (err) {
         console.error('Error loading developer dashboard data:', err);
@@ -130,29 +152,74 @@ export default function DeveloperDashboard() {
     });
   }, [applications, statusFilter]);
 
-  // Filtered failed applications for Errors tab
-  const failedApps = useMemo(() => {
-    return applications.filter((app) => app.status === 'failed');
-  }, [applications]);
-
-  // Grouped errors by category
-  const errorGrouping = useMemo(() => {
-    const map = {};
-    for (const app of failedApps) {
-      const cat = app.error_category || (app.failure_reason ? 'runtime_error' : 'unspecified');
-      if (!map[cat]) {
-        map[cat] = { category: cat, count: 0, apps: [] };
-      }
-      map[cat].count += 1;
-      map[cat].apps.push(app);
+  // Helper: Resolve precisely which block/step the application failed or stopped at
+  const resolveStoppedBlock = (app) => {
+    if (app.stopped_at_step) return app.stopped_at_step;
+    const reason = (app.failure_reason || app.error_category || '').toLowerCase();
+    if (reason.includes('auth') || reason.includes('password') || reason.includes('credential') || reason.includes('sign in') || reason.includes('create account')) {
+      return 'Auth Gateway (Sign In / Sign Up)';
     }
-    return Object.values(map);
-  }, [failedApps]);
+    if (reason.includes('zoho') || reason.includes('mailbox') || reason.includes('verification') || reason.includes('otp')) {
+      return 'Verification: Zoho Mail';
+    }
+    if (reason.includes('resume') || reason.includes('experience') || reason.includes('work history')) {
+      return 'Step 2: My Experience';
+    }
+    if (reason.includes('voluntary') || reason.includes('eeo') || reason.includes('disclosure') || reason.includes('self identify')) {
+      return 'Step 4: Voluntary Disclosures';
+    }
+    if (reason.includes('review') || reason.includes('submit')) {
+      return 'Step 5: Review & Submit';
+    }
+    if (reason.includes('field') || reason.includes('question') || reason.includes('work_auth') || reason.includes('unanswered') || reason.includes('missing')) {
+      return 'Step 3: Application Questions';
+    }
+    if (reason.includes('closed') || reason.includes('timeout') || reason.includes('target page') || reason.includes('context')) {
+      return 'Session Closed / Watchdog Timeout';
+    }
+    return 'Step 1: My Information';
+  };
 
-  const filteredErrors = useMemo(() => {
-    if (errorCategoryFilter === 'All') return errorGrouping;
-    return errorGrouping.filter((g) => g.category.startsWith(errorCategoryFilter));
-  }, [errorGrouping, errorCategoryFilter]);
+  // Helper: Shorten job URL for clean table display
+  const formatShortUrl = (url) => {
+    if (!url) return '—';
+    try {
+      const u = new URL(url);
+      const host = u.hostname.replace('www.', '');
+      const pathParts = u.pathname.split('/').filter(Boolean);
+      const last = pathParts[pathParts.length - 1] || '';
+      return `${host}/.../${last.substring(0, 22)}`;
+    } catch {
+      return url.length > 35 ? `${url.substring(0, 35)}...` : url;
+    }
+  };
+
+  // Operator lookup maps
+  const operatorMap = useMemo(() => {
+    const map = new Map();
+    for (const op of operators) {
+      map.set(op.email.toLowerCase().trim(), op);
+    }
+    return map;
+  }, [operators]);
+
+  // Filtered failed applications for individual audit
+  const filteredFailedApps = useMemo(() => {
+    return failedApps.filter((app) => {
+      const stoppedBlock = resolveStoppedBlock(app);
+      const matchesBlock = stoppedBlockFilter === 'All' || stoppedBlock.toLowerCase().includes(stoppedBlockFilter.toLowerCase());
+      
+      const q = errorSearchQuery.toLowerCase().trim();
+      if (!q) return matchesBlock;
+
+      const awlId = (app.applywizz_id || '').toLowerCase();
+      const company = (app.company || '').toLowerCase();
+      const reason = (app.failure_reason || '').toLowerCase();
+      const ca = (app.ca_id || clientToCaMap.get((app.applywizz_id || '').toUpperCase())?.caEmail || '').toLowerCase();
+
+      return matchesBlock && (awlId.includes(q) || company.includes(q) || reason.includes(q) || ca.includes(q));
+    });
+  }, [failedApps, stoppedBlockFilter, errorSearchQuery, clientToCaMap]);
 
   // Handle open in debugger
   const handleOpenDebugger = async (appId) => {
@@ -552,24 +619,38 @@ export default function DeveloperDashboard() {
         </div>
       )}
 
-      {/* 3. ERRORS TAB — applications where status = failed, grouped by error_category */}
+      {/* 3. ERRORS TAB — Individual Failure Breakdown with AWL-ID, CA, Manager, Short URL, Stopped Step, Screenshot & Log */}
       {activeTab === 'Errors' && (
         <div className="tab-body-fade">
-          <div className="filter-select-wrapper" style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
+          {/* Filter Bar with Search & Block Filter */}
+          <div className="filter-select-wrapper" style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', flexWrap: 'wrap', marginBottom: '1rem' }}>
+            <input
+              type="text"
+              placeholder="Search by AWL ID, CA Email, Company..."
+              value={errorSearchQuery}
+              onChange={(e) => setErrorSearchQuery(e.target.value)}
+              className="video-search-input"
+              style={{ minWidth: '280px', flex: '1' }}
+            />
+
             <select
-              value={errorCategoryFilter}
-              onChange={(e) => setErrorCategoryFilter(e.target.value)}
+              value={stoppedBlockFilter}
+              onChange={(e) => setStoppedBlockFilter(e.target.value)}
               className="video-select-filter"
             >
-              <option value="All">All Error Categories</option>
-              <option value="ca_not_confirmed">CA Not Confirmed</option>
-              <option value="field_not_answered">Field Not Answered (Missing Required Field)</option>
-              <option value="timeout_stalled">Timeout Stalled (&gt;10s Watchdog)</option>
-              <option value="captcha">CAPTCHA / Bot Protection</option>
-              <option value="unsupported_ats">Unsupported ATS</option>
+              <option value="All">All Stopped Blocks</option>
+              <option value="Auth Gateway">Auth Gateway (Sign In / Sign Up)</option>
+              <option value="Step 1">Step 1: My Information</option>
+              <option value="Step 2">Step 2: My Experience</option>
+              <option value="Step 3">Step 3: Application Questions</option>
+              <option value="Step 4">Step 4: Voluntary Disclosures</option>
+              <option value="Step 5">Step 5: Review & Submit</option>
+              <option value="Zoho">Verification: Zoho Mail</option>
+              <option value="Session">Session Closed / Timeout</option>
             </select>
-            <span style={{ fontSize: '0.85rem', color: '#ef4444' }}>
-              Total Failed Runs: {failedApps.length}
+
+            <span style={{ fontSize: '0.85rem', color: '#ef4444', fontWeight: 'bold' }}>
+              Showing {filteredFailedApps.length} of {failedApps.length} Failed Applications
             </span>
           </div>
 
@@ -577,54 +658,178 @@ export default function DeveloperDashboard() {
             <table className="video-data-table">
               <thead>
                 <tr>
-                  <th>ERROR CATEGORY</th>
-                  <th>SPECIFIC REASON / FIELD</th>
-                  <th>COUNT</th>
-                  <th>AFFECTED CANDIDATES</th>
-                  <th>ACTION</th>
+                  <th>CLIENT AWL-ID &amp; NAME</th>
+                  <th>CA-ID &amp; EMAIL</th>
+                  <th>MANAGER ID / NAME</th>
+                  <th>SHORTENED JOB URL</th>
+                  <th>STOPPED AT BLOCK</th>
+                  <th>FAILURE SCREENSHOT</th>
+                  <th>FAILURE LOG / ERROR MESSAGE</th>
                 </tr>
               </thead>
               <tbody>
-                {filteredErrors.length > 0 ? (
-                  filteredErrors.map((group) => (
-                    <tr key={group.category}>
-                      <td>
-                        <span className="video-status-tag failed">
-                          {group.category.toUpperCase()}
-                        </span>
-                      </td>
-                      <td>
-                        {group.category.startsWith('field_not_answered:')
-                          ? `Missing Answer for: ${group.category.replace('field_not_answered:', '')}`
-                          : group.apps[0]?.failure_reason || group.category}
-                      </td>
-                      <td>
-                        <strong>{group.count}</strong>
-                      </td>
-                      <td>
-                        <div style={{ display: 'flex', gap: '0.25rem', flexWrap: 'wrap' }}>
-                          {group.apps.map((a) => (
-                            <span key={a.id} className="app-id-tag">
-                              {a.applywizz_id}
+                {filteredFailedApps.length > 0 ? (
+                  filteredFailedApps.map((app) => {
+                    const normId = (app.applywizz_id || '').toUpperCase();
+                    const clientMeta = clientToCaMap.get(normId);
+                    const caEmail = (app.ca_id || clientMeta?.caEmail || 'sana@applywizz.com').toLowerCase().trim();
+                    const op = operatorMap.get(caEmail);
+                    const caName = op?.name || caEmail.split('@')[0];
+                    const mgrName = op?.manager_name || (op?.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : 'Ramakrishna Tejavath');
+                    const stoppedBlock = resolveStoppedBlock(app);
+                    const screenshotUrl = app.failure_screenshot_url || app.screenshot_url;
+
+                    return (
+                      <tr key={app.id}>
+                        {/* 1. Client AWL-ID & Name */}
+                        <td>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <a
+                              href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(app.applywizz_id)}`}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="app-id-tag"
+                              style={{ textDecoration: 'none', display: 'inline-block', width: 'fit-content' }}
+                              title="Open client in CRM"
+                            >
+                              {app.applywizz_id || 'UNKNOWN-ID'}
+                            </a>
+                            <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#f8fafc', marginTop: '3px' }}>
+                              {clientMeta?.clientName || app.company || 'Client Profile'}
                             </span>
-                          ))}
-                        </div>
-                      </td>
-                      <td>
-                        <button
-                          type="button"
-                          className="table-link-btn"
-                          onClick={() => handleOpenDebugger(group.apps[0]?.id)}
-                        >
-                          Inspect Trace
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                          </div>
+                        </td>
+
+                        {/* 2. CA-ID & Email */}
+                        <td>
+                          <div style={{ display: 'flex', flexDirection: 'column' }}>
+                            <span style={{ fontWeight: 'bold', color: '#f1f5f9', fontSize: '0.82rem' }}>
+                              {caName}
+                            </span>
+                            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.75rem', color: '#38bdf8' }}>
+                              {caEmail}
+                            </span>
+                          </div>
+                        </td>
+
+                        {/* 3. Manager ID / Name with Link */}
+                        <td>
+                          <span style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            fontSize: '0.78rem',
+                            fontWeight: 'bold',
+                            background: mgrName.toLowerCase().includes('balaji') ? 'rgba(245, 158, 11, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                            color: mgrName.toLowerCase().includes('balaji') ? '#f59e0b' : '#10b981',
+                            border: mgrName.toLowerCase().includes('balaji') ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
+                          }}>
+                            {mgrName}
+                          </span>
+                        </td>
+
+                        {/* 4. Shortened Job URL */}
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                            <a
+                              href={app.job_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="table-micro-url"
+                              style={{ color: '#93c5fd', textDecoration: 'none' }}
+                              title={app.job_url}
+                            >
+                              {formatShortUrl(app.job_url)}
+                            </a>
+                            <button
+                              type="button"
+                              onClick={() => navigator.clipboard.writeText(app.job_url)}
+                              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '0.75rem' }}
+                              title="Copy URL"
+                            >
+                              📋
+                            </button>
+                          </div>
+                        </td>
+
+                        {/* 5. Stopped At Block */}
+                        <td>
+                          <span style={{
+                            padding: '3px 8px',
+                            borderRadius: '4px',
+                            fontSize: '0.75rem',
+                            fontWeight: 'bold',
+                            background: 'rgba(239, 68, 68, 0.12)',
+                            color: '#f87171',
+                            border: '1px solid rgba(239, 68, 68, 0.25)',
+                            display: 'inline-block',
+                            whiteSpace: 'nowrap',
+                          }}>
+                            🛑 {stoppedBlock}
+                          </span>
+                        </td>
+
+                        {/* 6. Failure Screenshot URL */}
+                        <td>
+                          {screenshotUrl ? (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedErrorScreenshot(screenshotUrl)}
+                              style={{
+                                background: '#1e293b',
+                                border: '1px solid #38bdf8',
+                                color: '#38bdf8',
+                                padding: '4px 10px',
+                                borderRadius: '4px',
+                                fontSize: '0.75rem',
+                                fontWeight: 'bold',
+                                cursor: 'pointer',
+                                display: 'flex',
+                                alignItems: 'center',
+                                gap: '4px',
+                              }}
+                              title="View error screenshot from Supabase storage"
+                            >
+                              📸 View Screenshot
+                            </button>
+                          ) : (
+                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                              No Screenshot
+                            </span>
+                          )}
+                        </td>
+
+                        {/* 7. Failure Log / Error Message */}
+                        <td>
+                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
+                            <span style={{
+                              fontSize: '0.78rem',
+                              color: '#cbd5e1',
+                              maxWidth: '240px',
+                              whiteSpace: 'nowrap',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis',
+                              fontFamily: 'monospace',
+                            }} title={app.failure_reason || 'Unspecified runtime error'}>
+                              {app.failure_reason || 'Unspecified runtime error'}
+                            </span>
+                            <button
+                              type="button"
+                              className="table-link-btn"
+                              style={{ whiteSpace: 'nowrap', color: '#38bdf8', fontSize: '0.75rem' }}
+                              onClick={() => setSelectedErrorLog(app)}
+                              title="Inspect complete technical log and stack trace"
+                            >
+                              📋 Inspect Log
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })
                 ) : (
                   <tr>
-                    <td colSpan={5} style={{ textAlign: 'center', padding: '2rem', color: '#10b981' }}>
-                      {failedApps.length === 0 ? '✓ No failed applications in selected period.' : 'No errors in this category.'}
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#10b981' }}>
+                      {failedApps.length === 0 ? '✓ No failed applications recorded in this period.' : 'No errors match the current search or block filter.'}
                     </td>
                   </tr>
                 )}
@@ -780,6 +985,198 @@ export default function DeveloperDashboard() {
               <li><strong>Errors Tab:</strong> Real-time categorization of failed applications by <code>error_category</code> (missing fields vs CA unconfirmed vs watchdog stall).</li>
               <li><strong>Queue Tab:</strong> Live candidate URLs in queue with worker assignment.</li>
             </ul>
+          </div>
+        </div>
+      )}
+      {/* Failure Screenshot Modal Viewer */}
+      {selectedErrorScreenshot && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: 'rgba(0, 0, 0, 0.85)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 9999,
+          padding: '2rem',
+        }}>
+          <div style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '8px',
+            maxWidth: '90vw',
+            maxHeight: '90vh',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.6)',
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '12px 18px',
+              borderBottom: '1px solid #334155',
+              background: '#1e293b',
+            }}>
+              <span style={{ fontWeight: 'bold', color: '#f8fafc', fontSize: '0.95rem' }}>
+                📸 Application Failure Screenshot (Captured at exact stopping point)
+              </span>
+              <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                <a
+                  href={selectedErrorScreenshot}
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ color: '#38bdf8', fontSize: '0.85rem', textDecoration: 'none', marginRight: '10px' }}
+                >
+                  Open Original ↗
+                </a>
+                <button
+                  type="button"
+                  onClick={() => setSelectedErrorScreenshot(null)}
+                  style={{
+                    background: '#ef4444',
+                    border: 'none',
+                    color: '#fff',
+                    borderRadius: '4px',
+                    padding: '4px 10px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+            <div style={{ padding: '1rem', overflow: 'auto', textAlign: 'center', background: '#020617' }}>
+              <img
+                src={selectedErrorScreenshot}
+                alt="Application Failure Screenshot"
+                style={{ maxWidth: '100%', maxHeight: '75vh', objectFit: 'contain', borderRadius: '4px', border: '1px solid #1e293b' }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Failure Log Details Modal */}
+      {selectedErrorLog && (
+        <div style={{
+          position: 'fixed',
+          top: 0,
+          left: 0,
+          width: '100vw',
+          height: '100vh',
+          background: 'rgba(0, 0, 0, 0.85)',
+          display: 'flex',
+          justifyContent: 'center',
+          alignItems: 'center',
+          zIndex: 9999,
+          padding: '2rem',
+        }}>
+          <div style={{
+            background: '#0f172a',
+            border: '1px solid #334155',
+            borderRadius: '8px',
+            width: '800px',
+            maxWidth: '95vw',
+            maxHeight: '90vh',
+            display: 'flex',
+            flexDirection: 'column',
+            overflow: 'hidden',
+            boxShadow: '0 20px 40px rgba(0,0,0,0.6)',
+          }}>
+            <div style={{
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              padding: '14px 20px',
+              borderBottom: '1px solid #334155',
+              background: '#1e293b',
+            }}>
+              <div>
+                <span style={{ fontWeight: 'bold', color: '#f8fafc', fontSize: '1rem', display: 'block' }}>
+                  📋 Failure Log: {selectedErrorLog.applywizz_id} @ {selectedErrorLog.company || 'Workday'}
+                </span>
+                <span style={{ fontSize: '0.8rem', color: '#94a3b8' }}>
+                  Recorded at: {new Date(selectedErrorLog.created_at || selectedErrorLog.updated_at).toLocaleString()}
+                </span>
+              </div>
+              <div style={{ display: 'flex', gap: '8px' }}>
+                <button
+                  type="button"
+                  onClick={() => navigator.clipboard.writeText(JSON.stringify(selectedErrorLog, null, 2))}
+                  style={{
+                    background: '#0284c7',
+                    border: 'none',
+                    color: '#fff',
+                    borderRadius: '4px',
+                    padding: '5px 12px',
+                    fontSize: '0.8rem',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                  }}
+                >
+                  Copy JSON Log
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setSelectedErrorLog(null)}
+                  style={{
+                    background: '#ef4444',
+                    border: 'none',
+                    color: '#fff',
+                    borderRadius: '4px',
+                    padding: '5px 12px',
+                    fontWeight: 'bold',
+                    cursor: 'pointer',
+                  }}
+                >
+                  ✕ Close
+                </button>
+              </div>
+            </div>
+
+            <div style={{ padding: '1.25rem', overflow: 'auto', background: '#020617', fontFamily: 'JetBrains Mono, monospace' }}>
+              <div style={{ marginBottom: '1rem' }}>
+                <span style={{ color: '#f87171', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                  FAILED AT BLOCK:
+                </span>
+                <div style={{ color: '#fca5a5', background: 'rgba(239, 68, 68, 0.1)', padding: '8px 12px', borderRadius: '4px', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                  🛑 {resolveStoppedBlock(selectedErrorLog)}
+                </div>
+              </div>
+
+              <div style={{ marginBottom: '1rem' }}>
+                <span style={{ color: '#94a3b8', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                  FAILURE REASON:
+                </span>
+                <div style={{ color: '#f8fafc', background: '#0f172a', padding: '10px 14px', borderRadius: '4px', border: '1px solid #334155', whiteSpace: 'pre-wrap' }}>
+                  {selectedErrorLog.failure_reason || selectedErrorLog.error_category || 'No explicit stack trace recorded'}
+                </div>
+              </div>
+
+              <div>
+                <span style={{ color: '#94a3b8', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
+                  COMPLETE APPLICATION PAYLOAD:
+                </span>
+                <pre style={{
+                  color: '#93c5fd',
+                  background: '#0a0f1d',
+                  padding: '12px',
+                  borderRadius: '4px',
+                  border: '1px solid #1e293b',
+                  fontSize: '0.78rem',
+                  overflow: 'auto',
+                  maxHeight: '300px',
+                }}>
+                  {JSON.stringify(selectedErrorLog, null, 2)}
+                </pre>
+              </div>
+            </div>
           </div>
         </div>
       )}
