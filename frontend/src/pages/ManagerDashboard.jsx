@@ -179,6 +179,20 @@ export default function ManagerDashboard() {
     );
   };
 
+  // Helper: Live operator status considering 3-minute disconnect window
+  const getOperatorEffectiveStatus = (op) => {
+    if (!op) return 'inactive';
+    const raw = (op.status || '').toLowerCase();
+    if (raw === 'logged_out') return 'logged_out';
+    if (raw !== 'active') return 'inactive';
+    if (!op.updated_at && !op.last_sign_in) return 'inactive';
+    const last = new Date(op.updated_at || op.last_sign_in).getTime();
+    if (Date.now() - last > 3 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 3 minutes
+    }
+    return 'active';
+  };
+
   const handleBackFromDetails = () => {
     setSelectedOperatorDetails(null);
     if (window.location.hash.startsWith('#operator-details')) {
@@ -513,9 +527,28 @@ export default function ManagerDashboard() {
                         <span className="op-email">{op.email}</span>
                       </td>
                       <td>
-                        <span className={`video-status-tag ${(op.status || 'inactive').toLowerCase()}`}>
-                          {(op.status || 'inactive').toUpperCase()}
-                        </span>
+                        {(() => {
+                          const eff = getOperatorEffectiveStatus(op);
+                          if (eff === 'active') {
+                            return (
+                              <span className="video-status-tag active" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                ACTIVE
+                              </span>
+                            );
+                          }
+                          if (eff === 'logged_out') {
+                            return (
+                              <span className="video-status-tag inactive" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                LOGGED OUT
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className="video-status-tag inactive" style={{ background: 'rgba(100, 116, 139, 0.15)', color: '#94a3b8', border: '1px solid rgba(100, 116, 139, 0.3)' }}>
+                              INACTIVE
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td>
                         <button

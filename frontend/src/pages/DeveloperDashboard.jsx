@@ -194,6 +194,52 @@ export default function DeveloperDashboard() {
     }
   };
 
+  // Helper: Extract failure screenshot URL from multiple potential fields
+  const extractFailureScreenshot = (app) => {
+    if (!app) return null;
+    if (app.failure_screenshot_url) return app.failure_screenshot_url;
+    if (app.screenshot_url) return app.screenshot_url;
+    const reason = String(app.failure_reason || '');
+    const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+    if (match) return match[1] || match[0];
+    return null;
+  };
+
+  // Helper: Human-friendly root cause explanation
+  const getFailureExplanation = (reasonRaw, stoppedBlock) => {
+    const r = String(reasonRaw || '').toLowerCase();
+    if (r.includes('wizard_did_not_reach_review')) {
+      return 'The Workday wizard halted before reaching the final Review & Submit step. An unanswered mandatory question or rejected attachment on an earlier step blocked form advancement.';
+    }
+    if (r.includes('authentication failed') || r.includes('auth_failed')) {
+      return 'Workday candidate sign-in failed. Candidate account password, email verification, or captcha security challenge could not be completed.';
+    }
+    if (r.includes('zoho') || r.includes('mailbox')) {
+      return 'Zoho Mail reader could not retrieve candidate verification OTP or password reset link within the timeout window.';
+    }
+    if (r.includes('closed') || r.includes('context') || r.includes('target page')) {
+      return 'The browser page or browser session was closed or disconnected while the automation was in progress.';
+    }
+    if (r.includes('timeout') || r.includes('stalled')) {
+      return 'Page interaction or element selection exceeded the allowed timeout threshold.';
+    }
+    return `The automation encountered an issue at ${stoppedBlock}. Check the job link and error reason for missing profile answers.`;
+  };
+
+  // Helper: Live operator status considering 3-minute disconnect window
+  const getOperatorEffectiveStatus = (op) => {
+    if (!op) return 'inactive';
+    const raw = (op.status || '').toLowerCase();
+    if (raw === 'logged_out') return 'logged_out';
+    if (raw !== 'active') return 'inactive';
+    if (!op.updated_at && !op.last_sign_in) return 'inactive';
+    const last = new Date(op.updated_at || op.last_sign_in).getTime();
+    if (Date.now() - last > 3 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 3 minutes
+    }
+    return 'active';
+  };
+
   // Operator lookup maps
   const operatorMap = useMemo(() => {
     const map = new Map();
@@ -507,9 +553,28 @@ export default function DeveloperDashboard() {
                       </span>
                     </td>
                     <td>
-                      <span className={`video-status-tag ${op.status === 'active' ? 'active' : 'inactive'}`}>
-                        {op.status.toUpperCase()}
-                      </span>
+                      {(() => {
+                        const eff = getOperatorEffectiveStatus(op);
+                        if (eff === 'active') {
+                          return (
+                            <span className="video-status-tag active" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                              ACTIVE
+                            </span>
+                          );
+                        }
+                        if (eff === 'logged_out') {
+                          return (
+                            <span className="video-status-tag inactive" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                              LOGGED OUT
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="video-status-tag inactive" style={{ background: 'rgba(100, 116, 139, 0.15)', color: '#94a3b8', border: '1px solid rgba(100, 116, 139, 0.3)' }}>
+                            INACTIVE
+                          </span>
+                        );
+                      })()}
                     </td>
                     <td>
                       <button
@@ -659,17 +724,17 @@ export default function DeveloperDashboard() {
             </span>
           </div>
 
-          <div className="video-table-container">
-            <table className="video-data-table">
+          <div className="video-table-container" style={{ overflowX: 'auto', width: '100%' }}>
+            <table className="video-data-table" style={{ tableLayout: 'fixed', width: '100%', minWidth: '980px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  <th>CLIENT AWL-ID &amp; NAME</th>
-                  <th>CA-ID &amp; EMAIL</th>
-                  <th>MANAGER ID / NAME</th>
-                  <th>SHORTENED JOB URL</th>
-                  <th>STOPPED AT BLOCK</th>
-                  <th>FAILURE SCREENSHOT</th>
-                  <th>FAILURE LOG / ERROR MESSAGE</th>
+                  <th style={{ width: '15%' }}>CLIENT AWL-ID</th>
+                  <th style={{ width: '17%' }}>CA &amp; MANAGER</th>
+                  <th style={{ width: '13%' }}>JOB POSTING</th>
+                  <th style={{ width: '16%' }}>STOPPED AT</th>
+                  <th style={{ width: '23%' }}>FAILURE REASON</th>
+                  <th style={{ width: '8%' }}>SHOT</th>
+                  <th style={{ width: '8%' }}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
@@ -682,7 +747,7 @@ export default function DeveloperDashboard() {
                     const caName = op?.name || caEmail.split('@')[0];
                     const mgrName = op?.manager_name || (op?.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : 'Ramakrishna Tejavath');
                     const stoppedBlock = resolveStoppedBlock(app);
-                    const screenshotUrl = app.failure_screenshot_url || app.screenshot_url;
+                    const screenshotUrl = extractFailureScreenshot(app);
 
                     return (
                       <tr key={app.id}>
@@ -699,77 +764,105 @@ export default function DeveloperDashboard() {
                             >
                               {app.applywizz_id || 'UNKNOWN-ID'}
                             </a>
-                            <span style={{ fontSize: '0.8rem', fontWeight: 'bold', color: '#f8fafc', marginTop: '3px' }}>
+                            <span style={{ fontSize: '0.78rem', fontWeight: 'bold', color: '#f8fafc', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {clientMeta?.clientName || app.company || 'Client Profile'}
                             </span>
                           </div>
                         </td>
 
-                        {/* 2. CA-ID & Email */}
+                        {/* 2. CA & Manager */}
                         <td>
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <span style={{ fontWeight: 'bold', color: '#f1f5f9', fontSize: '0.82rem' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                            <span style={{ fontWeight: 'bold', color: '#f1f5f9', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {caName}
                             </span>
-                            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.75rem', color: '#38bdf8' }}>
+                            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.72rem', color: '#38bdf8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {caEmail}
+                            </span>
+                            <span style={{
+                              padding: '1px 6px',
+                              borderRadius: '3px',
+                              fontSize: '0.7rem',
+                              fontWeight: 'bold',
+                              width: 'fit-content',
+                              background: mgrName.toLowerCase().includes('balaji') ? 'rgba(245, 158, 11, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+                              color: mgrName.toLowerCase().includes('balaji') ? '#f59e0b' : '#10b981',
+                              border: mgrName.toLowerCase().includes('balaji') ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
+                            }}>
+                              {mgrName}
                             </span>
                           </div>
                         </td>
 
-                        {/* 3. Manager ID / Name with Link */}
+                        {/* 3. Compact Clickable Job Link */}
                         <td>
-                          <span style={{
-                            padding: '3px 8px',
-                            borderRadius: '4px',
-                            fontSize: '0.78rem',
-                            fontWeight: 'bold',
-                            background: mgrName.toLowerCase().includes('balaji') ? 'rgba(245, 158, 11, 0.15)' : 'rgba(16, 185, 129, 0.15)',
-                            color: mgrName.toLowerCase().includes('balaji') ? '#f59e0b' : '#10b981',
-                            border: mgrName.toLowerCase().includes('balaji') ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
-                          }}>
-                            {mgrName}
-                          </span>
-                        </td>
-
-                        {/* 4. Shortened Job URL */}
-                        <td>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
                             <a
                               href={app.job_url}
                               target="_blank"
                               rel="noreferrer"
-                              className="table-micro-url"
-                              style={{ color: '#93c5fd', textDecoration: 'none' }}
+                              style={{
+                                background: 'rgba(56, 189, 248, 0.1)',
+                                border: '1px solid rgba(56, 189, 248, 0.3)',
+                                color: '#38bdf8',
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.72rem',
+                                fontWeight: 'bold',
+                                textDecoration: 'none',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                whiteSpace: 'nowrap',
+                              }}
                               title={app.job_url}
                             >
-                              {formatShortUrl(app.job_url)}
+                              🔗 Open Job ↗
                             </a>
                             <button
                               type="button"
                               onClick={() => navigator.clipboard.writeText(app.job_url)}
-                              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '0.75rem' }}
-                              title="Copy URL"
+                              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '0.75rem', padding: '2px' }}
+                              title="Copy full job URL"
                             >
                               📋
                             </button>
                           </div>
                         </td>
 
-                        {/* 5. Stopped At Block */}
+                        {/* 4. Stopped At Block */}
                         <td>
                           <span style={{
-                            padding: '3px 8px',
+                            padding: '3px 6px',
                             borderRadius: '4px',
-                            fontSize: '0.75rem',
+                            fontSize: '0.72rem',
                             fontWeight: 'bold',
                             background: 'rgba(239, 68, 68, 0.12)',
                             color: '#f87171',
                             border: '1px solid rgba(239, 68, 68, 0.25)',
                             display: 'inline-block',
                             whiteSpace: 'nowrap',
-                          }}>
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            maxWidth: '100%',
+                          }} title={stoppedBlock}>
                             🛑 {stoppedBlock}
+                          </span>
+                        </td>
+
+                        {/* 5. Failure Reason */}
+                        <td>
+                          <span style={{
+                            fontSize: '0.76rem',
+                            color: '#cbd5e1',
+                            display: '-webkit-box',
+                            WebkitLineClamp: 2,
+                            WebkitBoxOrient: 'vertical',
+                            overflow: 'hidden',
+                            fontFamily: 'monospace',
+                            lineHeight: '1.25',
+                          }} title={app.failure_reason || 'wizard_did_not_reach_review'}>
+                            {app.failure_reason || 'wizard_did_not_reach_review'}
                           </span>
                         </td>
 
@@ -780,53 +873,47 @@ export default function DeveloperDashboard() {
                               type="button"
                               onClick={() => setSelectedErrorScreenshot(screenshotUrl)}
                               style={{
-                                background: '#1e293b',
-                                border: '1px solid #38bdf8',
-                                color: '#38bdf8',
-                                padding: '4px 10px',
+                                background: 'rgba(16, 185, 129, 0.15)',
+                                border: '1px solid rgba(16, 185, 129, 0.4)',
+                                color: '#34d399',
+                                padding: '3px 8px',
                                 borderRadius: '4px',
-                                fontSize: '0.75rem',
+                                fontSize: '0.72rem',
                                 fontWeight: 'bold',
                                 cursor: 'pointer',
-                                display: 'flex',
-                                alignItems: 'center',
-                                gap: '4px',
+                                whiteSpace: 'nowrap',
                               }}
-                              title="View error screenshot from Supabase storage"
+                              title="View error screenshot"
                             >
-                              📸 View Screenshot
+                              📸 View
                             </button>
                           ) : (
-                            <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                              No Screenshot
+                            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+                              None
                             </span>
                           )}
                         </td>
 
-                        {/* 7. Failure Log / Error Message */}
+                        {/* 7. Action: Inspect Log */}
                         <td>
-                          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '8px' }}>
-                            <span style={{
-                              fontSize: '0.78rem',
-                              color: '#cbd5e1',
-                              maxWidth: '240px',
+                          <button
+                            type="button"
+                            onClick={() => setSelectedErrorLog(app)}
+                            style={{
+                              background: 'rgba(59, 130, 246, 0.15)',
+                              border: '1px solid rgba(59, 130, 246, 0.4)',
+                              color: '#60a5fa',
+                              padding: '3px 8px',
+                              borderRadius: '4px',
+                              fontSize: '0.72rem',
+                              fontWeight: 'bold',
+                              cursor: 'pointer',
                               whiteSpace: 'nowrap',
-                              overflow: 'hidden',
-                              textOverflow: 'ellipsis',
-                              fontFamily: 'monospace',
-                            }} title={app.failure_reason || 'Unspecified runtime error'}>
-                              {app.failure_reason || 'Unspecified runtime error'}
-                            </span>
-                            <button
-                              type="button"
-                              className="table-link-btn"
-                              style={{ whiteSpace: 'nowrap', color: '#38bdf8', fontSize: '0.75rem' }}
-                              onClick={() => setSelectedErrorLog(app)}
-                              title="Inspect complete technical log and stack trace"
-                            >
-                              📋 Inspect Log
-                            </button>
-                          </div>
+                            }}
+                            title="Inspect failure details, screenshot, and root cause"
+                          >
+                            🔍 Inspect
+                          </button>
                         </td>
                       </tr>
                     );
@@ -1145,42 +1232,171 @@ export default function DeveloperDashboard() {
               </div>
             </div>
 
-            <div style={{ padding: '1.25rem', overflow: 'auto', background: '#020617', fontFamily: 'JetBrains Mono, monospace' }}>
-              <div style={{ marginBottom: '1rem' }}>
-                <span style={{ color: '#f87171', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
-                  FAILED AT BLOCK:
-                </span>
-                <div style={{ color: '#fca5a5', background: 'rgba(239, 68, 68, 0.1)', padding: '8px 12px', borderRadius: '4px', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
-                  🛑 {resolveStoppedBlock(selectedErrorLog)}
+            <div style={{ padding: '1.25rem', overflow: 'auto', background: '#020617' }}>
+              {/* Card 1: Exact Error Raised & Root Cause */}
+              <div style={{
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.3)',
+                borderRadius: '8px',
+                padding: '14px 16px',
+                marginBottom: '1rem',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
+                  <span style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.9rem' }}>
+                    🛑 FAILED AT: {resolveStoppedBlock(selectedErrorLog)}
+                  </span>
+                  <span style={{
+                    fontSize: '0.75rem',
+                    background: '#ef4444',
+                    color: '#fff',
+                    padding: '2px 8px',
+                    borderRadius: '4px',
+                    fontWeight: 'bold',
+                  }}>
+                    STATUS: FAILED
+                  </span>
+                </div>
+
+                <div style={{
+                  color: '#fee2e2',
+                  fontSize: '0.85rem',
+                  fontFamily: 'monospace',
+                  background: 'rgba(0, 0, 0, 0.4)',
+                  padding: '8px 12px',
+                  borderRadius: '4px',
+                  border: '1px solid rgba(239, 68, 68, 0.2)',
+                  marginBottom: '10px',
+                }}>
+                  <strong>Signal:</strong> {selectedErrorLog.failure_reason || selectedErrorLog.error_category || 'wizard_did_not_reach_review'}
+                </div>
+
+                <div style={{ color: '#cbd5e1', fontSize: '0.82rem', lineHeight: '1.45' }}>
+                  <strong style={{ color: '#38bdf8' }}>Diagnosis &amp; Root Cause:</strong><br />
+                  {getFailureExplanation(selectedErrorLog.failure_reason, resolveStoppedBlock(selectedErrorLog))}
                 </div>
               </div>
 
-              <div style={{ marginBottom: '1rem' }}>
-                <span style={{ color: '#94a3b8', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
-                  FAILURE REASON:
-                </span>
-                <div style={{ color: '#f8fafc', background: '#0f172a', padding: '10px 14px', borderRadius: '4px', border: '1px solid #334155', whiteSpace: 'pre-wrap' }}>
-                  {selectedErrorLog.failure_reason || selectedErrorLog.error_category || 'No explicit stack trace recorded'}
+              {/* Card 2: Failure Screenshot Preview */}
+              <div style={{
+                background: '#0a0f1d',
+                border: '1px solid #1e293b',
+                borderRadius: '8px',
+                padding: '14px 16px',
+                marginBottom: '1rem',
+              }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                  <span style={{ color: '#38bdf8', fontWeight: 'bold', fontSize: '0.88rem' }}>
+                    📸 Failure Screenshot
+                  </span>
+                  {extractFailureScreenshot(selectedErrorLog) && (
+                    <a
+                      href={extractFailureScreenshot(selectedErrorLog)}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ color: '#38bdf8', fontSize: '0.78rem', textDecoration: 'underline' }}
+                    >
+                      Open Full Size ↗
+                    </a>
+                  )}
                 </div>
+
+                {extractFailureScreenshot(selectedErrorLog) ? (
+                  <div style={{ textAlign: 'center', background: '#020617', padding: '8px', borderRadius: '6px', border: '1px solid #334155' }}>
+                    <img
+                      src={extractFailureScreenshot(selectedErrorLog)}
+                      alt="Workday failure state"
+                      style={{ maxWidth: '100%', maxHeight: '360px', objectFit: 'contain', borderRadius: '4px' }}
+                    />
+                  </div>
+                ) : (
+                  <div style={{ padding: '16px', background: 'rgba(100, 116, 139, 0.1)', borderRadius: '6px', border: '1px dashed #334155', textAlign: 'center' }}>
+                    <span style={{ color: '#94a3b8', fontSize: '0.82rem' }}>
+                      📸 No screenshot was captured for this legacy run. New runs automatically capture and store browser screenshots into Supabase bucket <code>application-failures</code> upon failure.
+                    </span>
+                  </div>
+                )}
               </div>
 
-              <div>
-                <span style={{ color: '#94a3b8', fontWeight: 'bold', display: 'block', marginBottom: '4px' }}>
-                  COMPLETE APPLICATION PAYLOAD:
-                </span>
+              {/* Card 3: Direct Action Shortcuts */}
+              <div style={{
+                display: 'flex',
+                gap: '10px',
+                flexWrap: 'wrap',
+                background: '#0a0f1d',
+                padding: '12px 16px',
+                borderRadius: '8px',
+                border: '1px solid #1e293b',
+                marginBottom: '1rem',
+              }}>
+                {selectedErrorLog.job_url && (
+                  <a
+                    href={selectedErrorLog.job_url}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      background: '#0284c7',
+                      color: '#ffffff',
+                      textDecoration: 'none',
+                      padding: '6px 14px',
+                      borderRadius: '5px',
+                      fontSize: '0.8rem',
+                      fontWeight: 'bold',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                    }}
+                  >
+                    🌐 Open Workday Job Link ↗
+                  </a>
+                )}
+                {selectedErrorLog.applywizz_id && (
+                  <a
+                    href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(selectedErrorLog.applywizz_id)}`}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      background: '#334155',
+                      color: '#f8fafc',
+                      textDecoration: 'none',
+                      padding: '6px 14px',
+                      borderRadius: '5px',
+                      fontSize: '0.8rem',
+                      fontWeight: 'bold',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                    }}
+                  >
+                    👤 Open Client in CRM ↗
+                  </a>
+                )}
+              </div>
+
+              {/* Card 4: Collapsible Technical Payload */}
+              <details style={{
+                background: '#0a0f1d',
+                border: '1px solid #1e293b',
+                borderRadius: '8px',
+                padding: '10px 14px',
+              }}>
+                <summary style={{ cursor: 'pointer', color: '#64748b', fontSize: '0.78rem', userSelect: 'none' }}>
+                  🔧 View Full Technical Application Payload (JSON)
+                </summary>
                 <pre style={{
                   color: '#93c5fd',
-                  background: '#0a0f1d',
+                  background: '#020617',
                   padding: '12px',
                   borderRadius: '4px',
                   border: '1px solid #1e293b',
-                  fontSize: '0.78rem',
+                  fontSize: '0.76rem',
                   overflow: 'auto',
-                  maxHeight: '300px',
+                  maxHeight: '260px',
+                  marginTop: '10px',
+                  fontFamily: 'monospace',
                 }}>
                   {JSON.stringify(selectedErrorLog, null, 2)}
                 </pre>
-              </div>
+              </details>
             </div>
           </div>
         </div>

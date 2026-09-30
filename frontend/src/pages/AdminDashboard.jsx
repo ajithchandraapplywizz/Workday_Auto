@@ -127,13 +127,27 @@ export default function AdminDashboard() {
     }
   };
 
+  // Helper: Live operator status considering 3-minute disconnect window
+  const getOperatorEffectiveStatus = (op) => {
+    if (!op) return 'inactive';
+    const raw = (op.status || '').toLowerCase();
+    if (raw === 'logged_out') return 'logged_out';
+    if (raw !== 'active') return 'inactive';
+    if (!op.updated_at && !op.last_sign_in) return 'inactive';
+    const last = new Date(op.updated_at || op.last_sign_in).getTime();
+    if (Date.now() - last > 3 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 3 minutes
+    }
+    return 'active';
+  };
+
   // Dynamic counts for Active / Inactive operators
   const activeOpsCount = useMemo(() => {
-    return operators.filter((o) => (o.status || '').toLowerCase() === 'active').length;
+    return operators.filter((o) => getOperatorEffectiveStatus(o) === 'active').length;
   }, [operators]);
 
   const inactiveOpsCount = useMemo(() => {
-    return operators.filter((o) => (o.status || '').toLowerCase() !== 'active').length;
+    return operators.filter((o) => getOperatorEffectiveStatus(o) !== 'active').length;
   }, [operators]);
 
   // Clickable Active / Inactive operators tile navigation
@@ -150,7 +164,8 @@ export default function AdminDashboard() {
         op.name?.toLowerCase().includes(operatorSearch.toLowerCase()) ||
         op.email?.toLowerCase().includes(operatorSearch.toLowerCase());
 
-      const isOpActive = (op.status || '').toLowerCase() === 'active';
+      const eff = getOperatorEffectiveStatus(op);
+      const isOpActive = eff === 'active';
       const matchesStatus =
         operatorFilter === 'All' ||
         (operatorFilter === 'active' && isOpActive) ||
@@ -385,10 +400,10 @@ export default function AdminDashboard() {
               <span className="vkpi-val">{kpis.submitted}</span>
             </div>
 
-            {/* Applied / In Progress */}
+            {/* Applied (Submitted) */}
             <div className="video-kpi-box">
               <span className="vkpi-label">APPLIED</span>
-              <span className="vkpi-val">{kpis.applying}</span>
+              <span className="vkpi-val">{kpis.submitted}</span>
             </div>
 
             {/* Running */}
@@ -552,9 +567,28 @@ export default function AdminDashboard() {
                         <td>{op.email}</td>
                         <td>{op.role || 'CA'}</td>
                         <td>
-                          <span className={`video-status-tag ${(op.status || 'offline').toLowerCase()}`}>
-                            {(op.status || 'offline').toUpperCase()}
-                          </span>
+                          {(() => {
+                            const eff = getOperatorEffectiveStatus(op);
+                            if (eff === 'active') {
+                              return (
+                                <span className="video-status-tag active" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                  ACTIVE
+                                </span>
+                              );
+                            }
+                            if (eff === 'logged_out') {
+                              return (
+                                <span className="video-status-tag inactive" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                  LOGGED OUT
+                                </span>
+                              );
+                            }
+                            return (
+                              <span className="video-status-tag inactive" style={{ background: 'rgba(100, 116, 139, 0.15)', color: '#94a3b8', border: '1px solid rgba(100, 116, 139, 0.3)' }}>
+                                INACTIVE
+                              </span>
+                            );
+                          })()}
                         </td>
                         <td>{mgr?.name || 'Assigned Manager'}</td>
                         <td style={{ textAlign: 'center' }}>

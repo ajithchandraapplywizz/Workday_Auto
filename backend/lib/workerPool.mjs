@@ -21,7 +21,7 @@ import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
-import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds } from './supabaseClient.mjs';
+import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, uploadStorageScreenshot, getActiveOperators } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -191,8 +191,17 @@ export async function executeWorkerTask({
           return { status: 'skipped', reason: 'zoho_email_not_connected' };
         }
         console.log(`   ❌ [${workerId}] Authentication failed for ${workdayEmail}.`);
+        let authShotUrl = null;
+        try {
+          if (page && !page.isClosed()) {
+            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+            if (buf) {
+              authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_auth_fail.jpg`, buf);
+            }
+          }
+        } catch {}
         await browser.close().catch(() => {});
-        if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'auth_failed' });
+        if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'auth_failed', screenshotPath: authShotUrl });
         await upsertSupabaseApplication({
           applywizzId,
           jobUrl,
@@ -200,8 +209,10 @@ export async function executeWorkerTask({
           roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
           status: 'failed',
           failureReason: 'Authentication failed',
+          failureScreenshotUrl: authShotUrl,
+          stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
         }).catch(() => {});
-        return { status: 'auth_failed' };
+        return { status: 'auth_failed', screenshotUrl: authShotUrl };
       }
     }
 
@@ -290,15 +301,33 @@ export async function executeWorkerTask({
     }
 
     // Step F: Record status to Supabase
+    let completionShotUrl = null;
+    try {
+      if (page && !page.isClosed()) {
+        const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+        if (buf) {
+          const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
+            ? 'application-successes'
+            : 'application-failures';
+          completionShotUrl = await uploadStorageScreenshot(bucket, `${applywizzId}_${Date.now()}_${status}.jpg`, buf);
+        }
+      }
+    } catch {}
+
+    const isSuccessStatus = (status === 'submitted' || status === 'reached-review' || status === 'reached_review');
+    const stoppedBlock = isSuccessStatus
+      ? 'Step 5: Review & Submit'
+      : (profile._currentStep || 'Step 3: Application Questions');
+
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl,
       company,
       roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
       status,
-      failureReason: status === 'submitted' || status === 'reached-review' || status === 'reached_review'
-        ? null
-        : `Stopped at status: ${status}`,
+      failureReason: isSuccessStatus ? null : `wizard_did_not_reach_review (stopped at ${stoppedBlock})`,
+      failureScreenshotUrl: isSuccessStatus ? null : completionShotUrl,
+      stoppedAtStep: isSuccessStatus ? null : stoppedBlock,
     }).catch(() => {});
 
     if (queueTaskId) {
@@ -311,17 +340,37 @@ export async function executeWorkerTask({
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
         preResolvedAnswers: answersMap,
+        screenshotPath: completionShotUrl,
       });
     }
 
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
-    return { status, cacheHit };
+    return { status, cacheHit, screenshotUrl: completionShotUrl };
   } catch (err) {
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
+    let errShotUrl = null;
+    try {
+      if (page && !page.isClosed()) {
+        const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+        if (buf) {
+          errShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_error.jpg`, buf);
+        }
+      }
+    } catch {}
     if (queueTaskId) {
-      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err.message });
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err.message, screenshotPath: errShotUrl });
     }
-    return { status: 'error', error: err.message, cacheHit };
+    await upsertSupabaseApplication({
+      applywizzId,
+      jobUrl,
+      company,
+      roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+      status: 'failed',
+      failureReason: err.message,
+      failureScreenshotUrl: errShotUrl,
+      stoppedAtStep: profile._currentStep || 'Runtime Exception',
+    }).catch(() => {});
+    return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl };
   } finally {
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
     try { await browser.close(); } catch {}
@@ -584,6 +633,23 @@ export async function runQueueWorkerPool({
     const workerId = `Worker-${workerNumber}`;
 
     while (taskPointer < taskLimit) {
+      // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 3-min grace on browser disconnect) ──
+      if (activeCaOnly && caEmails?.length) {
+        try {
+          const ops = await getActiveOperators().catch(() => []);
+          const ca = ops.find((o) => caEmails.some((e) => e.toLowerCase() === (o.email || '').toLowerCase().trim()));
+          if (!ca || (ca.status || '').toLowerCase() === 'logged_out' || (ca.status || '').toLowerCase() === 'inactive') {
+            console.log(`   ⏹ [${workerId}] CA has logged out or is inactive. Terminating worker pool.`);
+            break;
+          }
+          const lastActivity = new Date(ca.updated_at || ca.last_sign_in || 0).getTime();
+          if (Date.now() - lastActivity > 3 * 60 * 1000) {
+            console.log(`   ⏹ [${workerId}] CA browser session disconnected for > 3 minutes. Terminating worker pool.`);
+            break;
+          }
+        } catch {}
+      }
+
       // Atomically grab next task index
       const myIndex = taskPointer++;
       if (myIndex >= taskLimit) break;
