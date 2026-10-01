@@ -1934,25 +1934,16 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const nativeValue = getTodayISODate(dynamicDateAction.timeZone);
       const fillValue = await dateInput.evaluate((el) => el.type || 'text').catch(() => 'text');
       const targetValue = fillValue === 'date' ? nativeValue : valueToFill;
-      await dateInput.scrollIntoViewIfNeeded().catch(() => {});
       if (spinButtonCount >= 3) {
         const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        await selectCurrentDateFromCalendar(page, fieldBox, dateInput, dynamicDateAction.timeZone).catch(() => false);
         await spinButtons.nth(0).fill(String(Number(month)));
         await spinButtons.nth(1).fill(String(Number(day)));
         await spinButtons.nth(2).fill(year);
       } else if (fillValue === 'date') {
         await dateInput.fill(targetValue);
       } else {
-        const selectedFromCalendar = await selectCurrentDateFromCalendar(
-          page,
-          fieldBox,
-          dateInput,
-          dynamicDateAction.timeZone
-        );
-        if (!selectedFromCalendar) {
-          await dateInput.fill(targetValue);
-        }
+        await dateInput.click({ force: true }).catch(() => {});
+        await dateInput.fill(targetValue).catch(() => {});
       }
       await dateInput.press('Tab');
       const expectedPattern = fillValue === 'date' ? /^\d{4}-\d{2}-\d{2}$/ : /^\d{2}\/\d{2}\/\d{4}$/;

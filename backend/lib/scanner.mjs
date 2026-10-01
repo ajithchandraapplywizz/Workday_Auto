@@ -16,7 +16,7 @@
 import { chromium } from 'playwright';
 import { writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
-import { discoverApplicationForm, detectATS, isWorkdayWizardVisible } from './discovery.mjs';
+import { discoverApplicationForm, detectATS, isWorkdayWizardVisible, isWorkdayJobPageMissing } from './discovery.mjs';
 import { handleWorkday } from './workday.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 
@@ -404,8 +404,21 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === 'about:blank' || currentUrl.startsWith('data:')) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch { /* partial load OK */ }
-      await page.waitForTimeout(2000);
+      try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch { /* partial load OK */ }
+      await page.waitForTimeout(600);
+    }
+
+    if (await isWorkdayJobPageMissing(page)) {
+      console.log(`   ❌ [Scanner] Job page does not exist (dead/expired URL) — skipping: ${url}`);
+      return {
+        url: page.url(),
+        original_url: url,
+        jobMissing: true,
+        reason: 'job_expired_or_not_found',
+        field_count: 0,
+        fields: [],
+        submit_buttons: [],
+      };
     }
 
     const ats = detectATS(url);
@@ -420,8 +433,8 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     if (ats === 'workday') {
       if (await isWorkdayWizardVisible(page)) {
         console.log('   Already on Workday application form wizard — skipping authentication.');
-        try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-        await page.waitForTimeout(2000);
+        try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+        await page.waitForTimeout(600);
         try {
           await page.waitForSelector('input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
         } catch {}
@@ -449,8 +462,8 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           };
         }
 
-        try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-        await page.waitForTimeout(3000);
+        try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+        await page.waitForTimeout(600);
         try {
           await page.waitForSelector('input:not([type="hidden"]), select, textarea, [data-automation-id*="form"], [data-automation-id*="page"], [data-automation-id*="Section"], button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
         } catch {}

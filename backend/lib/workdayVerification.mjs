@@ -384,9 +384,9 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     await page.keyboard.press('Enter').catch(() => {});
   }
 
-  await page.waitForTimeout(4000);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-  await page.waitForTimeout(2000);
+  await page.waitForTimeout(600);
+  try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+  await page.waitForTimeout(400);
 
   // 4. Post-reset check: If application wizard is already reached, return immediately
   if (typeof isWorkdayWizardVisible === 'function' && await isWorkdayWizardVisible(page)) {
@@ -417,8 +417,8 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
   if (postActionBtn && !await isInNavOrHeader(postActionBtn)) {
     console.log('   🔗 [WorkdayBot] Clicking post-reset action button ("Sign In" / "Continue")...');
     await postActionBtn.click({ force: true }).catch(() => postActionBtn.evaluate(el => el.click()));
-    await page.waitForTimeout(3000);
-    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+    await page.waitForTimeout(600);
+    try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
   }
 
   // 6. Post-reset check: If login form appears (Email + Password), automatically fill credentials and submit
@@ -441,8 +441,8 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     await pwdInp.fill(targetPassword);
     await page.waitForTimeout(200);
     await submitSignIn.click({ force: true }).catch(() => submitSignIn.evaluate(el => el.click()));
-    await page.waitForTimeout(4000);
-    try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+    await page.waitForTimeout(800);
+    try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
   }
 
   // 7. Post-reset check: If URL still contains a redirect parameter, navigate directly to destination
@@ -456,8 +456,8 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
           const targetUrl = new URL(redirectParam, u.origin).toString();
           console.log(`   🚀 [WorkdayBot] Navigating directly to post-reset redirect destination: ${targetUrl}`);
           await page.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+          await page.waitForTimeout(600);
+          try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
         }
       }
     }
@@ -691,8 +691,8 @@ export async function executeWorkdayForgotPassword(page, { email, password, comp
 
   console.log('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
   await forgotBtn.click({ force: true }).catch(() => forgotBtn.evaluate(el => el.click()));
-  await page.waitForTimeout(3000);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await page.waitForTimeout(600);
+  try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
 
   // 2. Wait for Forgot Password form (email input and Reset Password button)
   try {
@@ -736,8 +736,8 @@ export async function executeWorkdayForgotPassword(page, { email, password, comp
   const requestTime = Date.now() - 30000;
   console.log('   📩 [WorkdayBot] Submitting client email for password reset instructions...');
   await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-  await page.waitForTimeout(3000);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await page.waitForTimeout(600);
+  try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
 
   // 5. Poll Zoho Mail Reader for the reset link
   console.log('   ⏳ [WorkdayBot] Polling Zoho Mail Reader for password reset email link...');

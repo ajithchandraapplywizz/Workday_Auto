@@ -530,32 +530,22 @@ function numbersEqual(actual, expected) {
 async function typeSegment(page, locator, digits) {
   if (!(await locator.count())) return false;
   const wanted = String(digits);
-  const variants = [wanted];
-  if (wanted.startsWith('0') && wanted.length === 2) variants.push(String(Number(wanted)));
 
   await locator.scrollIntoViewIfNeeded().catch(() => {});
 
-  for (const variant of variants) {
-    await locator.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(70);
-    await locator.press('Control+A').catch(() => {});
-    await locator.press('Delete').catch(() => {});
-    await locator.press('Backspace').catch(() => {});
-    for (const ch of variant) {
-      await locator.press(ch).catch(() => {});
-      await page.waitForTimeout(35);
-    }
-    if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
-
-    await locator.click({ force: true }).catch(() => {});
-    await locator.press('Control+A').catch(() => {});
-    await locator.pressSequentially(variant, { delay: 50 }).catch(() => {});
-    if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
-  }
-
+  // 1. Direct fast fill
+  await locator.click({ force: true }).catch(() => {});
   await locator.fill(wanted).catch(() => {});
   if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
 
+  // 2. Rapid keystrokes if spinbutton requires key sequence
+  await locator.click({ force: true }).catch(() => {});
+  await locator.press('Control+A').catch(() => {});
+  await locator.press('Backspace').catch(() => {});
+  await locator.pressSequentially(wanted, { delay: 15 }).catch(() => {});
+  if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
+
+  // 3. DOM property setter fallback
   await locator.evaluate((el, v) => {
     el.focus();
     const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');

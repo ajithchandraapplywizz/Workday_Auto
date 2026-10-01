@@ -25,6 +25,33 @@ import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, l
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
+const DEAD_JOB_URLS = new Set();
+
+async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId) {
+  DEAD_JOB_URLS.add(jobUrl);
+  console.log(`   🚫 [${workerId}] Purging dead job URL from queue for ALL clients: "${jobUrl}"`);
+  try {
+    const { getSupabaseClient } = await import('./supabaseClient.mjs');
+    const supabase = getSupabaseClient();
+    if (supabase) {
+      const { data, error } = await supabase.from('batch_job_queue')
+        .update({
+          status: 'failed',
+          error_message: 'job_expired_or_not_found',
+          completed_at: new Date().toISOString()
+        })
+        .eq('job_url', jobUrl)
+        .eq('status', 'pending')
+        .select('id, applywizz_id');
+      if (!error && data?.length) {
+        console.log(`   ✅ [${workerId}] Cancelled/purged ${data.length} pending task(s) for dead URL across all clients.`);
+      }
+    }
+  } catch (err) {
+    console.log(`   ⚠️ [${workerId}] Queue purge notice: ${err.message}`);
+  }
+}
+
 function findFilePath(relPath) {
   const candidates = [
     resolve(process.cwd(), relPath),
@@ -72,6 +99,22 @@ export async function executeWorkerTask({
     console.error(`   ❌ [${workerId}] Invalid Workday URL: ${check.reason}`);
     if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: check.reason });
     return { status: 'invalid_url', error: check.reason };
+  }
+
+  if (DEAD_JOB_URLS.has(jobUrl)) {
+    console.log(`   ⚡ [${workerId}] Skipping ${applywizzId} for "${jobUrl}" — URL verified dead/expired for all clients.`);
+    if (queueTaskId) {
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found' });
+    }
+    await upsertSupabaseApplication({
+      applywizzId,
+      jobUrl,
+      company,
+      roleTitle: 'Workday Application',
+      status: 'failed',
+      failureReason: 'Job page does not exist (dead/expired URL)',
+    }).catch(() => {});
+    return { status: 'failed', reason: 'job_expired_or_not_found' };
   }
 
   // 2. Load isolated Client Profile for this applywizzId
@@ -163,6 +206,26 @@ export async function executeWorkerTask({
       mode: 'signin',
       profile,
     });
+
+    if (scan.jobMissing || scan.reason === 'job_expired_or_not_found') {
+      console.log(`   ❌ [${workerId}] Dead / expired job posting detected ("The page you are looking for doesn't exist" / "Search for Jobs").`);
+      await purgeDeadJobUrlAcrossQueue(jobUrl, workerId);
+
+      await browser.close().catch(() => {});
+      if (queueTaskId) {
+        await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found' });
+      }
+      await upsertSupabaseApplication({
+        applywizzId,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+        status: 'failed',
+        failureReason: 'Job page does not exist (dead/expired URL)',
+      }).catch(() => {});
+
+      return { status: 'failed', reason: 'job_expired_or_not_found' };
+    }
 
     const extractedRole = await extractJobRoleFromDom(page, jobUrl);
     if (extractedRole) {
@@ -256,6 +319,11 @@ export async function executeWorkerTask({
       dryRun,
       isBatch: true,
     });
+
+    if (status === 'job_not_found') {
+      console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — purging queue for all clients.`);
+      await purgeDeadJobUrlAcrossQueue(jobUrl, workerId);
+    }
 
     // Step E: Save newly discovered form schema to Supabase if unique link
     const combinedFields = [

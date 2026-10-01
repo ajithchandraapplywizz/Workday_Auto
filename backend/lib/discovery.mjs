@@ -177,12 +177,16 @@ export function detectATS(url) {
 export async function isWorkdayJobPageMissing(page) {
   return await page.evaluate(() => {
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    const missing = /the page you are looking for doesn'?t exist/i.test(text)
-      || /this job (?:posting )?has (?:been )?(?:filled|closed|expired|removed)/i.test(text)
+    if (!text) return false;
+    const hasNotExist = /the page you are looking for doesn'?t exist/i.test(text)
+      || /page (?:you are looking for )?doesn'?t exist/i.test(text);
+    const hasFilledOrExpired = /this job (?:posting )?has (?:been )?(?:filled|closed|expired|removed)/i.test(text)
       || /job (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
-      || /position (?:has been )?filled/i.test(text);
-    const searchJobs = /search for jobs/i.test(text);
-    return missing && (searchJobs || /doesn'?t exist/i.test(text));
+      || /position (?:has been )?filled/i.test(text)
+      || /no longer accepting applications/i.test(text);
+    const hasSearchJobs = /search for jobs/i.test(text);
+
+    return hasNotExist || hasFilledOrExpired || (hasSearchJobs && /doesn'?t exist|not found|expired|no longer/i.test(text));
   }).catch(() => false);
 }
 

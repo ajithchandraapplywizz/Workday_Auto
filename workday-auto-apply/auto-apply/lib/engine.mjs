@@ -2705,12 +2705,12 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === 'about:blank' || currentUrl.startsWith('data:')) {
       await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch { /* partial load OK */ }
-      await page.waitForTimeout(800);
-      if (await isWorkdayJobPageMissing(page)) {
-        console.log('❌ Job page does not exist (dead/expired URL) — skipping');
-        return 'job_not_found';
-      }
+      try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch { /* partial load OK */ }
+      await page.waitForTimeout(400);
+    }
+    if (await isWorkdayJobPageMissing(page)) {
+      console.log('❌ Job page does not exist (dead/expired URL) — skipping');
+      return 'job_not_found';
     }
 
     const profile = profileIn || await loadProfile().catch(() => ({}));
