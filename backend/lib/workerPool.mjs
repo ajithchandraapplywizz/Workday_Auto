@@ -148,6 +148,7 @@ export async function executeWorkerTask({
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   });
   const page = await context.newPage();
+  let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
     // Step A: Scan Form
@@ -163,8 +164,9 @@ export async function executeWorkerTask({
       profile,
     });
 
-    const roleTitle = await extractJobRoleFromDom(page, jobUrl);
-    if (roleTitle) {
+    const extractedRole = await extractJobRoleFromDom(page, jobUrl);
+    if (extractedRole) {
+      roleTitle = extractedRole;
       profile._jobTitle = roleTitle;
       profile._roleTitle = roleTitle;
       console.log(`   [${workerId}] 💼 Role: ${roleTitle}`);

@@ -182,16 +182,36 @@ export function AuthProvider({ children }) {
       });
     }
 
-    // Update operators table to reflect active session
+    // Update or insert operators table to reflect active session
     try {
-      await supabase
+      const { data: existingOp } = await supabase
         .from('operators')
-        .update({
-          status: 'active',
-          last_sign_in: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .ilike('email', normalizedEmail);
+        .select('id')
+        .ilike('email', normalizedEmail)
+        .maybeSingle();
+
+      if (existingOp) {
+        await supabase
+          .from('operators')
+          .update({
+            status: 'active',
+            last_sign_in: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', existingOp.id);
+      } else {
+        await supabase
+          .from('operators')
+          .insert({
+            email: normalizedEmail,
+            name: resolvedProfile.name || normalizedEmail.split('@')[0],
+            role: resolvedProfile.role || 'operator',
+            manager_id: resolvedProfile.manager_id || null,
+            status: 'active',
+            last_sign_in: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+      }
     } catch (err) {
       console.warn('Failed to update operator active status:', err);
     }

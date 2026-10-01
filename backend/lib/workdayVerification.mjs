@@ -477,9 +477,34 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
  * @param {string} [options.company] - Company name (e.g. "nvidia", "target")
  * @param {number} [options.startTime] - Timestamp (Date.now()) recorded when request was submitted
  * @param {number} [options.timeoutMs=60000] - Max wait time (default: 60s)
- * @returns {Promise<{ success: boolean, type: 'link'|'code', url?: string, code?: string }>}
- */
+async function checkIfAlreadyOnApplicationWizard(page) {
+  if (!page || page.isClosed()) return false;
+  if (await isWorkdayWizardVisible(page).catch(() => false)) return true;
+  return await page.evaluate(() => {
+    const text = (document.body?.innerText || '').toLowerCase();
+    const hasNextBtn = Boolean(
+      document.querySelector('[data-automation-id="bottom-navigation-next-button"]') ||
+      document.querySelector('[data-automation-id="next-button"]') ||
+      document.querySelector('[data-automation-id="progressBar"]')
+    );
+    const hasFormInputs = Boolean(
+      document.querySelector('input[data-automation-id*="legalName" i]') ||
+      document.querySelector('input[data-automation-id*="address" i]') ||
+      document.querySelector('input[data-automation-id*="phone" i]') ||
+      document.querySelector('[data-automation-id*="formField"]')
+    );
+    const hasStepText = text.includes('my information') || text.includes('my experience') || text.includes('application questions') || text.includes('voluntary disclosures');
+    return (hasNextBtn || hasFormInputs) && (hasStepText || hasNextBtn);
+  }).catch(() => false);
+}
+
 export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 60000 }) {
+  // Fast path: if the page is already on the application form (e.g. My Information), skip polling immediately!
+  if (await checkIfAlreadyOnApplicationWizard(page)) {
+    console.log('   🎉 [WorkdayBot] Application Wizard / My Information is ALREADY ACTIVE! Skipping email verification polling.');
+    return { success: true, type: 'direct_wizard', onWizard: true };
+  }
+
   const cutoff = startTime ? (startTime - 60000) : (Date.now() - 30 * 60 * 1000);
   const pollInterval = 3000; // 3 seconds
   const deadline = Date.now() + timeoutMs;
@@ -489,6 +514,10 @@ export async function resolveWorkdayVerification(page, { email, password, compan
 
   let notConnectedCount = 0;
   while (Date.now() < deadline) {
+    if (await checkIfAlreadyOnApplicationWizard(page)) {
+      console.log('   🎉 [WorkdayBot] Application Wizard / My Information detected while waiting! Advancing to form fill immediately.');
+      return { success: true, type: 'direct_wizard', onWizard: true };
+    }
     await page.waitForTimeout(pollInterval);
     try {
       const rawHost = process.env.ZOHO_MAIL_READER_HOST || process.env.ZOHO_MAIL_READER_URL || '127.0.0.1';

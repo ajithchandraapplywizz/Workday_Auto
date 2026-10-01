@@ -41,6 +41,9 @@ const workersIdx = args.indexOf('--workers');
 const CONCURRENCY = workersIdx !== -1 && args[workersIdx + 1] ? Number(args[workersIdx + 1]) || 10 : 10;
 const DRY_RUN = args.includes('--dry-run');
 const HEADLESS = !args.includes('--headful');
+const FORCE_DISPATCH = args.includes('--force');
+const targetCaIdx = args.indexOf('--ca');
+const TARGET_CA = targetCaIdx !== -1 && args[targetCaIdx + 1] ? args[targetCaIdx + 1].trim().toLowerCase() : null;
 const POLL_INTERVAL_MS = 15_000;
 const SYNC_WAIT_MS = 8_000;
 const HEARTBEAT_MS = 60_000;
@@ -54,6 +57,7 @@ function todayStr() {
 }
 
 function alreadyDispatchedToday(caEmail) {
+  if (FORCE_DISPATCH) return false;
   return dispatchedToday.get(caEmail.toLowerCase()) === todayStr();
 }
 
@@ -127,12 +131,25 @@ async function pollLoop() {
     try {
       resetIfNewDay();
       const activeOps = await getActiveOperators();
+      // Sort so the CA who is currently online/active in the browser is prioritized first
+      activeOps.sort((a, b) => {
+        const timeA = Math.max(new Date(a.updated_at || 0).getTime(), new Date(a.last_sign_in || 0).getTime());
+        const timeB = Math.max(new Date(b.updated_at || 0).getTime(), new Date(b.last_sign_in || 0).getTime());
+        return timeB - timeA;
+      });
+
       const newLogins = activeOps.filter((op) => {
         const email = (op.email || '').toLowerCase().trim();
         if (!email || email === '_daemon_') return false;
+        if (TARGET_CA && email !== TARGET_CA) return false;
         if (alreadyDispatchedToday(email)) return false;
-        const lastIn = new Date(op.last_sign_in || 0).getTime();
-        return Date.now() - lastIn < 5 * 60 * 1000;
+        const lastIn = Math.max(
+          new Date(op.last_sign_in || 0).getTime(),
+          new Date(op.updated_at || 0).getTime()
+        );
+        const ageSec = (Date.now() - lastIn) / 1000;
+        // Strictly require the CA to be actively online within the last 3 minutes (180s)
+        return ageSec <= 180;
       });
 
       if (newLogins.length > 0) {

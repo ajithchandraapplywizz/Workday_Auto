@@ -256,6 +256,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
   }
 
   // 3. Resolve email verification
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   ✅ Already on application form wizard after account creation — skipping email verification.');
+    return finishSuccessfulLogin(page, mode, profile);
+  }
+
   // Workday account creation sends an activation link or OTP to the applicant's email.
   const isVerifPage = await isWorkdayVerificationPage(page);
   console.log(`   ${isVerifPage ? '📩 Workday page requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
@@ -272,6 +277,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
 
   if (verified?.reason === 'mailbox_not_connected') {
     return 'mailbox_not_connected';
+  }
+
+  if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
+    console.log('   ✅ Application wizard active — proceeding directly to form fill!');
+    return finishSuccessfulLogin(page, mode, profile);
   }
 
   if (verified?.success) {
@@ -744,6 +754,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
       }
 
       if (loginResult === 'needs-verification') {
+        if (await isWorkdayWizardVisible(page)) {
+          console.log('   ✅ Already on application form wizard — skipping verification.');
+          return finishSuccessfulLogin(page, mode, profile);
+        }
         console.log('   📩 Workday reports account requires email verification. Resolving via Zoho Mail Reader...');
         const company = extractWorkdayCompanyName(page.url());
         const verified = await resolveWorkdayVerification(page, {
@@ -758,6 +772,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
         if (verified?.reason === 'mailbox_not_connected') {
           return 'mailbox_not_connected';
+        }
+
+        if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
+          console.log('   ✅ Application wizard active — proceeding directly to form fill!');
+          return finishSuccessfulLogin(page, mode, profile);
         }
 
         if (verified?.success) {
@@ -845,6 +864,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         }
 
         if (loggedIn === 'needs-verification') {
+          if (await isWorkdayWizardVisible(page)) {
+            console.log('   ✅ Already on application form wizard — skipping verification.');
+            return finishSuccessfulLogin(page, mode, profile);
+          }
           console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
           const retryVerified = await resolveWorkdayVerification(page, {
             email,
@@ -856,6 +879,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
           if (retryVerified?.reason === 'mailbox_not_connected') {
             return 'mailbox_not_connected';
+          }
+
+          if (retryVerified?.type === 'direct_wizard' || retryVerified?.onWizard || await isWorkdayWizardVisible(page)) {
+            console.log('   ✅ Application wizard active — proceeding directly to form fill!');
+            return finishSuccessfulLogin(page, mode, profile);
           }
 
           if (retryVerified?.success) {
