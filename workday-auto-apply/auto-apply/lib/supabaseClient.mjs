@@ -301,13 +301,20 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
     });
     if (!res.ok) {
       const errText = await res.text().catch(() => '');
-      console.warn(`[Supabase Storage] Upload failed (${res.status}): ${errText}`);
+      console.warn(`[Supabase Storage] Upload to ${bucketName} failed (${res.status}): ${errText}`);
+      if (bucketName !== 'application-failures') {
+        console.log(`[Supabase Storage] Retrying upload to application-failures fallback bucket...`);
+        return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
+      }
       return null;
     }
     const publicUrl = `${url}/storage/v1/object/public/${bucketName}/${filename}`;
     return publicUrl;
   } catch (err) {
     console.warn(`[Supabase Storage] Upload exception: ${err.message}`);
+    if (bucketName !== 'application-failures') {
+      return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
+    }
     return null;
   }
 }

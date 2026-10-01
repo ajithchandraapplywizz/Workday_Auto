@@ -159,6 +159,9 @@ export default function DeveloperDashboard() {
     const stepMatch = rawReason.match(/\[step:\s*([^\]]+)\]/i) || rawReason.match(/stopped at\s+([^)\],]+)/i);
     if (stepMatch) return stepMatch[1].trim();
     const reason = rawReason.toLowerCase();
+    if (reason.includes('expired') || reason.includes("doesn't exist") || reason.includes("not exist") || reason.includes('job_not_found') || reason.includes('404')) {
+      return 'Link Expired';
+    }
     if (reason.includes('auth') || reason.includes('password') || reason.includes('credential') || reason.includes('sign in') || reason.includes('create account')) {
       return 'Auth Gateway (Sign In / Sign Up)';
     }
@@ -212,6 +215,9 @@ export default function DeveloperDashboard() {
   // Helper: Human-friendly root cause explanation
   const getFailureExplanation = (reasonRaw, stoppedBlock) => {
     const r = String(reasonRaw || '').toLowerCase();
+    if (r.includes('expired') || r.includes("doesn't exist") || r.includes('not exist') || r.includes('job_not_found') || r.includes('404') || stoppedBlock === 'Link Expired') {
+      return 'Workday Job Link Expired or removed by employer ("The page you are looking for doesn\'t exist"). This link has been permanently blacklisted across all candidate queues to eliminate wasted worker runs.';
+    }
     if (r.includes('wizard_did_not_reach_review')) {
       return `The Workday wizard halted at "${stoppedBlock}". An unanswered mandatory field, validation error, or step transition check prevented advancement.`;
     }
@@ -681,9 +687,31 @@ export default function DeveloperDashboard() {
                         </a>
                       </td>
                       <td>
-                        <span className={`video-status-tag ${run.status?.toLowerCase() || 'queued'}`}>
-                          {run.status?.toUpperCase() || 'QUEUED'}
-                        </span>
+                        {(() => {
+                          const r = String(run.failure_reason || run.error_message || '').toLowerCase();
+                          const isExpired = run.status?.toLowerCase() === 'job_expired' || run.stopped_at_step === 'Link Expired' || r.includes('expired') || r.includes("doesn't exist") || r.includes('job_not_found');
+                          if (isExpired) {
+                            return (
+                              <span
+                                className="video-status-tag"
+                                style={{
+                                  background: 'rgba(245, 158, 11, 0.18)',
+                                  color: '#f59e0b',
+                                  border: '1px solid rgba(245, 158, 11, 0.4)',
+                                  fontWeight: 'bold',
+                                  letterSpacing: '0.5px'
+                                }}
+                              >
+                                ⚠️ LINK EXPIRED
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className={`video-status-tag ${run.status?.toLowerCase() || 'queued'}`}>
+                              {run.status?.toUpperCase() || 'QUEUED'}
+                            </span>
+                          );
+                        })()}
                       </td>
                       <td>
                         {(() => {
@@ -691,28 +719,44 @@ export default function DeveloperDashboard() {
                           if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
                           const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
                           return (
-                            <a
-                              href={shot}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{
-                                background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                                border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
-                                color: isSuccess ? '#34d399' : '#f87171',
-                                padding: '3px 8px',
-                                borderRadius: '4px',
-                                fontSize: '0.72rem',
-                                fontWeight: 'bold',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title="Click to view application screenshot"
-                            >
-                              📸 {isSuccess ? 'Proof' : 'Fail Shot'} ↗
-                            </a>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedErrorScreenshot(shot)}
+                                style={{
+                                  background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                  border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
+                                  color: isSuccess ? '#34d399' : '#f87171',
+                                  padding: '3px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 'bold',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title="Click to preview screenshot"
+                              >
+                                📸 {isSuccess ? 'Proof' : 'Screenshot'}
+                              </button>
+                              <a
+                                href={shot}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  color: '#38bdf8',
+                                  fontSize: '0.75rem',
+                                  padding: '2px',
+                                  textDecoration: 'none',
+                                  fontWeight: 'bold',
+                                }}
+                                title="Open full image in new tab"
+                              >
+                                ↗
+                              </a>
+                            </div>
                           );
                         })()}
                       </td>
@@ -753,6 +797,7 @@ export default function DeveloperDashboard() {
               className="video-select-filter"
             >
               <option value="All">All Stopped Blocks</option>
+              <option value="Link Expired">⚠️ Link Expired (404 / Removed)</option>
               <option value="Auth Gateway">Auth Gateway (Sign In / Sign Up)</option>
               <option value="Step 1">Step 1: My Information</option>
               <option value="Step 2">Step 2: My Experience</option>
@@ -881,16 +926,16 @@ export default function DeveloperDashboard() {
                             borderRadius: '4px',
                             fontSize: '0.72rem',
                             fontWeight: 'bold',
-                            background: 'rgba(239, 68, 68, 0.12)',
-                            color: '#f87171',
-                            border: '1px solid rgba(239, 68, 68, 0.25)',
+                            background: stoppedBlock === 'Link Expired' ? 'rgba(245, 158, 11, 0.15)' : 'rgba(239, 68, 68, 0.12)',
+                            color: stoppedBlock === 'Link Expired' ? '#f59e0b' : '#f87171',
+                            border: stoppedBlock === 'Link Expired' ? '1px solid rgba(245, 158, 11, 0.35)' : '1px solid rgba(239, 68, 68, 0.25)',
                             display: 'inline-block',
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             maxWidth: '100%',
                           }} title={stoppedBlock}>
-                            🛑 {stoppedBlock}
+                            {stoppedBlock === 'Link Expired' ? '⚠️ Link Expired' : `🛑 ${stoppedBlock}`}
                           </span>
                         </td>
 

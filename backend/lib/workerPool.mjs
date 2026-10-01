@@ -27,19 +27,22 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 
 const DEAD_JOB_URLS = new Set();
 
-async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId) {
+async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId, screenshotUrl = null) {
   DEAD_JOB_URLS.add(jobUrl);
   console.log(`   🚫 [${workerId}] Purging dead job URL from queue for ALL clients: "${jobUrl}"`);
   try {
     const { getSupabaseClient } = await import('./supabaseClient.mjs');
     const supabase = getSupabaseClient();
     if (supabase) {
+      const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${screenshotUrl ? ` [screenshot: ${screenshotUrl}]` : ''}`;
+      const payload = {
+        status: 'failed',
+        error_message: expiredReason,
+        completed_at: new Date().toISOString()
+      };
+      if (screenshotUrl) payload.screenshot_path = screenshotUrl;
       const { data, error } = await supabase.from('batch_job_queue')
-        .update({
-          status: 'failed',
-          error_message: 'job_expired_or_not_found',
-          completed_at: new Date().toISOString()
-        })
+        .update(payload)
         .eq('job_url', jobUrl)
         .eq('status', 'pending')
         .select('id, applywizz_id');
@@ -103,8 +106,9 @@ export async function executeWorkerTask({
 
   if (DEAD_JOB_URLS.has(jobUrl)) {
     console.log(`   ⚡ [${workerId}] Skipping ${applywizzId} for "${jobUrl}" — URL verified dead/expired for all clients.`);
+    const expiredReason = 'Link Expired: The page you are looking for doesn\'t exist [step: Link Expired]';
     if (queueTaskId) {
-      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found' });
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: expiredReason });
     }
     await upsertSupabaseApplication({
       applywizzId,
@@ -112,9 +116,10 @@ export async function executeWorkerTask({
       company,
       roleTitle: 'Workday Application',
       status: 'failed',
-      failureReason: 'Job page does not exist (dead/expired URL)',
+      failureReason: expiredReason,
+      stoppedAtStep: 'Link Expired',
     }).catch(() => {});
-    return { status: 'failed', reason: 'job_expired_or_not_found' };
+    return { status: 'failed', reason: 'Link Expired' };
   }
 
   // 2. Load isolated Client Profile for this applywizzId
@@ -321,8 +326,39 @@ export async function executeWorkerTask({
     });
 
     if (status === 'job_not_found') {
-      console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — purging queue for all clients.`);
-      await purgeDeadJobUrlAcrossQueue(jobUrl, workerId);
+      console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — capturing screenshot & purging queue for all clients.`);
+      let expiredShotUrl = null;
+      try {
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+          if (buf) {
+            expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
+          }
+        }
+      } catch {}
+
+      await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
+
+      const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${expiredShotUrl ? ` [screenshot: ${expiredShotUrl}]` : ''}`;
+      if (queueTaskId) {
+        await updateQueueTaskStatus(queueTaskId, {
+          status: 'failed',
+          errorMessage: expiredReason,
+          screenshotPath: expiredShotUrl,
+        });
+      }
+      await upsertSupabaseApplication({
+        applywizzId,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+        status: 'failed',
+        failureReason: expiredReason,
+        failureScreenshotUrl: expiredShotUrl,
+        stoppedAtStep: 'Link Expired',
+      }).catch(() => {});
+
+      return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl };
     }
 
     // Step E: Save newly discovered form schema to Supabase if unique link
