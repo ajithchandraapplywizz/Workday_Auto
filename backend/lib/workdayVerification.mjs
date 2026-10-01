@@ -480,6 +480,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
  */
 async function checkIfAlreadyOnApplicationWizard(page) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  if (typeof page.evaluate !== 'function') return false;
   if (await isWorkdayWizardVisible(page).catch(() => false)) return true;
   return await page.evaluate(() => {
     const text = (document.body?.innerText || '').toLowerCase();
