@@ -529,14 +529,16 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
       const authUser = authMap.get(em);
 
       // Determine real dynamic active status:
-      // Active ONLY if the user has an active session within the last 3 minutes (180s)
+      // Active ONLY if the user has an active session within the last 2 minutes (120s)
       const lastActivity = Math.max(
         new Date(op.updated_at || 0).getTime(),
         new Date(op.last_sign_in || 0).getTime(),
-        new Date(authUser?.last_sign_in || 0).getTime()
+        new Date(authUser?.last_sign_in || 0).getTime(),
+        new Date(authUser?.updated_at || 0).getTime()
       );
-      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 3 * 60 * 1000);
+      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 2 * 60 * 1000);
       const effectiveStatus = isCurrentlyActive ? 'active' : ((op.status === 'logged_out' || authUser?.status === 'logged_out') ? 'logged_out' : 'inactive');
+      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || op.updated_at || null;
 
       return {
         ...op,
@@ -683,7 +685,25 @@ export async function fetchApplicationsDynamic({
 
     const { data, error } = await query;
     if (error) throw error;
-    let list = data || [];
+    let list = (data || []).map((item) => {
+      // Auto-extract screenshot and step from failure_reason if embedded
+      if (item.failure_reason) {
+        if (!item.failure_screenshot_url) {
+          const matchShot = item.failure_reason.match(/\[screenshot:\s*([^\]\s]+)\]/i) || item.failure_reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+          if (matchShot) {
+            item.failure_screenshot_url = matchShot[1] || matchShot[0];
+            item.screenshot_url = item.failure_screenshot_url;
+          }
+        }
+        if (!item.stopped_at_step) {
+          const matchStep = item.failure_reason.match(/\[step:\s*([^\]]+)\]/i) || item.failure_reason.match(/stopped at\s+([^)\],]+)/i);
+          if (matchStep) {
+            item.stopped_at_step = matchStep[1].trim();
+          }
+        }
+      }
+      return item;
+    });
 
     // Always merge active queue tasks from batch_job_queue so live tasks & proof screenshots appear dynamically
     let queueQuery = supabase
@@ -704,26 +724,27 @@ export async function fetchApplicationsDynamic({
         if (u) itemByUrl.set(u, item);
       }
 
-        for (const qt of queueTasks) {
-          const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
-          if (!cleanQtUrl) continue;
+      for (const qt of queueTasks) {
+        const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
+        if (!cleanQtUrl) continue;
 
-          const existing = itemByUrl.get(cleanQtUrl);
-          if (existing) {
-            // Reconcile status & screenshot from queue task
-            if (qt.screenshot_path && !existing.failure_screenshot_url) {
-              existing.failure_screenshot_url = qt.screenshot_path;
-              existing.screenshot_url = qt.screenshot_path;
-            }
-            if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review') {
-              existing.status = qt.status;
-            } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
-              existing.status = 'pending';
-            }
-            if (qt.error_message && !existing.failure_reason) {
-              existing.failure_reason = qt.error_message;
-            }
-          } else {
+        const existing = itemByUrl.get(cleanQtUrl);
+        if (existing) {
+          // Reconcile status & screenshot from queue task
+          if (qt.screenshot_path) {
+            existing.failure_screenshot_url = qt.screenshot_path;
+            existing.screenshot_url = qt.screenshot_path;
+            existing.screenshot_path = qt.screenshot_path;
+          }
+          if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review') {
+            existing.status = qt.status;
+          } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
+            existing.status = 'pending';
+          }
+          if (qt.error_message && (!existing.failure_reason || existing.failure_reason === 'wizard_did_not_reach_review')) {
+            existing.failure_reason = qt.error_message;
+          }
+        } else {
             itemByUrl.set(cleanQtUrl, true);
 
             // Extract company and role from URL if null
@@ -1666,10 +1687,12 @@ export async function fetchAllOperators() {
       const lastActivity = Math.max(
         new Date(op.updated_at || 0).getTime(),
         new Date(op.last_sign_in || 0).getTime(),
-        new Date(authUser?.last_sign_in || 0).getTime()
+        new Date(authUser?.last_sign_in || 0).getTime(),
+        new Date(authUser?.updated_at || 0).getTime()
       );
-      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 3 * 60 * 1000);
+      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 2 * 60 * 1000);
       const effectiveStatus = isCurrentlyActive ? 'active' : ((op.status === 'logged_out' || authUser?.status === 'logged_out') ? 'logged_out' : 'inactive');
+      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || op.updated_at || null;
 
       return {
         ...op,

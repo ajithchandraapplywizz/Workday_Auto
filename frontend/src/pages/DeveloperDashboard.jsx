@@ -155,7 +155,10 @@ export default function DeveloperDashboard() {
   // Helper: Resolve precisely which block/step the application failed or stopped at
   const resolveStoppedBlock = (app) => {
     if (app.stopped_at_step) return app.stopped_at_step;
-    const reason = (app.failure_reason || app.error_category || '').toLowerCase();
+    const rawReason = String(app.failure_reason || app.error_category || app.error_message || '');
+    const stepMatch = rawReason.match(/\[step:\s*([^\]]+)\]/i) || rawReason.match(/stopped at\s+([^)\],]+)/i);
+    if (stepMatch) return stepMatch[1].trim();
+    const reason = rawReason.toLowerCase();
     if (reason.includes('auth') || reason.includes('password') || reason.includes('credential') || reason.includes('sign in') || reason.includes('create account')) {
       return 'Auth Gateway (Sign In / Sign Up)';
     }
@@ -199,7 +202,8 @@ export default function DeveloperDashboard() {
     if (!app) return null;
     if (app.failure_screenshot_url) return app.failure_screenshot_url;
     if (app.screenshot_url) return app.screenshot_url;
-    const reason = String(app.failure_reason || '');
+    if (app.screenshot_path) return app.screenshot_path;
+    const reason = String(app.failure_reason || app.error_message || '');
     const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
     if (match) return match[1] || match[0];
     return null;
@@ -209,7 +213,7 @@ export default function DeveloperDashboard() {
   const getFailureExplanation = (reasonRaw, stoppedBlock) => {
     const r = String(reasonRaw || '').toLowerCase();
     if (r.includes('wizard_did_not_reach_review')) {
-      return 'The Workday wizard halted before reaching the final Review & Submit step. An unanswered mandatory question or rejected attachment on an earlier step blocked form advancement.';
+      return `The Workday wizard halted at "${stoppedBlock}". An unanswered mandatory field, validation error, or step transition check prevented advancement.`;
     }
     if (r.includes('authentication failed') || r.includes('auth_failed')) {
       return 'Workday candidate sign-in failed. Candidate account password, email verification, or captcha security challenge could not be completed.';
@@ -223,21 +227,20 @@ export default function DeveloperDashboard() {
     if (r.includes('timeout') || r.includes('stalled')) {
       return 'Page interaction or element selection exceeded the allowed timeout threshold.';
     }
-    return `The automation encountered an issue at ${stoppedBlock}. Check the job link and error reason for missing profile answers.`;
+    return `The automation stopped at ${stoppedBlock}. Check the failure screenshot and profile answers for details.`;
   };
 
-  // Helper: Live operator status considering 3-minute disconnect window
+  // Helper: Live operator status considering 2-minute disconnect window
   const getOperatorEffectiveStatus = (op) => {
     if (!op) return 'inactive';
     const raw = (op.status || '').toLowerCase();
     if (raw === 'logged_out') return 'logged_out';
-    if (raw !== 'active') return 'inactive';
     if (!op.updated_at && !op.last_sign_in) return 'inactive';
     const last = new Date(op.updated_at || op.last_sign_in).getTime();
-    if (Date.now() - last > 3 * 60 * 1000) {
-      return 'inactive'; // Disconnected > 3 minutes
+    if (Date.now() - last > 2 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 2 minutes
     }
-    return 'active';
+    return raw === 'active' ? 'active' : 'inactive';
   };
 
   // Operator lookup maps
@@ -288,12 +291,21 @@ export default function DeveloperDashboard() {
 
   // Toggle CA status (active / inactive)
   const handleToggleOperatorStatus = async (op) => {
-    const newStatus = op.status === 'active' ? 'inactive' : 'active';
+    const eff = getOperatorEffectiveStatus(op);
+    const newStatus = eff === 'active' ? 'inactive' : 'active';
+    const nowIso = new Date().toISOString();
     setUpdatingOpId(op.id);
     try {
       await updateOperatorStatus(op.id, newStatus);
+      if (op.email) {
+        await supabase
+          .from('auth_users')
+          .update({ status: newStatus, updated_at: nowIso })
+          .ilike('email', op.email.toLowerCase().trim())
+          .catch(() => {});
+      }
       setOperators((prev) =>
-        prev.map((o) => (o.id === op.id ? { ...o, status: newStatus } : o))
+        prev.map((o) => (o.id === op.id ? { ...o, status: newStatus, updated_at: nowIso } : o))
       );
     } catch (err) {
       console.error('Failed to update operator status:', err);
@@ -473,13 +485,13 @@ export default function DeveloperDashboard() {
             <div className="video-kpi-box">
               <span className="vkpi-label">ACTIVE CAS</span>
               <span className="vkpi-val" style={{ color: '#10b981' }}>
-                {operators.filter((o) => o.status === 'active').length}
+                {operators.filter((o) => getOperatorEffectiveStatus(o) === 'active').length}
               </span>
             </div>
             <div className="video-kpi-box">
               <span className="vkpi-label">INACTIVE CAS</span>
               <span className="vkpi-val" style={{ color: '#ef4444' }}>
-                {operators.filter((o) => o.status !== 'active').length}
+                {operators.filter((o) => getOperatorEffectiveStatus(o) !== 'active').length}
               </span>
             </div>
             <div className="video-kpi-box highlighted">
@@ -582,7 +594,7 @@ export default function DeveloperDashboard() {
                         disabled={updatingOpId === op.id}
                         onClick={() => handleToggleOperatorStatus(op)}
                         style={{
-                          background: op.status === 'active' ? '#ef4444' : '#10b981',
+                          background: getOperatorEffectiveStatus(op) === 'active' ? '#ef4444' : '#10b981',
                           color: '#ffffff',
                           border: 'none',
                           padding: '4px 10px',
@@ -592,7 +604,7 @@ export default function DeveloperDashboard() {
                           cursor: 'pointer',
                         }}
                       >
-                        {updatingOpId === op.id ? 'Saving...' : (op.status === 'active' ? 'Deactivate' : 'Activate')}
+                        {updatingOpId === op.id ? 'Saving...' : (getOperatorEffectiveStatus(op) === 'active' ? 'Deactivate' : 'Activate')}
                       </button>
                     </td>
                     <td style={{ fontSize: '0.78rem', color: '#64748b' }}>
@@ -901,28 +913,44 @@ export default function DeveloperDashboard() {
                         {/* 6. Failure Screenshot URL */}
                         <td>
                           {screenshotUrl ? (
-                            <a
-                              href={screenshotUrl}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{
-                                background: 'rgba(16, 185, 129, 0.15)',
-                                border: '1px solid rgba(16, 185, 129, 0.4)',
-                                color: '#34d399',
-                                padding: '4px 8px',
-                                borderRadius: '4px',
-                                fontSize: '0.72rem',
-                                fontWeight: 'bold',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title="Click to open full failure screenshot in new tab"
-                            >
-                              📸 Screenshot ↗
-                            </a>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedErrorLog(app)}
+                                style={{
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  border: '1px solid rgba(16, 185, 129, 0.4)',
+                                  color: '#34d399',
+                                  padding: '4px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 'bold',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title="Click to view failure screenshot preview"
+                              >
+                                📸 View Image
+                              </button>
+                              <a
+                                href={screenshotUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  color: '#38bdf8',
+                                  fontSize: '0.75rem',
+                                  padding: '2px',
+                                  textDecoration: 'none',
+                                  fontWeight: 'bold',
+                                }}
+                                title="Open full image in new tab"
+                              >
+                                ↗
+                              </a>
+                            </div>
                           ) : (
                             <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
                               —

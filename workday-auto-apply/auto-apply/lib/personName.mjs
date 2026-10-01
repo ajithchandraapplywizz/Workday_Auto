@@ -1,8 +1,4 @@
-/**
- * personName.mjs — Given / family split for Workday legal name fields.
- *
- * Family name = last word only. Given name = all words before the last word.
- */
+
 
 /**
  * @param {string} str

@@ -372,8 +372,11 @@ export async function executeWorkerTask({
 
     // Step F: Record status to Supabase
     let completionShotUrl = null;
+    let detectedStep = null;
     try {
       if (page && !page.isClosed()) {
+        const { detectWorkdayStep } = await import('./stateDetector.mjs');
+        detectedStep = await detectWorkdayStep(page).catch(() => null);
         const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
         if (buf) {
           const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
@@ -387,7 +390,15 @@ export async function executeWorkerTask({
     const isSuccessStatus = (status === 'submitted' || status === 'reached-review' || status === 'reached_review');
     const stoppedBlock = isSuccessStatus
       ? 'Step 5: Review & Submit'
-      : (profile._currentStep || 'Step 3: Application Questions');
+      : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+
+    let fullFailureReason = null;
+    if (!isSuccessStatus) {
+      fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
+      if (completionShotUrl) {
+        fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
+      }
+    }
 
     await upsertSupabaseApplication({
       applywizzId,
@@ -395,7 +406,7 @@ export async function executeWorkerTask({
       company,
       roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
       status,
-      failureReason: isSuccessStatus ? null : `wizard_did_not_reach_review (stopped at ${stoppedBlock})`,
+      failureReason: fullFailureReason,
       failureScreenshotUrl: completionShotUrl,
       stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
     }).catch(() => {});
@@ -409,6 +420,7 @@ export async function executeWorkerTask({
       const answersMap = profile._supabaseQa || (profile._answerCache ? Object.fromEntries(profile._answerCache) : {});
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
+        errorMessage: fullFailureReason,
         preResolvedAnswers: answersMap,
         screenshotPath: completionShotUrl,
       });
@@ -419,26 +431,34 @@ export async function executeWorkerTask({
   } catch (err) {
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
     let errShotUrl = null;
+    let errStep = profile?._currentStep || 'Runtime Exception';
     try {
       if (page && !page.isClosed()) {
+        const { detectWorkdayStep } = await import('./stateDetector.mjs');
+        const liveStep = await detectWorkdayStep(page).catch(() => null);
+        if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
         const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
         if (buf) {
           errShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_error.jpg`, buf);
         }
       }
     } catch {}
+
+    let fullErrReason = `${err.message} (stopped at ${errStep}) [step: ${errStep}]`;
+    if (errShotUrl) fullErrReason += ` [screenshot: ${errShotUrl}]`;
+
     if (queueTaskId) {
-      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err.message, screenshotPath: errShotUrl });
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: fullErrReason, screenshotPath: errShotUrl });
     }
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl,
       company,
-      roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+      roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
       status: 'failed',
-      failureReason: err.message,
+      failureReason: fullErrReason,
       failureScreenshotUrl: errShotUrl,
-      stoppedAtStep: profile._currentStep || 'Runtime Exception',
+      stoppedAtStep: errStep,
     }).catch(() => {});
     return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl };
   } finally {

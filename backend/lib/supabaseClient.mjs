@@ -870,12 +870,8 @@ export async function getActiveCaCandidateIds({ caEmails = null } = {}) {
   try {
     let activeEmails = Array.isArray(caEmails) ? caEmails : (caEmails ? [String(caEmails).trim()] : null);
     if (!activeEmails || !activeEmails.length) {
-      const ops = await request('operators', { query: '?status=eq.active&select=email' });
-      activeEmails = (ops || []).map((o) => o.email?.toLowerCase()?.trim()).filter(Boolean);
-      if (!activeEmails.length) {
-        const authUsers = await request('auth_users', { query: '?status=eq.active&role=eq.operator&select=email' });
-        activeEmails = (authUsers || []).map((o) => o.email?.toLowerCase()?.trim()).filter(Boolean);
-      }
+      const activeOps = await getActiveOperators();
+      activeEmails = activeOps.map((o) => o.email?.toLowerCase()?.trim()).filter(Boolean);
     }
     if (!activeEmails.length) return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
 
@@ -1262,7 +1258,36 @@ export async function getActiveOperators() {
     const ops = await request('operators', {
       query: '?status=eq.active&select=email,name,status,last_sign_in,updated_at&order=last_sign_in.desc',
     });
-    return Array.isArray(ops) ? ops : [];
+    const now = Date.now();
+    const TWO_MIN_MS = 2 * 60 * 1000;
+    const active = [];
+    const staleEmails = [];
+
+    for (const op of (Array.isArray(ops) ? ops : [])) {
+      const last = Math.max(
+        new Date(op.updated_at || 0).getTime(),
+        new Date(op.last_sign_in || 0).getTime()
+      );
+      if (last && now - last <= TWO_MIN_MS) {
+        active.push(op);
+      } else {
+        staleEmails.push(op.email);
+      }
+    }
+
+    // Proactively update stale operators to inactive in Supabase
+    if (staleEmails.length > 0) {
+      Promise.all(staleEmails.map((em) =>
+        request('operators', {
+          method: 'PATCH',
+          query: `?email=ilike.${encode(em)}`,
+          prefer: 'return=minimal',
+          body: { status: 'inactive', updated_at: new Date().toISOString() },
+        }).catch(() => {})
+      )).catch(() => {});
+    }
+
+    return active;
   } catch (err) {
     console.log(`  ⚠️  getActiveOperators error: ${err.message?.slice(0, 100)}`);
     return [];

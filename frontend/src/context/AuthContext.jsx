@@ -51,31 +51,47 @@ export function AuthProvider({ children }) {
     const em = user.email.toLowerCase().trim();
 
     // 1. Initial touch on mount/login
+    const nowIso = new Date().toISOString();
     supabase
       .from('operators')
-      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .update({ status: 'active', updated_at: nowIso })
+      .ilike('email', em)
+      .then(() => {})
+      .catch(() => {});
+    supabase
+      .from('auth_users')
+      .update({ status: 'active', updated_at: nowIso })
       .ilike('email', em)
       .then(() => {})
       .catch(() => {});
 
-    // 2. Periodic heartbeat every 30s
+    // 2. Periodic heartbeat every 20s to keep session dynamically active
     const heartbeatTimer = setInterval(() => {
+      const pingIso = new Date().toISOString();
       supabase
         .from('operators')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .update({ status: 'active', updated_at: pingIso })
         .ilike('email', em)
         .then(() => {})
         .catch(() => {});
-    }, 30000);
+      supabase
+        .from('auth_users')
+        .update({ status: 'active', updated_at: pingIso })
+        .ilike('email', em)
+        .then(() => {})
+        .catch(() => {});
+    }, 20000);
 
     // 3. Browser disconnect on tab/window close
     const handleBeforeUnload = () => {
-      const nowIso = new Date().toISOString();
-      const payload = JSON.stringify({ updated_at: nowIso });
+      const closeIso = new Date().toISOString();
+      const payload = JSON.stringify({ updated_at: closeIso });
       try {
-        const url = `${supabase.supabaseUrl}/rest/v1/operators?email=ilike.${encodeURIComponent(em)}`;
+        const url1 = `${supabase.supabaseUrl}/rest/v1/operators?email=ilike.${encodeURIComponent(em)}`;
+        const url2 = `${supabase.supabaseUrl}/rest/v1/auth_users?email=ilike.${encodeURIComponent(em)}`;
         if (navigator.sendBeacon) {
-          navigator.sendBeacon(url, payload);
+          navigator.sendBeacon(url1, payload);
+          navigator.sendBeacon(url2, payload);
         }
       } catch {}
     };

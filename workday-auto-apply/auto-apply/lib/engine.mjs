@@ -2031,6 +2031,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     } else {
       console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
     }
+    profile._currentStep = stepName;
 
     if (stepName === 'Review') {
       profile._discoveredSteps?.add('Review');
@@ -2169,6 +2170,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   }
 
   const finalStep = await detectWorkdayStep(page);
+  const stoppedTitle = (finalStep && finalStep !== 'Unknown') ? finalStep : (profile._currentStep || 'Step 1: My Information');
+  profile._currentStep = stoppedTitle;
   if (finalStep === 'Review') {
     await recordClientApplication(profile, {
       url: profile._canonicalJobUrl || plan?.url || page.url(),
@@ -2182,7 +2185,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     url: profile._canonicalJobUrl || plan?.url || page.url(),
     company: profile._company || plan?.company || '',
     status: 'failed',
-    failureReason: 'wizard_did_not_reach_review',
+    failureReason: `wizard_did_not_reach_review (stopped at ${stoppedTitle}) [step: ${stoppedTitle}]`,
   }).catch(() => {});
   return 'incomplete';
 }
@@ -2798,13 +2801,15 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       } else {
         holdMs = 8000;
       }
-      console.log(`\n   — Closing browser in ${Math.round(holdMs / 1000)}s...`);
-      try {
-        await page.waitForTimeout(holdMs);
-      } catch {}
-      try {
-        await browser.close();
-      } catch {}
+      if (ownBrowser) {
+        console.log(`\n   — Closing browser in ${Math.round(holdMs / 1000)}s...`);
+        try {
+          await page.waitForTimeout(holdMs);
+        } catch {}
+        try {
+          await browser.close();
+        } catch {}
+      }
       return status;
     } else if (!existingPage) {
       await discoverApplicationForm(page, url, { mode, profile });
