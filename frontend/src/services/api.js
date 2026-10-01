@@ -304,9 +304,9 @@ export async function checkAllApiHealth() {
     {
       id: 'workers',
       name: 'WORKERS',
-      service: '3-Worker Concurrency Pool',
+      service: '10-Worker Concurrency Pool',
       runner: async () => {
-        return { ok: true, status: 'OK', time: 10, meta: '1 in-flight, 10 idle' };
+        return { ok: true, status: 'OK', time: 10, meta: '0 in-flight, 10 idle' };
       },
     },
     {
@@ -529,10 +529,14 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
       const authUser = authMap.get(em);
 
       // Determine real dynamic active status:
-      // Active ONLY if the user is currently authenticated and active on our website session
-      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
-      const isCurrentlyActive = Boolean(authUser?.status === 'active' && effectiveLastSignIn);
-      const effectiveStatus = isCurrentlyActive ? 'active' : 'inactive';
+      // Active ONLY if the user has an active session within the last 3 minutes (180s)
+      const lastActivity = Math.max(
+        new Date(op.updated_at || 0).getTime(),
+        new Date(op.last_sign_in || 0).getTime(),
+        new Date(authUser?.last_sign_in || 0).getTime()
+      );
+      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 3 * 60 * 1000);
+      const effectiveStatus = isCurrentlyActive ? 'active' : ((op.status === 'logged_out' || authUser?.status === 'logged_out') ? 'logged_out' : 'inactive');
 
       return {
         ...op,
@@ -605,19 +609,30 @@ export async function reconcileOperatorsWithAPI() {
 }
 
 /**
- * 16. Supabase: Fetch Worker pool status (3 parallel workers)
+ * 16. Supabase: Fetch Worker pool status (10 parallel workers)
  */
 export async function fetchWorkerStatuses() {
   try {
     const { data, error } = await supabase.from('worker_status').select('*').order('worker_id');
     if (error) throw error;
     const workers = data || [];
-    const inFlight = workers.filter((w) => w.state === 'in_flight' || w.state === 'applying').length;
-    const total = workers.length > 0 ? workers.length : 3;
+    const now = Date.now();
+    // Worker is ONLY in_flight if updated within the last 3 minutes (180s)
+    const liveWorkers = workers.map((w) => {
+      const lastUpdate = new Date(w.updated_at || 0).getTime();
+      const isFresh = lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
+      const isActuallyInFlight = isFresh && (w.state === 'in_flight' || w.state === 'applying');
+      return {
+        ...w,
+        state: isActuallyInFlight ? 'in_flight' : 'idle',
+      };
+    });
+    const inFlight = liveWorkers.filter((w) => w.state === 'in_flight').length;
+    const total = Math.max(liveWorkers.length, 10);
     const idle = Math.max(0, total - inFlight);
-    return { success: true, workers, inFlight, idle, total };
+    return { success: true, workers: liveWorkers, inFlight, idle, total };
   } catch (err) {
-    return { success: true, workers: [], inFlight: 0, idle: 3, total: 3 };
+    return { success: true, workers: [], inFlight: 0, idle: 10, total: 10 };
   }
 }
 
@@ -635,7 +650,7 @@ export async function fetchApplicationsDynamic({
   limit = 200,
 } = {}) {
   try {
-    let query = supabase.from('applications').select('*').order('created_at', { ascending: false }).limit(limit);
+    let query = supabase.from('applications').select('*').order('updated_at', { ascending: false }).limit(limit);
 
     if (status && status !== 'All') {
       if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
@@ -663,28 +678,31 @@ export async function fetchApplicationsDynamic({
 
     if (dateStr && timeframe) {
       const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
     }
 
     const { data, error } = await query;
     if (error) throw error;
     let list = data || [];
 
-    // If querying by candidate, merge active tasks from batch_job_queue so assigned links appear immediately
-    if (applywizzId) {
-      const cleanId = String(applywizzId).trim().toUpperCase();
-      const { data: queueTasks } = await supabase
-        .from('batch_job_queue')
-        .select('*')
-        .eq('applywizz_id', cleanId)
-        .order('created_at', { ascending: false });
+    // Always merge active queue tasks from batch_job_queue so live tasks & proof screenshots appear dynamically
+    let queueQuery = supabase
+      .from('batch_job_queue')
+      .select('*')
+      .order('updated_at', { ascending: false })
+      .limit(applywizzId ? 50 : 100);
 
-      if (queueTasks && queueTasks.length > 0) {
-        const itemByUrl = new Map();
-        for (const item of list) {
-          const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
-          if (u) itemByUrl.set(u, item);
-        }
+    if (applywizzId) {
+      queueQuery = queueQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
+    }
+
+    const { data: queueTasks } = await queueQuery;
+    if (queueTasks && queueTasks.length > 0) {
+      const itemByUrl = new Map();
+      for (const item of list) {
+        const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
+        if (u) itemByUrl.set(u, item);
+      }
 
         for (const qt of queueTasks) {
           const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
@@ -750,7 +768,6 @@ export async function fetchApplicationsDynamic({
           }
         }
       }
-    }
 
     return { success: true, applications: list };
   } catch (err) {
@@ -781,8 +798,17 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     if (appsErr) throw appsErr;
 
     const allApps = apps || [];
+    const now = Date.now();
     const submitted = allApps.filter((a) => a.status === 'submitted').length;
-    const applying = allApps.filter((a) => a.status === 'in_progress' || a.status === 'started' || a.status === 'applying').length;
+    
+    // Only count as applying if active within the last 3 minutes and capped at max worker concurrency 10
+    const activeApplying = allApps.filter((a) => {
+      if (!['in_progress', 'started', 'applying'].includes(a.status)) return false;
+      const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
+      return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
+    });
+    const applying = Math.min(activeApplying.length, 10);
+
     const failed = allApps.filter((a) => a.status === 'failed').length;
     const skipped = allApps.filter((a) => a.status === 'skipped').length;
     const queued = allApps.filter((a) => a.status === 'queued' || a.status === 'pending').length;
@@ -1074,8 +1100,8 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
     // 3. Enrich strictly with OUR Supabase applications, batch_job_queue tracking, AND official company emails
     if (candidateIds.length > 0) {
       const [appsRes, queueRes, dbClientsRes] = await Promise.all([
-        supabase.from('applications').select('applywizz_id, status, failure_reason').in('applywizz_id', candidateIds),
-        supabase.from('batch_job_queue').select('applywizz_id, status, error_message').in('applywizz_id', candidateIds),
+        supabase.from('applications').select('id, applywizz_id, job_url, status, failure_reason, updated_at').in('applywizz_id', candidateIds),
+        supabase.from('batch_job_queue').select('id, applywizz_id, job_url, status, error_message, updated_at, claimed_at').in('applywizz_id', candidateIds),
         supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
       ]);
 
@@ -1088,18 +1114,26 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       const candidateJobsSet = new Map();
       const submittedCountMap = new Map();
       const zohoDisconnectedSet = new Set();
+      const clientStatusMap = new Map();
+      const now = Date.now();
 
       (appsRes.data || []).forEach((a) => {
         const cid = (a.applywizz_id || '').trim().toUpperCase();
         if (cid) {
           if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
           const key = (a.job_url || a.id || '').toLowerCase().trim();
-          candidateJobsSet.get(cid).add(key);
+          if (key) candidateJobsSet.get(cid).add(key);
           if (a.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
           if (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) {
             zohoDisconnectedSet.add(cid);
+          }
+          if (['in_progress', 'started', 'applying'].includes(a.status)) {
+            const lastUpdated = new Date(a.updated_at || 0).getTime();
+            if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
+              clientStatusMap.set(cid, '⚡ Bot Filling');
+            }
           }
         }
       });
@@ -1109,12 +1143,18 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         if (cid) {
           if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
           const key = (q.job_url || q.id || '').toLowerCase().trim();
-          candidateJobsSet.get(cid).add(key);
+          if (key) candidateJobsSet.get(cid).add(key);
           if (q.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
           if (q.error_message && q.error_message.includes('zoho_mail_not_connected')) {
             zohoDisconnectedSet.add(cid);
+          }
+          if (q.status === 'processing') {
+            const lastUpdated = new Date(q.updated_at || q.claimed_at || 0).getTime();
+            if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
+              clientStatusMap.set(cid, '⚡ Bot Filling');
+            }
           }
         }
       });
@@ -1124,6 +1164,15 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
         cand.zoho_status = zohoDisconnectedSet.has(cid) ? 'not_connected' : 'connected';
+        if (clientStatusMap.has(cid)) {
+          cand.status = clientStatusMap.get(cid);
+        } else if (cand.emails_submitted >= 10) {
+          cand.status = 'Completed';
+        } else if (cand.jobs_applied > 0) {
+          cand.status = 'In Progress';
+        } else {
+          cand.status = 'Queued';
+        }
         const dbClient = dbClientMap.get(cid);
         cand.client_email = formatClientCompanyEmail(cand.client_name, cand.client_email, dbClient?.company_email);
       }
@@ -1614,9 +1663,13 @@ export async function fetchAllOperators() {
     const mapped = (opsRes.data || []).map((op) => {
       const em = (op.email || '').toLowerCase().trim();
       const authUser = authMap.get(em);
-      const effectiveLastSignIn = op.last_sign_in || authUser?.last_sign_in || null;
-      const isCurrentlyActive = Boolean(authUser?.status === 'active' && effectiveLastSignIn);
-      const effectiveStatus = isCurrentlyActive ? 'active' : 'inactive';
+      const lastActivity = Math.max(
+        new Date(op.updated_at || 0).getTime(),
+        new Date(op.last_sign_in || 0).getTime(),
+        new Date(authUser?.last_sign_in || 0).getTime()
+      );
+      const isCurrentlyActive = (op.status === 'active' || authUser?.status === 'active') && lastActivity && (Date.now() - lastActivity < 3 * 60 * 1000);
+      const effectiveStatus = isCurrentlyActive ? 'active' : ((op.status === 'logged_out' || authUser?.status === 'logged_out') ? 'logged_out' : 'inactive');
 
       return {
         ...op,

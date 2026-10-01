@@ -33,7 +33,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 3, total: 3 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 10, total: 10 });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);

@@ -71,8 +71,8 @@ export function isCc305SelfIdentifyField(label = '', field = {}, stepName = '') 
   const plain = String(label || '').replace(/\*+/g, '').trim();
   const step = String(stepName || field?.stepName || '');
   const blob = `${step} ${field?.containerText || ''}`.toLowerCase();
-  const onSelfIdentify = /self\s*identify|cc-305|voluntary self-identification of disability|omb control number/i.test(blob);
-  if (!onSelfIdentify && !/self\s*identify/i.test(step)) return false;
+  const onSelfIdentify = /self[- ]?identif|cc-?305|voluntary self-identification of disability|omb control number/i.test(blob);
+  if (!onSelfIdentify && !/self[- ]?identif|disability|cc-?305/i.test(step)) return false;
   if (/^(language|name|date)$/i.test(plain)) return true;
   if (/please check one of the boxes below/i.test(plain)) return true;
   if (/disability/i.test(plain) && /check one|boxes below/i.test(String(label || ''))) return true;
@@ -150,7 +150,7 @@ export function isMandatoryField(label = '', field = {}, stepName = '') {
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   const plain = text.replace(/\*+$/, '').trim();
   if (/^(race|ethnicity|gender|sex|hispanic|veteran(\s*status)?)$/i.test(plain)) return true;
-  if (/voluntary disclosures/i.test(stepName || field?.stepName || '') && /gender|sex|race|ethnic|veteran|hispanic|latino/i.test(text)) return true;
+  if (/voluntary|self[- ]?identif|disclos|eeo|equal|diversity/i.test(stepName || field?.stepName || '') && /gender|sex|race|ethnic|veteran|hispanic|latino|disability/i.test(text)) return true;
   return hasRequiredSignal(text, field);
 }
 

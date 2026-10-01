@@ -448,10 +448,10 @@ export async function executeWorkerTask({
 }
 
 /**
- * Run tasks using a pool of N concurrent workers (default 3).
+ * Run tasks using a pool of N concurrent workers (default 10).
  */
 export async function runWorkerPool(tasks = [], {
-  concurrency = 3,
+  concurrency = 10,
   headless = true,
   confirmSubmit = false,
   dryRun = false,
@@ -542,7 +542,7 @@ export async function runWorkerPool(tasks = [], {
  *   5. Workers atomically claim their pre-assigned task by ID.
  */
 export async function runQueueWorkerPool({
-  concurrency = 3,
+  concurrency = 10,
   headless = true,
   dryRun = false,
   confirmSubmit = !dryRun,

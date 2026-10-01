@@ -1112,6 +1112,80 @@ export async function fillAllWorkdaySelectOneDropdowns(page, profile, stepName =
 }
 
 /**
+ * Check whether required fields in Voluntary Disclosures / Self-Identification steps are filled.
+ * @param {import('playwright').Page} page
+ * @param {object} profile
+ * @returns {Promise<{unfilledCount: number, missing: string[]}>}
+ */
+export async function checkVoluntaryDisclosuresRequiredFields(page, profile = {}) {
+  return await page.evaluate(() => {
+    const missing = [];
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+
+    const fields = document.querySelectorAll('[data-automation-id*="formField"], fieldset, [role="group"]');
+    let hasGender = false;
+    let genderFilled = false;
+    let hasHispanic = false;
+    let hispanicFilled = false;
+    let hasVeteran = false;
+    let veteranFilled = false;
+
+    for (const f of fields) {
+      const labelText = norm(f.querySelector('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]')?.textContent || '');
+      if (!labelText) continue;
+
+      if (/gender\b|^sex\b|please select your (gender|sex)/i.test(labelText)) {
+        hasGender = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) genderFilled = true;
+      }
+
+      if (/hispanic|latino/i.test(labelText) && !/terms|privacy|policy/i.test(labelText)) {
+        hasHispanic = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) hispanicFilled = true;
+      }
+
+      if (/veteran\s*status|describe\s*your\s*veteran/i.test(labelText)) {
+        hasVeteran = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) veteranFilled = true;
+      }
+    }
+
+    if (hasGender && !genderFilled) missing.push('Voluntary Disclosures: Gender');
+    if (hasHispanic && !hispanicFilled) missing.push('Voluntary Disclosures: Hispanic/Latino');
+    if (hasVeteran && !veteranFilled) missing.push('Voluntary Disclosures: Veteran Status');
+
+    // CC-305 check if CC-305 is rendered on the page
+    const bodyText = document.body?.innerText || '';
+    const hasCc305 = /cc-305|omb control|voluntary self-identification of disability/i.test(bodyText);
+    if (hasCc305) {
+      // Check disability radio
+      const radioChecked = Boolean(document.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked'));
+      if (!radioChecked) missing.push('Self-Identification: Disability Status Selection');
+
+      // Check name
+      const nameInput = document.querySelector('[data-automation-id*="formField"] input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+      const nameVal = norm(nameInput?.value || '');
+      if (!nameVal) missing.push('Self-Identification: Name');
+
+      // Check date
+      const dateSpins = document.querySelectorAll('input[role="spinbutton"]');
+      const dateFilled = dateSpins.length >= 3
+        ? Boolean(norm(dateSpins[0].value) && norm(dateSpins[1].value) && norm(dateSpins[2].value))
+        : Boolean(norm(document.querySelector('input[type="date"], [data-automation-id*="dateSection"] input')?.value || ''));
+      if (!dateFilled) missing.push('Self-Identification: Date');
+    }
+
+    return { unfilledCount: missing.length, missing };
+  }).catch(() => ({ unfilledCount: 0, missing: [] }));
+}
+
+/**
  * Count mandatory questions on the current step that are still empty in the live DOM.
  */
 export async function countUnfilledMandatoryQuestions(page, profile, stepName = '') {
@@ -1126,6 +1200,28 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
     const expected = peekExpectedAnswer(questionLabel, profile, tenant);
     if (!isQuestionDomFilled(q, questionLabel, expected, profile)) unfilled++;
   }
+
+  // Guard for My Experience step: verify Work Experience and Education required fields
+  if (/my\s*experience/i.test(stepName)) {
+    try {
+      const { checkMyExperienceRequiredFields } = await import('./workdayExperience.mjs');
+      const expCheck = await checkMyExperienceRequiredFields(page, profile);
+      if (expCheck?.unfilledCount > 0) {
+        unfilled += expCheck.unfilledCount;
+      }
+    } catch (_) {}
+  }
+
+  // Guard for Voluntary Disclosures / Self Identify step: verify EEO & CC-305 required fields
+  if (/voluntary|self[- ]?identif|disclos|eeo|equal|diversity/i.test(stepName)) {
+    try {
+      const discCheck = await checkVoluntaryDisclosuresRequiredFields(page, profile);
+      if (discCheck?.unfilledCount > 0) {
+        unfilled += discCheck.unfilledCount;
+      }
+    } catch (_) {}
+  }
+
   return unfilled;
 }
 
@@ -3260,6 +3356,29 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
   const vibe = await acknowledgeVibePrivacyOnce(page, profile);
   const foregoing = await acknowledgeForegoingStatementOnce(page, profile);
   const agreements = await acknowledgeAllPageAgreements(page, profile, 'Voluntary Disclosures');
+
+  const hasDisabilityOnPage = await page.evaluate(() => /cc-305|omb control|voluntary self-identification of disability/i.test(document.body?.innerText || '')).catch(() => false);
+  if (hasDisabilityOnPage) {
+    await ensureSelfIdentifyComplete(page, profile);
+  }
+
+  // Post-fill verification: if any required voluntary field remains empty, retry it specifically
+  const discCheck = await checkVoluntaryDisclosuresRequiredFields(page, profile);
+  if (discCheck.unfilledCount > 0) {
+    console.log(`    ↻ Voluntary Disclosures missing ${discCheck.unfilledCount} field(s): ${discCheck.missing.join(', ')} — retrying`);
+    if (discCheck.missing.some((m) => /gender/i.test(m))) {
+      await fillGenderDropdown(page, profile?.eeo?.gender || '', profile);
+    }
+    if (discCheck.missing.some((m) => /veteran/i.test(m))) {
+      await fillVeteranStatusDropdown(page, profile?.eeo?.veteran_status || '', profile);
+    }
+    if (discCheck.missing.some((m) => /hispanic/i.test(m))) {
+      await fillWorkdayCustomDropdown(page, { label: 'Are you Hispanic/Latino?', fieldType: 'dropdown' }, 'No');
+    }
+    if (discCheck.missing.some((m) => /disability|self-identification/i.test(m))) {
+      await ensureSelfIdentifyComplete(page, profile);
+    }
+  }
 
   const after = await discoverVoluntaryDisclosureDom(page);
   const genderOk = Boolean(after.gender?.currentValue && !/^select/i.test(after.gender.currentValue));

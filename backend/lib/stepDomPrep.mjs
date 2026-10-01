@@ -19,14 +19,14 @@ import {
 export async function runStepDomPrep(page, stepName = '', profile = {}) {
   const step = String(stepName || '');
 
-  if (/voluntary disclosures/i.test(step)) {
+  if (/voluntary\s*disclosures?|eeo|equal\s*employment|diversity|disclosures?/i.test(step)) {
     await acknowledgeVibePrivacyOnce(page, profile);
     await acknowledgeForegoingStatementOnce(page, profile);
     await handleVoluntaryDisclosuresStep(page, profile);
     return;
   }
 
-  if (/self identify/i.test(step)) {
+  if (/self[- ]?identif|disability|cc-?305/i.test(step)) {
     await ensureSelfIdentifyComplete(page, profile);
   }
 }

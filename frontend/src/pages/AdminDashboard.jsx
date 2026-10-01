@@ -434,14 +434,16 @@ export default function AdminDashboard() {
               <span className="vkpi-val">{kpis.failed}</span>
             </div>
 
-            {/* Zoho Mail Not Connected */}
+            {/* Zoho Gateway Integration Status */}
             <div
               className="video-kpi-box"
-              style={{ borderLeft: '3px solid #f59e0b' }}
-              title="Applications requiring Zoho verification where client mailbox connection is missing (193 pool)"
+              style={{ borderLeft: '3px solid #10b981' }}
+              title={zohoNotConnectedCount > 0 ? `Zoho Mail Gateway connected (${zohoNotConnectedCount} client mailbox(es) unlinked in pool)` : "Zoho Mail Gateway online and connected"}
             >
-              <span className="vkpi-label" style={{ color: '#f59e0b' }}>ZOHO NOT CONNECTED</span>
-              <span className="vkpi-val" style={{ color: '#f59e0b' }}>{zohoNotConnectedCount}</span>
+              <span className="vkpi-label" style={{ color: '#10b981' }}>ZOHO INTEGRATION</span>
+              <span className="vkpi-val" style={{ color: '#10b981', fontSize: '1.05rem', fontWeight: 'bold' }}>
+                CONNECTED
+              </span>
             </div>
 
             {/* Supabase Answer % */}

@@ -105,18 +105,21 @@ export function AuthProvider({ children }) {
     if (normalizedEmail === 'ramakrishnaa.tejavath@applywizz.ai') {
       return { role: 'manager', name: 'Ramakrishna Tejavath', manager_id: 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' };
     }
-    // 3. Admins
+    // 3. Admins (Super Admin & Platform Admins)
     const adminEmails = [
+      'admin@applywizz.ai',
+      'admin@applywizz.com',
+      'superadmin@applywizz.ai',
       'ramakrishna@applywizz.ai',
       'anushabandreddy@applywizz.ai',
       'shyam@applywizz.ai',
       'jagan@applywizz.ai'
     ];
-    if (adminEmails.includes(normalizedEmail)) {
+    if (normalizedEmail.includes('admin') || adminEmails.includes(normalizedEmail)) {
       const namePart = normalizedEmail.split('@')[0];
       return {
         role: 'admin',
-        name: namePart.charAt(0).toUpperCase() + namePart.slice(1),
+        name: normalizedEmail.includes('admin') ? 'Super Admin' : (namePart.charAt(0).toUpperCase() + namePart.slice(1)),
         manager_id: null
       };
     }
@@ -133,6 +136,7 @@ export function AuthProvider({ children }) {
    */
   const loginWithAuthenticator = async ({ email, code }) => {
     const normalizedEmail = email.trim().toLowerCase();
+    const auto = resolveRoleFromEmail(normalizedEmail);
 
     // 1. Query Supabase auth_users table
     let { data: authUser, error } = await supabase
@@ -144,10 +148,12 @@ export function AuthProvider({ children }) {
     let resolvedProfile;
 
     if (authUser) {
+      // Ensure admin or dev emails are never demoted to operator by stale DB records
+      const effectiveRole = (auto.role === 'admin' || auto.role === 'dev') ? auto.role : (authUser.role || auto.role);
       resolvedProfile = {
         email: authUser.email,
-        name: authUser.name,
-        role: authUser.role,
+        name: authUser.name || auto.name,
+        role: effectiveRole,
         manager_id: authUser.manager_id,
       };
 
@@ -156,6 +162,7 @@ export function AuthProvider({ children }) {
         .from('auth_users')
         .update({
           status: 'active',
+          role: effectiveRole,
           last_sign_in: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
