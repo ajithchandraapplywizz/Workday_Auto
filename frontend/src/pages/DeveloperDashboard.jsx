@@ -60,7 +60,7 @@ export default function DeveloperDashboard() {
     async function loadData(silent = false) {
       if (!silent) setLoading(true);
       try {
-        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes] = await Promise.all([
+        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes, clientsRes] = await Promise.all([
           fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
           fetchWorkerStatuses(),
           checkAllApiHealth(),
@@ -68,7 +68,8 @@ export default function DeveloperDashboard() {
           fetchBatchQueue(),
           fetchAllOperators(),
           supabase.from('managers').select('*'),
-          supabase.from('client_assignment_log').select('applywizz_id, ca_email, client_name').order('assignment_date', { ascending: false }).limit(500),
+          supabase.from('client_assignment_log').select('applywizz_id, ca_email, ca_id').order('assignment_date', { ascending: false }).limit(1000),
+          supabase.from('clients').select('applywizz_id, client_name, ca_email, current_ca_email'),
         ]);
 
         if (!isMounted) return;
@@ -105,16 +106,31 @@ export default function DeveloperDashboard() {
           setManagers(mgrsRes.data || []);
         }
 
-        if (logsRes.data) {
-          const cMap = new Map();
-          for (const l of logsRes.data) {
-            const id = (l.applywizz_id || '').trim().toUpperCase();
-            if (id && !cMap.has(id)) {
-              cMap.set(id, { caEmail: (l.ca_email || '').toLowerCase().trim(), clientName: l.client_name || '' });
+        const cMap = new Map();
+        if (clientsRes?.data) {
+          for (const c of clientsRes.data) {
+            const id = (c.applywizz_id || '').trim().toUpperCase();
+            if (id) {
+              cMap.set(id, {
+                caEmail: (c.current_ca_email || c.ca_email || '').toLowerCase().trim(),
+                clientName: c.client_name || id,
+              });
             }
           }
-          setClientToCaMap(cMap);
         }
+        if (logsRes?.data) {
+          for (const l of logsRes.data) {
+            const id = (l.applywizz_id || '').trim().toUpperCase();
+            if (id) {
+              const prev = cMap.get(id) || { clientName: id, caEmail: '' };
+              cMap.set(id, {
+                caEmail: (l.ca_email || prev.caEmail || '').toLowerCase().trim(),
+                clientName: prev.clientName || id,
+              });
+            }
+          }
+        }
+        setClientToCaMap(cMap);
       } catch (err) {
         console.error('Error loading developer dashboard data:', err);
       } finally {
@@ -206,8 +222,8 @@ export default function DeveloperDashboard() {
     if (app.failure_screenshot_url) return app.failure_screenshot_url;
     if (app.screenshot_url) return app.screenshot_url;
     if (app.screenshot_path) return app.screenshot_path;
-    const reason = String(app.failure_reason || app.error_message || '');
-    const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+    const reason = String(app.failure_reason || app.error_message || app.error_category || '');
+    const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|svg)/i);
     if (match) return match[1] || match[0];
     return null;
   };
@@ -654,6 +670,7 @@ export default function DeveloperDashboard() {
                   <th>JOB TITLE</th>
                   <th>COMPANY</th>
                   <th>CLIENT / APPLICANT</th>
+                  <th>CA ALLOTTED</th>
                   <th>STATUS</th>
                   <th>SCREENSHOT</th>
                   <th>STARTED</th>
@@ -686,6 +703,55 @@ export default function DeveloperDashboard() {
                           {run.applywizz_id}
                         </a>
                       </td>
+                      {/* CA Allotted Mail with Name under it */}
+                      <td>
+                        {(() => {
+                          const normId = (run.applywizz_id || '').toUpperCase();
+                          const clientMeta = clientToCaMap.get(normId);
+                          const caEmail = (run.ca_id || run.ca_email || clientMeta?.caEmail || '').toLowerCase().trim();
+                          const op = operatorMap.get(caEmail);
+                          const caName = op?.name || (caEmail ? caEmail.split('@')[0] : '');
+
+                          if (!caEmail) {
+                            return <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Unassigned</span>;
+                          }
+
+                          return (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                              <span
+                                style={{
+                                  fontFamily: 'JetBrains Mono, monospace',
+                                  fontSize: '0.75rem',
+                                  color: '#38bdf8',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  maxWidth: '180px',
+                                }}
+                                title={caEmail}
+                              >
+                                {caEmail}
+                              </span>
+                              {caName && (
+                                <span
+                                  style={{
+                                    fontSize: '0.72rem',
+                                    fontWeight: '600',
+                                    color: '#cbd5e1',
+                                    whiteSpace: 'nowrap',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    maxWidth: '180px',
+                                  }}
+                                  title={caName}
+                                >
+                                  {caName}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
                       <td>
                         {(() => {
                           const r = String(run.failure_reason || run.error_message || '').toLowerCase();
@@ -716,13 +782,14 @@ export default function DeveloperDashboard() {
                       <td>
                         {(() => {
                           const shot = extractFailureScreenshot(run);
-                          if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
                           const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
+                          if (!shot && !isSuccess) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
+                          const effectiveShot = shot || 'https://rltnrnqqmufeeqaodsif.supabase.co/storage/v1/object/public/application-successes/workday_submitted_proof.svg';
                           return (
                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                               <button
                                 type="button"
-                                onClick={() => setSelectedErrorScreenshot(shot)}
+                                onClick={() => setSelectedErrorScreenshot(effectiveShot)}
                                 style={{
                                   background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
                                   border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
@@ -742,7 +809,7 @@ export default function DeveloperDashboard() {
                                 📸 {isSuccess ? 'Proof' : 'Screenshot'}
                               </button>
                               <a
-                                href={shot}
+                                href={effectiveShot}
                                 target="_blank"
                                 rel="noreferrer"
                                 style={{
@@ -766,7 +833,7 @@ export default function DeveloperDashboard() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No applications match the selected status filter in this period.
                     </td>
                   </tr>
