@@ -645,11 +645,33 @@ export async function fetchApplicationsDynamic({
         .order('created_at', { ascending: false });
 
       if (queueTasks && queueTasks.length > 0) {
-        const seenUrls = new Set(list.map((a) => (a.job_url || a.url || '').split('?')[0].trim().toLowerCase()));
+        const itemByUrl = new Map();
+        for (const item of list) {
+          const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
+          if (u) itemByUrl.set(u, item);
+        }
+
         for (const qt of queueTasks) {
           const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
-          if (cleanQtUrl && !seenUrls.has(cleanQtUrl)) {
-            seenUrls.add(cleanQtUrl);
+          if (!cleanQtUrl) continue;
+
+          const existing = itemByUrl.get(cleanQtUrl);
+          if (existing) {
+            // Reconcile status & screenshot from queue task
+            if (qt.screenshot_path && !existing.failure_screenshot_url) {
+              existing.failure_screenshot_url = qt.screenshot_path;
+              existing.screenshot_url = qt.screenshot_path;
+            }
+            if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review') {
+              existing.status = qt.status;
+            } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
+              existing.status = 'pending';
+            }
+            if (qt.error_message && !existing.failure_reason) {
+              existing.failure_reason = qt.error_message;
+            }
+          } else {
+            itemByUrl.set(cleanQtUrl, true);
 
             // Extract company and role from URL if null
             let parsedCompany = qt.company;
@@ -681,10 +703,14 @@ export async function fetchApplicationsDynamic({
               job_title: parsedTitle || 'Workday Position',
               company: parsedCompany || 'Workday Employer',
               ats: 'Workday',
-              status: qt.status || 'ready_for_review',
+              status: qt.status || 'pending',
               job_url: qt.job_url,
               pre_resolved_answers: qt.pre_resolved_answers,
+              screenshot_url: qt.screenshot_path || null,
+              failure_screenshot_url: qt.screenshot_path || null,
+              failure_reason: qt.error_message || null,
               created_at: qt.created_at,
+              updated_at: qt.completed_at || qt.created_at,
             });
           }
         }

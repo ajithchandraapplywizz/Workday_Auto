@@ -637,6 +637,7 @@ export default function DeveloperDashboard() {
                   <th>COMPANY</th>
                   <th>CLIENT / APPLICANT</th>
                   <th>STATUS</th>
+                  <th>SCREENSHOT</th>
                   <th>STARTED</th>
                   <th>LAST UPDATED</th>
                 </tr>
@@ -672,13 +673,44 @@ export default function DeveloperDashboard() {
                           {run.status?.toUpperCase() || 'QUEUED'}
                         </span>
                       </td>
+                      <td>
+                        {(() => {
+                          const shot = extractFailureScreenshot(run);
+                          if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
+                          const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
+                          return (
+                            <a
+                              href={shot}
+                              target="_blank"
+                              rel="noreferrer"
+                              style={{
+                                background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
+                                color: isSuccess ? '#34d399' : '#f87171',
+                                padding: '3px 8px',
+                                borderRadius: '4px',
+                                fontSize: '0.72rem',
+                                fontWeight: 'bold',
+                                textDecoration: 'none',
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                gap: '3px',
+                                whiteSpace: 'nowrap',
+                              }}
+                              title="Click to view application screenshot"
+                            >
+                              📸 {isSuccess ? 'Proof' : 'Fail Shot'} ↗
+                            </a>
+                          );
+                        })()}
+                      </td>
                       <td>{run.started_at ? new Date(run.started_at).toLocaleString() : '—'}</td>
                       <td>{run.updated_at ? new Date(run.updated_at).toLocaleString() : '—'}</td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No applications match the selected status filter in this period.
                     </td>
                   </tr>

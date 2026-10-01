@@ -396,8 +396,8 @@ export async function executeWorkerTask({
       roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
       status,
       failureReason: isSuccessStatus ? null : `wizard_did_not_reach_review (stopped at ${stoppedBlock})`,
-      failureScreenshotUrl: isSuccessStatus ? null : completionShotUrl,
-      stoppedAtStep: isSuccessStatus ? null : stoppedBlock,
+      failureScreenshotUrl: completionShotUrl,
+      stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
     }).catch(() => {});
 
     if (queueTaskId) {

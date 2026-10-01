@@ -649,6 +649,9 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                               <td>
                                 {(() => {
                                   const s = (app.status || '').toLowerCase();
+                                  const lastUpdated = new Date(app.updated_at || app.created_at || 0).getTime();
+                                  const isLiveActive = lastUpdated && (Date.now() - lastUpdated < 3 * 60 * 1000);
+
                                   if (s === 'failed') {
                                     return (
                                       <span className="video-status-tag failed" title={app.failure_reason}>
@@ -659,11 +662,14 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                   if (s === 'submitted') {
                                     return <span className="video-status-tag submitted">SUBMITTED</span>;
                                   }
-                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress') {
-                                    return <span className="video-status-tag in_flight">RUNNING IN BACKGROUND</span>;
-                                  }
                                   if (s === 'ready_for_review' || s === 'reached_review') {
                                     return <span className="video-status-tag ready_for_review">READY TO REVIEW & SUBMIT</span>;
+                                  }
+                                  if (['in_flight', 'processing', 'in_progress', 'started', 'applying'].includes(s)) {
+                                    if (isLiveActive) {
+                                      return <span className="video-status-tag in_flight">BOT FILLING IN BACKGROUND</span>;
+                                    }
+                                    return <span className="video-status-tag queued">QUEUED / READY</span>;
                                   }
                                   if (s === 'pending' || s === 'queued') {
                                     return <span className="video-status-tag queued">IN QUEUE</span>;
@@ -674,6 +680,9 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                               <td>
                                 {(() => {
                                   const s = (app.status || '').toLowerCase();
+                                  const lastUpdated = new Date(app.updated_at || app.created_at || 0).getTime();
+                                  const isLiveActive = lastUpdated && (Date.now() - lastUpdated < 3 * 60 * 1000);
+
                                   if (s === 'submitted' || s === 'completed') {
                                     return (
                                       <button
@@ -722,43 +731,71 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                       </button>
                                     );
                                   }
-                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress' || s === 'started' || s === 'applying') {
+                                  if (['in_flight', 'processing', 'in_progress', 'started', 'applying'].includes(s)) {
+                                    if (isLiveActive) {
+                                      return (
+                                        <span
+                                          style={{
+                                            display: 'inline-flex',
+                                            alignItems: 'center',
+                                            gap: '6px',
+                                            fontSize: '0.78rem',
+                                            color: '#38bdf8',
+                                            fontWeight: 'bold',
+                                            background: 'rgba(56, 189, 248, 0.1)',
+                                            border: '1px solid rgba(56, 189, 248, 0.25)',
+                                            padding: '4px 10px',
+                                            borderRadius: '4px',
+                                          }}
+                                        >
+                                          ⚡ Bot Filling Form...
+                                        </span>
+                                      );
+                                    }
                                     return (
-                                      <span
+                                      <button
+                                        type="button"
+                                        className="video-btn-start"
                                         style={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: '6px',
-                                          fontSize: '0.78rem',
-                                          color: '#38bdf8',
+                                          padding: '5px 12px',
+                                          fontSize: '0.8rem',
                                           fontWeight: 'bold',
-                                          background: 'rgba(56, 189, 248, 0.1)',
-                                          border: '1px solid rgba(56, 189, 248, 0.25)',
-                                          padding: '4px 10px',
-                                          borderRadius: '4px',
+                                          background: 'linear-gradient(135deg, #0284c7 0%, #2563eb 100%)',
+                                          borderColor: '#38bdf8',
+                                          color: '#ffffff',
+                                          cursor: 'pointer',
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectApp(app);
+                                          handleOpenReview(app);
                                         }}
                                       >
-                                        ⚡ Bot Filling Form...
-                                      </span>
+                                        📋 Review & Apply
+                                      </button>
                                     );
                                   }
                                   if (s === 'pending' || s === 'queued' || s === 'in_queue') {
                                     return (
-                                      <span
+                                      <button
+                                        type="button"
+                                        className="video-btn-start"
                                         style={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: '6px',
-                                          fontSize: '0.78rem',
-                                          color: '#94a3b8',
-                                          background: 'rgba(148, 163, 184, 0.08)',
-                                          border: '1px solid rgba(148, 163, 184, 0.2)',
                                           padding: '4px 10px',
-                                          borderRadius: '4px',
+                                          fontSize: '0.78rem',
+                                          background: 'rgba(56, 189, 248, 0.08)',
+                                          borderColor: '#38bdf8',
+                                          color: '#38bdf8',
+                                          cursor: 'pointer',
+                                        }}
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          handleSelectApp(app);
+                                          handleOpenReview(app);
                                         }}
                                       >
-                                        ⏳ Queued (Waiting for Bot)
-                                      </span>
+                                        📋 Review & Apply
+                                      </button>
                                     );
                                   }
                                   if (s === 'failed') {
