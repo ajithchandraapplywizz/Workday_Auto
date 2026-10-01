@@ -475,8 +475,9 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
  * @param {string} options.email - The applicant's email address
  * @param {string} [options.password] - Candidate password to set if a password reset / new password form appears
  * @param {string} [options.company] - Company name (e.g. "nvidia", "target")
- * @param {number} [options.startTime] - Timestamp (Date.now()) recorded when request was submitted
  * @param {number} [options.timeoutMs=60000] - Max wait time (default: 60s)
+ * @returns {Promise<{ success: boolean, type: string, url?: string, code?: string, onWizard?: boolean }>}
+ */
 async function checkIfAlreadyOnApplicationWizard(page) {
   if (!page || page.isClosed()) return false;
   if (await isWorkdayWizardVisible(page).catch(() => false)) return true;
