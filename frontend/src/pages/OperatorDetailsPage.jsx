@@ -369,6 +369,7 @@ export default function OperatorDetailsPage({
                 <th>CLIENT NAME</th>
                 <th>APPLYWIZZ ID</th>
                 <th>OFFICIAL COMPANY EMAIL</th>
+                <th style={{ textAlign: 'center' }}>ZOHO STATUS</th>
                 <th style={{ textAlign: 'center' }}>JOBS APPLIED</th>
                 <th style={{ textAlign: 'center' }}>EMAILS SUBMITTED</th>
                 <th>WORK DATE</th>
@@ -378,7 +379,7 @@ export default function OperatorDetailsPage({
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={7} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                  <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
                     <RefreshCw size={20} className="animate-spin" style={{ margin: '0 auto 8px', display: 'block' }} />
                     Loading live candidate allocations from CA management backend...
                   </td>
@@ -408,6 +409,17 @@ export default function OperatorDetailsPage({
                         <span style={{ color: '#38bdf8', fontSize: '0.85rem', fontWeight: '500' }}>
                           {companyMail}
                         </span>
+                      </td>
+                      <td style={{ textAlign: 'center' }}>
+                        {c.zoho_status === 'not_connected' ? (
+                          <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: '600', background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                            ⚠️ Not Connected
+                          </span>
+                        ) : (
+                          <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: '600', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                            ✓ Connected
+                          </span>
+                        )}
                       </td>
                       <td style={{ textAlign: 'center' }}>
                         <span style={{ color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#64748b', fontWeight: 'bold' }}>

@@ -1013,8 +1013,8 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
     // 3. Enrich strictly with OUR Supabase applications, batch_job_queue tracking, AND official company emails
     if (candidateIds.length > 0) {
       const [appsRes, queueRes, dbClientsRes] = await Promise.all([
-        supabase.from('applications').select('applywizz_id, status').in('applywizz_id', candidateIds),
-        supabase.from('batch_job_queue').select('applywizz_id, status').in('applywizz_id', candidateIds),
+        supabase.from('applications').select('applywizz_id, status, failure_reason').in('applywizz_id', candidateIds),
+        supabase.from('batch_job_queue').select('applywizz_id, status, error_message').in('applywizz_id', candidateIds),
         supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
       ]);
 
@@ -1026,6 +1026,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
 
       const candidateJobsSet = new Map();
       const submittedCountMap = new Map();
+      const zohoDisconnectedSet = new Set();
 
       (appsRes.data || []).forEach((a) => {
         const cid = (a.applywizz_id || '').trim().toUpperCase();
@@ -1035,6 +1036,9 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           candidateJobsSet.get(cid).add(key);
           if (a.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
+          }
+          if (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) {
+            zohoDisconnectedSet.add(cid);
           }
         }
       });
@@ -1048,6 +1052,9 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           if (q.status === 'submitted') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
+          if (q.error_message && q.error_message.includes('zoho_mail_not_connected')) {
+            zohoDisconnectedSet.add(cid);
+          }
         }
       });
 
@@ -1055,6 +1062,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       for (const [cid, cand] of clientMap.entries()) {
         cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
+        cand.zoho_status = zohoDisconnectedSet.has(cid) ? 'not_connected' : 'connected';
         const dbClient = dbClientMap.get(cid);
         cand.client_email = formatClientCompanyEmail(cand.client_name, cand.client_email, dbClient?.company_email);
       }

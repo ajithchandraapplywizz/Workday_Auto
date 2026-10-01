@@ -150,6 +150,16 @@ export default function AdminDashboard() {
     return operators.filter((o) => getOperatorEffectiveStatus(o) !== 'active').length;
   }, [operators]);
 
+  // Clients / Applications flagged with zoho_mail_not_connected
+  const zohoNotConnectedCount = useMemo(() => {
+    return applications.filter((a) =>
+      a.failure_reason === 'zoho_mail_not_connected' ||
+      (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) ||
+      a.error_message === 'zoho_mail_not_connected' ||
+      (a.error_message && a.error_message.includes('zoho_mail_not_connected'))
+    ).length;
+  }, [applications]);
+
   // Clickable Active / Inactive operators tile navigation
   const handleOperatorFilterClick = (status) => {
     setOperatorFilter(status);
@@ -422,6 +432,16 @@ export default function AdminDashboard() {
             <div className="video-kpi-box">
               <span className="vkpi-label">FAILED</span>
               <span className="vkpi-val">{kpis.failed}</span>
+            </div>
+
+            {/* Zoho Mail Not Connected */}
+            <div
+              className="video-kpi-box"
+              style={{ borderLeft: '3px solid #f59e0b' }}
+              title="Applications requiring Zoho verification where client mailbox connection is missing (193 pool)"
+            >
+              <span className="vkpi-label" style={{ color: '#f59e0b' }}>ZOHO NOT CONNECTED</span>
+              <span className="vkpi-val" style={{ color: '#f59e0b' }}>{zohoNotConnectedCount}</span>
             </div>
 
             {/* Supabase Answer % */}
@@ -727,9 +747,15 @@ export default function AdminDashboard() {
                       </td>
                       <td>{app.company || 'Workday Tenant'}</td>
                       <td>
-                        <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
-                          {app.status?.toUpperCase() || 'QUEUED'}
-                        </span>
+                        {app.failure_reason === 'zoho_mail_not_connected' || (app.failure_reason && app.failure_reason.includes('zoho_mail_not_connected')) ? (
+                          <span className="video-status-tag" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.35)' }}>
+                            ZOHO NOT CONNECTED
+                          </span>
+                        ) : (
+                          <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
+                            {app.status?.toUpperCase() || 'QUEUED'}
+                          </span>
+                        )}
                       </td>
                       <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
                       <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>
