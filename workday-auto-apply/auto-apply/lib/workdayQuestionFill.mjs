@@ -1970,20 +1970,12 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         }
       }
       if (!expectedPattern.test(actual)) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const screenshotPath = `screenshots/manual-review-date-${stamp}.png`;
-        const htmlPath = `screenshots/manual-review-date-${stamp}.html`;
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-        const html = await page.content().catch(() => '');
-        await writeFile(htmlPath, html).catch(() => {});
         if (profile) {
           profile._manualReview = profile._manualReview || [];
           profile._manualReview.push(createManualReviewItem(label, {
             reason: 'Dynamic current-date field validation failed',
             expected: fillValue === 'date' ? nativeValue : valueToFill,
             actual,
-            screenshot: screenshotPath,
-            domSnapshot: htmlPath,
           }));
         }
         console.error('[date] Dynamic current-date field validation failed; manual review required');
@@ -2010,6 +2002,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const formattedDate = formatToMMDDYYYY(answer);
       const spinButtons = fieldBox.locator('input[role="spinbutton"], input[data-automation-id*="dateSection"]');
       const spinCount = await spinButtons.count().catch(() => 0);
+      let spinsFilled = 0;
       if (spinCount >= 2 && formattedDate) {
         const [month, day, year] = formattedDate.split('/');
         for (let i = 0; i < spinCount; i++) {
@@ -2019,11 +2012,20 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
             (await sp.getAttribute('data-automation-id') || '') + ' ' +
             (await sp.getAttribute('placeholder') || '')
           ).toLowerCase();
-          if (/month|\bmm\b|datesectionmonth/i.test(hint)) await sp.fill(String(Number(month))).catch(() => {});
-          else if (/day|\bdd\b|datesectionday/i.test(hint)) await sp.fill(String(Number(day))).catch(() => {});
-          else if (/year|yyyy|datesectionyear/i.test(hint)) await sp.fill(year).catch(() => {});
+          if (/month|\bmm\b|datesectionmonth/i.test(hint)) {
+            await sp.fill(String(Number(month))).catch(() => {});
+            spinsFilled++;
+          } else if (/day|\bdd\b|datesectionday/i.test(hint)) {
+            await sp.fill(String(Number(day))).catch(() => {});
+            spinsFilled++;
+          } else if (/year|yyyy|datesectionyear/i.test(hint)) {
+            await sp.fill(year).catch(() => {});
+            spinsFilled++;
+          }
         }
-        ok = true;
+        if (spinsFilled >= 2) {
+          ok = true;
+        }
       }
       if (!ok) {
         const input = fieldBox.locator('input[type="date"], input[type="text"], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
@@ -2431,7 +2433,7 @@ async function bruteForceSelfIdentifyNameDate(page, fullName, dateValue) {
       const labelEl = field.querySelector('label, legend, [data-automation-id*="label"]');
       const labelText = (labelEl?.textContent || '').replace(/\*+/g, '').trim().toLowerCase();
 
-      if (labelText === 'name' && fullName) {
+      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(labelText) && fullName) {
         const input = field.querySelector(
           'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, [contenteditable="true"]'
         );
@@ -2447,7 +2449,7 @@ async function bruteForceSelfIdentifyNameDate(page, fullName, dateValue) {
         }
       }
 
-      if (labelText === 'date' && month && day && year) {
+      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(labelText) && month && day && year) {
         const spins = field.querySelectorAll('input[role="spinbutton"]');
         if (spins.length >= 3) {
           spins[0].focus();
@@ -2501,11 +2503,11 @@ async function readSelfIdentifyFieldStatus(page) {
         const t = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
         if (t && !/^select/i.test(t)) status.language = t;
       }
-      if (label === 'name') {
+      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(label)) {
         const input = field.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
         status.name = (input?.value || '').trim();
       }
-      if (label === 'date') {
+      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(label)) {
         const spins = field.querySelectorAll('input[role="spinbutton"]');
         if (spins.length >= 3) {
           status.date = `${spins[0]?.value || ''}/${spins[1]?.value || ''}/${spins[2]?.value || ''}`;

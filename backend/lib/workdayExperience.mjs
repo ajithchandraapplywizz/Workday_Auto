@@ -1775,21 +1775,121 @@ async function ensureCurrentlyWorkHere(page, currentlyWorking = false) {
 }
 
 const WORK_FIELDS = [
-  { label: 'Job Title', labelPattern: '^Job\\s*Title', key: 'experience.current_title', type: 'text', alwaysFill: true },
-  { label: 'Company', labelPattern: '^Company', key: 'experience.current_company', type: 'text', alwaysFill: true },
-  { label: 'Location', labelPattern: '^Location', key: 'experience.location', type: 'text' },
-  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*From', key: 'experience.from_date', type: 'monthyear', alwaysFill: true },
-  { label: 'To', labelPattern: '^To\\b(?!\\s*year)|^End\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*To', key: 'experience.to_date', type: 'monthyear', alwaysFill: true },
-  { label: 'Role Description', labelPattern: 'Role\\s*Description', key: 'experience.description', type: 'textarea' },
+  { label: 'Job Title', labelPattern: '^Job\\s*Title', automationId: 'jobTitle', key: 'experience.current_title', type: 'text', alwaysFill: true },
+  { label: 'Company', labelPattern: '^Company', automationId: 'company', key: 'experience.current_company', type: 'text', alwaysFill: true },
+  { label: 'Location', labelPattern: '^Location', automationId: 'location', key: 'experience.location', type: 'text' },
+  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*From', automationId: 'startDate', key: 'experience.from_date', type: 'monthyear', alwaysFill: true },
+  { label: 'To', labelPattern: '^To\\b(?!\\s*year)|^End\\s*(Date|Month|Year)?|^Dates?\\s*Attended.*To', automationId: 'endDate', key: 'experience.to_date', type: 'monthyear', alwaysFill: true },
+  { label: 'Role Description', labelPattern: 'Role\\s*Description', automationId: 'description', key: 'experience.description', type: 'textarea' },
 ];
 
 const EDUCATION_CORE_FIELDS = [
-  { label: 'School or University', labelPattern: 'School\\s*or\\s*University|^School$', key: 'education.university', type: 'typeahead', alwaysFill: true },
-  { label: 'Degree', labelPattern: '^\\*?\\s*Degree', key: 'education.degree', type: 'searchable', alwaysFill: true },
-  { label: 'Field of Study', labelPattern: 'Field\\s*of\\s*Study|^Major$', key: 'education.major', type: 'fieldofstudy', alwaysFill: true },
-  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^First\\s*Year|^Dates?\\s*Attended.*From', key: 'education.from_year', type: 'year', alwaysFill: true },
-  { label: 'To', labelPattern: '^To\\b|^End\\s*(Date|Month|Year)?|^Last\\s*Year|^Expected\\s*Graduation|^Graduation\\s*(Date|Year)?|^Dates?\\s*Attended.*To', key: 'education.to_year', type: 'year', alwaysFill: true },
+  { label: 'School or University', labelPattern: 'School\\s*or\\s*University|^School$', automationId: 'school', key: 'education.university', type: 'typeahead', alwaysFill: true },
+  { label: 'Degree', labelPattern: '^\\*?\\s*Degree', automationId: 'degree', key: 'education.degree', type: 'searchable', alwaysFill: true },
+  { label: 'Field of Study', labelPattern: 'Field\\s*of\\s*Study|^Major$', automationId: 'fieldOfStudy', key: 'education.major', type: 'fieldofstudy', alwaysFill: true },
+  { label: 'From', labelPattern: '^From\\b|^Start\\s*(Date|Month|Year)?|^First\\s*Year|^Dates?\\s*Attended.*From', automationId: 'startDate', key: 'education.from_year', type: 'year', alwaysFill: true },
+  { label: 'To', labelPattern: '^To\\b|^End\\s*(Date|Month|Year)?|^Last\\s*Year|^Expected\\s*Graduation|^Graduation\\s*(Date|Year)?|^Dates?\\s*Attended.*To', automationId: 'endDate', key: 'education.to_year', type: 'year', alwaysFill: true },
 ];
+
+/**
+ * Check whether required Work Experience and Education fields are filled in the live DOM.
+ * @param {import('playwright').Page} page
+ * @param {object} profile
+ * @returns {Promise<{unfilledCount: number, missing: string[]}>}
+ */
+export async function checkMyExperienceRequiredFields(page, profile = {}) {
+  return await page.evaluate(() => {
+    const missing = [];
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+
+    // Check if Work Experience section is present and expanded
+    const workSection = document.querySelector('[data-automation-id*="workExperienceSection"], [data-automation-id*="work-experience-section"], [data-automation-id*="workExperiencePanelSet"]');
+    if (workSection && workSection.offsetParent !== null) {
+      const inputs = Array.from(workSection.querySelectorAll('input:not([type="hidden"]), textarea'));
+      if (inputs.length > 0) {
+        // Currently working check
+        const cb = workSection.querySelector('input[type="checkbox"][data-automation-id*="currentlyWork" i], input[type="checkbox"]#currentlyWorkHere');
+        const isCurrent = Boolean(cb?.checked || cb?.getAttribute('aria-checked') === 'true');
+
+        // Check Job Title
+        const titleInput = workSection.querySelector('[data-automation-id*="jobTitle" i] input, input[data-automation-id*="jobTitle" i], [data-automation-id*="jobTitle"]');
+        const titleVal = titleInput ? norm(titleInput.value) : '';
+        if (!titleVal) {
+          const titleField = Array.from(workSection.querySelectorAll('label')).find((l) => /job\s*title/i.test(l.textContent || ''));
+          const titleInp = titleField?.closest('[data-automation-id*="formField"], div')?.querySelector('input');
+          if (!titleInp || !norm(titleInp.value)) missing.push('Work Experience: Job Title');
+        }
+
+        // Check Company
+        const compInput = workSection.querySelector('[data-automation-id*="company" i] input, input[data-automation-id*="company" i], [data-automation-id*="company"]');
+        const compVal = compInput ? norm(compInput.value) : '';
+        if (!compVal) {
+          const compField = Array.from(workSection.querySelectorAll('label')).find((l) => /company/i.test(l.textContent || ''));
+          const compInp = compField?.closest('[data-automation-id*="formField"], div')?.querySelector('input');
+          if (!compInp || !norm(compInp.value)) missing.push('Work Experience: Company');
+        }
+
+        // Check From Date
+        const fromSpins = workSection.querySelectorAll('[data-automation-id*="startDate" i] input, [data-automation-id*="fromDate" i] input, [data-automation-id*="dateSectionMonth" i]');
+        const fromHasVal = Array.from(fromSpins).some((s) => norm(s.value) && !/^(m+|y+|d+|mm|yyyy)$/i.test(norm(s.value)));
+        if (!fromHasVal) {
+          const fromInput = workSection.querySelector('[data-automation-id*="startDate"] input, [data-automation-id*="fromDate"] input');
+          if (!fromInput || !norm(fromInput.value)) missing.push('Work Experience: From Date');
+        }
+
+        // Check To Date (if not currently working)
+        if (!isCurrent) {
+          const toSpins = workSection.querySelectorAll('[data-automation-id*="endDate" i] input, [data-automation-id*="toDate" i] input');
+          const toHasVal = Array.from(toSpins).some((s) => norm(s.value) && !/^(m+|y+|d+|mm|yyyy)$/i.test(norm(s.value)));
+          if (!toHasVal) {
+            const toInput = workSection.querySelector('[data-automation-id*="endDate"] input, [data-automation-id*="toDate"] input');
+            if (!toInput || !norm(toInput.value)) missing.push('Work Experience: To Date');
+          }
+        }
+      }
+    }
+
+    // Check if Education section is present and expanded
+    const eduSection = document.querySelector('[data-automation-id*="educationSection"], [data-automation-id*="educationPanelSet"]');
+    if (eduSection && eduSection.offsetParent !== null) {
+      const inputs = Array.from(eduSection.querySelectorAll('input:not([type="hidden"]), button[aria-haspopup="listbox"], [role="combobox"]'));
+      if (inputs.length > 0) {
+        // School / University
+        const schoolInput = eduSection.querySelector('[data-automation-id*="school" i] input, input[data-automation-id*="school" i], [data-automation-id*="university" i] input');
+        const schoolBtn = eduSection.querySelector('[data-automation-id*="school" i] button, [data-automation-id*="school" i] [role="combobox"]');
+        const schoolVal = schoolInput ? norm(schoolInput.value) : (schoolBtn ? norm(schoolBtn.textContent) : '');
+        if (!schoolVal || /^select/i.test(schoolVal)) {
+          const schoolLabel = Array.from(eduSection.querySelectorAll('label')).find((l) => /school|university/i.test(l.textContent || ''));
+          const sInp = schoolLabel?.closest('[data-automation-id*="formField"], div')?.querySelector('input, button');
+          const sVal = sInp ? norm(sInp.value || sInp.textContent) : '';
+          if (!sVal || /^select/i.test(sVal)) missing.push('Education: School or University');
+        }
+
+        // Degree
+        const degreeBtn = eduSection.querySelector('[data-automation-id*="degree" i] button, [data-automation-id*="degree" i] [role="combobox"], [data-automation-id*="degree" i] input');
+        const degreeVal = degreeBtn ? norm(degreeBtn.textContent || degreeBtn.value) : '';
+        if (!degreeVal || /^select/i.test(degreeVal)) {
+          const degLabel = Array.from(eduSection.querySelectorAll('label')).find((l) => /degree/i.test(l.textContent || ''));
+          const dInp = degLabel?.closest('[data-automation-id*="formField"], div')?.querySelector('button, [role="combobox"], input');
+          const dVal = dInp ? norm(dInp.textContent || dInp.value) : '';
+          if (!dVal || /^select/i.test(dVal)) missing.push('Education: Degree');
+        }
+
+        // Field of Study
+        const fosBtn = eduSection.querySelector('[data-automation-id*="fieldOfStudy" i] button, [data-automation-id*="fieldOfStudy" i] [role="combobox"], [data-automation-id*="fieldOfStudy" i] input');
+        const fosVal = fosBtn ? norm(fosBtn.textContent || fosBtn.value) : '';
+        if (!fosVal || /^select/i.test(fosVal)) {
+          const fosLabel = Array.from(eduSection.querySelectorAll('label')).find((l) => /field\s*of\s*study|major/i.test(l.textContent || ''));
+          const fInp = fosLabel?.closest('[data-automation-id*="formField"], div')?.querySelector('button, [role="combobox"], input');
+          const fVal = fInp ? norm(fInp.textContent || fInp.value) : '';
+          if (!fVal || /^select/i.test(fVal)) missing.push('Education: Field of Study');
+        }
+      }
+    }
+
+    return { unfilledCount: missing.length, missing };
+  }).catch(() => ({ unfilledCount: 0, missing: [] }));
+}
 
 export async function handleStep2MyExperience(page, profile = {}) {
   console.log('\n  ══════════════════════════════════════════');
@@ -1956,6 +2056,28 @@ export async function handleStep2MyExperience(page, profile = {}) {
         requiredOnly: false,
       });
       await page.waitForTimeout(400);
+    }
+  }
+
+  // Post-fill verification: if any required field was missed, perform one fast targeted refill pass
+  const expCheck = await checkMyExperienceRequiredFields(page, profile);
+  if (expCheck.unfilledCount > 0) {
+    console.log(`  ↻ My Experience post-fill check: ${expCheck.unfilledCount} field(s) still empty (${expCheck.missing.join(', ')}) — targeted retry`);
+    if (hasWorkSection) {
+      for (const spec of WORK_FIELDS) {
+        if (expCheck.missing.some((m) => m.toLowerCase().includes(spec.label.toLowerCase()))) {
+          const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
+          if (ok) filled++;
+        }
+      }
+    }
+    if (hasEducationSection) {
+      for (const spec of EDUCATION_CORE_FIELDS) {
+        if (expCheck.missing.some((m) => m.toLowerCase().includes(spec.label.toLowerCase()))) {
+          const ok = await fillFieldAtAnyCost(page, 'Education', 'education', spec, profile, qaStore, url);
+          if (ok) filled++;
+        }
+      }
     }
   }
 

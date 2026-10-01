@@ -639,9 +639,8 @@ export async function fillWorkdayDateField(page, opts) {
     await singleLoc.scrollIntoViewIfNeeded().catch(() => {});
     await singleLoc.click({ force: true }).catch(() => {});
     const ok = await typeSegment(page, singleLoc, targetVal);
-    attempts.push(`single-input ${targetVal} ${ok ? '✓' : '✗'}`);
-    await singleLoc.press('Enter').catch(() => {});
-    await page.waitForTimeout(100);
+    await singleLoc.press('Tab').catch(() => {});
+    await page.waitForTimeout(40);
     const after = await readMarkedDate(page);
     return { ok: ok || Boolean(after.text), attempts, after: after.text || targetVal };
   }
@@ -682,8 +681,8 @@ export async function fillWorkdayDateField(page, opts) {
     attempts.push(`year rewrite ${parsed.year} ${yearOk ? '✓' : '✗'}`);
   }
 
-  await yearLoc.press('Enter').catch(() => {});
-  await page.waitForTimeout(100);
+  await (hasYear ? yearLoc : monthLoc).press('Tab').catch(() => {});
+  await page.waitForTimeout(40);
 
   let after = await readMarkedDate(page);
   if (strictDateMatch(after, parsed, { requireMonth: needMonth })) {

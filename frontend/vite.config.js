@@ -9,11 +9,25 @@ export default defineConfig({
     port,
     host: '0.0.0.0',
     allowedHosts: true,
+    proxy: {
+      '/api/zoho-health': {
+        target: 'https://zoho-mail-reader.onrender.com',
+        changeOrigin: true,
+        rewrite: () => '/health',
+      },
+    },
   },
   preview: {
     port,
     host: '0.0.0.0',
     allowedHosts: true,
+    proxy: {
+      '/api/zoho-health': {
+        target: 'https://zoho-mail-reader.onrender.com',
+        changeOrigin: true,
+        rewrite: () => '/health',
+      },
+    },
   },
 });
 
