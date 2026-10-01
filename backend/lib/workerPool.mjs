@@ -413,7 +413,7 @@ export async function executeWorkerTask({
       if (page && !page.isClosed()) {
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         detectedStep = await detectWorkdayStep(page).catch(() => null);
-        const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+        const buf = profile?._submissionScreenshotBuffer || await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
         if (buf) {
           const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
             ? 'application-successes'
@@ -434,6 +434,8 @@ export async function executeWorkerTask({
       if (completionShotUrl) {
         fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
       }
+    } else if (completionShotUrl) {
+      fullFailureReason = `[screenshot: ${completionShotUrl}]`;
     }
 
     await upsertSupabaseApplication({

@@ -1891,11 +1891,31 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
+  // Explicitly wait for Workday confirmation screen to render
+  try {
+    await page.waitForFunction(() => {
+      const text = document.body?.innerText || '';
+      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
+             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
+    }, { timeout: 10000 });
+  } catch {}
+  await page.waitForTimeout(1500);
+
   const confirmationFound = await page.evaluate(() => {
     const text = document.body?.innerText || '';
-    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete/i.test(text) ||
-           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"]');
+    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
+           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
   });
+
+  // Capture real browser screenshot of the confirmation page
+  try {
+    if (page && !page.isClosed()) {
+      const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+      if (buf) {
+        profile._submissionScreenshotBuffer = buf;
+      }
+    }
+  } catch {}
 
   if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');

@@ -782,14 +782,13 @@ export default function DeveloperDashboard() {
                       <td>
                         {(() => {
                           const shot = extractFailureScreenshot(run);
+                          if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
                           const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
-                          if (!shot && !isSuccess) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
-                          const effectiveShot = shot || 'https://rltnrnqqmufeeqaodsif.supabase.co/storage/v1/object/public/application-successes/workday_submitted_proof.svg';
                           return (
                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                               <button
                                 type="button"
-                                onClick={() => setSelectedErrorScreenshot(effectiveShot)}
+                                onClick={() => setSelectedErrorScreenshot(shot)}
                                 style={{
                                   background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
                                   border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
@@ -809,7 +808,7 @@ export default function DeveloperDashboard() {
                                 📸 {isSuccess ? 'Proof' : 'Screenshot'}
                               </button>
                               <a
-                                href={effectiveShot}
+                                href={shot}
                                 target="_blank"
                                 rel="noreferrer"
                                 style={{
