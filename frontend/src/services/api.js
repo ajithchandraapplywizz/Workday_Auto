@@ -304,9 +304,10 @@ export async function checkAllApiHealth() {
     {
       id: 'workers',
       name: 'WORKERS',
-      service: '10-Worker Concurrency Pool',
+      service: '1-Worker Dedicated Execution Pool',
       runner: async () => {
-        return { ok: true, status: 'OK', time: 10, meta: '0 in-flight, 10 idle' };
+        const ws = await fetchWorkerStatuses();
+        return { ok: true, status: 'OK', time: 10, meta: `${ws.inFlight} in-flight, ${ws.idle} idle (pool: ${ws.total})` };
       },
     },
     {
@@ -611,7 +612,7 @@ export async function reconcileOperatorsWithAPI() {
 }
 
 /**
- * 16. Supabase: Fetch Worker pool status (10 parallel workers)
+ * 16. Supabase: Fetch Worker pool status (1 dedicated worker)
  */
 export async function fetchWorkerStatuses() {
   try {
@@ -630,11 +631,11 @@ export async function fetchWorkerStatuses() {
       };
     });
     const inFlight = liveWorkers.filter((w) => w.state === 'in_flight').length;
-    const total = Math.max(liveWorkers.length, 10);
+    const total = liveWorkers.length || 1;
     const idle = Math.max(0, total - inFlight);
     return { success: true, workers: liveWorkers, inFlight, idle, total };
   } catch (err) {
-    return { success: true, workers: [], inFlight: 0, idle: 10, total: 10 };
+    return { success: true, workers: [], inFlight: 0, idle: 1, total: 1 };
   }
 }
 
@@ -802,10 +803,25 @@ export async function fetchApplicationsDynamic({
               updated_at: qt.completed_at || qt.created_at,
             };
             itemByUrl.set(cleanQtUrl, newItem);
-            list.push(newItem);
-        }
+          }
         }
       }
+
+    // In 1-worker mode, at most ONE item can ever be in-flight simultaneously across the client's queue.
+    // If multiple stale items have in-flight statuses, preserve at most the most recent 1 and mark the rest as queued.
+    let foundInFlight = false;
+    list = list.map((item) => {
+      const isFlight = ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes((item.status || '').toLowerCase());
+      if (isFlight) {
+        if (!foundInFlight) {
+          foundInFlight = true;
+          return item;
+        } else {
+          return { ...item, status: 'queued' };
+        }
+      }
+      return item;
+    });
 
     return { success: true, applications: list };
   } catch (err) {
@@ -839,13 +855,13 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     const now = Date.now();
     const submitted = allApps.filter((a) => a.status === 'submitted').length;
     
-    // Only count as applying if active within the last 3 minutes and capped at max worker concurrency 10
+    // Only count as applying if active within the last 3 minutes and capped at max worker concurrency 1
     const activeApplying = allApps.filter((a) => {
       if (!['in_progress', 'started', 'applying'].includes(a.status)) return false;
       const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
       return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
     });
-    const applying = Math.min(activeApplying.length, 10);
+    const applying = Math.min(activeApplying.length, 1);
 
     const failed = allApps.filter((a) => a.status === 'failed').length;
     const skipped = allApps.filter((a) => a.status === 'skipped').length;
@@ -1152,10 +1168,11 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
 
     // 3. Enrich strictly with OUR Supabase applications, batch_job_queue tracking, AND official company emails
     if (candidateIds.length > 0) {
-      const [appsRes, queueRes, dbClientsRes] = await Promise.all([
+      const [appsRes, queueRes, dbClientsRes, workerRes] = await Promise.all([
         supabase.from('applications').select('id, applywizz_id, job_url, status, failure_reason, updated_at').in('applywizz_id', candidateIds),
         supabase.from('batch_job_queue').select('id, applywizz_id, job_url, status, error_message, updated_at, claimed_at').in('applywizz_id', candidateIds),
         supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
+        supabase.from('worker_status').select('*'),
       ]);
 
       const dbClientMap = new Map();
@@ -1167,8 +1184,24 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       const candidateJobsSet = new Map();
       const submittedCountMap = new Map();
       const zohoDisconnectedSet = new Set();
-      const clientStatusMap = new Map();
       const now = Date.now();
+
+      // In 1-worker setup, determine if Worker-1 is actively executing
+      const liveWorkers = (workerRes.data || []).filter((w) => {
+        const lastUpdate = new Date(w.updated_at || 0).getTime();
+        return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+      });
+      const activeWorker = liveWorkers[0] || null;
+      let activeCandidateId = null;
+
+      if (activeWorker) {
+        const activeAppId = activeWorker.current_application_id || activeWorker.current_job_id;
+        if (activeAppId) {
+          const appMatch = (appsRes.data || []).find((a) => a.id === activeAppId);
+          const queueMatch = (queueRes.data || []).find((q) => q.id === activeAppId);
+          activeCandidateId = (appMatch?.applywizz_id || queueMatch?.applywizz_id || '').trim().toUpperCase() || null;
+        }
+      }
 
       (appsRes.data || []).forEach((a) => {
         const cid = (a.applywizz_id || '').trim().toUpperCase();
@@ -1182,10 +1215,11 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           if (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) {
             zohoDisconnectedSet.add(cid);
           }
-          if (['in_progress', 'started', 'applying'].includes(a.status)) {
+          // If worker didn't provide specific id but worker is live, identify candidate by recent in-flight record
+          if (activeWorker && !activeCandidateId && ['in_progress', 'started', 'applying'].includes(a.status)) {
             const lastUpdated = new Date(a.updated_at || 0).getTime();
             if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
-              clientStatusMap.set(cid, '⚡ Bot Filling');
+              activeCandidateId = cid;
             }
           }
         }
@@ -1203,10 +1237,10 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           if (q.error_message && q.error_message.includes('zoho_mail_not_connected')) {
             zohoDisconnectedSet.add(cid);
           }
-          if (q.status === 'processing') {
+          if (activeWorker && !activeCandidateId && q.status === 'processing') {
             const lastUpdated = new Date(q.updated_at || q.claimed_at || 0).getTime();
             if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
-              clientStatusMap.set(cid, '⚡ Bot Filling');
+              activeCandidateId = cid;
             }
           }
         }
@@ -1217,8 +1251,8 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
         cand.zoho_status = zohoDisconnectedSet.has(cid) ? 'not_connected' : 'connected';
-        if (clientStatusMap.has(cid)) {
-          cand.status = clientStatusMap.get(cid);
+        if (activeCandidateId && cid === activeCandidateId) {
+          cand.status = '⚡ Bot Filling';
         } else if (cand.emails_submitted >= 10) {
           cand.status = 'Completed';
         } else if (cand.jobs_applied > 0) {
@@ -2053,13 +2087,34 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       };
     }
 
-    const [queueRes, appsRes] = await Promise.all([
+    const [queueRes, appsRes, workerRes] = await Promise.all([
       supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds),
       supabase.from('applications').select('*').in('applywizz_id', clientIds),
+      supabase.from('worker_status').select('*'),
     ]);
 
     const queueTasks = queueRes.data || [];
     const applications = appsRes.data || [];
+    const now = Date.now();
+
+    // In 1-worker setup, at most ONE job across ALL assigned clients can be in_flight
+    const liveWorkers = (workerRes.data || []).filter((w) => {
+      const lastUpdate = new Date(w.updated_at || 0).getTime();
+      return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+    });
+    const activeWorker = liveWorkers[0] || null;
+    let activeClientId = null;
+    let activeJobUrl = null;
+
+    if (activeWorker) {
+      const activeAppId = activeWorker.current_application_id || activeWorker.current_job_id;
+      if (activeAppId) {
+        const foundApp = applications.find((a) => a.id === activeAppId);
+        const foundQueue = queueTasks.find((q) => q.id === activeAppId);
+        activeClientId = (foundApp?.applywizz_id || foundQueue?.applywizz_id || '').trim().toUpperCase() || null;
+        activeJobUrl = (foundApp?.job_url || foundQueue?.job_url || '').split('?')[0].trim().toLowerCase() || null;
+      }
+    }
 
     let totalQueued = 0;
     let totalInFlight = 0;
@@ -2085,8 +2140,9 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       }
 
       const allJobs = Array.from(jobUrlMap.values());
-      const queuedCount = allJobs.filter((j) => ['pending', 'queued', 'in_queue', ''].includes((j.status || '').toLowerCase())).length;
-      const inFlightCount = allJobs.filter((j) => ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes((j.status || '').toLowerCase())).length;
+      const isClientActiveInFlight = Boolean(activeWorker && activeClientId === cid);
+      const inFlightCount = isClientActiveInFlight ? 1 : 0;
+      
       const readyCount = allJobs.filter((j) => ['ready_for_review', 'reached_review'].includes((j.status || '').toLowerCase())).length;
       const submittedCount = allJobs.filter((j) => {
         const s = (j.status || '').toLowerCase();
@@ -2094,6 +2150,8 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
         return (s === 'submitted' || s === 'completed') && hasProof;
       }).length;
       const failedCount = allJobs.filter((j) => (j.status || '').toLowerCase() === 'failed').length;
+      // All other jobs are in queue
+      const queuedCount = Math.max(0, allJobs.length - (inFlightCount + readyCount + submittedCount + failedCount));
 
       totalQueued += queuedCount;
       totalInFlight += inFlightCount;

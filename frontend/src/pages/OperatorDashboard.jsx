@@ -649,30 +649,44 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                         </tr>
                       </thead>
                       <tbody>
-                        {applications.length > 0 ? (
-                          applications.map((app) => {
-                            const proofShot = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url || (() => {
-                              const r = String(app.failure_reason || app.error_message || '');
-                              const m = r.match(/\[screenshot:\s*([^\s\]]+)\]/i) || r.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
-                              return m ? (m[1] || m[0]) : null;
-                            })();
-                            const rawStatus = (app.status || '').toLowerCase();
-                            const hasProof = Boolean(proofShot);
-                            const isGenuineSubmitted = (rawStatus === 'submitted' || rawStatus === 'completed') && hasProof;
-                            const isFailed = rawStatus === 'failed';
-                            const isReady = ['ready_for_review', 'reached_review', 'pre_resolved'].includes(rawStatus);
-                            const isInFlight = ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(rawStatus);
-                            
-                            // Dynamic real-time status: never show fake submitted without genuine proof!
-                            const s = isGenuineSubmitted
-                              ? 'submitted'
-                              : isReady
-                                ? 'ready_for_review'
-                                : isInFlight
-                                  ? 'in_flight'
-                                  : isFailed
-                                    ? 'failed'
-                                    : 'queued';
+                        {(() => {
+                          // In 1-worker architecture, at most ONE application can ever be actively filled by the bot.
+                          // Find the single active in-flight application; all other queued/stale apps render as 'queued'.
+                          const activeInFlightAppId = (() => {
+                            const flight = applications.find((app) => {
+                              const rs = (app.status || '').toLowerCase();
+                              const proof = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url;
+                              if ((rs === 'submitted' || rs === 'completed') && proof) return false;
+                              if (['ready_for_review', 'reached_review', 'pre_resolved', 'failed'].includes(rs)) return false;
+                              return ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(rs);
+                            });
+                            return flight?.id || null;
+                          })();
+
+                          return applications.length > 0 ? (
+                            applications.map((app) => {
+                              const proofShot = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url || (() => {
+                                const r = String(app.failure_reason || app.error_message || '');
+                                const m = r.match(/\[screenshot:\s*([^\s\]]+)\]/i) || r.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+                                return m ? (m[1] || m[0]) : null;
+                              })();
+                              const rawStatus = (app.status || '').toLowerCase();
+                              const hasProof = Boolean(proofShot);
+                              const isGenuineSubmitted = (rawStatus === 'submitted' || rawStatus === 'completed') && hasProof;
+                              const isFailed = rawStatus === 'failed';
+                              const isReady = ['ready_for_review', 'reached_review', 'pre_resolved'].includes(rawStatus);
+                              const isInFlight = app.id === activeInFlightAppId;
+                              
+                              // Dynamic real-time status: never show fake submitted without genuine proof!
+                              const s = isGenuineSubmitted
+                                ? 'submitted'
+                                : isReady
+                                  ? 'ready_for_review'
+                                  : isInFlight
+                                    ? 'in_flight'
+                                    : isFailed
+                                      ? 'failed'
+                                      : 'queued';
 
                             const jobUrl = app.job_url || app.url || '';
                             const displayTitle = app.job_title || app.role_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
@@ -881,20 +895,22 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                 })()}
                               </td>
                             </tr>
-                          );})
-                        ) : (
-                          <tr>
-                            <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
-                              <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
-                                No applications recorded or queued yet for {selectedCandidate.id}.
-                              </div>
-                              <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
-                                Application links will appear here once ingested for processing.
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
+                          );
+                        })
+                      ) : (
+                        <tr>
+                          <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                            <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
+                              No applications recorded or queued yet for {selectedCandidate.id}.
+                            </div>
+                            <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
+                              Application links will appear here once ingested for processing.
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                  </tbody>
                     </table>
                   </div>
                 </div>

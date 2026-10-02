@@ -143,10 +143,9 @@ CREATE TABLE IF NOT EXISTS public.worker_status (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Pre-seed 10 workers for pool tracking
+-- Pre-seed 1 worker for pool tracking (Strictly 1 worker allocated)
 INSERT INTO public.worker_status (worker_id, state)
-SELECT 'Worker-' || i, 'idle'
-FROM generate_series(1, 10) AS i
+VALUES ('Worker-1', 'idle')
 ON CONFLICT (worker_id) DO NOTHING;
 
 -- 7. Table: automation_trace (Debug execution trace stream per application)

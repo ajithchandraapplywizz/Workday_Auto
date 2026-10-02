@@ -33,7 +33,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 10, total: 10 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 1, total: 1 });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -458,7 +458,7 @@ export default function DeveloperDashboard() {
               <span className="isc-speed">24ms</span>
             </div>
 
-            {/* Tile 10: Workers (from worker_status: in-flight vs idle out of 10) */}
+            {/* Tile 10: Workers (from worker_status: 1 dedicated worker) */}
             <div className="integration-status-card">
               <div className="isc-header">
                 <span className="isc-title">WORKERS</span>
