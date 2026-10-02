@@ -438,12 +438,18 @@ export async function executeWorkerTask({
       fullFailureReason = `[screenshot: ${completionShotUrl}]`;
     }
 
+    const appStatus = (status === 'submitted')
+      ? 'submitted'
+      : (status === 'reached-review' || status === 'reached_review')
+        ? 'ready_for_review'
+        : status;
+
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl,
       company,
       roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-      status,
+      status: appStatus,
       failureReason: fullFailureReason,
       failureScreenshotUrl: completionShotUrl,
       stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
@@ -453,9 +459,13 @@ export async function executeWorkerTask({
       const finalStatus = (status === 'submitted')
         ? 'submitted'
         : (status === 'reached-review' || status === 'reached_review')
-          ? 'reached_review'
+          ? 'ready_for_review'
           : (status === 'skipped' ? 'skipped' : 'failed');
-      const answersMap = profile._supabaseQa || (profile._answerCache ? Object.fromEntries(profile._answerCache) : {});
+      const answersMap = {
+        ...(profile._scrapedReviewMap || {}),
+        ...(profile._supabaseQa || {}),
+        ...(profile._answerCache ? Object.fromEntries(profile._answerCache) : {})
+      };
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
         errorMessage: fullFailureReason,
@@ -761,7 +771,7 @@ export async function runQueueWorkerPool({
     const workerId = `Worker-${workerNumber}`;
 
     while (taskPointer < taskLimit) {
-      // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 3-min grace on browser disconnect) ──
+      // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 2-min grace on browser disconnect) ──
       if (activeCaOnly && caEmails?.length) {
         try {
           const ops = await getActiveOperators().catch(() => []);
@@ -771,8 +781,8 @@ export async function runQueueWorkerPool({
             break;
           }
           const lastActivity = new Date(ca.updated_at || ca.last_sign_in || 0).getTime();
-          if (Date.now() - lastActivity > 3 * 60 * 1000) {
-            console.log(`   ⏹ [${workerId}] CA browser session disconnected for > 3 minutes. Terminating worker pool.`);
+          if (Date.now() - lastActivity > 2 * 60 * 1000) {
+            console.log(`   ⏹ [${workerId}] CA browser session disconnected for > 2 minutes. Terminating worker pool.`);
             break;
           }
         } catch {}

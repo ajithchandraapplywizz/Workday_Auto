@@ -64,7 +64,7 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
         {/* Global Controls: Role Switcher (Developer Only), Date, Timeframe, Refresh, User */}
         <div className="header-controls-block">
           {/* ONLY Developer (Ajith) can switch roles across all 4 dashboards */}
-          {user?.role === 'dev' && (
+          {(user?.baseRole === 'dev' || user?.role === 'dev' || user?.email === 'ajithchandranimmala@applywizz.ai') && (
             <div className="role-pill-group" title="Developer Master Override">
               {[
                 { id: 'dev', label: 'Dev' },

@@ -604,23 +604,37 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     <h3 style={{ color: '#e2e8f0', fontSize: '1.1rem', margin: 0 }}>
                       Assigned Workday Application Queue
                     </h3>
-                    {applications.length > 0 && (
-                      <button
-                        type="button"
-                        className="video-btn-start"
-                        style={{ padding: '5px 14px', fontSize: '0.8rem', background: '#0284c7', borderColor: '#38bdf8' }}
-                        onClick={() => handleOpenReview(selectedApp || applications[0])}
-                      >
-                        📋 Review Application Form
-                      </button>
-                    )}
+                    {applications.length > 0 && (() => {
+                      const targetApp = selectedApp || applications[0];
+                      const s = (targetApp?.status || '').toLowerCase();
+                      const canReview = ['ready_for_review', 'reached_review', 'pre_resolved', 'submitted', 'completed'].includes(s);
+                      return (
+                        <button
+                          type="button"
+                          className="video-btn-start"
+                          disabled={!canReview}
+                          style={{
+                            padding: '5px 14px',
+                            fontSize: '0.8rem',
+                            background: canReview ? '#0284c7' : 'rgba(51, 65, 85, 0.4)',
+                            borderColor: canReview ? '#38bdf8' : '#475569',
+                            color: canReview ? '#ffffff' : '#94a3b8',
+                            cursor: canReview ? 'pointer' : 'not-allowed',
+                            opacity: canReview ? 1 : 0.6,
+                          }}
+                          onClick={() => canReview && handleOpenReview(targetApp)}
+                        >
+                          {canReview ? '📋 Review Application Form' : '⏳ Waiting for Bot to Reach Review'}
+                        </button>
+                      );
+                    })()}
                   </div>
 
                   <div className="video-table-container">
                     <table className="video-data-table">
                       <thead>
                         <tr>
-                          <th>JOB TITLE</th>
+                          <th>JOB TITLE & LINK</th>
                           <th>COMPANY</th>
                           <th>ATS</th>
                           <th>STATUS</th>
@@ -629,29 +643,72 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                       </thead>
                       <tbody>
                         {applications.length > 0 ? (
-                          applications.map((app) => (
+                          applications.map((app) => {
+                            const proofShot = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url || (() => {
+                              const r = String(app.failure_reason || app.error_message || '');
+                              const m = r.match(/\[screenshot:\s*([^\s\]]+)\]/i) || r.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+                              return m ? (m[1] || m[0]) : null;
+                            })();
+                            const s = (app.status || '').toLowerCase();
+                            const isSubmitted = s === 'submitted' || s === 'completed';
+                            const isFailed = s === 'failed';
+                            const jobUrl = app.job_url || app.url || '';
+
+                            return (
                             <tr
                               key={app.id}
                               style={{ background: selectedApp?.id === app.id ? '#1e293b' : 'transparent', cursor: 'pointer' }}
                               onClick={() => {
                                 handleSelectApp(app);
-                                const s = (app.status || '').toLowerCase();
                                 if (['ready_for_review', 'reached_review', 'pre_resolved', 'submitted', 'completed'].includes(s)) {
                                   handleOpenReview(app);
                                 }
                               }}
                             >
                               <td>
-                                <strong>{app.job_title || app.role_title || 'Workday Position'}</strong>
+                                <div>
+                                  <strong>{app.job_title || app.role_title || 'Workday Position'}</strong>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
+                                    {jobUrl && (
+                                      <a
+                                        href={jobUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{ color: '#38bdf8', fontSize: '0.74rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                                        title={jobUrl}
+                                      >
+                                        🔗 Link ↗
+                                      </a>
+                                    )}
+                                    {proofShot && (
+                                      <a
+                                        href={proofShot}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{
+                                          padding: '1px 6px',
+                                          borderRadius: '4px',
+                                          fontSize: '0.72rem',
+                                          fontWeight: 'bold',
+                                          textDecoration: 'none',
+                                          background: isSubmitted ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                          color: isSubmitted ? '#34d399' : '#fca5a5',
+                                          border: `1px solid ${isSubmitted ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                                        }}
+                                        title="Click to view real Playwright screenshot proof in Supabase"
+                                      >
+                                        📸 {isSubmitted ? 'Proof ↗' : 'Fail Shot ↗'}
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
                               </td>
                               <td>{app.company || 'Workday Tenant'}</td>
                               <td>{app.ats || 'Workday'}</td>
                               <td>
                                 {(() => {
-                                  const s = (app.status || '').toLowerCase();
-                                  const lastUpdated = new Date(app.updated_at || app.created_at || 0).getTime();
-                                  const isLiveActive = lastUpdated && (Date.now() - lastUpdated < 3 * 60 * 1000);
-
                                   if (s === 'failed') {
                                     return (
                                       <span className="video-status-tag failed" title={app.failure_reason}>
@@ -666,12 +723,9 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                     return <span className="video-status-tag ready_for_review">READY TO REVIEW & SUBMIT</span>;
                                   }
                                   if (['in_flight', 'processing', 'in_progress', 'started', 'applying'].includes(s)) {
-                                    if (isLiveActive) {
-                                      return <span className="video-status-tag in_flight">BOT FILLING IN BACKGROUND</span>;
-                                    }
-                                    return <span className="video-status-tag queued">QUEUED / READY</span>;
+                                    return <span className="video-status-tag in_flight">BOT FILLING IN BACKGROUND</span>;
                                   }
-                                  if (s === 'pending' || s === 'queued') {
+                                  if (s === 'pending' || s === 'queued' || s === 'in_queue') {
                                     return <span className="video-status-tag queued">IN QUEUE</span>;
                                   }
                                   return <span className={`video-status-tag ${s || 'queued'}`}>{(app.status || 'QUEUED').toUpperCase()}</span>;
@@ -679,11 +733,11 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                               </td>
                               <td>
                                 {(() => {
-                                  const s = (app.status || '').toLowerCase();
-                                  const lastUpdated = new Date(app.updated_at || app.created_at || 0).getTime();
-                                  const isLiveActive = lastUpdated && (Date.now() - lastUpdated < 3 * 60 * 1000);
+                                  const isReady = ['ready_for_review', 'reached_review', 'pre_resolved'].includes(s);
+                                  const isInFlight = ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(s);
+                                  const isQueued = ['pending', 'queued', 'in_queue', ''].includes(s);
 
-                                  if (s === 'submitted' || s === 'completed') {
+                                  if (isSubmitted) {
                                     return (
                                       <button
                                         type="button"
@@ -706,7 +760,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                       </button>
                                     );
                                   }
-                                  if (s === 'ready_for_review' || s === 'reached_review' || s === 'pre_resolved') {
+                                  if (isReady) {
                                     return (
                                       <button
                                         type="button"
@@ -727,75 +781,47 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           handleOpenReview(app);
                                         }}
                                       >
-                                        📋 Review & Confirm
+                                        📋 Review & Submit
                                       </button>
                                     );
                                   }
-                                  if (['in_flight', 'processing', 'in_progress', 'started', 'applying'].includes(s)) {
-                                    if (isLiveActive) {
-                                      return (
-                                        <span
-                                          style={{
-                                            display: 'inline-flex',
-                                            alignItems: 'center',
-                                            gap: '6px',
-                                            fontSize: '0.78rem',
-                                            color: '#38bdf8',
-                                            fontWeight: 'bold',
-                                            background: 'rgba(56, 189, 248, 0.1)',
-                                            border: '1px solid rgba(56, 189, 248, 0.25)',
-                                            padding: '4px 10px',
-                                            borderRadius: '4px',
-                                          }}
-                                        >
-                                          ⚡ Bot Filling Form...
-                                        </span>
-                                      );
-                                    }
+                                  if (isInFlight) {
                                     return (
-                                      <button
-                                        type="button"
-                                        className="video-btn-start"
+                                      <span
                                         style={{
-                                          padding: '5px 12px',
-                                          fontSize: '0.8rem',
-                                          fontWeight: 'bold',
-                                          background: 'linear-gradient(135deg, #0284c7 0%, #2563eb 100%)',
-                                          borderColor: '#38bdf8',
-                                          color: '#ffffff',
-                                          cursor: 'pointer',
-                                        }}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleSelectApp(app);
-                                          handleOpenReview(app);
-                                        }}
-                                      >
-                                        📋 Review & Apply
-                                      </button>
-                                    );
-                                  }
-                                  if (s === 'pending' || s === 'queued' || s === 'in_queue') {
-                                    return (
-                                      <button
-                                        type="button"
-                                        className="video-btn-start"
-                                        style={{
-                                          padding: '4px 10px',
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
                                           fontSize: '0.78rem',
-                                          background: 'rgba(56, 189, 248, 0.08)',
-                                          borderColor: '#38bdf8',
                                           color: '#38bdf8',
-                                          cursor: 'pointer',
-                                        }}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleSelectApp(app);
-                                          handleOpenReview(app);
+                                          fontWeight: 'bold',
+                                          background: 'rgba(56, 189, 248, 0.1)',
+                                          border: '1px solid rgba(56, 189, 248, 0.25)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
                                         }}
                                       >
-                                        📋 Review & Apply
-                                      </button>
+                                        ⚡ Bot Filling Form...
+                                      </span>
+                                    );
+                                  }
+                                  if (isQueued) {
+                                    return (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          fontSize: '0.78rem',
+                                          color: '#94a3b8',
+                                          background: 'rgba(100, 116, 139, 0.12)',
+                                          border: '1px solid rgba(100, 116, 139, 0.25)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                        }}
+                                      >
+                                        ⏳ Queued
+                                      </span>
                                     );
                                   }
                                   if (s === 'failed') {
@@ -830,7 +856,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                 })()}
                               </td>
                             </tr>
-                          ))
+                          );})
                         ) : (
                           <tr>
                             <td colSpan={5} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>

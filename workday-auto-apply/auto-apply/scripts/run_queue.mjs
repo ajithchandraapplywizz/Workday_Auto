@@ -45,8 +45,8 @@ const activeCaOnly = !args.includes('--all-candidates');
 
 const dryRun = args.includes('--dry-run');
 const confirmSubmit = !dryRun && !args.includes('--no-submit');
-// If --headful is passed, or if --headless is not explicitly specified, honor headful mode
-const isHeadless = args.includes('--headless') && !args.includes('--headful');
+// Default to headless mode unless --headful is explicitly specified
+const isHeadless = !args.includes('--headful');
 
 await runQueueWorkerPool({
   concurrency: workers,

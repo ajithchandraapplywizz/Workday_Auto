@@ -102,7 +102,7 @@ async function dispatchWorkerPoolForCA(caEmail, caName) {
     const results = await runQueueWorkerPool({
       concurrency: CONCURRENCY,
       headless: HEADLESS,
-      confirmSubmit: true,
+      confirmSubmit: false, // Halts at Step 5 Review & Submit for CA verification
       dryRun: DRY_RUN,
       defaultPassword: process.env.WORKDAY_PASSWORD || '',
       activeCaOnly: true,

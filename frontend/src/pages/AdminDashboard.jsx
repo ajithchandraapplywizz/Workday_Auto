@@ -127,7 +127,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // Helper: Live operator status considering 3-minute disconnect window
+  // Helper: Live operator status considering 2-minute disconnect window
   const getOperatorEffectiveStatus = (op) => {
     if (!op) return 'inactive';
     const raw = (op.status || '').toLowerCase();
@@ -135,8 +135,8 @@ export default function AdminDashboard() {
     if (raw !== 'active') return 'inactive';
     if (!op.updated_at && !op.last_sign_in) return 'inactive';
     const last = new Date(op.updated_at || op.last_sign_in).getTime();
-    if (Date.now() - last > 3 * 60 * 1000) {
-      return 'inactive'; // Disconnected > 3 minutes
+    if (Date.now() - last > 2 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 2 minutes
     }
     return 'active';
   };

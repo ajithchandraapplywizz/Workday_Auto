@@ -387,13 +387,13 @@ export async function discoverFields(pageOrContainer = (typeof document !== 'und
 }
 
 // ─── Scan a form ────────────────────────────────────────────────────────────
-export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, mode = 'signin', profile = null } = {}) {
+export async function scanForm(url, { formsDir, browser: existingBrowser, context: existingContext, page: existingPage, keepOpen = false, workdayEmail, workdayPassword, mode = 'signin', profile = null, headless = true } = {}) {
   console.log(`🔍 Scanning: ${url}`);
   const outDir = formsDir || resolve(process.cwd(), 'forms');
   await mkdir(outDir, { recursive: true });
 
   const ownBrowser = !existingBrowser;
-  const browser = existingBrowser || await chromium.launch({ headless: false });
+  const browser = existingBrowser || await chromium.launch({ headless });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

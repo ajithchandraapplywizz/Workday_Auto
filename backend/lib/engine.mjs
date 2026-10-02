@@ -1868,6 +1868,34 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
 
+  // Scrape all question-answer pairs from the Review page into profile
+  const scrapedReviewMap = {};
+  if (review?.pairs && Array.isArray(review.pairs)) {
+    for (const p of review.pairs) {
+      const lbl = (p.label || p.automationId || '').trim();
+      const val = (p.value || p.text || '').trim();
+      if (lbl && val) {
+        scrapedReviewMap[lbl] = val;
+      }
+    }
+  }
+  profile._scrapedReviewMap = scrapedReviewMap;
+  console.log(`  📋 Scraped ${Object.keys(scrapedReviewMap).length} review fields from Step 5 into JSON.`);
+
+  // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
+  if (!confirmSubmit || dryRun) {
+    console.log('  🎯 Form completed up to Review & Submit. Halting without submitting so CA can review.');
+    try {
+      if (page && !page.isClosed()) {
+        const reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+        if (reviewBuf) {
+          profile._submissionScreenshotBuffer = reviewBuf;
+        }
+      }
+    } catch {}
+    return 'reached-review';
+  }
+
   const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
   if (decision === 'dry-run-skip') {
     console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
@@ -2709,12 +2737,12 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, isBatch = false, profile: profileIn = null } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, isBatch = false, profile: profileIn = null, headless = true } = {}) {
   console.log(`📝 Fill mode: ${url}`);
 
   const ats = detectATS(url);
   const ownBrowser = !existingBrowser;
-  const browser = existingBrowser || await chromium.launch({ headless: false });
+  const browser = existingBrowser || await chromium.launch({ headless });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

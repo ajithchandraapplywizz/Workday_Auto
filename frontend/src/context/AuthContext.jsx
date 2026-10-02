@@ -16,6 +16,7 @@ const DEFAULT_USER = {
   email: 'ajithchandranimmala@applywizz.ai',
   name: 'Ajith Chandra Nimmala',
   role: 'dev', // 'dev' | 'admin' | 'manager' | 'operator'
+  baseRole: 'dev', // Preserves developer privileges across role switches
   manager_id: null,
   authProvider: 'Microsoft Authenticator',
   date: getTodayDateStr(),
@@ -85,14 +86,14 @@ export function AuthProvider({ children }) {
     // 3. Browser disconnect on tab/window close
     const handleBeforeUnload = () => {
       const closeIso = new Date().toISOString();
-      const payload = JSON.stringify({ updated_at: closeIso });
+      // Use supabase client directly to update status to inactive
       try {
-        const url1 = `${supabase.supabaseUrl}/rest/v1/operators?email=ilike.${encodeURIComponent(em)}`;
-        const url2 = `${supabase.supabaseUrl}/rest/v1/auth_users?email=ilike.${encodeURIComponent(em)}`;
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(url1, payload);
-          navigator.sendBeacon(url2, payload);
-        }
+        supabase
+          .from('operators')
+          .update({ status: 'inactive', updated_at: closeIso })
+          .ilike('email', em)
+          .then(() => {})
+          .catch(() => {});
       } catch {}
     };
 
@@ -307,10 +308,12 @@ export function AuthProvider({ children }) {
   };
 
   const switchRole = (newRole) => {
-    // Only Developer can switch roles globally
-    if (user?.role !== 'dev' && newRole !== user?.role) return;
+    // Only Developer (Ajith) can switch roles globally across all 4 dashboards
+    const isDev = user?.baseRole === 'dev' || user?.role === 'dev' || user?.email === 'ajithchandranimmala@applywizz.ai';
+    if (!isDev) return;
     setUser((prev) => ({
       ...prev,
+      baseRole: 'dev',
       role: newRole,
     }));
   };
