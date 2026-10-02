@@ -363,23 +363,29 @@ export async function upsertSupabaseApplication({
   if (stoppedAtStep) row.stopped_at_step = stoppedAtStep;
 
   try {
-    await request('applications', {
+    const res = await request('applications', {
       method: 'POST',
       query: '?on_conflict=applywizz_id%2Cjob_url',
-      prefer: 'resolution=merge-duplicates,return=minimal',
+      prefer: 'resolution=merge-duplicates,return=representation',
       body: row,
     });
+    if (Array.isArray(res) && res[0]?.id) {
+      return { success: true, id: res[0].id };
+    }
   } catch (err) {
     if (/column.*does not exist|42703/i.test(String(err.message || ''))) {
       delete row.failure_screenshot_url;
       delete row.stopped_at_step;
       try {
-        await request('applications', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id%2Cjob_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: row,
-        });
+        const res = await request('applications', {
+      method: 'POST',
+      query: '?on_conflict=applywizz_id%2Cjob_url',
+      prefer: 'resolution=merge-duplicates,return=representation',
+      body: row,
+    });
+    if (Array.isArray(res) && res[0]?.id) {
+      return { success: true, id: res[0].id };
+    }
         return true;
       } catch (innerErr) {
         err = innerErr;
@@ -400,14 +406,34 @@ export async function upsertSupabaseApplication({
         body: row,
       });
     } else {
-      await request('applications', {
+      const created = await request('applications', {
         method: 'POST',
-        prefer: 'return=minimal',
+        prefer: 'return=representation',
         body: row,
       });
+      return { success: true, id: created?.[0]?.id || null };
     }
   }
-  return true;
+  return { success: true };
+}
+
+/**
+ * Fetch the latest application record for a candidate and optional job URL
+ */
+export async function getApplicationForTask(applywizzId, jobUrl = '') {
+  if (!isSupabaseConfigured() || !applywizzId) return null;
+  try {
+    const cleanUrl = String(jobUrl || '').trim()
+      .replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '')
+      .replace(/%2C/gi, ',');
+    let q = `?applywizz_id=eq.${encode(applywizzId)}`;
+    if (cleanUrl) q += `&job_url=eq.${encode(cleanUrl)}`;
+    q += '&select=id,status,job_url,company,role_title&order=updated_at.desc&limit=1';
+    const rows = await request('applications', { query: q });
+    return rows?.[0] || null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1358,15 +1384,32 @@ export async function getActiveOperators() {
 /**
  * Log a single step event to public.automation_trace for live terminal streaming in frontend
  */
+const candidateAppTraceCache = new Map();
+
 export async function logAutomationTrace({ applicationId, applywizzId, stepIndex = 0, message = '' } = {}) {
   if (!isSupabaseConfigured() || !message) return false;
   try {
+    let resolvedAppId = applicationId || null;
+    if (!resolvedAppId && applywizzId) {
+      resolvedAppId = candidateAppTraceCache.get(applywizzId) || null;
+      if (!resolvedAppId) {
+        const app = await getApplicationForTask(applywizzId);
+        if (app?.id) {
+          resolvedAppId = app.id;
+          candidateAppTraceCache.set(applywizzId, resolvedAppId);
+        }
+      }
+    }
+
     const row = {
       step_index: stepIndex,
       message: String(message),
       ts: new Date().toISOString(),
     };
-    if (applicationId) row.application_id = applicationId;
+    if (resolvedAppId) {
+      row.application_id = resolvedAppId;
+    }
+
     await request('automation_trace', {
       method: 'POST',
       prefer: 'return=minimal',

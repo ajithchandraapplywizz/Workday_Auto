@@ -235,6 +235,8 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const fromProfileIdentity = isPersonalIdentityQuestion(question) ? profileFactForLabel(question, profile) : null;
   if (fromProfileIdentity) return acceptClientValue(question, fromProfileIdentity, { options, fieldType, profile }) || fromProfileIdentity;
 
+  const currentStep = profile?._currentStepIndex || 2;
+
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Check Supabase client_questions table with respective AWL ID
   const fromSupabase = lookupSupabaseAnswerSync(question, profile, { options, fieldType });
@@ -309,6 +311,8 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
 
 
+  const currentStep = profile?._currentStepIndex || 2;
+
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)
   const fromProfileIdentity = isPersonalIdentityQuestion(label) ? profileFactForLabel(label, profile) : null;
@@ -316,6 +320,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const hit = finish(fromProfileIdentity, 'supabase_client_fact');
     if (hit) {
       console.log(`    👤 [Identity] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Identity Match] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
@@ -326,6 +331,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const supabaseHit = finish(fromSupabase.answer, fromSupabase.source || 'supabase_client_questions');
     if (supabaseHit) {
       console.log(`    🗄️  [Supabase Tier 1 client_questions] "${label.slice(0, 55)}" ← "${supabaseHit.answer.slice(0, 40)}" (${fromSupabase.source})`);
+      profile?._onLog?.(currentStep, `[Tier 1 Supabase Match] "${label.slice(0, 50)}" ← "${supabaseHit.answer.slice(0, 45)}"`);
       return supabaseHit;
     }
   }
@@ -339,6 +345,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const hit = finish(fromProfile, 'supabase_clients_table');
     if (hit) {
       console.log(`    🗄️  [Supabase Tier 1 clients table] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Profile Match] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
       return hit;
     }
   }
@@ -348,6 +355,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const hit = finish(priorEmployer, 'supabase_clients_table');
     if (hit) {
       console.log(`    🧾 [Supabase Tier 1 Prior Employer] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Prior Employer] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
@@ -375,6 +383,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         answer: apiHit.answer,
       });
       console.log(`    🗄️  [CRM API Tier 2 facts] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 2 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
       return apiHit;
     }
   }
@@ -394,6 +403,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         answer: hit.answer,
       });
       console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
@@ -476,6 +486,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       answer: expHit.answer,
     });
     console.log(`    📄 [Resume Tier 3] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
+    profile?._onLog?.(currentStep, `[Tier 3 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
     return expHit;
   }
   trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
@@ -499,6 +510,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       rejectionReason: 'llm_blocked_for_compliance',
     });
     console.log(`    🛑 [LLM Tier 4 blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
+    profile?._onLog?.(currentStep, `[Compliance Blocked] "${label.slice(0, 50)}" — protected question, manual answer needed`);
     return null;
   }
 
@@ -553,6 +565,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       allowedOptions: options,
       dryRun: opts.dryRun === true,
     });
+    profile?._onLog?.(currentStep, `[Tier 4 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
 
     const awlId = profile._applyWizzId || profile.applywizz_id || profile.client_id || process.env.APPLYWIZZ_ID || '';
     if (awlId && isSupabaseConfigured() && opts.dryRun !== true) {

@@ -1833,6 +1833,7 @@ export async function promptScanReviewDecision({ company = '', url = '' } = {}) 
 
 async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dryRun = false } = {}) {
   console.log('\n📋 Review step — parsing DOM before submit.');
+  profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
   if (profile?._humanRequired?.length) {
     console.log('\n  🛑 Cannot auto-submit — unresolved required field(s):');
@@ -1880,11 +1881,14 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     }
   }
   profile._scrapedReviewMap = scrapedReviewMap;
-  console.log(`  📋 Scraped ${Object.keys(scrapedReviewMap).length} review fields from Step 5 into JSON.`);
+  const scrapedCount = Object.keys(scrapedReviewMap).length;
+  console.log(`  📋 Scraped ${scrapedCount} review fields from Step 5 into JSON.`);
+  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} question/answer pairs from Review page into JSON.`);
 
   // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
   if (!confirmSubmit || dryRun) {
     console.log('  🎯 Form completed up to Review & Submit. Halting without submitting so CA can review.');
+    profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
     try {
       if (page && !page.isClosed()) {
         const reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
@@ -1915,6 +1919,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   }
 
   console.log('🚀 Clicking final "Submit" button...');
+  profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
   await clickSubmitButton(page, { allowSubmit: true });
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
@@ -1934,6 +1939,10 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
            !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
   });
+
+  if (confirmationFound) {
+    profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
+  }
 
   // Capture real browser screenshot of the confirmation page
   try {
@@ -2080,9 +2089,11 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
     }
     profile._currentStep = stepName;
+    profile._currentStepIndex = currentIteration;
     if (typeof profile._onStepChange === 'function') {
       try { profile._onStepChange(currentIteration, stepName); } catch {}
     }
+    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Workday Page "${stepName}" detected. Starting automated scan & fill.`);
 
     if (stepName === 'Review') {
       profile._discoveredSteps?.add('Review');
@@ -2106,6 +2117,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       }
     }
     console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
+    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
 
     await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
 
@@ -2127,6 +2139,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
 
     console.log('  ➡️  Fill done — instant Save and Continue...');
+    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Completed filling "${stepName}". Clicking Save & Continue...`);
     let advanceResult;
     try {
       advanceResult = await clickSaveAndContinueAtAnyCost(page, stepName, profile, plan);

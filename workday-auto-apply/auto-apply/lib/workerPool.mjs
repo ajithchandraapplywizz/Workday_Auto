@@ -99,8 +99,26 @@ export async function executeWorkerTask({
   console.log(`   🔗 URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
 
+  // Ensure application record exists in Supabase so trace events are linked to the application ID
+  let liveApplicationId = null;
+  try {
+    const initApp = await upsertSupabaseApplication({
+      applywizzId,
+      jobUrl,
+      company,
+      roleTitle: 'Workday Application',
+      status: isApprovedForSubmission ? 'in_progress' : 'in_progress',
+    });
+    if (initApp?.id) liveApplicationId = initApp.id;
+  } catch {}
+
   const appLog = (stepIndex, msg) => {
-    logAutomationTrace({ applywizzId, stepIndex, message: `[${workerId}] ${msg}` }).catch(() => {});
+    logAutomationTrace({
+      applicationId: liveApplicationId,
+      applywizzId,
+      stepIndex,
+      message: `[${workerId}] ${msg}`
+    }).catch(() => {});
   };
 
   appLog(1, `Supabase: Fetched queue task ${queueTaskId ? `(${queueTaskId.slice(0, 8)})` : ''} for candidate ${applywizzId}. Initializing worker session.`);
@@ -141,6 +159,8 @@ export async function executeWorkerTask({
     profile._applyWizzId = applywizzId;
     profile._canonicalJobUrl = jobUrl;
     profile._jobUrl = jobUrl;
+    profile._applicationId = liveApplicationId;
+    profile._onLog = (stepIndex, msg) => appLog(stepIndex, msg);
     if (company) profile._company = company;
   } catch (err) {
     console.error(`   ❌ [${workerId}] Failed to load profile for ${applywizzId}: ${err.message}`);
@@ -762,11 +782,16 @@ export async function runQueueWorkerPool({
     }
   }
 
-  // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks
+  // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks.
+  // CRITICAL: Tasks that have been approved by CA ('approved_for_submission') receive top priority
+  // so final submission triggers immediately when CA clicks Submit in the review modal!
+  const approvedTasks = orderedTasks.filter((t) => t.status === 'approved_for_submission' || t.status === 'approved_by_ca');
+  const regularTasks = orderedTasks.filter((t) => t.status !== 'approved_for_submission' && t.status !== 'approved_by_ca');
+
   const urlOrder = new Map();
   const blueprintTasks = [];
   const cacheFillTasks = [];
-  for (const t of orderedTasks) {
+  for (const t of regularTasks) {
     const url = String(t.job_url || '').replace(/\s+/g, '').trim();
     if (!urlOrder.has(url)) {
       urlOrder.set(url, 'blueprint');
@@ -775,9 +800,9 @@ export async function runQueueWorkerPool({
       cacheFillTasks.push(t);
     }
   }
-  const fairTasks = [...blueprintTasks, ...cacheFillTasks];
+  const fairTasks = [...approvedTasks, ...blueprintTasks, ...cacheFillTasks];
 
-  console.log(`   Fair-Share Order Built: ${fairTasks.length} tasks across ${caTaskBuckets.size} active CA(s)\n`);
+  console.log(`   Fair-Share Order Built: ${fairTasks.length} tasks (${approvedTasks.length} CA-approved for instant submit) across ${caTaskBuckets.size} active CA(s)\n`);
 
   // ── 5. Cluster Synchronization Primitives ──────────────────────────
   // urlCluster: URL → { state: 'scanning'|'cached'|'failed', resolve: fn }

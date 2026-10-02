@@ -922,30 +922,59 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 export async function fetchAutomationTrace(param = {}) {
   try {
     const applicationId = typeof param === 'string' ? param : param?.applicationId;
-    const limit = (typeof param === 'object' && param?.limit) || 50;
+    const applywizzId = typeof param === 'object' ? param?.applywizzId : null;
+    const limit = (typeof param === 'object' && param?.limit) || 100;
 
-    let query = supabase
+    let logs = [];
+
+    // 1. Primary: Direct query by application_id
+    if (applicationId) {
+      const { data, error } = await supabase
+        .from('automation_trace')
+        .select('*')
+        .eq('application_id', applicationId)
+        .order('id', { ascending: false })
+        .limit(limit);
+      if (!error && data?.length) {
+        logs = data.slice().reverse();
+        return { success: true, logs, trace: logs };
+      }
+    }
+
+    // 2. Secondary: If no logs by applicationId or applicationId was null, resolve via candidate's applications
+    if (applywizzId) {
+      const { data: candApps } = await supabase
+        .from('applications')
+        .select('id')
+        .eq('applywizz_id', applywizzId)
+        .order('updated_at', { ascending: false })
+        .limit(5);
+
+      if (candApps?.length) {
+        const appIds = candApps.map((a) => a.id).filter(Boolean);
+        if (appIds.length > 0) {
+          const { data: candLogs } = await supabase
+            .from('automation_trace')
+            .select('*')
+            .in('application_id', appIds)
+            .order('id', { ascending: false })
+            .limit(limit);
+          if (candLogs?.length) {
+            logs = candLogs.slice().reverse();
+            return { success: true, logs, trace: logs };
+          }
+        }
+      }
+    }
+
+    // 3. Fallback: Recent execution trace from any active worker
+    const { data: fallback } = await supabase
       .from('automation_trace')
       .select('*')
       .order('id', { ascending: false })
       .limit(limit);
-
-    if (applicationId) {
-      query = query.eq('application_id', applicationId);
-    }
-
-    const { data, error } = await query;
-    if (error || !data?.length) {
-      const { data: fallback } = await supabase
-        .from('automation_trace')
-        .select('*')
-        .order('id', { ascending: false })
-        .limit(limit);
-      const list = (fallback || []).reverse();
-      return { success: true, logs: list, trace: list };
-    }
-    const list = (data || []).reverse();
-    return { success: true, logs: list, trace: list };
+    logs = (fallback || []).slice().reverse();
+    return { success: true, logs, trace: logs };
   } catch (err) {
     return { success: false, logs: [], trace: [], error: err.message };
   }

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   fetchCAEmails,
@@ -58,6 +58,13 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   const [selectedApp, setSelectedApp] = useState(null);
   const [traceLogs, setTraceLogs] = useState([]);
   const [candidateSearch, setCandidateSearch] = useState('');
+  const terminalBottomRef = useRef(null);
+
+  useEffect(() => {
+    if (terminalBottomRef.current) {
+      terminalBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [traceLogs]);
   const [botAutomationStats, setBotAutomationStats] = useState({
     totals: { total: 0, queued: 0, inFlight: 0, readyForReview: 0, submitted: 0, failed: 0 },
     clientStats: [],
@@ -187,7 +194,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
         setApplications(appsRes.applications);
         setSelectedApp(appsRes.applications[0]);
         // Load trace for first app
-        const trace = await fetchAutomationTrace(appsRes.applications[0].id);
+        const trace = await fetchAutomationTrace({
+          applicationId: appsRes.applications[0].id,
+          applywizzId: candidate.id,
+        });
         if (trace.success) {
           setTraceLogs(trace.trace);
         }
@@ -204,7 +214,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   // Switch inspected application in queue
   const handleSelectApp = async (app) => {
     setSelectedApp(app);
-    const trace = await fetchAutomationTrace(app.id);
+    const trace = await fetchAutomationTrace({
+      applicationId: app.id,
+      applywizzId: selectedCandidate?.id,
+    });
     if (trace.success) {
       setTraceLogs(trace.trace);
     }
@@ -228,7 +241,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
             return updated || curr;
           });
         }
-        const trace = await fetchAutomationTrace(selectedApp?.id || null);
+        const trace = await fetchAutomationTrace({
+          applicationId: selectedApp?.id || null,
+          applywizzId: selectedCandidate?.id || null,
+        });
         if (isMounted && trace.success && (trace.logs || trace.trace)) {
           setTraceLogs(trace.logs || trace.trace);
         }
@@ -237,7 +253,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
       }
     };
 
-    const intervalId = setInterval(refreshActiveCandidateApps, 3500);
+    const intervalId = setInterval(refreshActiveCandidateApps, 2000);
     return () => {
       isMounted = false;
       clearInterval(intervalId);

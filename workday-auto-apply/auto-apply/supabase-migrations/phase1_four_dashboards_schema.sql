@@ -158,6 +158,8 @@ CREATE TABLE IF NOT EXISTS public.automation_trace (
 );
 
 CREATE INDEX IF NOT EXISTS idx_automation_trace_app_ts ON public.automation_trace (application_id, ts DESC);
+ALTER TABLE public.automation_trace ADD COLUMN IF NOT EXISTS applywizz_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_automation_trace_applywizz_id ON public.automation_trace (applywizz_id, ts DESC);
 
 -- 8. Table: job_templates (Keyed primarily on tenant + posting_id to prevent URL tracking param undercounting)
 CREATE TABLE IF NOT EXISTS public.job_templates (
