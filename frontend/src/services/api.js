@@ -886,20 +886,35 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 /**
  * 19. Supabase: Fetch live automation trace for an application
  */
-export async function fetchAutomationTrace(applicationId) {
-  if (!applicationId) return { success: true, trace: [] };
+export async function fetchAutomationTrace(param = {}) {
   try {
-    const { data, error } = await supabase
+    const applicationId = typeof param === 'string' ? param : param?.applicationId;
+    const limit = (typeof param === 'object' && param?.limit) || 50;
+
+    let query = supabase
       .from('automation_trace')
       .select('*')
-      .eq('application_id', applicationId)
-      .order('step_index', { ascending: true })
-      .order('ts', { ascending: true });
-    if (error) throw error;
-    return { success: true, trace: data || [] };
+      .order('id', { ascending: false })
+      .limit(limit);
+
+    if (applicationId) {
+      query = query.eq('application_id', applicationId);
+    }
+
+    const { data, error } = await query;
+    if (error || !data?.length) {
+      const { data: fallback } = await supabase
+        .from('automation_trace')
+        .select('*')
+        .order('id', { ascending: false })
+        .limit(limit);
+      const list = (fallback || []).reverse();
+      return { success: true, logs: list, trace: list };
+    }
+    const list = (data || []).reverse();
+    return { success: true, logs: list, trace: list };
   } catch (err) {
-    console.error('Failed to fetch automation trace:', err);
-    return { success: false, trace: [] };
+    return { success: false, logs: [], trace: [], error: err.message };
   }
 }
 
@@ -1737,6 +1752,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     const cleanUrl = (jobUrl || '').split('?')[0].trim();
 
     // 1. Fetch task row from batch_job_queue
+    // 1. Fetch task row from batch_job_queue strictly for this candidate and job URL
     let queueTask = null;
     if (jobUrl) {
       const { data: tasks } = await supabase
@@ -1758,18 +1774,29 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       }
     }
 
-    if (!queueTask) {
-      // Find latest task for this candidate if specific URL not found
-      const { data: latestTasks } = await supabase
-        .from('batch_job_queue')
+    // Also fetch application status & screenshot proof from applications table
+    let appRow = null;
+    if (jobUrl) {
+      const { data: appData } = await supabase
+        .from('applications')
         .select('*')
         .eq('applywizz_id', cleanId)
-        .order('created_at', { ascending: false })
+        .eq('job_url', jobUrl)
         .limit(1);
-      queueTask = latestTasks?.[0] || null;
+      appRow = appData?.[0] || null;
+
+      if (!appRow && cleanUrl) {
+        const { data: cAppData } = await supabase
+          .from('applications')
+          .select('*')
+          .eq('applywizz_id', cleanId)
+          .ilike('job_url', `${cleanUrl}%`)
+          .limit(1);
+        appRow = cAppData?.[0] || null;
+      }
     }
 
-    const effectiveUrl = jobUrl || queueTask?.job_url || '';
+    const effectiveUrl = jobUrl || queueTask?.job_url || appRow?.job_url || '';
     const effectiveCleanUrl = effectiveUrl.split('?')[0].trim();
 
     // 2. Fetch schema from job_form_schemas using canonical_job_url
@@ -1783,19 +1810,10 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       schema = schemas?.[0] || null;
     }
 
-    // 3. Fetch candidate's stored answers from client_questions
-    const { data: clientQuestions } = await supabase
-      .from('client_questions')
-      .select('*')
-      .eq('applywizz_id', cleanId);
+    // 3. Pre-resolved answers JSONB specifically from batch_job_queue
+    const preResolved = queueTask?.pre_resolved_answers || {};
 
-    const questionMap = new Map();
-    (clientQuestions || []).forEach((q) => {
-      const norm = (q.question_normalized || q.question_raw || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-      if (norm) questionMap.set(norm, q);
-    });
-
-    // 4. Fetch candidate details from clients table
+    // 4. Fetch candidate details from clients table for identity mapping
     const { data: clientRows } = await supabase
       .from('clients')
       .select('*')
@@ -1803,13 +1821,9 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       .limit(1);
     const client = clientRows?.[0] || null;
 
-    // 5. Pre-resolved answers JSONB
-    const preResolved = queueTask?.pre_resolved_answers || {};
-
-    // 6. Assemble complete fields list
+    // 5. Assemble genuinely scraped / pre-resolved fields list
     const fields = [];
     const seenLabels = new Set();
-
     const normalizeLabelKey = (lbl) => (lbl || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
 
     // Helper to determine field source badge
@@ -1825,7 +1839,6 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       if (s.includes('supabase') || s.includes('manual') || s.includes('db') || s.includes('database')) {
         return { key: 'supabase', label: 'Solved with Supabase', icon: '💾', color: 'emerald' };
       }
-      // Heuristic fallback
       if (/name|email|phone|address|city|postal|zip/i.test(label)) {
         return { key: 'identity', label: 'Solved with Identity', icon: '👤', color: 'amber' };
       }
@@ -1835,7 +1848,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       return { key: 'ai', label: 'Solved with AI', icon: '🤖', color: 'purple' };
     };
 
-    // If schema fields exist, use the exact required DOM questions extracted from Workday
+    // A. If genuine schema fields exist, use the exact questions extracted from Workday
     if (schema?.fields_schema && Array.isArray(schema.fields_schema) && schema.fields_schema.length > 0) {
       for (const sf of schema.fields_schema) {
         const rawLabel = sf.label || sf.question_label || '';
@@ -1843,9 +1856,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
         if (!rawLabel || seenLabels.has(normKey)) continue;
         seenLabels.add(normKey);
 
-        const qMatch = questionMap.get(normKey);
-        let val = preResolved[rawLabel] || preResolved[normKey] || (qMatch ? qMatch.answer : '');
-
+        let val = preResolved[rawLabel] || preResolved[normKey] || '';
         const isIdentityField = /name|email|phone|address|city|postal/i.test(rawLabel);
         if (!val && isIdentityField && client) {
           if (/first\s*name|given\s*name/i.test(rawLabel)) val = client.first_name || client.client_name?.split(' ')[0] || '';
@@ -1856,7 +1867,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
           else if (/city/i.test(rawLabel)) val = client.current_city || '';
         }
 
-        const sourceMeta = determineSource(rawLabel, qMatch?.answer_source || (preResolved[rawLabel] ? 'ai' : ''), isIdentityField);
+        const sourceMeta = determineSource(rawLabel, preResolved[rawLabel] ? 'ai' : '', isIdentityField);
 
         fields.push({
           id: sf.automation_id || sf.id || `field_${fields.length + 1}`,
@@ -1875,15 +1886,14 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       }
     }
 
-    // Also include preResolved answers from batch_job_queue
+    // B. Include genuine preResolved answers scraped when Worker-1 arrived at Step 5 Review
     for (const [ansLabel, ansVal] of Object.entries(preResolved)) {
       const normKey = normalizeLabelKey(ansLabel);
       if (seenLabels.has(normKey)) continue;
       seenLabels.add(normKey);
 
-      const qMatch = questionMap.get(normKey);
       const isIdentity = /name|email|phone|address/i.test(ansLabel);
-      const sourceMeta = determineSource(ansLabel, qMatch?.answer_source || 'ai', isIdentity);
+      const sourceMeta = determineSource(ansLabel, 'ai', isIdentity);
 
       fields.push({
         id: `field_${fields.length + 1}`,
@@ -1901,80 +1911,22 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       });
     }
 
-    // Also include verified candidate questions from client_questions
-    (clientQuestions || []).forEach((cq) => {
-      const qText = cq.question_raw || cq.question_normalized || '';
-      const normKey = normalizeLabelKey(qText);
-      if (!qText || seenLabels.has(normKey) || !cq.answer) return;
-      seenLabels.add(normKey);
-
-      const isIdentity = /name|email|phone|address|city/i.test(qText);
-      const sourceMeta = determineSource(qText, cq.answer_source || 'supabase', isIdentity);
-
-      // Capitalize first letter of label for neat display
-      const displayLabel = qText.charAt(0).toUpperCase() + qText.slice(1);
-
-      fields.push({
-        id: `cq_${cq.id || fields.length + 1}`,
-        label: displayLabel,
-        value: String(cq.answer || ''),
-        step: isIdentity ? 'My Information' : 'Application Questions',
-        fieldType: cq.field_type || (cq.options?.length ? 'select' : 'text'),
-        required: true,
-        options: cq.options || [],
-        source: sourceMeta.key,
-        sourceLabel: sourceMeta.label,
-        sourceIcon: sourceMeta.icon,
-        sourceColor: sourceMeta.color,
-        isModified: false,
-      });
-    });
-
-    // If fields are still empty (e.g. brand new client with no prior questions), use candidate facts
-    if (fields.length === 0 && client) {
-      const facts = [
-        { label: 'Given Name(s)*', val: client.first_name || client.client_name?.split(' ')[0] || '', step: 'My Information', src: 'identity', req: true },
-        { label: 'Family Name*', val: client.last_name || client.client_name?.split(' ').slice(1).join(' ') || '', step: 'My Information', src: 'identity', req: true },
-        { label: 'Email*', val: client.company_email || client.client_email || '', step: 'My Information', src: 'identity', req: true },
-        { label: 'Phone Number*', val: client.callable_phone || client.whatsapp_number || client.phone || '', step: 'My Information', src: 'identity', req: true },
-        { label: 'Primary Visa Status*', val: client.visa_type || 'F1 - OPT/CPT', step: 'Application Questions', src: 'supabase', req: true },
-        { label: 'Will you now or in future require sponsorship?*', val: client.sponsorship ? 'Yes' : 'No', step: 'Application Questions', src: 'supabase', req: true },
-        { label: 'Legally authorized to work in the United States?*', val: 'Yes', step: 'Application Questions', src: 'supabase', req: true },
-        { label: 'Total Years of Professional Experience*', val: client.years_of_experience || '3 years', step: 'My Experience', src: 'resume', req: true },
-        { label: 'Primary Skills & Core Technologies*', val: client.skills || 'Python, Machine Learning, Distributed Systems', step: 'My Experience', src: 'resume', req: true },
-      ];
-
-      facts.forEach((df, idx) => {
-        const sourceMeta = determineSource(df.label, df.src, df.src === 'identity');
-        fields.push({
-          id: `field_${idx + 1}`,
-          label: df.label,
-          value: df.val,
-          step: df.step,
-          fieldType: df.val.length > 50 ? 'textarea' : 'text',
-          required: df.req,
-          options: df.val === 'Yes' || df.val === 'No' ? ['Yes', 'No'] : [],
-          source: sourceMeta.key,
-          sourceLabel: sourceMeta.label,
-          sourceIcon: sourceMeta.icon,
-          sourceColor: sourceMeta.color,
-          isModified: false,
-        });
-      });
-    }
+    const currentStatus = appRow?.status || queueTask?.status || 'ready_for_review';
 
     return {
       success: true,
+      isFormScraped: fields.length > 0,
       application: {
         applywizzId: cleanId,
         candidateName: client?.client_name || client?.full_name || cleanId,
-        company: queueTask?.company || schema?.company || 'Workday Partner',
-        roleTitle: queueTask?.role_title || schema?.role_title || 'Workday Application',
+        company: queueTask?.company || appRow?.company || schema?.company || 'Workday Partner',
+        roleTitle: queueTask?.role_title || appRow?.role_title || schema?.role_title || 'Workday Application',
         jobUrl: effectiveUrl,
-        status: queueTask?.status || 'ready_for_review',
+        status: currentStatus,
         taskId: queueTask?.id || null,
         workerId: queueTask?.worker_id || null,
-        updatedAt: queueTask?.updated_at || new Date().toISOString(),
+        screenshotUrl: appRow?.failure_screenshot_url || queueTask?.screenshot_path || null,
+        updatedAt: queueTask?.updated_at || appRow?.updated_at || new Date().toISOString(),
       },
       fields,
     };
@@ -1983,6 +1935,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     return { success: false, error: err.message, fields: [] };
   }
 }
+
 
 /**
  * 26. Submit CA Reviewed Application (Persists edits & flips status to submitted)

@@ -219,6 +219,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
             return updated || curr;
           });
         }
+        const trace = await fetchAutomationTrace(selectedApp?.id || null);
+        if (isMounted && trace.success && (trace.logs || trace.trace)) {
+          setTraceLogs(trace.logs || trace.trace);
+        }
       } catch (err) {
         console.warn('Silent live polling error:', err);
       }
@@ -638,6 +642,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                           <th>COMPANY</th>
                           <th>ATS</th>
                           <th>STATUS</th>
+                          <th style={{ textAlign: 'center' }}>SCREENSHOT</th>
                           <th>ACTION</th>
                         </tr>
                       </thead>
@@ -653,6 +658,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                             const isSubmitted = s === 'submitted' || s === 'completed';
                             const isFailed = s === 'failed';
                             const jobUrl = app.job_url || app.url || '';
+                            const displayTitle = app.job_title || app.role_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
 
                             return (
                             <tr
@@ -667,8 +673,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                             >
                               <td>
                                 <div>
-                                  <strong>{app.job_title || app.role_title || 'Workday Position'}</strong>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px', flexWrap: 'wrap' }}>
+                                  <strong>{displayTitle}</strong>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
                                     {jobUrl && (
                                       <a
                                         href={jobUrl}
@@ -679,27 +685,6 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                         title={jobUrl}
                                       >
                                         🔗 Link ↗
-                                      </a>
-                                    )}
-                                    {proofShot && (
-                                      <a
-                                        href={proofShot}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        onClick={(e) => e.stopPropagation()}
-                                        style={{
-                                          padding: '1px 6px',
-                                          borderRadius: '4px',
-                                          fontSize: '0.72rem',
-                                          fontWeight: 'bold',
-                                          textDecoration: 'none',
-                                          background: isSubmitted ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                                          color: isSubmitted ? '#34d399' : '#fca5a5',
-                                          border: `1px solid ${isSubmitted ? 'rgba(16, 185, 129, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
-                                        }}
-                                        title="Click to view real Playwright screenshot proof in Supabase"
-                                      >
-                                        📸 {isSubmitted ? 'Proof ↗' : 'Fail Shot ↗'}
                                       </a>
                                     )}
                                   </div>
@@ -729,6 +714,40 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                     return <span className="video-status-tag queued">IN QUEUE</span>;
                                   }
                                   return <span className={`video-status-tag ${s || 'queued'}`}>{(app.status || 'QUEUED').toUpperCase()}</span>;
+                                })()}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                {(() => {
+                                  if (proofShot) {
+                                    return (
+                                      <a
+                                        href={proofShot}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{
+                                          padding: '3px 8px',
+                                          borderRadius: '4px',
+                                          fontSize: '0.74rem',
+                                          fontWeight: 'bold',
+                                          textDecoration: 'none',
+                                          background: isSubmitted ? 'rgba(16, 185, 129, 0.15)' : isFailed ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                                          color: isSubmitted ? '#34d399' : isFailed ? '#fca5a5' : '#38bdf8',
+                                          border: `1px solid ${isSubmitted ? 'rgba(16, 185, 129, 0.3)' : isFailed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(56, 189, 248, 0.3)'}`,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                        }}
+                                        title="Click to view genuine Playwright screenshot proof stored in Supabase"
+                                      >
+                                        📸 {isSubmitted ? 'Proof (Supabase) ↗' : isFailed ? 'Fail Shot ↗' : 'Review Step ↗'}
+                                      </a>
+                                    );
+                                  }
+                                  if (['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(s)) {
+                                    return <span style={{ fontSize: '0.74rem', color: '#38bdf8' }}>⚡ In progress...</span>;
+                                  }
+                                  return <span style={{ fontSize: '0.74rem', color: '#475569' }}>—</span>;
                                 })()}
                               </td>
                               <td>
@@ -859,7 +878,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                           );})
                         ) : (
                           <tr>
-                            <td colSpan={5} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                            <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
                               <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
                                 No applications recorded or queued yet for {selectedCandidate.id}.
                               </div>
@@ -875,27 +894,43 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                 </div>
 
                 {/* 3. Automation Execution Trace Panel */}
-                <div style={{ marginTop: '1.5rem', background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '1rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#38bdf8' }}>
-                      AUTOMATION EXECUTION TRACE {selectedApp ? `(${selectedApp.job_title || selectedApp.company || selectedApp.id})` : ''}
-                    </span>
-                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                      Live debug stream from public.automation_trace
-                    </span>
+                <div style={{ marginTop: '1.5rem', background: '#070b14', border: '1px solid #1e293b', borderRadius: '8px', overflow: 'hidden' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.65rem 1rem', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ display: 'inline-flex', gap: '5px' }}>
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444' }} />
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#f59e0b' }} />
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#10b981' }} />
+                      </span>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#38bdf8', marginLeft: '6px' }}>
+                        AUTOMATION EXECUTION TRACE {selectedApp ? `(${selectedApp.company || selectedApp.job_title || selectedCandidate?.id || 'Worker-1'})` : '(Worker-1 Live)'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'inline-block' }} />
+                      <span style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+                        Live Terminal Output (1 Worker Allocated)
+                      </span>
+                    </div>
                   </div>
 
-                  <div style={{ maxHeight: '180px', overflowY: 'auto', fontFamily: 'monospace', fontSize: '0.8rem', background: '#020617', padding: '0.75rem', borderRadius: '4px' }}>
+                  <div style={{ maxHeight: '200px', overflowY: 'auto', fontFamily: 'Consolas, Monaco, "Courier New", monospace', fontSize: '0.8rem', background: '#020617', padding: '0.85rem 1rem', lineHeight: '1.6' }}>
                     {traceLogs.length > 0 ? (
-                      traceLogs.map((log) => (
-                        <div key={log.id} style={{ marginBottom: '0.35rem', color: '#cbd5e1' }}>
-                          <span style={{ color: '#64748b' }}>[{new Date(log.ts).toLocaleTimeString()}]</span> Step {log.step_index}: {log.message}
-                        </div>
-                      ))
+                      traceLogs.map((log) => {
+                        const isErr = /fail|error|invalid|expired/i.test(log.message || '');
+                        const isSuccess = /submit|success|reached.*review/i.test(log.message || '');
+                        return (
+                          <div key={log.id} style={{ marginBottom: '0.35rem', color: isErr ? '#fca5a5' : isSuccess ? '#86efac' : '#cbd5e1' }}>
+                            <span style={{ color: '#64748b', marginRight: '8px' }}>[{new Date(log.ts).toLocaleTimeString()}]</span>
+                            <span style={{ color: '#38bdf8', fontWeight: 'bold', marginRight: '8px' }}>Step {log.step_index}:</span>
+                            <span>{log.message}</span>
+                          </div>
+                        );
+                      })
                     ) : (
-                      <span style={{ color: '#64748b' }}>
-                        No automation trace events logged yet for this application.
-                      </span>
+                      <div style={{ color: '#64748b', fontStyle: 'italic', padding: '0.5rem 0' }}>
+                        Waiting for Worker-1 trace events... When CA logs in and worker fills applications, live terminal steps will stream here in real time.
+                      </div>
                     )}
                   </div>
                 </div>

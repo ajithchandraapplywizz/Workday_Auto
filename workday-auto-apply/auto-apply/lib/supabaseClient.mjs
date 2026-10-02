@@ -333,10 +333,10 @@ export async function upsertSupabaseApplication({
   const cleanUrl = String(jobUrl).trim()
     .replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '')
     .replace(/%2C/gi, ',');
-  const normalizedStatus = ['started', 'in_progress', 'submitted', 'failed', 'skipped'].includes(status)
+  const normalizedStatus = ['started', 'in_progress', 'submitted', 'failed', 'skipped', 'ready_for_review', 'reached_review'].includes(status)
     ? status
-    : (status === 'ready_for_review' || status === 'needs_manual_verification' || status === 'review-pending-confirmation'
-        ? 'in_progress'
+    : (status === 'needs_manual_verification' || status === 'review-pending-confirmation'
+        ? 'ready_for_review'
         : (status === 'incomplete' || status === 'error'
             ? 'failed'
             : (status === 'review-declined' || status === 'review_declined' ? 'skipped' : 'started')));
@@ -1298,6 +1298,29 @@ export async function getActiveOperators() {
   } catch (err) {
     console.log(`  ⚠️  getActiveOperators error: ${err.message?.slice(0, 100)}`);
     return [];
+  }
+}
+
+/**
+ * Log a single step event to public.automation_trace for live terminal streaming in frontend
+ */
+export async function logAutomationTrace({ applicationId, applywizzId, stepIndex = 0, message = '' } = {}) {
+  if (!isSupabaseConfigured() || !message) return false;
+  try {
+    const row = {
+      step_index: stepIndex,
+      message: String(message),
+      ts: new Date().toISOString(),
+    };
+    if (applicationId) row.application_id = applicationId;
+    await request('automation_trace', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: row,
+    }).catch(() => {});
+    return true;
+  } catch {
+    return false;
   }
 }
 

@@ -38,7 +38,7 @@ if (!isSupabaseConfigured()) {
 // CLI Args
 const args = process.argv.slice(2);
 const workersIdx = args.indexOf('--workers');
-const CONCURRENCY = workersIdx !== -1 && args[workersIdx + 1] ? Number(args[workersIdx + 1]) || 10 : 10;
+const CONCURRENCY = workersIdx !== -1 && args[workersIdx + 1] ? Number(args[workersIdx + 1]) || 1 : 1;
 const DRY_RUN = args.includes('--dry-run');
 const HEADLESS = !args.includes('--headful');
 const FORCE_DISPATCH = args.includes('--force');

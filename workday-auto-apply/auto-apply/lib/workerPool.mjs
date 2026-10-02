@@ -21,7 +21,7 @@ import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
-import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, uploadStorageScreenshot, getActiveOperators } from './supabaseClient.mjs';
+import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -95,6 +95,12 @@ export async function executeWorkerTask({
   console.log(`   🏢 Company: ${company || 'Workday'}`);
   console.log(`   🔗 URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
+
+  const appLog = (stepIndex, msg) => {
+    logAutomationTrace({ applywizzId, stepIndex, message: `[${workerId}] ${msg}` }).catch(() => {});
+  };
+
+  appLog(1, `Started application run for ${applywizzId} @ ${company || 'Workday'}`);
 
   // 1. Validate Workday URL
   const check = validateWorkdayUrl(jobUrl);
@@ -190,6 +196,7 @@ export async function executeWorkerTask({
   }
 
   // 5. Launch isolated Playwright browser context
+  appLog(2, 'Launching isolated headless Playwright browser instance...');
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -200,6 +207,7 @@ export async function executeWorkerTask({
 
   try {
     // Step A: Scan Form
+    appLog(3, `Navigating to ${jobUrl.slice(0, 60)} & scanning form...`);
     console.log(`   [${workerId}] Step 1: Scanning form fields...`);
     const scan = await scanForm(jobUrl, {
       browser,
@@ -287,6 +295,7 @@ export async function executeWorkerTask({
     }
 
     // Step B: Pick resume for candidate
+    appLog(4, 'Parsing job description and selecting best resume...');
     console.log(`   [${workerId}] Step 2: Preparing resume...`);
     let jdText = '';
     try { jdText = await extractJDText(page); } catch {}
@@ -298,6 +307,7 @@ export async function executeWorkerTask({
     if (resumePath) profile._resumePath = resumePath;
 
     // Step C: Generate fill plan
+    appLog(5, 'Generating AI fill plan from candidate knowledge...');
     console.log(`   [${workerId}] Step 3: Generating plan...`);
     const plan = await generatePlan(scan, profile, { resumePath, jdText, url: jobUrl });
     if (company) plan.company = company;
@@ -311,6 +321,7 @@ export async function executeWorkerTask({
     } catch {}
 
     // Step D: Fill & Submit
+    appLog(6, `Filling application form steps 1–4 (${company || 'Workday'})...`);
     console.log(`   [${workerId}] Step 4: Filling application...`);
     const status = await fillForm(jobUrl, plan, {
       browser,
@@ -474,6 +485,12 @@ export async function executeWorkerTask({
       });
     }
 
+    if (status === 'submitted') {
+      appLog(6, `Application submitted successfully! Screenshot proof captured: ${completionShotUrl || 'Supabase Storage'}`);
+    } else if (status === 'reached-review' || status === 'reached_review') {
+      appLog(5, `Reached Step 5: Review & Submit. Form paused for CA review.`);
+    }
+
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
     return { status, cacheHit, screenshotUrl: completionShotUrl };
   } catch (err) {
@@ -494,6 +511,8 @@ export async function executeWorkerTask({
 
     let fullErrReason = `${err.message} (stopped at ${errStep}) [step: ${errStep}]`;
     if (errShotUrl) fullErrReason += ` [screenshot: ${errShotUrl}]`;
+
+    appLog(99, `Task halted: ${fullErrReason}`);
 
     if (queueTaskId) {
       await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: fullErrReason, screenshotPath: errShotUrl });
@@ -516,10 +535,10 @@ export async function executeWorkerTask({
 }
 
 /**
- * Run tasks using a pool of N concurrent workers (default 10).
+ * Run tasks using a pool of N concurrent workers (default 1).
  */
 export async function runWorkerPool(tasks = [], {
-  concurrency = 10,
+  concurrency = 1,
   headless = true,
   confirmSubmit = false,
   dryRun = false,
@@ -610,7 +629,7 @@ export async function runWorkerPool(tasks = [], {
  *   5. Workers atomically claim their pre-assigned task by ID.
  */
 export async function runQueueWorkerPool({
-  concurrency = 10,
+  concurrency = 1,
   headless = true,
   dryRun = false,
   confirmSubmit = !dryRun,
