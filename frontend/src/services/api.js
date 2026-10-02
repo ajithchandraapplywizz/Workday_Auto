@@ -729,14 +729,14 @@ export async function fetchApplicationsDynamic({
         if (!cleanQtUrl) continue;
 
         const existing = itemByUrl.get(cleanQtUrl);
-        if (existing) {
+        if (existing && typeof existing === 'object') {
           // Reconcile status & screenshot from queue task
           if (qt.screenshot_path) {
             existing.failure_screenshot_url = qt.screenshot_path;
             existing.screenshot_url = qt.screenshot_path;
             existing.screenshot_path = qt.screenshot_path;
           }
-          if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review') {
+          if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review' || qt.status === 'ready_for_review') {
             existing.status = qt.status;
           } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
             existing.status = 'pending';
@@ -745,8 +745,6 @@ export async function fetchApplicationsDynamic({
             existing.failure_reason = qt.error_message;
           }
         } else {
-            itemByUrl.set(cleanQtUrl, true);
-
             // Extract company and role from URL if null
             let parsedCompany = qt.company;
             let parsedTitle = qt.role_title;
@@ -771,7 +769,7 @@ export async function fetchApplicationsDynamic({
               } catch (_) {}
             }
 
-            list.push({
+            const newItem = {
               id: qt.id,
               applywizz_id: qt.applywizz_id,
               job_title: parsedTitle || 'Workday Position',
@@ -785,8 +783,10 @@ export async function fetchApplicationsDynamic({
               failure_reason: qt.error_message || null,
               created_at: qt.created_at,
               updated_at: qt.completed_at || qt.created_at,
-            });
-          }
+            };
+            itemByUrl.set(cleanQtUrl, newItem);
+            list.push(newItem);
+        }
         }
       }
 
