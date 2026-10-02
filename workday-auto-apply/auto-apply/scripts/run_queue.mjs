@@ -25,10 +25,10 @@ if (!isSupabaseConfigured()) {
 
 const args = process.argv.slice(2);
 
-let workers = 10;
+let workers = 1;
 const workersIdx = args.indexOf('--workers') !== -1 ? args.indexOf('--workers') : args.indexOf('--concurrency');
 if (workersIdx !== -1 && args[workersIdx + 1]) {
-  workers = Number(args[workersIdx + 1]) || 10;
+  workers = Number(args[workersIdx + 1]) || 1;
 }
 
 let maxTasks = Infinity;

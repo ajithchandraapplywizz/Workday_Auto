@@ -21,7 +21,7 @@ import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
-import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
+import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -674,7 +674,13 @@ export async function runQueueWorkerPool({
     console.log(`   Active CA(s): ${activeEmails.length ? activeEmails.join(', ') : 'None'}`);
     console.log(`   Assigned Clients (${allowedCandidateIds.length}): ${allowedCandidateIds.join(', ') || 'None'}`);
     if (allowedCandidateIds.length === 0) {
-      console.log('   ⚠️ No candidates found for active CA(s). No tasks will be leased.');
+      console.log('   🛑 [WORKER POOL] No candidates found for active CA(s). Bot will NOT trigger.');
+      return [];
+    }
+
+    const totalApps = await getTotalApplicationCountForCandidates(allowedCandidateIds);
+    if (totalApps === 0) {
+      console.log('   🛑 [WORKER POOL] STOPPED: Application count is 0 for all clients of active CA(s). Bot will NOT trigger.');
       return [];
     }
   }
@@ -692,7 +698,7 @@ export async function runQueueWorkerPool({
   console.log(`${'═'.repeat(70)}\n`);
 
   if (pendingCount === 0) {
-    console.log('ℹ️  No pending or pre_resolved tasks found in Supabase batch_job_queue.');
+    console.log('🛑 [WORKER POOL] STOPPED: 0 pending tasks found. Bot will NOT trigger.');
     return [];
   }
 

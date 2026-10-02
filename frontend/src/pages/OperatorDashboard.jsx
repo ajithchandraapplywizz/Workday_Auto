@@ -63,6 +63,11 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     clientStats: [],
   });
 
+  // Calculate total application count across all assigned candidates for this CA
+  const totalCaApplications = useMemo(() => {
+    return candidates.reduce((sum, c) => sum + (c.jobs_applied || 0), 0);
+  }, [candidates]);
+
   // Form Review Modal state
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [reviewTargetApp, setReviewTargetApp] = useState(null);
@@ -207,7 +212,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
   // Live polling: automatically reflects real-time background bot progress in CA portal
   useEffect(() => {
-    if (!selectedCandidate?.id) return;
+    // If no candidate is selected OR total applications across all assigned clients is 0, do not poll
+    if (!selectedCandidate?.id || totalCaApplications === 0) return;
     let isMounted = true;
 
     const refreshActiveCandidateApps = async () => {
@@ -236,7 +242,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [selectedCandidate?.id]);
+  }, [selectedCandidate?.id, totalCaApplications]);
 
   // Load Live Bot Automation Stats for Stats Tab
   useEffect(() => {
@@ -534,6 +540,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                 <span className="shb-title">ASSIGNED CANDIDATES</span>
                 <div className="shb-badges">
                   <span className="shb-badge red">{candidates.length} Clients</span>
+                  <span
+                    className="shb-badge"
+                    style={{
+                      background: totalCaApplications > 0 ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.2)',
+                      color: totalCaApplications > 0 ? '#38bdf8' : '#94a3b8',
+                      border: `1px solid ${totalCaApplications > 0 ? 'rgba(56, 189, 248, 0.35)' : 'rgba(100, 116, 139, 0.35)'}`,
+                      fontWeight: totalCaApplications > 0 ? 'bold' : 'normal',
+                    }}
+                  >
+                    {totalCaApplications > 0 ? `${totalCaApplications} Apps` : '0 Apps (Bot Stopped)'}
+                  </span>
                 </div>
               </div>
               <div className="sidebar-search-box">
@@ -582,6 +599,43 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
           {/* Right Main Panel: Detail Panel & Application Queue */}
           <main className="operator-workspace">
+            {totalCaApplications === 0 && candidates.length > 0 && !loading && (
+              <div style={{
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.25)',
+                borderRadius: '8px',
+                padding: '10px 16px',
+                marginBottom: '1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{ fontSize: '1.2rem' }}>🛑</span>
+                  <div>
+                    <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.86rem' }}>
+                      Bot Triggering Stopped: 0 Applications Across All Clients
+                    </div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '1px' }}>
+                      All {candidates.length} assigned clients have 0 application links recorded. The automated bot is completely stopped and will not trigger.
+                    </div>
+                  </div>
+                </div>
+                <span style={{
+                  background: 'rgba(239, 68, 68, 0.18)',
+                  color: '#fca5a5',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.72rem',
+                  fontWeight: 'bold',
+                  border: '1px solid rgba(239, 68, 68, 0.35)',
+                  whiteSpace: 'nowrap'
+                }}>
+                  BOT IDLE (0 APPS)
+                </span>
+              </div>
+            )}
+
             {selectedCandidate ? (
               <div className="candidate-detail-screen">
                 {/* 1. Candidate Full Profile Detail Panel from get-client-details */}

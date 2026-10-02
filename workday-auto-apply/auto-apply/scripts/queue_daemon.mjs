@@ -23,6 +23,7 @@ import {
   isSupabaseConfigured,
   getActiveOperators,
   getActiveCaCandidateIds,
+  getTotalApplicationCountForCandidates,
   updateDaemonCaState,
   fetchPendingTasksForActiveCAs,
 } from '../lib/supabaseClient.mjs';
@@ -163,18 +164,46 @@ async function pollLoop() {
 
           const caScope = await getActiveCaCandidateIds({ caEmails: [caEmail] });
           if (caScope.candidateIds.length === 0) {
-            console.log(`  [DAEMON] No candidates for ${caEmail}. Skipping.`);
-            await updateDaemonCaState(caEmail, { caName, state: 'idle' });
+            console.log(`  🛑 [DAEMON] No candidates assigned to ${caEmail}. Bot triggering STOPPED.`);
+            await updateDaemonCaState(caEmail, { caName, state: 'idle', syncedDate: todayStr(), note: '0 assigned candidates' });
+            markDispatched(caEmail);
             continue;
           }
+
+          // Check application count for clients inside CA dashboard (matches left sidebar count)
+          // If 0 for all clients for this particular CA, STOP the triggering of bot!
+          const totalApps = await getTotalApplicationCountForCandidates(caScope.candidateIds);
+          if (totalApps === 0) {
+            console.log(`  🛑 [DAEMON] STOPPED: Application count for all ${caScope.candidateIds.length} clients of ${caEmail} is 0. Bot triggering STOPPED. No use in triggering.`);
+            await updateDaemonCaState(caEmail, {
+              caName,
+              state: 'idle',
+              syncedDate: todayStr(),
+              candidateIds: caScope.candidateIds,
+              tasksDispatched: 0,
+              note: '0 applications across all clients. Bot triggering stopped.'
+            });
+            markDispatched(caEmail);
+            continue;
+          }
+
           const pending = await fetchPendingTasksForActiveCAs(caScope.candidateIds);
           if (pending.length === 0) {
-            console.log(`  [DAEMON] No pending tasks for ${caEmail}. Nothing to dispatch.`);
-            await updateDaemonCaState(caEmail, { caName, state: 'synced', syncedDate: todayStr(), candidateIds: caScope.candidateIds });
+            console.log(`  🛑 [DAEMON] STOPPED: 0 pending tasks for ${caEmail} (out of ${totalApps} total apps). Bot triggering STOPPED.`);
+            await updateDaemonCaState(caEmail, {
+              caName,
+              state: 'idle',
+              syncedDate: todayStr(),
+              candidateIds: caScope.candidateIds,
+              tasksDispatched: 0,
+              note: '0 pending tasks remaining. Bot triggering stopped.'
+            });
+            markDispatched(caEmail);
             continue;
           }
+
           await updateDaemonCaState(caEmail, { caName, state: 'synced', syncedDate: todayStr(), candidateIds: caScope.candidateIds });
-          console.log(`  [DAEMON] ${caEmail}: ${pending.length} tasks for ${caScope.candidateIds.length} clients -> dispatching.`);
+          console.log(`  ⚡ [DAEMON] ${caEmail}: ${pending.length} pending tasks for ${caScope.candidateIds.length} clients (${totalApps} total apps) -> dispatching.`);
           dispatchWorkerPoolForCA(caEmail, caName).catch((err) => {
             console.error(`  [DAEMON] Background error for ${caEmail}:`, err?.message || err);
           });

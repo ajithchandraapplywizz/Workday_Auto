@@ -882,20 +882,70 @@ export async function getActiveCaCandidateIds({ caEmails = null } = {}) {
     }
     if (!activeEmails.length) return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
 
-    const clients = await request('clients', {
-      query: `?current_ca_email=in.(${activeEmails.map(encodeURIComponent).join(',')})&select=applywizz_id,current_ca_email`,
-    });
+    // Query BOTH clients table and client_assignment_log to ensure 100% of assigned candidates are discovered
+    const [clients, assignmentLogs] = await Promise.all([
+      request('clients', {
+        query: `?current_ca_email=in.(${activeEmails.map(encodeURIComponent).join(',')})&select=applywizz_id,current_ca_email`,
+      }),
+      request('client_assignment_log', {
+        query: `?ca_email=in.(${activeEmails.map(encodeURIComponent).join(',')})&effective_to=is.null&select=applywizz_id,ca_email`,
+      }),
+    ]);
+
     const clientToCaMap = {};
     for (const c of (clients || [])) {
       if (c.applywizz_id) {
         clientToCaMap[c.applywizz_id] = (c.current_ca_email || '').toLowerCase().trim();
       }
     }
-    const candidateIds = Array.from(new Set((clients || []).map((c) => c.applywizz_id).filter(Boolean)));
+    for (const l of (assignmentLogs || [])) {
+      if (l.applywizz_id && !clientToCaMap[l.applywizz_id]) {
+        clientToCaMap[l.applywizz_id] = (l.ca_email || '').toLowerCase().trim();
+      }
+    }
+
+    const candidateIds = Array.from(new Set([
+      ...(clients || []).map((c) => c.applywizz_id),
+      ...(assignmentLogs || []).map((l) => l.applywizz_id),
+    ].filter(Boolean)));
+
     return { activeEmails, candidateIds, clientToCaMap };
   } catch (err) {
     console.log(`  ⚠️  getActiveCaCandidateIds error: ${err.message?.slice(0, 100)}`);
     return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
+  }
+}
+
+/**
+ * Get total application count across all assigned candidates for a CA.
+ * Matches the left-sidebar count in the CA client dashboard.
+ * @param {string[]} candidateIds - AWL IDs
+ * @returns {Promise<number>} Total application count
+ */
+export async function getTotalApplicationCountForCandidates(candidateIds = []) {
+  if (!isSupabaseConfigured() || !Array.isArray(candidateIds) || candidateIds.length === 0) return 0;
+  try {
+    const [apps, queueTasks] = await Promise.all([
+      request('applications', {
+        query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=id,applywizz_id,job_url`,
+      }),
+      request('batch_job_queue', {
+        query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=id,applywizz_id,job_url`,
+      }),
+    ]);
+    const jobKeySet = new Set();
+    for (const a of (apps || [])) {
+      const key = `${(a.applywizz_id || '').trim().toUpperCase()}_${(a.job_url || a.id || '').trim().toLowerCase()}`;
+      if (key) jobKeySet.add(key);
+    }
+    for (const q of (queueTasks || [])) {
+      const key = `${(q.applywizz_id || '').trim().toUpperCase()}_${(q.job_url || q.id || '').trim().toLowerCase()}`;
+      if (key) jobKeySet.add(key);
+    }
+    return jobKeySet.size;
+  } catch (err) {
+    console.log(`  ⚠️  getTotalApplicationCountForCandidates error: ${err.message?.slice(0, 100)}`);
+    return 0;
   }
 }
 
@@ -1202,6 +1252,10 @@ export async function leaseSpecificQueueTask(taskId, workerId = 'worker-1') {
 export async function fetchPendingTasksForActiveCAs(allowedCandidateIds = null) {
   if (!isSupabaseConfigured()) return [];
   try {
+    // If allowedCandidateIds is explicitly provided as empty array, return empty immediately
+    if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length === 0) {
+      return [];
+    }
     let filter = '?status=in.(pending,pre_resolved,approved_for_submission)&order=created_at.asc&limit=500';
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
       filter = `?status=in.(pending,pre_resolved,approved_for_submission)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
