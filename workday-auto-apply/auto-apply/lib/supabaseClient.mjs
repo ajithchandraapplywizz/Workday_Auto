@@ -906,7 +906,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
       return null;
     }
 
-    let filter = '?status=in.(pending,pre_resolved)';
+    let filter = '?status=in.(pending,pre_resolved,approved_for_submission)';
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
       filter += `&applywizz_id=in.(${allowedCandidateIds.join(',')})`;
     }
@@ -928,7 +928,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
 
     const patched = await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?id=eq.${encode(task.id)}&status=in.(pending,pre_resolved)`,
+      query: `?id=eq.${encode(task.id)}&status=in.(pending,pre_resolved,approved_for_submission)`,
       prefer: 'return=representation',
       body: patchBody,
     });
@@ -1202,9 +1202,9 @@ export async function leaseSpecificQueueTask(taskId, workerId = 'worker-1') {
 export async function fetchPendingTasksForActiveCAs(allowedCandidateIds = null) {
   if (!isSupabaseConfigured()) return [];
   try {
-    let filter = '?status=in.(pending,pre_resolved)&order=created_at.asc&limit=500';
+    let filter = '?status=in.(pending,pre_resolved,approved_for_submission)&order=created_at.asc&limit=500';
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
-      filter = `?status=in.(pending,pre_resolved)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
+      filter = `?status=in.(pending,pre_resolved,approved_for_submission)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
     }
     const tasks = await request('batch_job_queue', { query: filter });
     return Array.isArray(tasks) ? tasks : [];

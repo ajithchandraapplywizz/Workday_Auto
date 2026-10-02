@@ -702,6 +702,11 @@ export async function fetchApplicationsDynamic({
           }
         }
       }
+      // If marked submitted without real screenshot proof, correct it to queued
+      const hasProof = Boolean(item.screenshot_url || item.screenshot_path || item.failure_screenshot_url);
+      if ((item.status === 'submitted' || item.status === 'completed') && !hasProof) {
+        item.status = 'queued';
+      }
       return item;
     });
 
@@ -736,7 +741,13 @@ export async function fetchApplicationsDynamic({
             existing.screenshot_url = qt.screenshot_path;
             existing.screenshot_path = qt.screenshot_path;
           }
-          if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review' || qt.status === 'ready_for_review') {
+          const hasProof = Boolean(existing.failure_screenshot_url || existing.screenshot_url || existing.screenshot_path || qt.screenshot_path);
+          if ((qt.status === 'submitted' || qt.status === 'completed') && !hasProof) {
+            // Fake submitted state without real screenshot proof: correct to queued
+            if (existing.status !== 'ready_for_review') {
+              existing.status = 'queued';
+            }
+          } else if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review' || qt.status === 'ready_for_review') {
             existing.status = qt.status;
           } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
             existing.status = 'pending';
@@ -769,13 +780,19 @@ export async function fetchApplicationsDynamic({
               } catch (_) {}
             }
 
+            const hasProof = Boolean(qt.screenshot_path);
+            let finalStatus = qt.status || 'pending';
+            if ((finalStatus === 'submitted' || finalStatus === 'completed') && !hasProof) {
+              finalStatus = 'pending';
+            }
+
             const newItem = {
               id: qt.id,
               applywizz_id: qt.applywizz_id,
               job_title: parsedTitle || 'Workday Position',
               company: parsedCompany || 'Workday Employer',
               ats: 'Workday',
-              status: qt.status || 'pending',
+              status: finalStatus,
               job_url: qt.job_url,
               pre_resolved_answers: qt.pre_resolved_answers,
               screenshot_url: qt.screenshot_path || null,
@@ -1965,13 +1982,13 @@ export async function submitApplicationReview({
       }
     }
 
-    // 1. Update batch_job_queue
+    // 1. Update batch_job_queue with CA answers and set status to approved_for_submission so bot performs final submit & captures screenshot proof
+    const queueStatus = status === 'submitted' ? 'approved_for_submission' : status;
     const { error: queueErr } = await supabase
       .from('batch_job_queue')
       .update({
-        status,
+        status: queueStatus,
         pre_resolved_answers: updatedAnswersMap,
-        completed_at: now,
         updated_at: now,
       })
       .eq('applywizz_id', cleanId)
@@ -1987,8 +2004,7 @@ export async function submitApplicationReview({
         job_url: jobUrl,
         company: company || 'Workday Tenant',
         role_title: roleTitle || 'Workday Application',
-        status: status,
-        submitted_at: now,
+        status: queueStatus === 'approved_for_submission' ? 'in_progress' : status,
         updated_at: now,
       }, { onConflict: 'applywizz_id,job_url' });
 
@@ -2016,6 +2032,114 @@ export async function submitApplicationReview({
   } catch (err) {
     console.error('Failed to submit application review:', err);
     return { success: false, error: err.message };
+  }
+}
+
+/**
+ * 27. Fetch Real Bot Automation Stats for CA's Assigned Candidates
+ * (Replaces old static work history with genuine live automation counts from Supabase)
+ */
+export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } = {}) {
+  try {
+    const clientsRes = await fetchAssignedClientsForCA({ caEmail, dateStr });
+    const assignedClients = clientsRes.assignedClients || [];
+    const clientIds = assignedClients.map((c) => String(c.id).trim().toUpperCase());
+
+    if (clientIds.length === 0) {
+      return {
+        success: true,
+        totals: { total: 0, queued: 0, inFlight: 0, readyForReview: 0, submitted: 0, failed: 0 },
+        clientStats: [],
+      };
+    }
+
+    const [queueRes, appsRes] = await Promise.all([
+      supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds),
+      supabase.from('applications').select('*').in('applywizz_id', clientIds),
+    ]);
+
+    const queueTasks = queueRes.data || [];
+    const applications = appsRes.data || [];
+
+    let totalQueued = 0;
+    let totalInFlight = 0;
+    let totalReady = 0;
+    let totalSubmitted = 0;
+    let totalFailed = 0;
+
+    const clientStats = assignedClients.map((client) => {
+      const cid = String(client.id).trim().toUpperCase();
+      const clientQueue = queueTasks.filter((q) => String(q.applywizz_id).trim().toUpperCase() === cid);
+      const clientApps = applications.filter((a) => String(a.applywizz_id).trim().toUpperCase() === cid);
+
+      const jobUrlMap = new Map();
+      for (const a of clientApps) {
+        const u = (a.job_url || '').split('?')[0].trim().toLowerCase();
+        if (u) jobUrlMap.set(u, a);
+      }
+      for (const q of clientQueue) {
+        const u = (q.job_url || '').split('?')[0].trim().toLowerCase();
+        if (u && !jobUrlMap.has(u)) {
+          jobUrlMap.set(u, q);
+        }
+      }
+
+      const allJobs = Array.from(jobUrlMap.values());
+      const queuedCount = allJobs.filter((j) => ['pending', 'queued', 'in_queue', ''].includes((j.status || '').toLowerCase())).length;
+      const inFlightCount = allJobs.filter((j) => ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes((j.status || '').toLowerCase())).length;
+      const readyCount = allJobs.filter((j) => ['ready_for_review', 'reached_review'].includes((j.status || '').toLowerCase())).length;
+      const submittedCount = allJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        const hasProof = Boolean(j.screenshot_url || j.screenshot_path || j.failure_screenshot_url);
+        return (s === 'submitted' || s === 'completed') && hasProof;
+      }).length;
+      const failedCount = allJobs.filter((j) => (j.status || '').toLowerCase() === 'failed').length;
+
+      totalQueued += queuedCount;
+      totalInFlight += inFlightCount;
+      totalReady += readyCount;
+      totalSubmitted += submittedCount;
+      totalFailed += failedCount;
+
+      let botState = 'Idle';
+      if (inFlightCount > 0) botState = '⚡ Filling in Background';
+      else if (readyCount > 0) botState = '📋 Ready to Review';
+      else if (queuedCount > 0) botState = '⏳ In Queue';
+      else if (submittedCount > 0) botState = '✓ Submitted';
+
+      return {
+        id: client.id,
+        name: client.client_name || client.name || client.id,
+        totalJobs: allJobs.length,
+        queued: queuedCount,
+        inFlight: inFlightCount,
+        readyForReview: readyCount,
+        submitted: submittedCount,
+        failed: failedCount,
+        botState,
+      };
+    });
+
+    return {
+      success: true,
+      totals: {
+        total: totalQueued + totalInFlight + totalReady + totalSubmitted + totalFailed,
+        queued: totalQueued,
+        inFlight: totalInFlight,
+        readyForReview: totalReady,
+        submitted: totalSubmitted,
+        failed: totalFailed,
+      },
+      clientStats,
+    };
+  } catch (err) {
+    console.error('Error fetching CA bot automation stats:', err);
+    return {
+      success: false,
+      totals: { total: 0, queued: 0, inFlight: 0, readyForReview: 0, submitted: 0, failed: 0 },
+      clientStats: [],
+      error: err.message,
+    };
   }
 }
 

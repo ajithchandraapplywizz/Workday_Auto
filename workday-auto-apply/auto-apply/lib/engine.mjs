@@ -2080,6 +2080,9 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
     }
     profile._currentStep = stepName;
+    if (typeof profile._onStepChange === 'function') {
+      try { profile._onStepChange(currentIteration, stepName); } catch {}
+    }
 
     if (stepName === 'Review') {
       profile._discoveredSteps?.add('Review');

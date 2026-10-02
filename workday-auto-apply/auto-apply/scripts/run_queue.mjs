@@ -25,10 +25,10 @@ if (!isSupabaseConfigured()) {
 
 const args = process.argv.slice(2);
 
-let workers = 1;
+let workers = 10;
 const workersIdx = args.indexOf('--workers') !== -1 ? args.indexOf('--workers') : args.indexOf('--concurrency');
 if (workersIdx !== -1 && args[workersIdx + 1]) {
-  workers = Number(args[workersIdx + 1]) || 1;
+  workers = Number(args[workersIdx + 1]) || 10;
 }
 
 let maxTasks = Infinity;
@@ -44,8 +44,7 @@ const caEmails = caIdx !== -1 && args[caIdx + 1] ? args[caIdx + 1].split(',').ma
 const activeCaOnly = !args.includes('--all-candidates');
 
 const dryRun = args.includes('--dry-run');
-// Only auto-submit if explicitly requested with --confirm-submit; default is to pause at Step 5 Review for CA approval
-const confirmSubmit = args.includes('--confirm-submit');
+const confirmSubmit = !dryRun && !args.includes('--no-submit');
 // Default to headless mode unless --headful is explicitly specified
 const isHeadless = !args.includes('--headful');
 

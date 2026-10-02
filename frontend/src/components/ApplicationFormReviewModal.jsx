@@ -117,16 +117,17 @@ export default function ApplicationFormReviewModal({
         company: applicationData?.company || companyName,
         roleTitle: applicationData?.roleTitle || roleTitle,
         fields,
-        status: 'submitted',
+        status: 'approved_for_submission',
       });
 
       if (res.success) {
-        setSuccessMsg('Application successfully reviewed and submitted to Supabase!');
+        setSuccessMsg('Review approved! Bot is performing final submission & capturing proof screenshot...');
         if (onSubmitted) {
           onSubmitted({
             applywizzId,
             jobUrl: applicationData?.jobUrl || jobUrl,
             fields,
+            status: 'in_progress',
           });
         }
         setTimeout(() => {
