@@ -153,8 +153,23 @@ function profileFactForLabel(label, profile = {}) {
   if (/(salary|compensation|pay|minimum salary)/.test(n) && !/hourly|wage/.test(n)) {
     return explicitSalary(profile, false);
   }
-  if (profile._desiredStartDate && /available.*start|when.*start|desired.*start/.test(n)) {
-    return profile._desiredStartDate;
+  if (/available.*start|when.*start|desired.*start|willing.*join|available.*join|earliest.*start|target.*start|start.*date/i.test(n)) {
+    const explicit = profile._desiredStartDate
+      || profile._supabaseQa?.['available to start']
+      || profile._supabaseQa?.['when can you start']
+      || profile._supabaseQa?.['start date']
+      || profile._supabaseQa?.['willing to join']
+      || profile.personal?.available_date;
+    if (explicit && /\d/.test(String(explicit))) {
+      const formatted = formatToMMDDYYYY(explicit);
+      if (formatted && /^\d{2}\/\d{2}\/\d{4}$/.test(formatted)) return formatted;
+    }
+    const now = new Date();
+    const target = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+    const mm = String(target.getMonth() + 1).padStart(2, '0');
+    const dd = String(target.getDate()).padStart(2, '0');
+    const yyyy = target.getFullYear();
+    return `${mm}/${dd}/${yyyy}`;
   }
   return null;
 }

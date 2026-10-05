@@ -84,7 +84,7 @@ export async function executeWorkerTask({
     allowedCandidateIds = null,
   } = options;
 
-  const isApprovedForSubmission = task.status === 'approved_for_submission' || task.status === 'approved_by_ca';
+  const isApprovedForSubmission = task.status === 'approved_for_submission' || task.status === 'approved_by_ca' || task.status === 'queued_for_submission';
   const effectiveConfirmSubmit = isApprovedForSubmission ? true : confirmSubmit;
 
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
@@ -529,8 +529,31 @@ export async function executeWorkerTask({
     }
 
     if (status === 'submitted') {
+      try {
+        const { completeSubmittedTask } = await import('./supabaseClient.mjs');
+        await completeSubmittedTask({
+          applywizzId,
+          jobUrl,
+          screenshotUrl: completionShotUrl,
+          workerId,
+        });
+      } catch {}
       appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
     } else if (status === 'reached-review' || status === 'reached_review') {
+      try {
+        const { saveResolvedAnswers } = await import('./supabaseClient.mjs');
+        await saveResolvedAnswers({
+          applywizzId,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          resolvedAnswersJson: profile._scrapedReviewFields || [],
+          isFullyAnswered: true,
+          unansweredCount: 0,
+          status: 'ready_for_review',
+          screenshotUrl: completionShotUrl,
+        });
+      } catch {}
       appLog(15, `Playwright: Reached Step 5 (Review & Submit). Form paused for CA review. High-res verification screenshot saved: ${completionShotUrl || 'Supabase'}`);
     }
 
@@ -785,8 +808,8 @@ export async function runQueueWorkerPool({
   // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks.
   // CRITICAL: Tasks that have been approved by CA ('approved_for_submission') receive top priority
   // so final submission triggers immediately when CA clicks Submit in the review modal!
-  const approvedTasks = orderedTasks.filter((t) => t.status === 'approved_for_submission' || t.status === 'approved_by_ca');
-  const regularTasks = orderedTasks.filter((t) => t.status !== 'approved_for_submission' && t.status !== 'approved_by_ca');
+  const approvedTasks = orderedTasks.filter((t) => t.status === 'approved_for_submission' || t.status === 'approved_by_ca' || t.status === 'queued_for_submission');
+  const regularTasks = orderedTasks.filter((t) => t.status !== 'approved_for_submission' && t.status !== 'approved_by_ca' && t.status !== 'queued_for_submission');
 
   const urlOrder = new Map();
   const blueprintTasks = [];

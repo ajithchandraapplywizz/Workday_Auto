@@ -1421,3 +1421,329 @@ export async function logAutomationTrace({ applicationId, applywizzId, stepIndex
   }
 }
 
+// ==============================================================================
+// SCANNED JOBS & RESOLVED ANSWERS ARCHITECTURE
+// ==============================================================================
+
+/**
+ * Save or update a scanned job blueprint with scraped questions.
+ */
+export async function saveScannedJob({
+  applywizzId = null,
+  jobId = null,
+  jobUrl = '',
+  company = '',
+  roleTitle = '',
+  scrapedQuestions = [],
+  stepNames = [],
+  scanStatus = 'completed',
+  errorMessage = null,
+} = {}) {
+  if (!isSupabaseConfigured() || !jobUrl) return null;
+  const cleanUrl = String(jobUrl).trim();
+  const questionsArr = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
+  const payload = {
+    applywizz_id: applywizzId ? String(applywizzId).trim().toUpperCase() : null,
+    job_id: jobId ? String(jobId).trim() : null,
+    job_url: cleanUrl,
+    company: company || 'Workday Employer',
+    role_title: roleTitle || 'Position',
+    scraped_questions: questionsArr,
+    question_count: questionsArr.length,
+    step_names: Array.isArray(stepNames) ? stepNames : [],
+    scan_status: scanStatus,
+    error_message: errorMessage || null,
+    scanned_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+  };
+
+  try {
+    const res = await request('scanned_jobs', {
+      method: 'POST',
+      query: '?on_conflict=job_url',
+      prefer: 'resolution=merge-duplicates,return=representation',
+      body: payload,
+    });
+    return Array.isArray(res) ? res[0] : res;
+  } catch (err) {
+    try {
+      const patched = await request('scanned_jobs', {
+        method: 'PATCH',
+        query: `?job_url=eq.${encode(cleanUrl)}`,
+        prefer: 'return=representation',
+        body: payload,
+      });
+      return Array.isArray(patched) ? patched[0] : patched;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Fetch a scanned job blueprint by URL.
+ */
+export async function getScannedJob(jobUrl = '') {
+  if (!isSupabaseConfigured() || !jobUrl) return null;
+  const cleanUrl = String(jobUrl).split('?')[0].trim();
+  try {
+    const rows = await request('scanned_jobs', {
+      query: `?or=(job_url.eq.${encode(jobUrl)},job_url.ilike.${encode(cleanUrl)}*)&order=created_at.desc&limit=1`,
+    });
+    if (Array.isArray(rows) && rows.length > 0) return rows[0];
+  } catch {}
+
+  // Fallback to job_form_schemas if scanned_jobs table is empty or migrating
+  try {
+    const schemas = await request('job_form_schemas', {
+      query: `?or=(canonical_job_url.eq.${encode(cleanUrl)},canonical_job_url.ilike.${encode(cleanUrl)}*)&order=created_at.desc&limit=1`,
+    });
+    if (Array.isArray(schemas) && schemas.length > 0) {
+      const s = schemas[0];
+      return {
+        id: s.id,
+        job_url: s.canonical_job_url,
+        company: s.company,
+        role_title: s.role_title,
+        scraped_questions: s.fields_schema || [],
+        question_count: s.total_fields || (s.fields_schema || []).length,
+        step_names: s.step_names || [],
+        scan_status: 'completed',
+      };
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Save per-client pre-resolved answers for a specific job link.
+ */
+export async function saveResolvedAnswers({
+  applywizzId,
+  scannedJobId = null,
+  jobId = null,
+  jobUrl,
+  company,
+  roleTitle,
+  resolvedAnswersJson = [],
+  isFullyAnswered = false,
+  unansweredCount = 0,
+  status = 'ready_for_review',
+  screenshotUrl = null,
+  errorMessage = null,
+} = {}) {
+  if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return null;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const cleanUrl = String(jobUrl).trim();
+  const answersArr = Array.isArray(resolvedAnswersJson) ? resolvedAnswersJson : [];
+
+  const payload = {
+    applywizz_id: cleanId,
+    scanned_job_id: scannedJobId || null,
+    job_id: jobId ? String(jobId).trim() : null,
+    job_url: cleanUrl,
+    company: company || 'Workday Employer',
+    role_title: roleTitle || 'Position',
+    resolved_answers_json: answersArr,
+    is_fully_answered: Boolean(isFullyAnswered),
+    unanswered_count: Number(unansweredCount) || 0,
+    status: isFullyAnswered ? status : (status === 'submitted' ? 'submitted' : 'incomplete'),
+    screenshot_url: screenshotUrl || null,
+    error_message: errorMessage || null,
+    updated_at: new Date().toISOString(),
+  };
+
+  try {
+    const res = await request('resolved_answers', {
+      method: 'POST',
+      query: '?on_conflict=applywizz_id,job_url',
+      prefer: 'resolution=merge-duplicates,return=representation',
+      body: payload,
+    });
+    return Array.isArray(res) ? res[0] : res;
+  } catch (err) {
+    try {
+      const patched = await request('resolved_answers', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(cleanUrl)}`,
+        prefer: 'return=representation',
+        body: payload,
+      });
+      return Array.isArray(patched) ? patched[0] : patched;
+    } catch {
+      return null;
+    }
+  }
+}
+
+/**
+ * Fetch resolved answers for a candidate and job link.
+ */
+export async function getResolvedAnswers(applywizzId, jobUrl) {
+  if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return null;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const cleanUrl = String(jobUrl).split('?')[0].trim();
+  try {
+    const rows = await request('resolved_answers', {
+      query: `?applywizz_id=eq.${encode(cleanId)}&or=(job_url.eq.${encode(jobUrl)},job_url.ilike.${encode(cleanUrl)}*)&order=updated_at.desc&limit=1`,
+    });
+    if (Array.isArray(rows) && rows.length > 0) return rows[0];
+  } catch {}
+  return null;
+}
+
+/**
+ * Fetch ONLY 100% fully-answered applications for a list of candidate IDs.
+ * STRICT ZERO-INCOMPLETE FILTER: Applications with any unanswered question are omitted.
+ */
+export async function fetchFullyResolvedApplicationsForCA(candidateIds = []) {
+  if (!isSupabaseConfigured() || !Array.isArray(candidateIds) || candidateIds.length === 0) return [];
+  try {
+    const cleanIds = candidateIds.map((id) => String(id).trim().toUpperCase()).filter(Boolean);
+    const filter = `?applywizz_id=in.(${cleanIds.join(',')})&is_fully_answered=eq.true&status=in.(ready_for_review,queued_for_submission,applying,submitted)&order=updated_at.desc&limit=200`;
+    const rows = await request('resolved_answers', { query: filter });
+    return Array.isArray(rows) ? rows : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+/**
+ * Save a novel/unique answer to the persistent candidate QA bank.
+ */
+export async function recordNovelQABankAnswer({
+  applywizzId,
+  question,
+  questionNormalized = null,
+  answer,
+  fieldType = 'text',
+  source = 'llm',
+} = {}) {
+  if (!isSupabaseConfigured() || !applywizzId || !question || answer === undefined || answer === null) return false;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const qStr = String(question).trim();
+  const norm = questionNormalized || normalizeLabel(qStr);
+  const ansStr = String(answer).trim();
+  const validSource = ['supabase', 'api', 'resume', 'llm', 'manual'].includes(source) ? source : 'llm';
+
+  try {
+    await request('qa_bank', {
+      method: 'POST',
+      query: '?on_conflict=applywizz_id,question_normalized',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: {
+        applywizz_id: cleanId,
+        question: qStr,
+        question_normalized: norm,
+        answer: ansStr,
+        field_type: fieldType,
+        source: validSource,
+        updated_at: new Date().toISOString(),
+      },
+    });
+  } catch {}
+
+  // Also maintain client_questions table for backward compatibility
+  try {
+    await upsertSupabaseAnswer({
+      applywizzId: cleanId,
+      question: qStr,
+      questionNormalized: norm,
+      answer: ansStr,
+      fieldType,
+      source: validSource,
+    });
+  } catch {}
+
+  return true;
+}
+
+/**
+ * Atomically lease a queued submission task for a background worker.
+ */
+export async function leaseQueuedSubmissionTask(workerId = 'worker-1') {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const now = new Date().toISOString();
+    // Lease oldest task queued_for_submission
+    const candidates = await request('resolved_answers', {
+      query: `?status=eq.queued_for_submission&order=updated_at.asc&limit=1`,
+    });
+    if (!Array.isArray(candidates) || !candidates.length) return null;
+    const task = candidates[0];
+
+    const patched = await request('resolved_answers', {
+      method: 'PATCH',
+      query: `?id=eq.${encode(task.id)}&status=eq.queued_for_submission`,
+      prefer: 'return=representation',
+      body: {
+        status: 'applying',
+        worker_id: workerId,
+        worker_leased_at: now,
+        updated_at: now,
+      },
+    });
+    return Array.isArray(patched) && patched.length > 0 ? patched[0] : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Complete a submitted task with confirmation proof screenshot URL.
+ */
+export async function completeSubmittedTask({
+  applywizzId,
+  jobUrl,
+  screenshotUrl,
+  workerId = null,
+} = {}) {
+  if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const now = new Date().toISOString();
+
+  try {
+    await request('resolved_answers', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+      prefer: 'return=minimal',
+      body: {
+        status: 'submitted',
+        screenshot_url: screenshotUrl || null,
+        worker_id: workerId || null,
+        updated_at: now,
+      },
+    });
+
+    // Also update applications table
+    await request('applications', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+      prefer: 'return=minimal',
+      body: {
+        status: 'submitted',
+        screenshot_url: screenshotUrl || null,
+        updated_at: now,
+      },
+    }).catch(() => {});
+
+    // And batch_job_queue for full consistency
+    await request('batch_job_queue', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+      prefer: 'return=minimal',
+      body: {
+        status: 'submitted',
+        screenshot_path: screenshotUrl || null,
+        completed_at: now,
+        updated_at: now,
+      },
+    }).catch(() => {});
+
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+

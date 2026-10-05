@@ -168,6 +168,7 @@ function profileFactForLabel(label, profile = {}) {
     const target = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
     const mm = String(target.getMonth() + 1).padStart(2, '0');
     const dd = String(target.getDate()).padStart(2, '0');
+    const yyyy = target.getFullYear();
     return `${mm}/${dd}/${yyyy}`;
   }
   return null;

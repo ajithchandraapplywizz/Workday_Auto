@@ -711,6 +711,74 @@ export async function fetchApplicationsDynamic({
       return item;
     });
 
+    // Query resolved_answers for 100% pre-resolved tasks (Strict Zero-Incomplete Architecture)
+    try {
+      let resolvedQuery = supabase
+        .from('resolved_answers')
+        .select('*')
+        .order('updated_at', { ascending: false })
+        .limit(applywizzId ? 50 : 100);
+
+      if (applywizzId) {
+        resolvedQuery = resolvedQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
+      }
+
+      const { data: resolvedTasks } = await resolvedQuery;
+      if (resolvedTasks && resolvedTasks.length > 0) {
+        const itemByUrl = new Map();
+        for (const item of list) {
+          const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
+          if (u) itemByUrl.set(u, item);
+        }
+
+        for (const rt of resolvedTasks) {
+          const cleanRtUrl = (rt.job_url || '').split('?')[0].trim().toLowerCase();
+          if (!cleanRtUrl) continue;
+
+          // STRICT ZERO-INCOMPLETE FILTER: If not fully answered or incomplete, omit it completely!
+          if (!rt.is_fully_answered || (rt.unanswered_count > 0) || rt.status === 'incomplete') {
+            continue;
+          }
+
+          const existing = itemByUrl.get(cleanRtUrl);
+          if (existing && typeof existing === 'object') {
+            existing.is_fully_answered = true;
+            existing.resolved_answers_json = rt.resolved_answers_json;
+            if (rt.screenshot_url) {
+              existing.screenshot_url = rt.screenshot_url;
+              existing.screenshot_path = rt.screenshot_url;
+            }
+            if (rt.status === 'submitted') {
+              existing.status = 'submitted';
+            } else if (rt.status === 'ready_for_review') {
+              existing.status = 'ready_for_review';
+            } else if (rt.status === 'queued_for_submission' || rt.status === 'applying') {
+              existing.status = 'in_flight';
+            }
+          } else {
+            list.push({
+              id: rt.id,
+              applywizz_id: rt.applywizz_id,
+              job_url: rt.job_url,
+              company: rt.company || 'Workday Tenant',
+              role_title: rt.role_title || 'Workday Application',
+              ats: 'Workday',
+              status: rt.status === 'queued_for_submission' || rt.status === 'applying' ? 'in_flight' : rt.status,
+              screenshot_url: rt.screenshot_url || null,
+              screenshot_path: rt.screenshot_url || null,
+              resolved_answers_json: rt.resolved_answers_json,
+              is_fully_answered: true,
+              unanswered_count: 0,
+              updated_at: rt.updated_at,
+              created_at: rt.created_at,
+            });
+          }
+        }
+      }
+    } catch (e) {
+      // Non-fatal if table not created yet
+    }
+
     // Always merge active queue tasks from batch_job_queue so live tasks & proof screenshots appear dynamically
     let queueQuery = supabase
       .from('batch_job_queue')
@@ -1832,6 +1900,20 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     const cleanUrl = (jobUrl || '').split('?')[0].trim();
 
     // 1. Fetch task row from batch_job_queue
+    // 0. Check resolved_answers table first (has pre-computed 4-tier answers)
+    let resolvedRow = null;
+    if (jobUrl) {
+      try {
+        const { data: rRows } = await supabase
+          .from('resolved_answers')
+          .select('*')
+          .eq('applywizz_id', cleanId)
+          .eq('job_url', jobUrl)
+          .limit(1);
+        resolvedRow = rRows?.[0] || null;
+      } catch {}
+    }
+
     // 1. Fetch task row from batch_job_queue strictly for this candidate and job URL
     let queueTask = null;
     if (jobUrl) {
@@ -2043,6 +2125,29 @@ export async function submitApplicationReview({
       if (f.label && f.value !== undefined) {
         updatedAnswersMap[f.label] = f.value;
       }
+    }
+
+    // 0. Update resolved_answers table with status queued_for_submission
+    try {
+      await supabase
+        .from('resolved_answers')
+        .update({
+          status: 'queued_for_submission',
+          resolved_answers_json: fields.map((f) => ({
+            question: f.label,
+            answer: f.value,
+            field_type: f.fieldType,
+            options: f.options,
+            step: f.step,
+            source: f.sourceLabel || '[CA Manual]',
+            is_answered: Boolean(f.value),
+          })),
+          updated_at: now,
+        })
+        .eq('applywizz_id', cleanId)
+        .eq('job_url', jobUrl);
+    } catch (e) {
+      console.warn('resolved_answers update:', e.message);
     }
 
     // 1. Update batch_job_queue with CA answers and set status to approved_for_submission so bot performs final submit & captures screenshot proof
