@@ -868,7 +868,6 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
     .filter((it) => (it?.applywizzId || it?.applywizz_id) && (it?.jobUrl || it?.job_url))
     .map((it) => ({
       applywizz_id: String(it.applywizzId || it.applywizz_id).trim(),
-      candidate_email: it.candidateEmail || it.candidate_email ? String(it.candidateEmail || it.candidate_email).trim() : null,
       job_url: String(it.jobUrl || it.job_url).trim(),
       company: it.company ? String(it.company).trim() : null,
       role_title: it.roleTitle || it.role_title ? String(it.roleTitle || it.role_title).trim() : null,
