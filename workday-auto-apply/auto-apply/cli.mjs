@@ -905,7 +905,8 @@ Usage:
 
 // ─── CLUSTER BATCH RUNNER (3 PARALLEL WORKERS ON TOP 3 LINKS) ───────────────
 async function cmdClusterRun() {
-  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  // User explicitly wants HEADED only: defaults to false (HEADED browser), visible windows
+  const isHeadless = process.argv.includes('--headless') && !process.argv.includes('--headed');
   const { runClusterBatchRunner } = await import('./lib/clusterBatchRunner.mjs');
 
   await runClusterBatchRunner({
