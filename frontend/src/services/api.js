@@ -1,3 +1,39 @@
+
+/**
+ * Normalizes clumsy AWL IDs (e.g. '26828', 'awl26828', '  AWL-26828  ') -> 'AWL-26828'
+ */
+export function normalizeAwlId(rawId) {
+  if (!rawId) return '';
+  const str = String(rawId).trim().toUpperCase();
+  const digitsMatch = str.match(/^(?:AWL[-_]?)?(\d+)$/i);
+  if (digitsMatch) {
+    return `AWL-${digitsMatch[1]}`;
+  }
+  return str;
+}
+
+/**
+ * Strips tracking parameters, trailing slashes, and step endpoints from job URLs
+ */
+export function cleanCanonicalJobUrl(rawUrl) {
+  if (!rawUrl) return '';
+  try {
+    const u = new URL(String(rawUrl).trim());
+    let pathname = u.pathname
+      .replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '')
+      .replace(/\/+$/, '');
+    return `${u.origin}${pathname}`.toLowerCase();
+  } catch {
+    return String(rawUrl)
+      .split('?')[0]
+      .split('#')[0]
+      .trim()
+      .toLowerCase()
+      .replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '')
+      .replace(/\/+$/, '');
+  }
+}
+
 import { supabase, SUPABASE_URL } from '../config/supabase.js';
 export { supabase };
 
@@ -1215,7 +1251,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
     if (historyRes.success && historyRes.records?.length > 0) {
       for (const r of historyRes.records) {
         if (!r.applywizz_id) continue;
-        const normId = r.applywizz_id.trim().toUpperCase();
+        const normId = normalizeAwlId(r.applywizz_id);
         if (!clientMap.has(normId)) {
           clientMap.set(normId, {
             applywizz_id: normId,
@@ -1244,7 +1280,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       if (logData && logData.length > 0) {
         for (const l of logData) {
           if (!l.applywizz_id) continue;
-          const normId = l.applywizz_id.trim().toUpperCase();
+          const normId = normalizeAwlId(l.applywizz_id);
           if (!clientMap.has(normId)) {
             clientMap.set(normId, {
               applywizz_id: normId,
