@@ -863,7 +863,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       await applyBtn.click({ force: true }).catch(() => applyBtn.evaluate(el => el.click()));
       await page.waitForTimeout(2000);
 
-      // Popup choices: if client previously applied to this company, click "Use My Last Application", else "Apply Manually"
+      // Always choose "Apply Manually" to ensure all form fields are freshly scanned and populated
       const manualApplySelectors = [
         '[data-automation-id="applyManually"]',
         'a[data-automation-id="applyManually"]',
@@ -875,50 +875,8 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         'div:has-text("Apply Manually")',
       ];
 
-      const previousAppSelectors = [
-        '[data-automation-id="useMyLastApplication"]',
-        '[data-automation-id="useMyPreviousApplication"]',
-        'a[data-automation-id="useMyLastApplication"]',
-        'button[data-automation-id="useMyLastApplication"]',
-        'a:has-text("Use My Last Application")',
-        'button:has-text("Use My Last Application")',
-        'a:has-text("Use My Previous Application")',
-        'button:has-text("Use My Previous Application")',
-        'span:has-text("Use My Last Application")',
-        'span:has-text("Use My Previous Application")',
-        'div:has-text("Use My Last Application")',
-        'div:has-text("Use My Previous Application")',
-        '[data-automation-id*="lastApplication" i]',
-        '[data-automation-id*="previousApplication" i]',
-      ];
-
       let optionClicked = false;
-
-      if (hasPriorApp) {
-        console.log(`   Client "${clientAwlId}" has applied to "${company}" previously — selecting "Use My Last Application"...`);
-        for (let attempt = 0; attempt < 8; attempt++) {
-          for (const sel of previousAppSelectors) {
-            try {
-              const opt = await page.$(sel);
-              if (opt && await opt.isVisible().catch(() => false)) {
-                const optText = (await opt.textContent().catch(() => '')).trim();
-                console.log(`   ✅ Selecting Workday apply option: "${optText || 'Use My Last Application'}"...`);
-                await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
-                optionClicked = true;
-                await page.waitForTimeout(2000);
-                break;
-              }
-            } catch {}
-          }
-          if (optionClicked) break;
-          await page.waitForTimeout(500);
-        }
-        if (!optionClicked) {
-          console.log(`   ℹ️  "Use My Last Application" popup option not found — falling back to "Apply Manually"...`);
-        }
-      } else {
-        console.log(`   Client "${clientAwlId || 'unknown'}" is new to "${company}" — selecting "Apply Manually"...`);
-      }
+      console.log(`   Selecting "Apply Manually" for client "${clientAwlId || 'candidate'}"...`);
 
       if (!optionClicked) {
         console.log('   Waiting for "Apply Manually" popup option...');

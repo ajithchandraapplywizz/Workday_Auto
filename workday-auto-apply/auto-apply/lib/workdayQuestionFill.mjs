@@ -2032,9 +2032,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const targetValue = fillValue === 'date' ? nativeValue : valueToFill;
       if (spinButtonCount >= 3) {
         const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        await spinButtons.nth(0).fill(String(Number(month)));
-        await spinButtons.nth(1).fill(String(Number(day)));
-        await spinButtons.nth(2).fill(year);
+        await spinButtons.nth(0).fill(String(month).padStart(2, '0'));
+        await spinButtons.nth(1).fill(String(day).padStart(2, '0'));
+        await spinButtons.nth(2).fill(String(year));
       } else if (fillValue === 'date') {
         await dateInput.fill(targetValue);
       } else {
@@ -2053,9 +2053,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (!expectedPattern.test(actual) || (fillValue !== 'date' && actual !== valueToFill)) {
         if (spinButtonCount >= 3) {
           const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-          await spinButtons.nth(0).fill(String(Number(month)));
-          await spinButtons.nth(1).fill(String(Number(day)));
-          await spinButtons.nth(2).fill(year);
+          await spinButtons.nth(0).fill(String(month).padStart(2, '0'));
+          await spinButtons.nth(1).fill(String(day).padStart(2, '0'));
+          await spinButtons.nth(2).fill(String(year));
           await spinButtons.nth(2).press('Tab');
           const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.value));
           actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
@@ -2092,15 +2092,28 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
     } else if (
       /date\s*of\s*birth|\bdob\b|birth\s*date|birthday/i.test(label)
+      || /willing\s*to\s*join|available\s*(to\s*)?(start|join)|when\s*(can|are)\s*you\s*(start|join)|earliest\s*start|target\s*start|start\s*date/i.test(label)
       || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(answer).trim())
       || /date/i.test(fieldType)
     ) {
-      const formattedDate = formatToMMDDYYYY(answer);
+      let rawDateAnswer = String(answer || '').trim();
+      if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDateAnswer)) {
+        const now = new Date();
+        const target = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+        const mm = String(target.getMonth() + 1).padStart(2, '0');
+        const dd = String(target.getDate()).padStart(2, '0');
+        const yyyy = String(target.getFullYear());
+        rawDateAnswer = `${mm}/${dd}/${yyyy}`;
+      }
+      const formattedDate = formatToMMDDYYYY(rawDateAnswer) || rawDateAnswer;
       const spinButtons = fieldBox.locator('input[role="spinbutton"], input[data-automation-id*="dateSection"]');
       const spinCount = await spinButtons.count().catch(() => 0);
       let spinsFilled = 0;
       if (spinCount >= 2 && formattedDate) {
-        const [month, day, year] = formattedDate.split('/');
+        const parts = formattedDate.split('/');
+        const month = String(parts[0] || '01').padStart(2, '0');
+        const day = String(parts[1] || '01').padStart(2, '0');
+        const year = String(parts[2] || new Date().getFullYear());
         for (let i = 0; i < spinCount; i++) {
           const sp = spinButtons.nth(i);
           const hint = (
@@ -2109,10 +2122,10 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
             (await sp.getAttribute('placeholder') || '')
           ).toLowerCase();
           if (/month|\bmm\b|datesectionmonth/i.test(hint)) {
-            await sp.fill(String(Number(month))).catch(() => {});
+            await sp.fill(month).catch(() => {});
             spinsFilled++;
           } else if (/day|\bdd\b|datesectionday/i.test(hint)) {
-            await sp.fill(String(Number(day))).catch(() => {});
+            await sp.fill(day).catch(() => {});
             spinsFilled++;
           } else if (/year|yyyy|datesectionyear/i.test(hint)) {
             await sp.fill(year).catch(() => {});
@@ -2128,7 +2141,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         if (await input.isVisible({ timeout: 600 }).catch(() => false)) {
           await input.scrollIntoViewIfNeeded().catch(() => {});
           await input.click({ force: true }).catch(() => {});
-          await input.fill(formattedDate || String(answer));
+          await input.fill(formattedDate || rawDateAnswer);
           await input.press('Tab').catch(() => {});
           ok = true;
         }

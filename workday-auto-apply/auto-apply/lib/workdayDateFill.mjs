@@ -105,6 +105,17 @@ export function isRequiredLabelText(text = '') {
 export function parseDateFillValue(value, mode = 'monthyear') {
   const raw = String(value || '').trim();
   if (!raw) return null;
+  const mdy = raw.match(/^(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{4})$/);
+  if (mdy) {
+    const month = Number(mdy[1]);
+    const day = Number(mdy[2]);
+    const year = Number(mdy[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 2100) {
+      const mm = String(month).padStart(2, '0');
+      const dd = String(day).padStart(2, '0');
+      return { month: mm, day: dd, year: String(year), padded: `${mm}/${dd}/${year}` };
+    }
+  }
   const my = raw.match(/^(\d{1,2})\s*[/\-.]\s*(\d{4})$/);
   if (my) {
     const month = Number(my[1]);
@@ -660,7 +671,8 @@ export async function fillWorkdayDateField(page, opts) {
     attempts.push(`month ${parsed.month} ${monthOk ? '✓' : '✗'}`);
   }
   if (hasDay) {
-    const dayOk = await typeSegment(page, dayLoc, '01');
+    const dayVal = parsed.day || '01';
+    const dayOk = await typeSegment(page, dayLoc, dayVal);
     attempts.push(`day 01 ${dayOk ? '✓' : '✗'}`);
   }
   if (hasYear) {

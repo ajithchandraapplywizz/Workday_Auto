@@ -20,7 +20,7 @@ function inferMode(field = {}, answer = '') {
  */
 export async function fillDatepicker(page, field, answer, ctx = {}) {
   const label = field.label || '';
-  if (/^from\b|^to\b|start date|end date|actual or expected/i.test(label)) {
+  if (/^from\b|^to\b|start date|end date|actual or expected|willing.*join|available.*(start|join)|when.*(start|join)|target.*start|earliest.*start/i.test(label)) {
     const result = await fillWorkdayDateField(page, {
       labelPattern: label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'),
       sectionType: inferSection(field),

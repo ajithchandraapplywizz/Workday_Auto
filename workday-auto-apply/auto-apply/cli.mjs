@@ -103,6 +103,9 @@ const positionalArgs = [];
 
 let workerCount = 10;
 let minClients = 1;
+let demoClientsStr = '';
+let demoClientsFile = '';
+let demoHeaded = false;
 
 for (let i = 0; i < rawArgs.length; i++) {
   if (rawArgs[i] === '--workday-email' && rawArgs[i + 1]) workdayEmail = rawArgs[++i];
@@ -128,6 +131,9 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if ((rawArgs[i] === '--client' || rawArgs[i] === '--applywizz-id') && rawArgs[i + 1]) {
     process.env.APPLYWIZZ_ID = rawArgs[++i];
   }
+  else if (rawArgs[i] === '--clients' && rawArgs[i + 1]) demoClientsStr = rawArgs[++i];
+  else if (rawArgs[i] === '--clients-file' && rawArgs[i + 1]) demoClientsFile = rawArgs[++i];
+  else if (rawArgs[i] === '--headed') demoHeaded = true;
   else positionalArgs.push(rawArgs[i]);
 }
 const mode = isSignup ? 'signup' : 'signin';
@@ -825,6 +831,70 @@ async function cmdRunQueue() {
   });
 }
 
+// ─── 40-CLIENT BLUEPRINT DEMO RUNNER ─────────────────────────────────────────
+async function cmdDemoRun() {
+  const url = positionalArgs[0];
+  let clientIds = [];
+
+  if (demoClientsFile && existsSync(demoClientsFile)) {
+    const raw = await readFile(demoClientsFile, 'utf8');
+    clientIds = raw.split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+  } else if (demoClientsStr) {
+    clientIds = demoClientsStr.split(/[\r\n,]+/).map((s) => s.trim()).filter(Boolean);
+  }
+
+  if (!url || clientIds.length === 0) {
+    console.log(`
+Usage:
+  node cli.mjs demo-run <url> --clients "AWL-1,AWL-2,..." [--workers 5] [--headed] [--confirm-submit]
+  node cli.mjs demo-run <url> --clients-file clients.txt [--workers 5] [--headed] [--confirm-submit]
+`);
+    process.exit(1);
+  }
+
+  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  const { runDemoBatch } = await import('./lib/demoRunner.mjs');
+
+  await runDemoBatch({
+    jobUrl: url,
+    clientIds,
+    concurrency: workerCount || 5,
+    headless: isHeadless,
+    confirmSubmit,
+    defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
+  });
+}
+
+// ─── TERMINAL-FIRST BATCH QUEUE RUNNER (NUMERIC ASCENDING AWL) ───────────────
+async function cmdQueueRun() {
+  let url = positionalArgs[0];
+  if (!url) {
+    const { fetchPendingTasksForActiveCAs } = await import('./lib/supabaseClient.mjs');
+    const tasks = await fetchPendingTasksForActiveCAs();
+    const firstTask = tasks.find((t) => t.applywizz_id === 'AWL-1568') || tasks[0];
+    url = firstTask?.job_url;
+  }
+
+  if (!url) {
+    console.log(`
+Usage:
+  node cli.mjs queue-run [<url>] [--workers 5] [--headed] [--confirm-submit]
+`);
+    process.exit(1);
+  }
+
+  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  const { runQueueBatchForUrl } = await import('./lib/queueBatchRunner.mjs');
+
+  await runQueueBatchForUrl({
+    jobUrl: url,
+    concurrency: workerCount || 5,
+    headless: isHeadless,
+    confirmSubmit,
+    defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
+  });
+}
+
 // ─── STATUS ─────────────────────────────────────────────────────────────────
 async function cmdStatus() {
   const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
@@ -1075,6 +1145,8 @@ async function main() {
     case 'queue': await cmdQueue(positionalArgs[0], ...positionalArgs.slice(1)); break;
     case 'list': await cmdList(); break;
     case 'status': await cmdStatus(); break;
+    case 'demo-run': await cmdDemoRun(); break;
+    case 'queue-run': await cmdQueueRun(); break;
     default: showHelp();
   }
 }
