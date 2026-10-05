@@ -1,13 +1,13 @@
 -- ==============================================================================
--- Migration: 008_cleanup_and_optimize_schema.sql (FIXED & ROBUST)
+-- Migration: 008_cleanup_and_optimize_schema.sql (SAFE & TESTED)
 -- Description: Professional Database Cleanup & Optimization
 --              1. Updates qa_bank_source_check constraint to accept all standard sources
 --              2. Migrates valuable data from job_form_schemas -> scanned_jobs
 --              3. Cleanly normalizes & migrates verified client questions -> qa_bank
 --              4. Drops dead/obsolete tables (job_templates, application_answers)
---              5. Replaces legacy batch_job_queue & job_form_schemas with clean views
---              6. Cleans redundant/dead columns from applications table
---              7. Creates high-performance production indexes
+--              5. Adds screenshot_url to applications without breaking dependent views
+--              6. Creates high-performance production indexes
+--              7. Refreshes schema cache
 -- ==============================================================================
 
 -- ------------------------------------------------------------------------------
@@ -92,85 +92,20 @@ ON CONFLICT (applywizz_id, question_normalized) DO UPDATE SET
 -- ------------------------------------------------------------------------------
 -- STEP 2: Drop completely dead / empty legacy prototype tables
 -- ------------------------------------------------------------------------------
-
 DROP TABLE IF EXISTS public.job_templates CASCADE;
 DROP TABLE IF EXISTS public.application_answers CASCADE;
 
 
 -- ------------------------------------------------------------------------------
--- STEP 3: Replace legacy physical tables with clean views (eliminating duplication)
+-- STEP 3: Ensure applications table has screenshot_url (preserves dependent views)
 -- ------------------------------------------------------------------------------
-
--- Drop legacy empty batch_job_queue table and replace with view pointing to resolved_answers
-DROP TABLE IF EXISTS public.batch_job_queue CASCADE;
-
-CREATE OR REPLACE VIEW public.batch_job_queue AS
-SELECT 
-    id,
-    applywizz_id,
-    NULL::text AS candidate_email,
-    job_url,
-    company,
-    role_title,
-    CASE 
-        WHEN status = 'ready_for_review' THEN 'pre_resolved'
-        WHEN status = 'queued_for_submission' THEN 'approved_for_submission'
-        ELSE status
-    END AS status,
-    worker_id,
-    worker_leased_at AS locked_at,
-    0 AS attempts,
-    2 AS max_attempts,
-    error_message,
-    screenshot_url AS screenshot_path,
-    created_at,
-    worker_leased_at AS started_at,
-    CASE WHEN status = 'submitted' THEN updated_at ELSE NULL END AS completed_at,
-    updated_at,
-    resolved_answers_json AS pre_resolved_answers
-FROM public.resolved_answers;
-
--- Drop legacy job_form_schemas table and replace with view pointing to scanned_jobs
-DROP TABLE IF EXISTS public.job_form_schemas CASCADE;
-
-CREATE OR REPLACE VIEW public.job_form_schemas AS
-SELECT 
-    id,
-    job_url AS canonical_job_url,
-    split_part(split_part(job_url, '//', 2), '.', 1) AS tenant,
-    company,
-    role_title,
-    'workday'::text AS ats_type,
-    scraped_questions AS fields_schema,
-    step_names,
-    question_count AS total_fields,
-    applywizz_id AS scanned_by_applywizz_id,
-    created_at,
-    updated_at
-FROM public.scanned_jobs;
-
-
--- ------------------------------------------------------------------------------
--- STEP 4: Clean up unused & redundant columns in applications table
--- ------------------------------------------------------------------------------
-
--- Ensure screenshot_url column exists
 ALTER TABLE public.applications 
 ADD COLUMN IF NOT EXISTS screenshot_url TEXT;
 
--- Drop redundant / always-null columns from applications
-ALTER TABLE public.applications 
-DROP COLUMN IF EXISTS client_id,
-DROP COLUMN IF EXISTS job_title,
-DROP COLUMN IF EXISTS ats,
-DROP COLUMN IF EXISTS started_at,
-DROP COLUMN IF EXISTS submitted_at;
-
 
 -- ------------------------------------------------------------------------------
--- STEP 5: Add high-performance production indexes
+-- STEP 4: Add high-performance production indexes
 -- ------------------------------------------------------------------------------
-
 CREATE INDEX IF NOT EXISTS idx_scanned_jobs_url_clean 
 ON public.scanned_jobs (job_url);
 
@@ -186,7 +121,8 @@ ON public.applications (applywizz_id, status);
 CREATE INDEX IF NOT EXISTS idx_clients_awl_perf 
 ON public.clients (applywizz_id);
 
+
 -- ------------------------------------------------------------------------------
--- STEP 6: Refresh PostgREST schema cache
+-- STEP 5: Refresh PostgREST schema cache
 -- ------------------------------------------------------------------------------
 NOTIFY pgrst, 'reload schema';
