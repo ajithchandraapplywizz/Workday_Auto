@@ -106,6 +106,8 @@ let minClients = 1;
 let demoClientsStr = '';
 let demoClientsFile = '';
 let demoHeaded = false;
+let topLinksCount = 3;
+let limitPerLink = null;
 
 for (let i = 0; i < rawArgs.length; i++) {
   if (rawArgs[i] === '--workday-email' && rawArgs[i + 1]) workdayEmail = rawArgs[++i];
@@ -124,6 +126,12 @@ for (let i = 0; i < rawArgs.length; i++) {
   else if (rawArgs[i] === '--no-wait-review') scanBatchWaitReview = false;
   else if (rawArgs[i] === '--workers' && rawArgs[i + 1]) {
     workerCount = Number(rawArgs[++i]) || 10;
+  }
+  else if (rawArgs[i] === '--top-links' && rawArgs[i + 1]) {
+    topLinksCount = Number(rawArgs[++i]) || 3;
+  }
+  else if (rawArgs[i] === '--limit-per-link' && rawArgs[i + 1]) {
+    limitPerLink = Number(rawArgs[++i]) || null;
   }
   else if (rawArgs[i] === '--min-clients' && rawArgs[i + 1]) {
     minClients = Number(rawArgs[++i]) || 30;
@@ -895,6 +903,21 @@ Usage:
   });
 }
 
+// ─── CLUSTER BATCH RUNNER (3 PARALLEL WORKERS ON TOP 3 LINKS) ───────────────
+async function cmdClusterRun() {
+  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  const { runClusterBatchRunner } = await import('./lib/clusterBatchRunner.mjs');
+
+  await runClusterBatchRunner({
+    topLinks: topLinksCount || 3,
+    workers: workerCount || 3,
+    headless: isHeadless,
+    confirmSubmit,
+    limitPerLink,
+    defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
+  });
+}
+
 // ─── STATUS ─────────────────────────────────────────────────────────────────
 async function cmdStatus() {
   const csvPath = resolve(process.cwd(), 'data', 'applied.csv');
@@ -1094,11 +1117,16 @@ Usage:
   node cli.mjs queue list                  Show queue entries
   node cli.mjs queue remove <url>          Remove URL from queue
   node cli.mjs queue clear                 Clear completed/failed entries
+  node cli.mjs queue-run [<url>]           Blueprint #1 first, then 5 workers for followers
+  node cli.mjs cluster-run                 Cluster links & run 3 parallel workers on top 3 links
   node cli.mjs list                        Show all applied jobs + what's left
   node cli.mjs status                      Show stats & learnings
 
 Options:
-  --workers <n>                Number of parallel browser workers (default: 10)
+  --top-links <n>              Number of top candidate-clustered links to run in parallel (default: 3)
+  --limit-per-link <n>         Max candidates to process per link (optional, for quick testing)
+  --workers <n>                Number of parallel browser workers (default: 3 for cluster, 10 for batch)
+  --headed / --headless        Browser visibility mode (default: headed when requested)
   --min-clients <n>            Only process links shared by at least N clients (default: 1, recommended: 30)
   --signin / --signup          Workday auth mode (default: signin — tries login, then Create Account if no account exists on that tenant)
   --confirm-submit             Auto-submit at Review (skips Y/N/S prompt)
@@ -1147,6 +1175,7 @@ async function main() {
     case 'status': await cmdStatus(); break;
     case 'demo-run': await cmdDemoRun(); break;
     case 'queue-run': await cmdQueueRun(); break;
+    case 'cluster-run': await cmdClusterRun(); break;
     default: showHelp();
   }
 }

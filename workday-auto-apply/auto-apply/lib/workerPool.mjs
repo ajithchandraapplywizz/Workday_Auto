@@ -535,7 +535,7 @@ export async function executeWorkerTask({
     }
 
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
-    return { status, cacheHit, screenshotUrl: completionShotUrl };
+    return { status, cacheHit, screenshotUrl: completionShotUrl, answersMap: profile?._scrapedReviewMap || {} };
   } catch (err) {
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
     let errShotUrl = null;
