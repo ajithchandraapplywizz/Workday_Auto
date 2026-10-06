@@ -747,72 +747,76 @@ export async function fetchApplicationsDynamic({
       return item;
     });
 
-    // Query resolved_answers for 100% pre-resolved tasks (Strict Zero-Incomplete Architecture)
+    // Query job_distributions for pre-resolved answers, queued/applying states, and proof screenshots
     try {
-      let resolvedQuery = supabase
-        .from('resolved_answers')
+      let distQuery = supabase
+        .from('job_distributions')
         .select('*')
         .order('updated_at', { ascending: false })
         .limit(applywizzId ? 50 : 100);
 
       if (applywizzId) {
-        resolvedQuery = resolvedQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
+        distQuery = distQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
       }
 
-      const { data: resolvedTasks } = await resolvedQuery;
-      if (resolvedTasks && resolvedTasks.length > 0) {
+      const { data: distTasks } = await distQuery;
+      if (distTasks && distTasks.length > 0) {
         const itemByUrl = new Map();
         for (const item of list) {
           const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
           if (u) itemByUrl.set(u, item);
         }
 
-        for (const rt of resolvedTasks) {
-          const cleanRtUrl = (rt.job_url || '').split('?')[0].trim().toLowerCase();
-          if (!cleanRtUrl) continue;
+        for (const dt of distTasks) {
+          const cleanDtUrl = (dt.job_url || '').split('?')[0].trim().toLowerCase();
+          if (!cleanDtUrl) continue;
 
-          // STRICT ZERO-INCOMPLETE FILTER: If not fully answered or incomplete, omit it completely!
-          if (!rt.is_fully_answered || (rt.unanswered_count > 0) || rt.status === 'incomplete') {
-            continue;
-          }
+          const existing = itemByUrl.get(cleanDtUrl);
+          const proofShot = dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
 
-          const existing = itemByUrl.get(cleanRtUrl);
           if (existing && typeof existing === 'object') {
-            existing.is_fully_answered = true;
-            existing.resolved_answers_json = rt.resolved_answers_json;
-            if (rt.screenshot_url) {
-              existing.screenshot_url = rt.screenshot_url;
-              existing.screenshot_path = rt.screenshot_url;
+            existing.is_fully_answered = dt.is_fully_answered;
+            existing.resolved_answers_json = dt.resolved_answers;
+            existing.unanswered_questions = dt.unanswered_questions;
+            existing.unanswered_count = dt.unanswered_count;
+            if (proofShot) {
+              existing.screenshot_url = proofShot;
+              existing.screenshot_path = proofShot;
+              existing.original_application_screenshot_successful = dt.original_application_screenshot_successful || dt.final_submission_screenshot_url;
             }
-            if (rt.status === 'submitted') {
+            if (dt.status === 'submitted') {
               existing.status = 'submitted';
-            } else if (rt.status === 'ready_for_review') {
+            } else if (dt.status === 'ready_for_review' || dt.status === 'distributed') {
               existing.status = 'ready_for_review';
-            } else if (rt.status === 'queued_for_submission' || rt.status === 'applying') {
+            } else if (dt.status === 'queued' || dt.status === 'queued_for_submission') {
+              existing.status = 'queued';
+            } else if (dt.status === 'applying') {
               existing.status = 'in_flight';
             }
           } else {
             list.push({
-              id: rt.id,
-              applywizz_id: rt.applywizz_id,
-              job_url: rt.job_url,
-              company: rt.company || 'Workday Tenant',
-              role_title: rt.role_title || 'Workday Application',
+              id: dt.id,
+              applywizz_id: dt.applywizz_id,
+              job_url: dt.job_url,
+              company: dt.company || 'Workday Tenant',
+              role_title: dt.role_title || 'Workday Application',
               ats: 'Workday',
-              status: rt.status === 'queued_for_submission' || rt.status === 'applying' ? 'in_flight' : rt.status,
-              screenshot_url: rt.screenshot_url || null,
-              screenshot_path: rt.screenshot_url || null,
-              resolved_answers_json: rt.resolved_answers_json,
-              is_fully_answered: true,
-              unanswered_count: 0,
-              updated_at: rt.updated_at,
-              created_at: rt.created_at,
+              status: dt.status === 'queued' || dt.status === 'queued_for_submission' ? 'queued' : (dt.status === 'applying' ? 'in_flight' : (dt.status === 'distributed' ? 'ready_for_review' : dt.status)),
+              screenshot_url: proofShot || null,
+              screenshot_path: proofShot || null,
+              original_application_screenshot_successful: dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
+              resolved_answers_json: dt.resolved_answers,
+              unanswered_questions: dt.unanswered_questions,
+              unanswered_count: dt.unanswered_count || 0,
+              is_fully_answered: dt.is_fully_answered,
+              updated_at: dt.updated_at,
+              created_at: dt.created_at,
             });
           }
         }
       }
     } catch (e) {
-      // Non-fatal if table not created yet
+      // Non-fatal fallback
     }
 
     // Always merge active queue tasks from batch_job_queue so live tasks & proof screenshots appear dynamically
@@ -1935,22 +1939,31 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     const cleanId = String(applywizzId).trim().toUpperCase();
     const cleanUrl = (jobUrl || '').split('?')[0].trim();
 
-    // 1. Fetch task row from batch_job_queue
-    // 0. Check resolved_answers table first (has pre-computed 4-tier answers)
-    let resolvedRow = null;
+    // 1. Fetch from job_distributions (stores pre-resolved answers, proof screenshots, and status)
+    let distRow = null;
     if (jobUrl) {
       try {
-        const { data: rRows } = await supabase
-          .from('resolved_answers')
+        const { data: dRows } = await supabase
+          .from('job_distributions')
           .select('*')
           .eq('applywizz_id', cleanId)
           .eq('job_url', jobUrl)
           .limit(1);
-        resolvedRow = rRows?.[0] || null;
+        distRow = dRows?.[0] || null;
+
+        if (!distRow && cleanUrl) {
+          const { data: cdRows } = await supabase
+            .from('job_distributions')
+            .select('*')
+            .eq('applywizz_id', cleanId)
+            .ilike('job_url', `${cleanUrl}%`)
+            .limit(1);
+          distRow = cdRows?.[0] || null;
+        }
       } catch {}
     }
 
-    // 1. Fetch task row from batch_job_queue strictly for this candidate and job URL
+    // 2. Fetch task row from batch_job_queue
     let queueTask = null;
     if (jobUrl) {
       const { data: tasks } = await supabase
@@ -1994,10 +2007,10 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       }
     }
 
-    const effectiveUrl = jobUrl || queueTask?.job_url || appRow?.job_url || '';
+    const effectiveUrl = jobUrl || distRow?.job_url || queueTask?.job_url || appRow?.job_url || '';
     const effectiveCleanUrl = effectiveUrl.split('?')[0].trim();
 
-    // 2. Fetch schema from job_form_schemas using canonical_job_url
+    // 3. Fetch schema from job_form_schemas using canonical_job_url
     let schema = null;
     if (effectiveCleanUrl) {
       const { data: schemas } = await supabase
@@ -2008,7 +2021,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       schema = schemas?.[0] || null;
     }
 
-    // 3. Pre-resolved answers JSONB specifically from batch_job_queue
+    // Pre-resolved answers JSONB from batch_job_queue
     const preResolved = queueTask?.pre_resolved_answers || {};
 
     // 4. Fetch candidate details from clients table for identity mapping
@@ -2034,7 +2047,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       if (s.includes('resume') || s.includes('experience') || /years|skills|experience/i.test(label)) {
         return { key: 'resume', label: 'Solved with Resume', icon: '📄', color: 'blue' };
       }
-      if (s.includes('supabase') || s.includes('manual') || s.includes('db') || s.includes('database')) {
+      if (s.includes('supabase') || s.includes('manual') || s.includes('db') || s.includes('database') || s.includes('facts')) {
         return { key: 'supabase', label: 'Solved with Supabase', icon: '💾', color: 'emerald' };
       }
       if (/name|email|phone|address|city|postal|zip/i.test(label)) {
@@ -2046,8 +2059,39 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       return { key: 'ai', label: 'Solved with AI', icon: '🤖', color: 'purple' };
     };
 
-    // A. If genuine schema fields exist, use the exact questions extracted from Workday
-    if (schema?.fields_schema && Array.isArray(schema.fields_schema) && schema.fields_schema.length > 0) {
+    // A. Use pre-resolved answers from job_distributions (STRICTLY successful answers only)
+    if (distRow?.resolved_answers && Array.isArray(distRow.resolved_answers) && distRow.resolved_answers.length > 0) {
+      for (const item of distRow.resolved_answers) {
+        const rawLabel = item.question || item.label || '';
+        const rawValue = item.answer !== undefined && item.answer !== null ? String(item.answer).trim() : '';
+        // ONLY display successfully resolved answers to CA
+        if (!rawValue || rawValue === '[UNANSWERED]' || item.is_answered === false) continue;
+        const normKey = normalizeLabelKey(rawLabel);
+        if (!rawLabel || seenLabels.has(normKey)) continue;
+        seenLabels.add(normKey);
+
+        const isIdentity = /name|email|phone|address|city|postal|zip/i.test(rawLabel);
+        const sourceMeta = determineSource(rawLabel, item.source, isIdentity);
+
+        fields.push({
+          id: `dist_field_${fields.length + 1}`,
+          label: rawLabel,
+          value: rawValue,
+          step: item.step || (/name|email|phone|address/i.test(rawLabel) ? 'My Information' : 'Application Questions'),
+          fieldType: item.field_type || (item.options?.length ? 'select' : (/experience|describe|explain/i.test(rawLabel) && rawValue.length > 60 ? 'textarea' : 'text')),
+          required: Boolean(item.is_required || rawLabel.includes('*')),
+          options: item.options || [],
+          source: sourceMeta.key,
+          sourceLabel: sourceMeta.label,
+          sourceIcon: sourceMeta.icon,
+          sourceColor: sourceMeta.color,
+          isModified: false,
+        });
+      }
+    }
+
+    // B. If no job_distribution answers yet, fall back to genuine schema fields
+    if (fields.length === 0 && schema?.fields_schema && Array.isArray(schema.fields_schema) && schema.fields_schema.length > 0) {
       for (const sf of schema.fields_schema) {
         const rawLabel = sf.label || sf.question_label || '';
         const normKey = normalizeLabelKey(rawLabel);
@@ -2084,32 +2128,35 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       }
     }
 
-    // B. Include genuine preResolved answers scraped when Worker-1 arrived at Step 5 Review
-    for (const [ansLabel, ansVal] of Object.entries(preResolved)) {
-      const normKey = normalizeLabelKey(ansLabel);
-      if (seenLabels.has(normKey)) continue;
-      seenLabels.add(normKey);
+    // C. Include genuine preResolved answers scraped when Worker arrived at Step 5 Review
+    if (fields.length === 0) {
+      for (const [ansLabel, ansVal] of Object.entries(preResolved)) {
+        const normKey = normalizeLabelKey(ansLabel);
+        if (seenLabels.has(normKey)) continue;
+        seenLabels.add(normKey);
 
-      const isIdentity = /name|email|phone|address/i.test(ansLabel);
-      const sourceMeta = determineSource(ansLabel, 'ai', isIdentity);
+        const isIdentity = /name|email|phone|address/i.test(ansLabel);
+        const sourceMeta = determineSource(ansLabel, 'ai', isIdentity);
 
-      fields.push({
-        id: `field_${fields.length + 1}`,
-        label: ansLabel,
-        value: String(ansVal || ''),
-        step: /name|email|phone|address|city/i.test(ansLabel) ? 'My Information' : 'Application Questions',
-        fieldType: /years|experience|explain|describe/i.test(ansLabel) && String(ansVal).length > 60 ? 'textarea' : 'text',
-        required: true,
-        options: [],
-        source: sourceMeta.key,
-        sourceLabel: sourceMeta.label,
-        sourceIcon: sourceMeta.icon,
-        sourceColor: sourceMeta.color,
-        isModified: false,
-      });
+        fields.push({
+          id: `field_${fields.length + 1}`,
+          label: ansLabel,
+          value: String(ansVal || ''),
+          step: /name|email|phone|address|city/i.test(ansLabel) ? 'My Information' : 'Application Questions',
+          fieldType: /years|experience|explain|describe/i.test(ansLabel) && String(ansVal).length > 60 ? 'textarea' : 'text',
+          required: true,
+          options: [],
+          source: sourceMeta.key,
+          sourceLabel: sourceMeta.label,
+          sourceIcon: sourceMeta.icon,
+          sourceColor: sourceMeta.color,
+          isModified: false,
+        });
+      }
     }
 
-    const currentStatus = appRow?.status || queueTask?.status || 'ready_for_review';
+    const currentStatus = distRow?.status || appRow?.status || queueTask?.status || 'ready_for_review';
+    const proofScreenshot = distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || distRow?.screenshot_url || appRow?.failure_screenshot_url || queueTask?.screenshot_path || null;
 
     return {
       success: true,
@@ -2117,14 +2164,16 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
       application: {
         applywizzId: cleanId,
         candidateName: client?.client_name || client?.full_name || cleanId,
-        company: queueTask?.company || appRow?.company || schema?.company || 'Workday Partner',
-        roleTitle: queueTask?.role_title || appRow?.role_title || schema?.role_title || 'Workday Application',
+        company: distRow?.company || queueTask?.company || appRow?.company || schema?.company || 'Workday Partner',
+        roleTitle: distRow?.role_title || queueTask?.role_title || appRow?.role_title || schema?.role_title || 'Workday Application',
         jobUrl: effectiveUrl,
         status: currentStatus,
         taskId: queueTask?.id || null,
-        workerId: queueTask?.worker_id || null,
-        screenshotUrl: appRow?.failure_screenshot_url || queueTask?.screenshot_path || null,
-        updatedAt: queueTask?.updated_at || appRow?.updated_at || new Date().toISOString(),
+        workerId: distRow?.worker_id || queueTask?.worker_id || null,
+        screenshotUrl: proofScreenshot,
+        originalScreenshotUrl: distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || null,
+        reviewScreenshotUrl: distRow?.screenshot_url || null,
+        updatedAt: distRow?.updated_at || queueTask?.updated_at || appRow?.updated_at || new Date().toISOString(),
       },
       fields,
     };
@@ -2163,13 +2212,13 @@ export async function submitApplicationReview({
       }
     }
 
-    // 0. Update resolved_answers table with status queued_for_submission
+    // 0. Update job_distributions with status 'queued' and pre-resolved answers
     try {
       await supabase
-        .from('resolved_answers')
+        .from('job_distributions')
         .update({
-          status: 'queued_for_submission',
-          resolved_answers_json: fields.map((f) => ({
+          status: 'queued',
+          resolved_answers: fields.map((f) => ({
             question: f.label,
             answer: f.value,
             field_type: f.fieldType,
@@ -2183,7 +2232,7 @@ export async function submitApplicationReview({
         .eq('applywizz_id', cleanId)
         .eq('job_url', jobUrl);
     } catch (e) {
-      console.warn('resolved_answers update:', e.message);
+      console.warn('job_distributions update:', e.message);
     }
 
     // 1. Update batch_job_queue with CA answers and set status to approved_for_submission so bot performs final submit & captures screenshot proof

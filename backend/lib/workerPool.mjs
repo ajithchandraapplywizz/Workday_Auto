@@ -185,6 +185,12 @@ export async function executeWorkerTask({
     status: 'in_progress',
   }).catch(() => {});
 
+  // Update status in job_distributions to 'applying'
+  try {
+    const { markJobDistributionApplying } = await import('./supabaseClient.mjs');
+    await markJobDistributionApplying({ applywizzId, jobUrl, workerId });
+  } catch {}
+
   // 4. Check Job Form Cache in Supabase (Duplicate Link Detection & Pre-Resolved Cell)
   let cacheHit = false;
   let cacheResult = null;
@@ -200,6 +206,30 @@ export async function executeWorkerTask({
     appLog(3, `Supabase QA Cache HIT: Loaded ${preCount} pre-resolved answers from queue cell for instant fill.`);
     console.log(`   ⚡ [${workerId}] Queue Pre-Resolved Hit: ${preCount} answers loaded directly from queue cell for instant fill.`);
   } else {
+    // Also load pre-resolved answers from job_distributions table
+    try {
+      const { getResolvedAnswers } = await import('./supabaseClient.mjs');
+      const distData = await getResolvedAnswers(applywizzId, jobUrl);
+      if (distData?.resolved_answers && Array.isArray(distData.resolved_answers) && distData.resolved_answers.length > 0) {
+        cacheHit = true;
+        profile._supabaseQa = profile._supabaseQa || {};
+        profile._answerCache = profile._answerCache || new Map();
+        let loadedCount = 0;
+        for (const item of distData.resolved_answers) {
+          const q = item.question || item.label || item.question_label;
+          const a = item.answer || item.value;
+          if (q && a !== undefined && a !== null) {
+            profile._supabaseQa[q] = a;
+            profile._answerCache.set(q, a);
+            loadedCount++;
+          }
+        }
+        if (loadedCount > 0) {
+          console.log(   ⚡ [] Loaded  pre-resolved answers from job_distributions for !);
+        }
+      }
+    } catch {}
+
     try {
       cacheResult = await checkAndPreResolveJobForClient({ jobUrl, profile });
       cacheHit = cacheResult.hit;
