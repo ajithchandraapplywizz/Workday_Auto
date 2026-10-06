@@ -2460,25 +2460,25 @@ export async function triggerAutonomousBot() {
         {
           worker_id: 'bot_controller',
           state: 'trigger_requested',
-          current_application_id: 'Autonomous 3-Worker Pool Triggered',
+          current_application_id: null,
           updated_at: now,
         },
         {
           worker_id: 'worker-1',
           state: 'in_flight',
-          current_application_id: 'Clustering & scanning unique links...',
+          current_application_id: null,
           updated_at: now,
         },
         {
           worker_id: 'worker-2',
           state: 'in_flight',
-          current_application_id: 'Clustering & scanning unique links...',
+          current_application_id: null,
           updated_at: now,
         },
         {
           worker_id: 'worker-3',
           state: 'in_flight',
-          current_application_id: 'Clustering & scanning unique links...',
+          current_application_id: null,
           updated_at: now,
         },
       ], { onConflict: 'worker_id' });
@@ -2563,5 +2563,448 @@ export async function fetchBotDaemonStatus() {
     };
   } catch (err) {
     return { success: false, isRunning: false, state: 'idle', error: err.message };
+  }
+}
+
+/**
+ * Helper to check if a field is standard personal info (First Name, Email, Address, etc.)
+ * Personal info is already populated in DB and should NOT clutter the CA review drawer.
+ */
+export function isPersonalInfoField(label = '') {
+  if (!label) return false;
+  const l = String(label).toLowerCase().replace(/[^a-z0-9]/g, ' ').trim();
+  const personalPatterns = [
+    'first name', 'given name', 'last name', 'family name', 'middle name',
+    'legal name', 'preferred name', 'prefix', 'suffix',
+    'email', 'email address', 'work email', 'personal email',
+    'phone', 'phone number', 'mobile phone', 'contact phone', 'country phone code', 'device type',
+    'address line 1', 'address line 2', 'street address', 'street',
+    'city', 'postal code', 'zip code', 'zip', 'state', 'province',
+    'country', 'region', 'county', 'how did you hear', 'source', 'hear about us'
+  ];
+  return personalPatterns.some((p) => l === p || l.startsWith(`${p} `) || l.endsWith(` ${p}`));
+}
+
+/**
+ * Fetch all allocated applications for a given client from job_distributions and batch_job_queue
+ */
+export async function fetchClientApplications(applywizzId) {
+  if (!applywizzId) return { success: true, applications: [] };
+  try {
+    const cleanId = String(applywizzId).trim().toUpperCase();
+
+    // 1. Fetch from job_distributions (scanned, pre-resolved, ready_for_review)
+    const { data: distData, error: distErr } = await supabase
+      .from('job_distributions')
+      .select('*')
+      .eq('applywizz_id', cleanId)
+      .order('created_at', { ascending: false });
+
+    // 2. Fetch from batch_job_queue (pending, queued, in_flight)
+    const { data: queueData, error: queueErr } = await supabase
+      .from('batch_job_queue')
+      .select('*')
+      .eq('applywizz_id', cleanId)
+      .order('created_at', { ascending: false });
+
+    const jobMap = new Map();
+
+    if (distData && Array.isArray(distData)) {
+      for (const d of distData) {
+        const key = d.job_url || d.id;
+        const unans = Array.isArray(d.unanswered_questions) ? d.unanswered_questions : [];
+        const unansCount = d.unanswered_count !== undefined && d.unanswered_count !== null
+          ? Number(d.unanswered_count)
+          : unans.length;
+
+        jobMap.set(key, {
+          id: d.id,
+          distributionId: d.id,
+          applywizz_id: d.applywizz_id,
+          job_id: d.job_id,
+          job_url: d.job_url,
+          company: d.company || 'Workday Employer',
+          role_title: d.role_title || 'Workday Application',
+          status: d.status || (unansCount > 0 ? 'needs_answers' : 'ready_for_review'),
+          scraped_questions: d.scraped_questions || [],
+          resolved_answers: d.resolved_answers || [],
+          unanswered_questions: unans,
+          unanswered_count: unansCount,
+          is_fully_answered: d.is_fully_answered ?? (unansCount === 0),
+          screenshot_url: d.screenshot_url || d.proof_screenshot_url || null,
+          created_at: d.created_at,
+          updated_at: d.updated_at,
+          source: 'job_distributions',
+        });
+      }
+    }
+
+    if (queueData && Array.isArray(queueData)) {
+      for (const q of queueData) {
+        const key = q.job_url || q.id;
+        if (!jobMap.has(key)) {
+          jobMap.set(key, {
+            id: q.id,
+            queueTaskId: q.id,
+            applywizz_id: q.applywizz_id,
+            job_id: q.job_id,
+            job_url: q.job_url,
+            company: q.company || 'Workday Employer',
+            role_title: q.role_title || 'Workday Application',
+            status: q.status || 'pending',
+            scraped_questions: q.pre_resolved_answers || [],
+            resolved_answers: q.pre_resolved_answers || [],
+            unanswered_questions: [],
+            unanswered_count: 0,
+            is_fully_answered: true,
+            screenshot_url: q.screenshot_path || null,
+            created_at: q.created_at,
+            source: 'batch_job_queue',
+          });
+        }
+      }
+    }
+
+    const applications = Array.from(jobMap.values());
+    return { success: true, applications };
+  } catch (err) {
+    console.error('Error in fetchClientApplications:', err);
+    return { success: false, applications: [], error: err.message };
+  }
+}
+
+/**
+ * Fetch detailed form questions and AI answers for the Application Slide Drawer
+ * Strips away standard personal info, isolating AI-answered questions and missing/unanswered items.
+ */
+export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, distributionId = null }) {
+  if (!applywizzId || (!jobUrl && !distributionId)) {
+    return { success: false, error: 'applywizzId and jobUrl/distributionId required' };
+  }
+
+  const cleanId = String(applywizzId).trim().toUpperCase();
+
+  try {
+    let distRow = null;
+
+    // 1. Fetch distribution row
+    let query = supabase.from('job_distributions').select('*');
+    if (distributionId) {
+      query = query.eq('id', distributionId);
+    } else {
+      query = query.eq('applywizz_id', cleanId).eq('job_url', jobUrl);
+    }
+
+    const { data: distData } = await query;
+    if (distData && distData.length > 0) {
+      distRow = distData[0];
+    }
+
+    // 2. Fetch scanned_jobs for the canonical questions blueprint
+    let scannedBlueprint = null;
+    if (jobUrl) {
+      const { data: scanData } = await supabase
+        .from('scanned_jobs')
+        .select('*')
+        .eq('job_url', jobUrl)
+        .limit(1);
+      if (scanData && scanData.length > 0) {
+        scannedBlueprint = scanData[0];
+      }
+    }
+
+    // 3. Fetch qa_bank for existing saved answers
+    const { data: qaRows } = await supabase
+      .from('qa_bank')
+      .select('*')
+      .eq('applywizz_id', cleanId);
+
+    const qaMap = new Map();
+    if (qaRows && Array.isArray(qaRows)) {
+      for (const q of qaRows) {
+        if (q.question_normalized) qaMap.set(q.question_normalized, q.answer);
+        if (q.question) qaMap.set(q.question.toLowerCase().trim(), q.answer);
+      }
+    }
+
+    const allFields = [];
+    const seenQuestions = new Set();
+
+    // Unanswered questions list
+    const unansList = Array.isArray(distRow?.unanswered_questions) ? distRow.unanswered_questions : [];
+    for (const u of unansList) {
+      const label = typeof u === 'string' ? u : (u.label || u.question || u.question_raw || 'Unanswered Question');
+      const norm = (typeof u === 'object' && u.question_normalized) ? u.question_normalized : label.toLowerCase().trim();
+      if (seenQuestions.has(norm) || isPersonalInfoField(label)) continue;
+      seenQuestions.add(norm);
+
+      // Check if candidate already has an answer in qa_bank
+      const savedAns = qaMap.get(norm) || qaMap.get(label.toLowerCase().trim()) || '';
+
+      allFields.push({
+        id: `unans-${norm}`,
+        label,
+        questionNormalized: norm,
+        value: savedAns || '',
+        source: savedAns ? 'qa_bank' : 'unanswered',
+        sourceLabel: savedAns ? 'QA Bank (Saved)' : 'Needs CA Answer',
+        tier: savedAns ? 2 : 0,
+        isUnanswered: !savedAns,
+        isPersonal: false,
+        fieldType: (typeof u === 'object' && u.fieldType) ? u.fieldType : 'input',
+      });
+    }
+
+    // Resolved / Scraped questions
+    const scrapedList = Array.isArray(distRow?.scraped_questions)
+      ? distRow.scraped_questions
+      : (Array.isArray(scannedBlueprint?.scraped_questions) ? scannedBlueprint.scraped_questions : []);
+
+    const resolvedList = Array.isArray(distRow?.resolved_answers) ? distRow.resolved_answers : [];
+    const resolvedMap = new Map();
+    for (const r of resolvedList) {
+      const k = r.question_normalized || (r.label || r.question || '').toLowerCase().trim();
+      if (k) resolvedMap.set(k, r);
+    }
+
+    for (const f of scrapedList) {
+      const label = typeof f === 'string' ? f : (f.label || f.question || f.question_raw || f.name || '');
+      if (!label) continue;
+      const norm = (typeof f === 'object' && f.question_normalized) ? f.question_normalized : label.toLowerCase().trim();
+      if (seenQuestions.has(norm)) continue;
+      seenQuestions.add(norm);
+
+      const isPersonal = isPersonalInfoField(label);
+      const resItem = resolvedMap.get(norm) || resolvedMap.get(label.toLowerCase().trim());
+      const qaAns = qaMap.get(norm) || qaMap.get(label.toLowerCase().trim());
+
+      const value = resItem?.answer ?? (qaAns ?? (typeof f === 'object' ? f.value ?? f.answer : ''));
+      const isAi = resItem?.tier === 4 || resItem?.source === 'ai' || resItem?.source === 'llm' || (!resItem && !isPersonal);
+      const isMissing = !value || value === '' || value === 'null';
+
+      allFields.push({
+        id: `field-${norm}`,
+        label,
+        questionNormalized: norm,
+        value: value || '',
+        source: isMissing ? 'unanswered' : (isAi ? 'ai' : (qaAns ? 'qa_bank' : 'supabase')),
+        sourceLabel: isMissing ? 'Needs CA Answer' : (isAi ? 'AI / LLM Answered' : (qaAns ? 'QA Bank' : 'Supabase DB')),
+        tier: resItem?.tier || (isAi ? 4 : 2),
+        isUnanswered: isMissing,
+        isPersonal,
+        fieldType: (typeof f === 'object' && f.fieldType) ? f.fieldType : 'input',
+      });
+    }
+
+    // Separate clean lists
+    const nonPersonalFields = allFields.filter((f) => !f.isPersonal);
+    const unansweredFields = nonPersonalFields.filter((f) => f.isUnanswered);
+    const aiFields = nonPersonalFields.filter((f) => f.source === 'ai');
+
+    const appObj = {
+      id: distRow?.id || null,
+      applywizzId: cleanId,
+      jobUrl: jobUrl || distRow?.job_url,
+      company: distRow?.company || scannedBlueprint?.company || 'Workday Employer',
+      roleTitle: distRow?.role_title || scannedBlueprint?.role_title || 'Workday Role',
+      status: distRow?.status || 'ready_for_review',
+      screenshotUrl: distRow?.screenshot_url || distRow?.proof_screenshot_url || scannedBlueprint?.screenshot_path || null,
+      unansweredCount: unansweredFields.length,
+    };
+
+    return {
+      success: true,
+      application: appObj,
+      fields: nonPersonalFields,
+      unansweredFields,
+      aiFields,
+      allFields,
+    };
+  } catch (err) {
+    console.error('fetchApplicationFormReviewData error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Save an edited or newly answered question directly to qa_bank and update job_distributions
+ */
+export async function saveAnswerToQaBank({
+  applywizzId,
+  question,
+  questionNormalized = null,
+  answer,
+  fieldType = 'input',
+  source = 'manual',
+  jobUrl = null,
+  distributionId = null,
+}) {
+  if (!applywizzId || !question || answer === undefined || answer === null) {
+    return { success: false, error: 'Missing required parameters' };
+  }
+
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const qStr = String(question).trim();
+  const norm = questionNormalized || qStr.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
+  const ansStr = String(answer).trim();
+  const now = new Date().toISOString();
+
+  try {
+    // 1. Upsert into qa_bank
+    const { error: qaErr } = await supabase
+      .from('qa_bank')
+      .upsert({
+        applywizz_id: cleanId,
+        question: qStr,
+        question_normalized: norm,
+        answer: ansStr,
+        field_type: fieldType,
+        source: 'manual',
+        updated_at: now,
+      }, { onConflict: 'applywizz_id,question_normalized' });
+
+    if (qaErr) console.warn('Note on qa_bank upsert:', qaErr.message);
+
+    // 2. Sync to client_questions
+    await supabase
+      .from('client_questions')
+      .upsert({
+        applywizz_id: cleanId,
+        question: qStr,
+        question_normalized: norm,
+        answer: ansStr,
+        field_type: fieldType,
+        source: 'manual',
+        updated_at: now,
+      }, { onConflict: 'applywizz_id,question_normalized' })
+      .catch(() => {});
+
+    // 3. Update job_distributions record if distributionId or jobUrl provided
+    if (distributionId || jobUrl) {
+      let query = supabase.from('job_distributions').select('*');
+      if (distributionId) {
+        query = query.eq('id', distributionId);
+      } else {
+        query = query.eq('applywizz_id', cleanId).eq('job_url', jobUrl);
+      }
+
+      const { data: distRows } = await query;
+      if (distRows && distRows.length > 0) {
+        const dist = distRows[0];
+        const unans = Array.isArray(dist.unanswered_questions) ? [...dist.unanswered_questions] : [];
+        const filteredUnans = unans.filter((u) => {
+          const uLabel = typeof u === 'string' ? u : (u.label || u.question || u.question_normalized || '');
+          return uLabel.toLowerCase().trim() !== qStr.toLowerCase().trim() &&
+                 uLabel.toLowerCase().trim() !== norm;
+        });
+
+        const newUnansCount = filteredUnans.length;
+        const resolved = Array.isArray(dist.resolved_answers) ? [...dist.resolved_answers] : [];
+        const existingIdx = resolved.findIndex((r) => (r.question_normalized || r.question) === norm);
+        const resolvedItem = {
+          question: qStr,
+          question_normalized: norm,
+          answer: ansStr,
+          source: 'manual',
+          tier: 1,
+        };
+        if (existingIdx >= 0) resolved[existingIdx] = resolvedItem;
+        else resolved.push(resolvedItem);
+
+        await supabase
+          .from('job_distributions')
+          .update({
+            unanswered_questions: filteredUnans,
+            unanswered_count: newUnansCount,
+            is_fully_answered: newUnansCount === 0,
+            status: newUnansCount === 0 ? 'ready_for_review' : 'needs_answers',
+            resolved_answers: resolved,
+            updated_at: now,
+          })
+          .eq('id', dist.id);
+      }
+    }
+
+    return {
+      success: true,
+      message: '✓ Saved answer directly to candidate QA Bank and updated distribution record.',
+    };
+  } catch (err) {
+    console.error('Failed to save to qa_bank:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Handle CA confirming and submitting an application for automated submission
+ */
+export async function submitApplicationReview({
+  applywizzId,
+  jobUrl,
+  distributionId = null,
+  company = '',
+  roleTitle = '',
+  fields = [],
+  status = 'approved_for_submission',
+}) {
+  try {
+    const cleanId = String(applywizzId).trim().toUpperCase();
+    const now = new Date().toISOString();
+
+    // 1. Update job_distributions
+    if (distributionId) {
+      await supabase
+        .from('job_distributions')
+        .update({
+          status: 'approved_for_submission',
+          reviewed_at: now,
+          reviewed_by: 'Career Associate',
+          updated_at: now,
+        })
+        .eq('id', distributionId);
+    } else if (cleanId && jobUrl) {
+      await supabase
+        .from('job_distributions')
+        .update({
+          status: 'approved_for_submission',
+          reviewed_at: now,
+          reviewed_by: 'Career Associate',
+          updated_at: now,
+        })
+        .eq('applywizz_id', cleanId)
+        .eq('job_url', jobUrl);
+    }
+
+    // 2. Update batch_job_queue if present
+    if (cleanId && jobUrl) {
+      await supabase
+        .from('batch_job_queue')
+        .update({
+          status: 'approved_for_submission',
+          updated_at: now,
+        })
+        .eq('applywizz_id', cleanId)
+        .eq('job_url', jobUrl);
+    }
+
+    // 3. Signal bot daemon
+    await supabase
+      .from('worker_status')
+      .upsert([
+        {
+          worker_id: 'bot_controller',
+          state: 'trigger_requested',
+          current_application_id: null,
+          updated_at: now,
+        },
+      ], { onConflict: 'worker_id' })
+      .catch(() => {});
+
+    return {
+      success: true,
+      message: 'Application approved and scheduled for automated submission!',
+    };
+  } catch (err) {
+    return { success: false, error: err.message };
   }
 }

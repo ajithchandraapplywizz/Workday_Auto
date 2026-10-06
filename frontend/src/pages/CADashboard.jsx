@@ -7,6 +7,7 @@ import {
   submitApplicationRecord,
   fetchClients,
   fetchAssignedClientsForCA,
+  fetchClientApplications,
 } from '../services/api';
 import { supabase } from '../config/supabase';
 import {
@@ -28,7 +29,10 @@ import {
   ChevronRight,
   ShieldCheck,
   AlertCircle,
-  FileText
+  FileText,
+  Image as ImageIcon,
+  Eye,
+  X
 } from 'lucide-react';
 import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
@@ -68,6 +72,7 @@ export default function CADashboard() {
   // Form Review & Confirmation Slide Drawer state
   const [showSlideDrawer, setShowSlideDrawer] = useState(false);
   const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
+  const [dashboardScreenshot, setDashboardScreenshot] = useState(null);
 
   const handleReviewSubmitted = () => {
     setApplyStep(4);
@@ -642,7 +647,9 @@ export default function CADashboard() {
                     {clientJobs.map((j, idx) => {
                       const isSub = j.status === 'submitted';
                       const isQ = j.status === 'queued' || j.status === 'queued_for_submission';
+                      const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
                       const isSelected = activeTask?.id === j.id;
+                      const cardScreenshot = j.screenshot_url || j.applied_screenshot;
 
                       let badgeBg = 'rgba(56, 189, 248, 0.15)';
                       let badgeColor = '#38bdf8';
@@ -654,6 +661,11 @@ export default function CADashboard() {
                         badgeColor = '#34d399';
                         badgeBorder = 'rgba(16, 185, 129, 0.3)';
                         badgeText = 'SUBMITTED';
+                      } else if (hasMissing) {
+                        badgeBg = 'rgba(245, 158, 11, 0.15)';
+                        badgeColor = '#fbbf24';
+                        badgeBorder = 'rgba(245, 158, 11, 0.35)';
+                        badgeText = `NEEDS ANSWERS (${j.unanswered_count || 1})`;
                       } else if (isQ) {
                         badgeBg = 'rgba(245, 158, 11, 0.15)';
                         badgeColor = '#f59e0b';
@@ -684,11 +696,13 @@ export default function CADashboard() {
                             transition: 'all 0.15s ease',
                           }}
                         >
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                               <strong style={{ fontSize: '0.88rem', color: '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                 {j.company || 'Workday Partner'}
                               </strong>
+
+                              {/* Status Badge */}
                               <span style={{
                                 fontSize: '0.68rem',
                                 fontWeight: 700,
@@ -700,7 +714,37 @@ export default function CADashboard() {
                               }}>
                                 {badgeText}
                               </span>
+
+                              {/* Prominent View Screenshot Option Beside Status Badge */}
+                              {cardScreenshot && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDashboardScreenshot(cardScreenshot);
+                                  }}
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    background: 'rgba(16, 185, 129, 0.15)',
+                                    color: '#34d399',
+                                    border: '1px solid rgba(16, 185, 129, 0.35)',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    transition: 'all 0.15s ease',
+                                  }}
+                                  title="View verified application screenshot"
+                                >
+                                  <Eye size={12} />
+                                  <span>View Screenshot</span>
+                                </button>
+                              )}
                             </div>
+
                             <span style={{ fontSize: '0.78rem', color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {j.role_title || 'Application'}
                             </span>
@@ -886,6 +930,69 @@ export default function CADashboard() {
         }}
         onStatusUpdated={handleReviewSubmitted}
       />
+
+      {/* Full Screenshot Proof Modal */}
+      {dashboardScreenshot && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            backdropFilter: 'blur(8px)',
+            zIndex: 10000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2rem',
+          }}
+          onClick={() => setDashboardScreenshot(null)}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              borderRadius: '8px',
+              overflow: 'hidden',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid #334155',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '0.75rem 1rem',
+                background: '#0f172a',
+                color: '#f8fafc',
+                fontWeight: 600,
+                fontSize: '0.88rem',
+                borderBottom: '1px solid #334155',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <ImageIcon size={16} style={{ color: '#34d399' }} />
+                <span>Workday Application Screenshot Proof</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDashboardScreenshot(null)}
+                style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
+              >
+                <X size={18} />
+              </button>
+            </div>
+            <img
+              src={dashboardScreenshot}
+              alt="Workday Application Proof"
+              style={{ maxWidth: '100%', maxHeight: 'calc(90vh - 50px)', objectFit: 'contain' }}
+            />
+          </div>
+        </div>
+      )}
     </div>
   );
 }
