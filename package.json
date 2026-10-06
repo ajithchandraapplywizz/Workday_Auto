@@ -3,14 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "packageManager": "npm@10.8.2",
+  "main": "index.js",
   "workspaces": [
     "backend",
     "frontend",
     "workday-auto-apply"
   ],
-  "main": "backend/scripts/queue_daemon.mjs",
   "scripts": {
-    "start": "node backend/scripts/queue_daemon.mjs",
+    "start": "node index.js",
+    "postinstall": "npx playwright install chromium 2>/dev/null || true",
     "setup": "node backend/cli.mjs setup",
     "scan": "node backend/cli.mjs scan",
     "fill": "node backend/cli.mjs fill",
