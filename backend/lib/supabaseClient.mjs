@@ -1650,7 +1650,70 @@ export async function fetchFullyResolvedApplicationsForCA(candidateIds = []) {
 }
 
 /**
+ * Check if a question is eligible for QA bank storage:
+ * Excludes personal information, DOM/button artifacts, and transient date/signature fields.
+ * QA Bank must ONLY store novel/unique custom unresolved questions!
+ */
+export function isEligibleForQaBank(question = '', answer = '') {
+  if (!question || answer === undefined || answer === null || String(answer).trim() === '') return false;
+  const q = String(question).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (q.length < 3) return false;
+
+  // 1. Reject DOM / UI artifacts
+  if (
+    q.includes('utilitymenubutton') ||
+    q.includes('menubutton') ||
+    q.includes('dropdown') ||
+    q.includes('regionsubdivision') ||
+    q.includes('legalname') ||
+    q.includes('widget') ||
+    q.includes('current value is') ||
+    q.includes('terms and conditions') ||
+    q.includes('click here') ||
+    q.includes('select one')
+  ) {
+    return false;
+  }
+
+  // 2. Reject personal information
+  const personalPatterns = [
+    'first name', 'given name', 'last name', 'family name', 'middle name',
+    'legal name', 'preferred name', 'prefix', 'suffix', 'full name',
+    'local given', 'local family', 'local middle', 'local name',
+    'email', 'email address', 'work email', 'personal email',
+    'phone', 'phone number', 'mobile phone', 'contact phone', 'country phone code',
+    'phone extension', 'phone device', 'device type',
+    'address', 'address line 1', 'address line 2', 'address line 3',
+    'street address', 'street', 'city', 'postal code', 'zip code', 'zip',
+    'state', 'province', 'country', 'region', 'county',
+    'how did you hear', 'hear about us', 'source', 'referral source'
+  ];
+
+  for (const p of personalPatterns) {
+    if (q === p || q.startsWith(`${p} `) || q.endsWith(` ${p}`) || q.includes(` ${p} `)) {
+      return false;
+    }
+  }
+
+  // 3. Reject transient signature / date companion fields
+  if (
+    q.includes('signature') ||
+    q.includes('todays date') ||
+    q.includes('today s date') ||
+    q.includes('date of application') ||
+    q.includes('submission date') ||
+    /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(q)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Save a novel/unique answer to the persistent candidate QA bank.
+ * STRICT POLICY: Rejects standard personal info, DOM/button artifacts,
+ * and already-existing repeated questions. ONLY unique new unresolved questions are stored!
  */
 export async function recordNovelQABankAnswer({
   applywizzId,
@@ -1663,11 +1726,28 @@ export async function recordNovelQABankAnswer({
   if (!isSupabaseConfigured() || !applywizzId || !question || answer === undefined || answer === null) return false;
   const cleanId = String(applywizzId).trim().toUpperCase();
   const qStr = String(question).trim();
-  const norm = questionNormalized || normalizeLabel(qStr);
   const ansStr = String(answer).trim();
+
+  // 1. Strict filter: Exclude personal info, DOM artifacts, transient dates
+  if (!isEligibleForQaBank(qStr, ansStr)) {
+    return false;
+  }
+
+  const norm = questionNormalized || normalizeLabel(qStr);
   const validSource = ['supabase', 'api', 'resume', 'llm', 'manual'].includes(source) ? source : 'llm';
 
   try {
+    // 2. Strict deduplication: Check if question is already present in qa_bank
+    const existing = await request('qa_bank', {
+      query: `?applywizz_id=eq.${encode(cleanId)}&question_normalized=eq.${encode(norm)}&select=id,answer&limit=1`,
+    }).catch(() => null);
+
+    if (Array.isArray(existing) && existing.length > 0) {
+      // Question already exists in QA Bank! Do not store repeated/duplicate rows.
+      return true;
+    }
+
+    // 3. Store ONLY unique new unresolved question
     await request('qa_bank', {
       method: 'POST',
       query: '?on_conflict=applywizz_id,question_normalized',
@@ -1681,18 +1761,6 @@ export async function recordNovelQABankAnswer({
         source: validSource,
         updated_at: new Date().toISOString(),
       },
-    });
-  } catch {}
-
-  // Also maintain client_questions table for backward compatibility
-  try {
-    await upsertSupabaseAnswer({
-      applywizzId: cleanId,
-      question: qStr,
-      questionNormalized: norm,
-      answer: ansStr,
-      fieldType,
-      source: validSource,
     });
   } catch {}
 

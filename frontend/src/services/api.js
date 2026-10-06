@@ -2827,7 +2827,55 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
 }
 
 /**
- * Save an edited or newly answered question directly to qa_bank and update job_distributions
+ * Check if a question is eligible for QA bank storage:
+ * Excludes personal information, DOM/button artifacts, and transient date/signature fields.
+ * QA Bank must ONLY store novel/unique custom unresolved questions!
+ */
+export function isEligibleForQaBank(question = '', answer = '') {
+  if (!question || answer === undefined || answer === null || String(answer).trim() === '') return false;
+  const q = String(question).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (q.length < 3) return false;
+
+  // 1. Reject DOM / UI artifacts
+  if (
+    q.includes('utilitymenubutton') ||
+    q.includes('menubutton') ||
+    q.includes('dropdown') ||
+    q.includes('regionsubdivision') ||
+    q.includes('legalname') ||
+    q.includes('widget') ||
+    q.includes('current value is') ||
+    q.includes('terms and conditions') ||
+    q.includes('click here') ||
+    q.includes('select one')
+  ) {
+    return false;
+  }
+
+  // 2. Reject personal information
+  if (isPersonalInfoField(question)) {
+    return false;
+  }
+
+  // 3. Reject transient signature / date companion fields
+  if (
+    q.includes('signature') ||
+    q.includes('todays date') ||
+    q.includes('today s date') ||
+    q.includes('date of application') ||
+    q.includes('submission date') ||
+    /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(q)
+  ) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
+ * Save an edited or newly answered question directly to qa_bank and update job_distributions.
+ * STRICT POLICY: Only stores unique new unresolved questions in qa_bank.
+ * Rejects personal info, DOM button artifacts, and duplicate existing answers.
  */
 export async function saveAnswerToQaBank({
   applywizzId,
@@ -2850,36 +2898,35 @@ export async function saveAnswerToQaBank({
   const now = new Date().toISOString();
 
   try {
-    // 1. Upsert into qa_bank
-    const { error: qaErr } = await supabase
-      .from('qa_bank')
-      .upsert({
-        applywizz_id: cleanId,
-        question: qStr,
-        question_normalized: norm,
-        answer: ansStr,
-        field_type: fieldType,
-        source: 'manual',
-        updated_at: now,
-      }, { onConflict: 'applywizz_id,question_normalized' });
+    // 1. Only store in qa_bank if it is an eligible unique novel question (not personal info, not DOM artifact)
+    if (isEligibleForQaBank(qStr, ansStr)) {
+      // Check if already exists in qa_bank
+      const { data: existingQa } = await supabase
+        .from('qa_bank')
+        .select('id, answer')
+        .eq('applywizz_id', cleanId)
+        .eq('question_normalized', norm)
+        .limit(1);
 
-    if (qaErr) console.warn('Note on qa_bank upsert:', qaErr.message);
+      if (!existingQa || existingQa.length === 0) {
+        // Truly unique new unresolved question -> insert into qa_bank
+        const { error: qaErr } = await supabase
+          .from('qa_bank')
+          .insert({
+            applywizz_id: cleanId,
+            question: qStr,
+            question_normalized: norm,
+            answer: ansStr,
+            field_type: fieldType,
+            source: 'manual',
+            updated_at: now,
+          });
 
-    // 2. Sync to client_questions
-    await supabase
-      .from('client_questions')
-      .upsert({
-        applywizz_id: cleanId,
-        question: qStr,
-        question_normalized: norm,
-        answer: ansStr,
-        field_type: fieldType,
-        source: 'manual',
-        updated_at: now,
-      }, { onConflict: 'applywizz_id,question_normalized' })
-      .catch(() => {});
+        if (qaErr) console.warn('Note on qa_bank insert:', qaErr.message);
+      }
+    }
 
-    // 3. Update job_distributions record if distributionId or jobUrl provided
+    // 2. Update job_distributions record if distributionId or jobUrl provided
     if (distributionId || jobUrl) {
       let query = supabase.from('job_distributions').select('*');
       if (distributionId) {
