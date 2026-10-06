@@ -225,7 +225,7 @@ export async function executeWorkerTask({
           }
         }
         if (loadedCount > 0) {
-          console.log(`   ⚡ [${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
+          console.log(`   * [Worker ${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
         }
       }
     } catch {}

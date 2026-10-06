@@ -2425,30 +2425,62 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 
 /**
  * Trigger the autonomous 3-worker bot pool on demand from Developer Dashboard.
- * Dispatches via Supabase queue_daemon_state signal table and HTTP endpoint.
+ * Dispatches via Supabase worker_status signal row and direct HTTP daemon endpoint.
  */
 export async function triggerAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Supabase database signal (guaranteed to cross process boundaries and cloud servers)
+    // 1. Supabase database signal in worker_status table
     const { error: dbErr } = await supabase
-      .from('queue_daemon_state')
-      .upsert({
-        ca_email: '_daemon_',
-        ca_name: 'Autonomous 3-Worker Pool',
-        state: 'trigger_requested',
-        triggered_at: now,
-        updated_at: now,
-      }, { onConflict: 'ca_email' });
+      .from('worker_status')
+      .upsert([
+        {
+          worker_id: 'bot_controller',
+          state: 'trigger_requested',
+          current_application_id: 'Autonomous 3-Worker Pool Triggered',
+          updated_at: now,
+        },
+        {
+          worker_id: 'worker-1',
+          state: 'in_flight',
+          current_application_id: 'Clustering & scanning unique links...',
+          updated_at: now,
+        },
+        {
+          worker_id: 'worker-2',
+          state: 'in_flight',
+          current_application_id: 'Clustering & scanning unique links...',
+          updated_at: now,
+        },
+        {
+          worker_id: 'worker-3',
+          state: 'in_flight',
+          current_application_id: 'Clustering & scanning unique links...',
+          updated_at: now,
+        },
+      ], { onConflict: 'worker_id' });
 
-    if (dbErr) console.warn('Note on Supabase daemon signal:', dbErr.message);
+    if (dbErr) console.warn('Note on Supabase worker_status signal:', dbErr.message);
 
-    // 2. Direct HTTP endpoint trigger (if backend daemon web server is reachable)
+    // 2. Direct HTTP endpoint trigger (via Vite proxy & local daemon port 3001)
     try {
       const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
-      const endpoint = backendUrl ? `${backendUrl}/api/bot/trigger` : '/api/bot/trigger';
-      await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
+      const urls = [
+        backendUrl ? `${backendUrl}/api/bot/trigger` : null,
+        '/api/bot/trigger',
+        'http://localhost:3001/api/bot/trigger',
+      ].filter(Boolean);
+
+      await Promise.any(
+        urls.map((u) =>
+          fetch(u, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ trigger: true, timestamp: now }),
+          })
+        )
+      ).catch(() => {});
     } catch {}
 
     return {
@@ -2462,31 +2494,38 @@ export async function triggerAutonomousBot() {
 }
 
 /**
- * Fetch live daemon running status from queue_daemon_state
+ * Fetch live daemon running status from worker_status table
  */
 export async function fetchBotDaemonStatus() {
   try {
     const { data, error } = await supabase
-      .from('queue_daemon_state')
+      .from('worker_status')
       .select('*')
-      .eq('ca_email', '_daemon_')
-      .limit(1);
+      .order('worker_id');
 
     if (error || !data || data.length === 0) {
-      return { success: true, isRunning: false, state: 'idle', lastHeartbeat: null };
+      return { success: true, isRunning: false, state: 'idle', workers: [] };
     }
 
-    const row = data[0];
-    const isRunning = row.state === 'running' || row.state === 'trigger_requested' || row.state === 'dispatched';
+    const controller = data.find((r) => r.worker_id === 'bot_controller');
+    const workers = data.filter((r) => r.worker_id && r.worker_id.toLowerCase().startsWith('worker-'));
+
+    const now = Date.now();
+    const isControllerRunning = controller?.state === 'running' || controller?.state === 'trigger_requested';
+    const hasActiveWorkers = workers.some((w) => {
+      const last = new Date(w.updated_at || 0).getTime();
+      return (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+    });
+
+    const isRunning = isControllerRunning || hasActiveWorkers;
 
     return {
       success: true,
       isRunning,
-      state: row.state,
-      workersAssigned: row.workers_assigned || 3,
-      tasksDispatched: row.tasks_dispatched || 0,
-      triggeredAt: row.triggered_at,
-      lastHeartbeat: row.last_heartbeat,
+      state: isRunning ? 'running' : 'idle',
+      workersAssigned: workers.length || 3,
+      workers,
+      triggeredAt: controller?.updated_at,
     };
   } catch (err) {
     return { success: false, isRunning: false, state: 'idle', error: err.message };

@@ -15,6 +15,10 @@ export default defineConfig({
         changeOrigin: true,
         rewrite: () => '/health',
       },
+      '/api/bot': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
+      },
     },
   },
   preview: {
@@ -26,6 +30,10 @@ export default defineConfig({
         target: 'https://zoho-mail-reader.onrender.com',
         changeOrigin: true,
         rewrite: () => '/health',
+      },
+      '/api/bot': {
+        target: 'http://localhost:3001',
+        changeOrigin: true,
       },
     },
   },

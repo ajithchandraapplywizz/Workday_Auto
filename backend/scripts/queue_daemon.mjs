@@ -35,6 +35,7 @@ import {
   getTotalApplicationCountForCandidates,
   updateDaemonCaState,
   fetchPendingTasksForActiveCAs,
+  updateWorkerStatus,
 } from '../lib/supabaseClient.mjs';
 import { runQueueWorkerPool } from '../lib/workerPool.mjs';
 
@@ -114,6 +115,13 @@ export async function checkAndTriggerAutonomousPool(force = false) {
 
     isPoolRunning = true;
     lastTriggerTime = new Date().toISOString();
+
+    // Mark controller and 3 workers active in worker_status
+    await updateWorkerStatus('bot_controller', { state: 'running', current_application_id: 'Active' }).catch(() => {});
+    for (let slot = 1; slot <= CONCURRENCY; slot++) {
+      await updateWorkerStatus(`worker-${slot}`, { state: 'in_flight', current_application_id: 'Clustering unique links...' }).catch(() => {});
+    }
+
     await updateDaemonCaState('_daemon_', {
       caName: 'Autonomous 3-Worker Pool',
       state: 'running',
@@ -156,6 +164,10 @@ export async function checkAndTriggerAutonomousPool(force = false) {
     } catch (err) {
       console.error(`\n[DAEMON] Worker pool error:`, err?.message || err);
     } finally {
+      await updateWorkerStatus('bot_controller', { state: 'idle', current_application_id: null }).catch(() => {});
+      for (let slot = 1; slot <= CONCURRENCY; slot++) {
+        await updateWorkerStatus(`worker-${slot}`, { state: 'idle', current_application_id: null }).catch(() => {});
+      }
       await updateDaemonCaState('_daemon_', {
         caName: 'Autonomous 3-Worker Pool',
         state: 'idle',
@@ -169,7 +181,7 @@ export async function checkAndTriggerAutonomousPool(force = false) {
   }
 }
 
-// Check for trigger signal in Supabase queue_daemon_state
+// Check for trigger signal in Supabase worker_status (bot_controller)
 async function checkSupabaseTriggerSignal() {
   if (isPoolRunning) return;
   try {
@@ -179,14 +191,22 @@ async function checkSupabaseTriggerSignal() {
     if (!configured) return;
 
     const res = await httpsJsonWithRetry({
-      url: `${url}/rest/v1/queue_daemon_state?ca_email=eq._daemon_&select=state,triggered_at`,
+      url: `${url}/rest/v1/worker_status?worker_id=eq.bot_controller&select=state,updated_at`,
       headers: { apikey: key, Authorization: `Bearer ${key}` },
     });
 
     if (res.ok && res.text) {
       const data = res.json();
       if (Array.isArray(data) && data[0]?.state === 'trigger_requested') {
-        console.log(`\n⚡ [DAEMON] Supabase trigger signal received from Developer Dashboard! Starting 3-worker bot...`);
+        console.log(`\n⚡ [DAEMON] Supabase trigger signal received from Developer Dashboard (worker_status)! Starting 3-worker bot...`);
+        // Acknowledge signal immediately
+        await httpsJsonWithRetry({
+          url: `${url}/rest/v1/worker_status?worker_id=eq.bot_controller`,
+          method: 'PATCH',
+          headers: { apikey: key, Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+          body: { state: 'running', updated_at: new Date().toISOString() },
+        }).catch(() => {});
+
         checkAndTriggerAutonomousPool(true).catch(console.error);
       }
     }
@@ -263,6 +283,20 @@ const server = http.createServer(async (req, res) => {
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[DAEMON SERVER] HTTP listening on 0.0.0.0:${PORT} (Health & Developer Trigger API active)`);
 });
+
+// Initialize worker_status table rows for the 3 workers and controller
+async function initWorkerStatusOnStartup() {
+  try {
+    await updateWorkerStatus('bot_controller', { state: 'idle', current_application_id: null });
+    for (let slot = 1; slot <= CONCURRENCY; slot++) {
+      await updateWorkerStatus(`worker-${slot}`, { state: 'idle', current_application_id: null });
+    }
+    console.log(`[DAEMON] worker_status table initialized for ${CONCURRENCY} workers + bot_controller.`);
+  } catch (err) {
+    console.warn(`[DAEMON] Note on worker_status init:`, err.message);
+  }
+}
+initWorkerStatusOnStartup();
 
 // Main Poll Loop
 async function pollLoop() {

@@ -32,6 +32,7 @@ import { readFileSync, existsSync } from 'fs';
 import { resolve } from 'path';
 import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
+import { updateWorkerStatus } from './supabaseClient.mjs';
 
 function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
@@ -672,8 +673,22 @@ export async function runClusterBatchRunner({
   const topClusters = await fetchQueueClusters({ minClients: 1, limit: topLinks });
 
   if (!topClusters.length) {
-    console.log(`❌ No tasks found in batch_job_queue!`);
+    console.log(`❌ No tasks found in batch_job_queue! Setting workers to idle.`);
+    for (let slot = 1; slot <= 3; slot++) {
+      await updateWorkerStatus(`worker-${slot}`, {
+        state: 'idle',
+        current_application_id: 'Ready (0 pending queue items)',
+      }).catch(() => {});
+    }
     return;
+  }
+
+  // Set workers to active in-flight in Supabase worker_status
+  for (let slot = 1; slot <= Math.min(3, topClusters.length); slot++) {
+    await updateWorkerStatus(`worker-${slot}`, {
+      state: 'in_flight',
+      current_application_id: 'Clustering & preparing link run...',
+    }).catch(() => {});
   }
 
   console.log(`\n📋 Selected Top ${topClusters.length} Canonical Clusters for Parallel Execution:\n`);
@@ -697,13 +712,18 @@ export async function runClusterBatchRunner({
   const clusterResults = [];
 
   async function workerLoop(slot) {
-    const workerId = `Worker-${slot}`;
+    const workerId = `worker-${slot}`;
     while (clusterIndex < topClusters.length) {
       const myIndex = clusterIndex++;
       const cluster = topClusters[myIndex];
       if (!cluster) break;
 
-      console.log(`\n▶️ [${workerId}] [Link #${myIndex + 1}/${topClusters.length}] Assigned: ${cluster.company} — ${cluster.roleTitle} (${cluster.clientCount} clients)`);
+      await updateWorkerStatus(workerId, {
+        state: 'in_flight',
+        current_application_id: `${cluster.company} (${cluster.clientCount} clients)`,
+      }).catch(() => {});
+
+      console.log(`\n▶️ [Worker ${slot}] [Link #${myIndex + 1}/${topClusters.length}] Assigned: ${cluster.company} — ${cluster.roleTitle} (${cluster.clientCount} clients)`);
 
       try {
         const res = await runClusterWorker(workerId, cluster, {
@@ -714,7 +734,7 @@ export async function runClusterBatchRunner({
         });
         clusterResults.push(res);
       } catch (err) {
-        console.error(`❌ [${workerId}] Error on link #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
+        console.error(`❌ [Worker ${slot}] Error on link #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
         clusterResults.push({
           workerId,
           jobUrl: cluster.canonicalUrl,
@@ -727,6 +747,11 @@ export async function runClusterBatchRunner({
         });
       }
     }
+
+    await updateWorkerStatus(workerId, {
+      state: 'idle',
+      current_application_id: null,
+    }).catch(() => {});
   }
 
   const workerPromises = [];
@@ -735,6 +760,14 @@ export async function runClusterBatchRunner({
   }
 
   await Promise.all(workerPromises);
+
+  // Return all workers to idle
+  for (let slot = 1; slot <= 3; slot++) {
+    await updateWorkerStatus(`worker-${slot}`, {
+      state: 'idle',
+      current_application_id: null,
+    }).catch(() => {});
+  }
 
   // Step 3: Final Execution Summary
   const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
