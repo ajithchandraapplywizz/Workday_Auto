@@ -654,24 +654,46 @@ export async function fetchWorkerStatuses() {
   try {
     const { data, error } = await supabase.from('worker_status').select('*').order('worker_id');
     if (error) throw error;
-    const workers = data || [];
+    const rows = data || [];
     const now = Date.now();
-    // Worker is ONLY in_flight if updated within the last 3 minutes (180s)
-    const liveWorkers = workers.map((w) => {
-      const lastUpdate = new Date(w.updated_at || 0).getTime();
-      const isFresh = lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
-      const isActuallyInFlight = isFresh && (w.state === 'in_flight' || w.state === 'applying');
+
+    // Group into 3 canonical worker slots: worker-1, worker-2, worker-3
+    const slots = [1, 2, 3].map((num) => {
+      const matching = rows.filter((r) => {
+        const id = (r.worker_id || '').toLowerCase();
+        return id.includes(`worker-${num}`) || id === `worker${num}`;
+      });
+      const activeMatch = matching.find((r) => {
+        const last = new Date(r.updated_at || 0).getTime();
+        return last && (now - last < 3 * 60 * 1000) && (r.state === 'in_flight' || r.state === 'applying');
+      });
+
       return {
-        ...w,
-        state: isActuallyInFlight ? 'in_flight' : 'idle',
+        worker_id: `worker-${num}`,
+        name: `Worker ${num}`,
+        state: activeMatch ? 'in_flight' : 'idle',
+        current_application_id: activeMatch?.current_application_id || null,
+        updated_at: activeMatch?.updated_at || matching[0]?.updated_at || new Date().toISOString(),
       };
     });
-    const inFlight = liveWorkers.filter((w) => w.state === 'in_flight').length;
-    const total = liveWorkers.length || 1;
+
+    const inFlight = slots.filter((s) => s.state === 'in_flight').length;
+    const total = 3;
     const idle = Math.max(0, total - inFlight);
-    return { success: true, workers: liveWorkers, inFlight, idle, total };
+
+    return { success: true, workers: slots, inFlight, idle, total };
   } catch (err) {
-    return { success: true, workers: [], inFlight: 0, idle: 1, total: 1 };
+    return {
+      success: true,
+      workers: [
+        { worker_id: 'worker-1', name: 'Worker 1', state: 'idle' },
+        { worker_id: 'worker-2', name: 'Worker 2', state: 'idle' },
+        { worker_id: 'worker-3', name: 'Worker 3', state: 'idle' },
+      ],
+      inFlight: 0,
+      idle: 3,
+      total: 3,
+    };
   }
 }
 
@@ -2498,13 +2520,25 @@ export async function triggerAutonomousBot() {
  */
 export async function fetchBotDaemonStatus() {
   try {
+    let daemonApiRunning = false;
+    let daemonApiWorkers = 3;
+
+    try {
+      const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
+      if (res.ok) {
+        const json = await res.json();
+        daemonApiRunning = Boolean(json.isRunning);
+        daemonApiWorkers = json.workers || 3;
+      }
+    } catch {}
+
     const { data, error } = await supabase
       .from('worker_status')
       .select('*')
       .order('worker_id');
 
     if (error || !data || data.length === 0) {
-      return { success: true, isRunning: false, state: 'idle', workers: [] };
+      return { success: true, isRunning: daemonApiRunning, state: daemonApiRunning ? 'running' : 'idle', workers: [] };
     }
 
     const controller = data.find((r) => r.worker_id === 'bot_controller');
@@ -2517,13 +2551,13 @@ export async function fetchBotDaemonStatus() {
       return (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
     });
 
-    const isRunning = isControllerRunning || hasActiveWorkers;
+    const isRunning = daemonApiRunning || isControllerRunning || hasActiveWorkers;
 
     return {
       success: true,
       isRunning,
       state: isRunning ? 'running' : 'idle',
-      workersAssigned: workers.length || 3,
+      workersAssigned: daemonApiWorkers || workers.length || 3,
       workers,
       triggeredAt: controller?.updated_at,
     };

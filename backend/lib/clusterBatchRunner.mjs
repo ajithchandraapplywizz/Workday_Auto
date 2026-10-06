@@ -402,7 +402,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     taskIndex: 1,
     totalTasks: activeTasks.length,
     options: {
-      headless: false, // Ensure visible headed browser window
+      headless: Boolean(headless),
       dryRun: !confirmSubmit,
       confirmSubmit,
       defaultPassword,
@@ -608,7 +608,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       taskIndex: followerIndex + 1,
       totalTasks: activeTasks.length,
       options: {
-        headless: false, // Ensure visible headed browser window
+        headless: Boolean(headless),
         dryRun: !confirmSubmit,
         confirmSubmit,
         defaultPassword,
@@ -727,7 +727,7 @@ export async function runClusterBatchRunner({
 
       try {
         const res = await runClusterWorker(workerId, cluster, {
-          headless: false, // Explicitly HEADED only!
+          headless: Boolean(headless),
           confirmSubmit,
           limitPerLink,
           defaultPassword,
