@@ -30,7 +30,7 @@ import {
   AlertCircle,
   FileText
 } from 'lucide-react';
-import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
+import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function CADashboard() {
   const { user, date } = useAuth();
@@ -51,8 +51,9 @@ export default function CADashboard() {
 
   // Workday Auto-Apply Dynamic state
   const [activeTask, setActiveTask] = useState(null);
-  const [companyName, setCompanyName] = useState('Workday Partner');
-  const [roleTitle, setRoleTitle] = useState('Workday Application');
+  const [clientJobs, setClientJobs] = useState([]);
+  const [companyName, setCompanyName] = useState('');
+  const [roleTitle, setRoleTitle] = useState('');
   const [jobUrl, setJobUrl] = useState('');
   const [applyStep, setApplyStep] = useState(0); // 0: idle, 1: scanning, 2: matching, 3: filled, 4: submitted
   const [applyLog, setApplyLog] = useState([]);
@@ -64,16 +65,20 @@ export default function CADashboard() {
   const [newAnswer, setNewAnswer] = useState('');
   const [newFieldType, setNewFieldType] = useState('input');
 
-  // Form Review & Confirmation Modal state
-  const [showReviewModal, setShowReviewModal] = useState(false);
+  // Form Review & Confirmation Slide Drawer state
+  const [showSlideDrawer, setShowSlideDrawer] = useState(false);
+  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
 
   const handleReviewSubmitted = () => {
     setApplyStep(4);
     setApplyLog((prev) => [
       ...prev,
       `[${new Date().toLocaleTimeString()}] Form answers confirmed and submitted by Career Associate!`,
-      `[${new Date().toLocaleTimeString()}] Recorded changes in public.applications & client_questions.`,
+      `[${new Date().toLocaleTimeString()}] Recorded changes in public.applications & job_distributions.`,
     ]);
+    if (applywizzId) {
+      loadClientProfile(applywizzId);
+    }
   };
 
   // Dynamically load assigned candidates for this CA on the active date
@@ -122,7 +127,7 @@ export default function CADashboard() {
     return () => { isMounted = false; };
   }, [sessionCaEmail, date]);
 
-  // Fetch client details, questions, and active queue task
+  // Fetch client details, questions, and real jobs from Supabase
   const loadClientProfile = async (idToLoad) => {
     const id = idToLoad || applywizzId;
     if (!id) return;
@@ -131,10 +136,11 @@ export default function CADashboard() {
     setApplyLog([]);
 
     try {
-      const [detailsRes, qaRes, queueRes] = await Promise.all([
+      const [detailsRes, qaRes, queueRes, distRes] = await Promise.all([
         fetchClientDetails(id),
         fetchClientQuestions({ applywizzId: id, limit: 50 }),
-        supabase.from('batch_job_queue').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }).limit(1),
+        supabase.from('batch_job_queue').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
+        supabase.from('job_distributions').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
       ]);
 
       if (detailsRes.success && detailsRes.client) {
@@ -147,7 +153,52 @@ export default function CADashboard() {
         setQuestions(qaRes.questions || []);
       }
 
-      const task = queueRes?.data?.[0] || null;
+      // Merge real jobs from job_distributions (primary) and batch_job_queue (fallback)
+      const jobsMap = new Map();
+      if (distRes.data && distRes.data.length > 0) {
+        for (const dj of distRes.data) {
+          const u = (dj.job_url || '').trim().toLowerCase();
+          if (u && !jobsMap.has(u)) {
+            jobsMap.set(u, {
+              id: dj.id,
+              applywizz_id: dj.applywizz_id,
+              job_url: dj.job_url,
+              company: dj.company || 'Workday Partner',
+              role_title: dj.role_title || 'Workday Application',
+              status: dj.status === 'distributed' ? 'ready_for_review' : dj.status,
+              is_fully_answered: dj.is_fully_answered,
+              resolved_answers: dj.resolved_answers,
+              unanswered_count: dj.unanswered_count || 0,
+              applied_screenshot: dj.applied_screenshot || dj.original_application_screenshot_successful || dj.screenshot_url,
+              screenshot_url: dj.screenshot_url,
+              source: 'job_distributions',
+            });
+          }
+        }
+      }
+
+      if (queueRes.data && queueRes.data.length > 0) {
+        for (const qj of queueRes.data) {
+          const u = (qj.job_url || '').trim().toLowerCase();
+          if (u && !jobsMap.has(u)) {
+            jobsMap.set(u, {
+              id: qj.id,
+              applywizz_id: qj.applywizz_id,
+              job_url: qj.job_url,
+              company: qj.company || 'Workday Partner',
+              role_title: qj.role_title || 'Workday Application',
+              status: qj.status,
+              screenshot_url: qj.screenshot_path,
+              source: 'batch_job_queue',
+            });
+          }
+        }
+      }
+
+      const mergedJobs = Array.from(jobsMap.values());
+      setClientJobs(mergedJobs);
+
+      const task = mergedJobs[0] || null;
       setActiveTask(task);
 
       if (task) {
@@ -155,28 +206,26 @@ export default function CADashboard() {
         if (task.company) setCompanyName(task.company);
         if (task.role_title) setRoleTitle(task.role_title);
 
-        if (task.status === 'reached_review' || task.status === 'pre_resolved') {
+        if (task.status === 'ready_for_review' || task.status === 'reached_review' || task.status === 'pre_resolved') {
           setApplyStep(3);
           setApplyLog([
-            `[Task ${task.id.slice(0, 8)}] Scanned job application: ${task.company} (${task.role_title})`,
-            `[Workday Engine] Extracted required DOM questions and pre-resolved form fields.`,
-            `[Ready for Review] Reached Review screen. Click Review Form Fields to inspect and confirm submission.`,
+            `[Application ${task.company}] Status: Ready for Review. Questions scraped & answers pre-resolved.`,
+            `Click on application below to slide open unique AI-resolved questions.`,
           ]);
         } else if (task.status === 'submitted') {
           setApplyStep(4);
           setApplyLog([
-            `[Task ${task.id.slice(0, 8)}] Application already submitted for ${task.company} — ${task.role_title}.`,
+            `[Application ${task.company}] Successfully submitted on Workday! Confirmation proof saved.`,
           ]);
         } else {
           setApplyLog([
-            `[Task ${task.id.slice(0, 8)}] Active task in queue (${task.status})`,
-            `[Target Job] ${task.company || 'Workday Partner'} — ${task.role_title || 'Workday Job'}`,
+            `[Task Queue] Status: ${task.status}. Waiting for autonomous worker or review.`,
           ]);
         }
       } else {
-        setJobUrl('https://unitytech.wd1.myworkdayjobs.com/Unity/job/Mountain-View-CA-USA/Principal-Machine-Learning-Engineer--Ads-Modeling_JOBREQ-2616596');
-        setCompanyName('Unity Technologies');
-        setRoleTitle('Principal Machine Learning Engineer');
+        setJobUrl('');
+        setCompanyName('');
+        setRoleTitle('');
       }
     } catch (err) {
       console.error('Failed to load candidate details:', err);
@@ -492,11 +541,14 @@ export default function CADashboard() {
                   type="button"
                   className="btn-icon-label"
                   style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', fontSize: '0.78rem' }}
-                  onClick={() => setShowReviewModal(true)}
+                  onClick={() => {
+                    setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
+                    setShowSlideDrawer(true);
+                  }}
                   disabled={!clientData}
                 >
                   <FileText size={14} />
-                  <span>Review Form Fields</span>
+                  <span>Review AI Form Answers</span>
                 </button>
                 <span className="console-speed-tag">Tier-1 Engine Active</span>
               </div>
@@ -552,10 +604,13 @@ export default function CADashboard() {
                       type="button"
                       className="btn-accent-run"
                       style={{ flex: 1.2, background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)' }}
-                      onClick={() => setShowReviewModal(true)}
+                      onClick={() => {
+                        setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
+                        setShowSlideDrawer(true);
+                      }}
                     >
                       <FileText size={16} />
-                      <span>Review Form &amp; Badges (AI / DB / Resume)</span>
+                      <span>Review AI Questions &amp; Answers</span>
                     </button>
                     <button
                       type="button"
@@ -569,6 +624,102 @@ export default function CADashboard() {
                     </button>
                   </div>
                 )}
+              </div>
+
+              {/* Allotted Candidate Applications List */}
+              <div style={{ marginTop: '1.25rem', borderTop: '1px solid #334155', paddingTop: '1rem' }}>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.75rem' }}>
+                  <span style={{ fontSize: '0.78rem', fontWeight: 700, color: '#94a3b8', letterSpacing: '0.05em' }}>
+                    ALLOTTED APPLICATIONS ({clientJobs.length}):
+                  </span>
+                  <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
+                    Click an application to slide open unique AI answers
+                  </span>
+                </div>
+
+                {clientJobs.length > 0 ? (
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                    {clientJobs.map((j, idx) => {
+                      const isSub = j.status === 'submitted';
+                      const isQ = j.status === 'queued' || j.status === 'queued_for_submission';
+                      const isSelected = activeTask?.id === j.id;
+
+                      let badgeBg = 'rgba(56, 189, 248, 0.15)';
+                      let badgeColor = '#38bdf8';
+                      let badgeBorder = 'rgba(56, 189, 248, 0.3)';
+                      let badgeText = 'READY FOR REVIEW';
+
+                      if (isSub) {
+                        badgeBg = 'rgba(16, 185, 129, 0.15)';
+                        badgeColor = '#34d399';
+                        badgeBorder = 'rgba(16, 185, 129, 0.3)';
+                        badgeText = 'SUBMITTED';
+                      } else if (isQ) {
+                        badgeBg = 'rgba(245, 158, 11, 0.15)';
+                        badgeColor = '#f59e0b';
+                        badgeBorder = 'rgba(245, 158, 11, 0.3)';
+                        badgeText = 'QUEUED';
+                      }
+
+                      return (
+                        <div
+                          key={j.id || idx}
+                          onClick={() => {
+                            setActiveTask(j);
+                            setJobUrl(j.job_url);
+                            setCompanyName(j.company);
+                            setRoleTitle(j.role_title);
+                            setSelectedAppForDrawer(j);
+                            setShowSlideDrawer(true);
+                          }}
+                          style={{
+                            background: isSelected ? '#1e293b' : '#0f172a',
+                            border: isSelected ? '1px solid #38bdf8' : '1px solid #1e293b',
+                            borderRadius: '6px',
+                            padding: '10px 12px',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            cursor: 'pointer',
+                            transition: 'all 0.15s ease',
+                          }}
+                        >
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                              <strong style={{ fontSize: '0.88rem', color: '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                {j.company || 'Workday Partner'}
+                              </strong>
+                              <span style={{
+                                fontSize: '0.68rem',
+                                fontWeight: 700,
+                                padding: '2px 6px',
+                                borderRadius: '4px',
+                                background: badgeBg,
+                                color: badgeColor,
+                                border: `1px solid ${badgeBorder}`,
+                              }}>
+                                {badgeText}
+                              </span>
+                            </div>
+                            <span style={{ fontSize: '0.78rem', color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                              {j.role_title || 'Application'}
+                            </span>
+                          </div>
+
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', color: '#38bdf8', fontSize: '0.78rem', fontWeight: 600 }}>
+                            <span>Inspect</span>
+                            <ChevronRight size={14} />
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+                ) : (
+                  <div style={{ padding: '1rem', textAlign: 'center', color: '#64748b', fontSize: '0.82rem', background: '#0f172a', borderRadius: '6px', border: '1px solid #1e293b' }}>
+                    No applications currently queued for this client.
+                  </div>
+                )}
+              </div>
 
                 {applyStep === 4 && (
                   <div className="submission-success-banner">
@@ -593,7 +744,6 @@ export default function CADashboard() {
               )}
             </div>
           </div>
-        </div>
 
         {/* Right Column: Q&A Answers Manager */}
         <div className="panel-card qa-card">
@@ -720,18 +870,22 @@ export default function CADashboard() {
         </div>
       )}
 
-      {/* Interactive Application Form Review & Confirmation Modal */}
-      {showReviewModal && (
-        <ApplicationFormReviewModal
-          isOpen={showReviewModal}
-          onClose={() => setShowReviewModal(false)}
-          applywizzId={clientData?.applywizz_id || applywizzId}
-          jobUrl={jobUrl}
-          companyName={companyName}
-          roleTitle={roleTitle}
-          onSubmitted={handleReviewSubmitted}
-        />
-      )}
+      {/* Interactive Application Slide Drawer */}
+      <ApplicationSlideDrawer
+        isOpen={showSlideDrawer}
+        onClose={() => {
+          setShowSlideDrawer(false);
+          setSelectedAppForDrawer(null);
+        }}
+        application={selectedAppForDrawer || activeTask || {
+          applywizz_id: clientData?.applywizz_id || applywizzId,
+          job_url: jobUrl,
+          company: companyName,
+          role_title: roleTitle,
+          status: activeTask?.status || 'ready_for_review',
+        }}
+        onStatusUpdated={handleReviewSubmitted}
+      />
     </div>
   );
 }

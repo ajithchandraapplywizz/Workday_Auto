@@ -12,6 +12,7 @@ import {
 } from '../services/api';
 import CAClientDetailsModal from '../components/CAClientDetailsModal';
 import OperatorDetailsPage from './OperatorDetailsPage';
+import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function AdminDashboard() {
   const { date, timeframe } = useAuth();
@@ -25,6 +26,7 @@ export default function AdminDashboard() {
   const [appCaFilter, setAppCaFilter] = useState('All');
   const [selectedOperatorForModal, setSelectedOperatorForModal] = useState(null);
   const [selectedOperatorDetails, setSelectedOperatorDetails] = useState(null);
+  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
 
   // Real dynamic states
   const [reconciliation, setReconciliation] = useState({
@@ -719,6 +721,7 @@ export default function AdminDashboard() {
                   <th>STATUS</th>
                   <th>CREATED AT</th>
                   <th>LAST UPDATED</th>
+                  <th>AI ANSWERS</th>
                 </tr>
               </thead>
               <tbody>
@@ -761,11 +764,29 @@ export default function AdminDashboard() {
                       </td>
                       <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
                       <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAppForDrawer(app)}
+                          style={{
+                            background: 'rgba(56, 189, 248, 0.15)',
+                            color: '#38bdf8',
+                            border: '1px solid rgba(56, 189, 248, 0.3)',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Inspect Answers
+                        </button>
+                      </td>
                     </tr>
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No applications recorded for the selected filter and period.
                     </td>
                   </tr>
@@ -802,6 +823,14 @@ export default function AdminDashboard() {
         onClose={() => setSelectedOperatorForModal(null)}
         operator={selectedOperatorForModal}
         dateStr={date}
+      />
+
+      {/* Interactive Application Slide Drawer */}
+      <ApplicationSlideDrawer
+        isOpen={Boolean(selectedAppForDrawer)}
+        onClose={() => setSelectedAppForDrawer(null)}
+        application={selectedAppForDrawer}
+        onStatusUpdated={() => loadData(true)}
       />
     </div>
   );

@@ -8,6 +8,7 @@ import {
 } from '../services/api';
 import CAClientDetailsModal from '../components/CAClientDetailsModal';
 import OperatorDetailsPage from './OperatorDetailsPage';
+import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function ManagerDashboard() {
   const { user, date, timeframe, setTimeframe } = useAuth();
@@ -45,8 +46,11 @@ export default function ManagerDashboard() {
   const [activeWorkDate, setActiveWorkDate] = useState(date);
   const [isFallbackDate, setIsFallbackDate] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
+  const [appStatusFilter, setAppStatusFilter] = useState('All');
+  const [appSearchQuery, setAppSearchQuery] = useState('');
 
-  const tabs = ['Home', 'Operators', 'Activity', 'Reports', 'Guide'];
+  const tabs = ['Home', 'Applications', 'Operators', 'Activity', 'Reports', 'Guide'];
 
   // Load managers list once
   useEffect(() => {
@@ -147,6 +151,23 @@ export default function ManagerDashboard() {
     if (selectedCA === 'All') return teamClients;
     return teamClients.filter((c) => c.assigned === selectedCA);
   }, [teamClients, selectedCA]);
+
+  // Filtered applications for Manager Applications tab
+  const filteredApplications = useMemo(() => {
+    return applications.filter((app) => {
+      const matchStatus =
+        appStatusFilter === 'All' ||
+        (app.status || '').toLowerCase() === appStatusFilter.toLowerCase();
+      const q = appSearchQuery.toLowerCase();
+      const matchSearch =
+        !q ||
+        (app.applywizz_id && app.applywizz_id.toLowerCase().includes(q)) ||
+        (app.company && app.company.toLowerCase().includes(q)) ||
+        (app.job_title && app.job_title.toLowerCase().includes(q)) ||
+        (app.role_title && app.role_title.toLowerCase().includes(q));
+      return matchStatus && matchSearch;
+    });
+  }, [applications, appStatusFilter, appSearchQuery]);
 
   // Team summary KPIs
   const teamMetrics = useMemo(() => {
@@ -498,7 +519,115 @@ export default function ManagerDashboard() {
         </div>
       )}
 
-      {/* 2. OPERATORS TAB — This manager's CAs only */}
+      {/* 2. APPLICATIONS TAB (Manager Team Applications & Slide Drawer Inspection) */}
+      {activeTab === 'Applications' && (
+        <div className="tab-body-fade">
+          <div className="video-filter-bar" style={{ display: 'flex', gap: '1rem', marginBottom: '1.25rem' }}>
+            <input
+              type="text"
+              value={appSearchQuery}
+              onChange={(e) => setAppSearchQuery(e.target.value)}
+              placeholder="Search by ID, Company, or Job Title..."
+              className="video-input-search"
+            />
+            <select
+              value={appStatusFilter}
+              onChange={(e) => setAppStatusFilter(e.target.value)}
+              className="video-select-filter"
+            >
+              <option value="All">All Statuses</option>
+              <option value="ready_for_review">Ready for Review Only</option>
+              <option value="queued">Queued Only</option>
+              <option value="in_progress">In Progress / Applying</option>
+              <option value="submitted">Submitted</option>
+              <option value="failed">Failed</option>
+            </select>
+            <span style={{ alignSelf: 'center', fontSize: '0.85rem', color: '#94a3b8' }}>
+              Showing {filteredApplications.length} of {applications.length} applications
+            </span>
+          </div>
+
+          <div className="video-table-container">
+            <table className="video-data-table">
+              <thead>
+                <tr>
+                  <th>CLIENT AWL ID</th>
+                  <th>JOB TITLE / POSTING</th>
+                  <th>COMPANY</th>
+                  <th>STATUS</th>
+                  <th>CREATED AT</th>
+                  <th>LAST UPDATED</th>
+                  <th>AI ANSWERS</th>
+                </tr>
+              </thead>
+              <tbody>
+                {filteredApplications.length > 0 ? (
+                  filteredApplications.map((app) => (
+                    <tr key={app.id}>
+                      <td>
+                        <a
+                          href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(app.applywizz_id)}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="app-id-tag"
+                          style={{ textDecoration: 'none' }}
+                        >
+                          {app.applywizz_id}
+                        </a>
+                      </td>
+                      <td>
+                        <a
+                          href={app.job_url}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="table-link-btn"
+                          title="Open Workday Job"
+                        >
+                          {app.job_title || app.role_title || 'Workday Application'}
+                        </a>
+                      </td>
+                      <td>{app.company || 'Workday Tenant'}</td>
+                      <td>
+                        <span className={`video-status-tag ${(app.status || 'queued').toLowerCase()}`}>
+                          {(app.status || 'queued').toUpperCase()}
+                        </span>
+                      </td>
+                      <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
+                      <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>
+                      <td>
+                        <button
+                          type="button"
+                          onClick={() => setSelectedAppForDrawer(app)}
+                          style={{
+                            background: 'rgba(56, 189, 248, 0.15)',
+                            color: '#38bdf8',
+                            border: '1px solid rgba(56, 189, 248, 0.3)',
+                            padding: '4px 8px',
+                            borderRadius: '4px',
+                            fontSize: '0.75rem',
+                            fontWeight: 600,
+                            cursor: 'pointer',
+                          }}
+                        >
+                          Inspect Answers
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                      No applications recorded for {currentManager.name}&apos;s team.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {/* 3. OPERATORS TAB — This manager's CAs only */}
       {activeTab === 'Operators' && (
         <div className="tab-body-fade">
           <div className="video-table-container">
@@ -729,6 +858,14 @@ export default function ManagerDashboard() {
         onClose={() => setSelectedOperatorForModal(null)}
         operator={selectedOperatorForModal}
         dateStr={activeWorkDate || date}
+      />
+
+      {/* Interactive Application Slide Drawer */}
+      <ApplicationSlideDrawer
+        isOpen={Boolean(selectedAppForDrawer)}
+        onClose={() => setSelectedAppForDrawer(null)}
+        application={selectedAppForDrawer}
+        onStatusUpdated={() => loadManagerData()}
       />
     </div>
   );
