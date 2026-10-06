@@ -982,7 +982,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
       return null;
     }
 
-    let filter = '?status=in.(pending,pre_resolved,approved_for_submission)';
+    let filter = '?status=in.(pending,pre_resolved,approved_for_submission,queued,queued_for_submission)';
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
       filter += `&applywizz_id=in.(${allowedCandidateIds.join(',')})`;
     }
@@ -1002,7 +1002,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
 
     const patched = await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?id=eq.${encode(task.id)}&status=in.(pending,pre_resolved,approved_for_submission)`,
+      query: `?id=eq.${encode(task.id)}&status=in.(pending,pre_resolved,approved_for_submission,queued,queued_for_submission)`,
       prefer: 'return=representation',
       body: patchBody,
     });
@@ -1298,9 +1298,9 @@ export async function fetchPendingTasksForActiveCAs(allowedCandidateIds = null) 
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length === 0) {
       return [];
     }
-    let filter = '?status=in.(pending,pre_resolved,approved_for_submission)&order=created_at.asc&limit=500';
+    let filter = '?status=in.(pending,pre_resolved,approved_for_submission,queued,queued_for_submission)&order=created_at.asc&limit=500';
     if (Array.isArray(allowedCandidateIds) && allowedCandidateIds.length > 0) {
-      filter = `?status=in.(pending,pre_resolved,approved_for_submission)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
+      filter = `?status=in.(pending,pre_resolved,approved_for_submission,queued,queued_for_submission)&applywizz_id=in.(${allowedCandidateIds.join(',')})&order=created_at.asc&limit=500`;
     }
     const tasks = await request('batch_job_queue', { query: filter });
     return Array.isArray(tasks) ? tasks : [];
@@ -1694,16 +1694,16 @@ export async function leaseQueuedSubmissionTask(workerId = 'worker-1') {
   if (!isSupabaseConfigured()) return null;
   try {
     const now = new Date().toISOString();
-    // Lease oldest task queued_for_submission from job_distributions
+    // Lease oldest task queued or queued_for_submission from job_distributions
     const candidates = await request('job_distributions', {
-      query: `?status=eq.queued_for_submission&order=updated_at.asc&limit=1`,
+      query: `?or=(status.eq.queued,status.eq.queued_for_submission)&order=updated_at.asc&limit=1`,
     });
     if (!Array.isArray(candidates) || !candidates.length) return null;
     const task = candidates[0];
 
     const patched = await request('job_distributions', {
       method: 'PATCH',
-      query: `?id=eq.${encode(task.id)}&status=eq.queued_for_submission`,
+      query: `?id=eq.${encode(task.id)}&or=(status.eq.queued,status.eq.queued_for_submission)`,
       prefer: 'return=representation',
       body: {
         status: 'applying',
@@ -1719,7 +1719,37 @@ export async function leaseQueuedSubmissionTask(workerId = 'worker-1') {
 }
 
 /**
+ * Mark a task in job_distributions as currently being applied by a worker.
+ */
+export async function markJobDistributionApplying({
+  applywizzId,
+  jobUrl,
+  workerId = null,
+} = {}) {
+  if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const now = new Date().toISOString();
+  try {
+    await request('job_distributions', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+      prefer: 'return=minimal',
+      body: {
+        status: 'applying',
+        worker_id: workerId || null,
+        worker_leased_at: now,
+        updated_at: now,
+      },
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * Complete a submitted task with confirmation proof screenshot URL into job_distributions.
+ * Persists authentic proof into original_application_screenshot_successful and final_submission_screenshot_url.
  */
 export async function completeSubmittedTask({
   applywizzId,
@@ -1732,17 +1762,34 @@ export async function completeSubmittedTask({
   const now = new Date().toISOString();
 
   try {
-    await request('job_distributions', {
-      method: 'PATCH',
-      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
-      prefer: 'return=minimal',
-      body: {
-        status: 'submitted',
-        screenshot_url: screenshotUrl || null,
-        worker_id: workerId || null,
-        updated_at: now,
-      },
-    });
+    // 1. Update job_distributions with dedicated screenshot proof columns
+    try {
+      await request('job_distributions', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'submitted',
+          original_application_screenshot_successful: screenshotUrl || null,
+          final_submission_screenshot_url: screenshotUrl || null,
+          screenshot_url: screenshotUrl || null,
+          worker_id: workerId || null,
+          updated_at: now,
+        },
+      });
+    } catch {
+      await request('job_distributions', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'submitted',
+          screenshot_url: screenshotUrl || null,
+          worker_id: workerId || null,
+          updated_at: now,
+        },
+      });
+    }
 
     // Also update applications table
     await request('applications', {
@@ -1752,6 +1799,7 @@ export async function completeSubmittedTask({
       body: {
         status: 'submitted',
         screenshot_url: screenshotUrl || null,
+        failure_screenshot_url: screenshotUrl || null,
         updated_at: now,
       },
     }).catch(() => {});
