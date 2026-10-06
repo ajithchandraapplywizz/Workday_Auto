@@ -398,7 +398,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       applywizzId: blueprintTask.applywizz_id,
       jobUrl: blueprintTask.job_url || jobUrl,
     },
-    workerId: `${workerId}-Lead`,
+    workerId,
     taskIndex: 1,
     totalTasks: activeTasks.length,
     options: {

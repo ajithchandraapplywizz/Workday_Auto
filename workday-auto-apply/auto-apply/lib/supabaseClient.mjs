@@ -1200,8 +1200,14 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
 export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null } = {}) {
   if (!isSupabaseConfigured() || !workerId) return false;
   try {
+    let cleanId = String(workerId).toLowerCase().trim();
+    if (cleanId.includes('worker-1') || cleanId.includes('worker1')) cleanId = 'worker-1';
+    else if (cleanId.includes('worker-2') || cleanId.includes('worker2')) cleanId = 'worker-2';
+    else if (cleanId.includes('worker-3') || cleanId.includes('worker3')) cleanId = 'worker-3';
+    else if (cleanId.includes('controller')) cleanId = 'bot_controller';
+
     const row = {
-      worker_id: String(workerId),
+      worker_id: cleanId,
       state: String(state),
       current_application_id: current_application_id || null,
       updated_at: new Date().toISOString(),
@@ -1215,9 +1221,15 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
     return true;
   } catch (err) {
     try {
+      let cleanId = String(workerId).toLowerCase().trim();
+      if (cleanId.includes('worker-1') || cleanId.includes('worker1')) cleanId = 'worker-1';
+      else if (cleanId.includes('worker-2') || cleanId.includes('worker2')) cleanId = 'worker-2';
+      else if (cleanId.includes('worker-3') || cleanId.includes('worker3')) cleanId = 'worker-3';
+      else if (cleanId.includes('controller')) cleanId = 'bot_controller';
+
       await request('worker_status', {
         method: 'PATCH',
-        query: `?worker_id=eq.${encode(workerId)}`,
+        query: `?worker_id=eq.${encode(cleanId)}`,
         prefer: 'return=minimal',
         body: { state: String(state), updated_at: new Date().toISOString() },
       });
