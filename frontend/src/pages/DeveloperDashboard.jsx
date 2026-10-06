@@ -9,6 +9,8 @@ import {
   fetchAutomationTrace,
   fetchAllOperators,
   updateOperatorStatus,
+  triggerAutonomousBot,
+  fetchBotDaemonStatus,
   supabase,
 } from '../services/api';
 
@@ -44,6 +46,9 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 3 });
+  const [isTriggering, setIsTriggering] = useState(false);
+  const [triggerToast, setTriggerToast] = useState(null);
 
   const tabs = ['System', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
 
@@ -60,7 +65,7 @@ export default function DeveloperDashboard() {
     async function loadData(silent = false) {
       if (!silent) setLoading(true);
       try {
-        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes, clientsRes] = await Promise.all([
+        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes, clientsRes, daemonRes] = await Promise.all([
           fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
           fetchWorkerStatuses(),
           checkAllApiHealth(),
@@ -70,7 +75,12 @@ export default function DeveloperDashboard() {
           supabase.from('managers').select('*'),
           supabase.from('client_assignment_log').select('applywizz_id, ca_email, ca_id').order('assignment_date', { ascending: false }).limit(1000),
           supabase.from('clients').select('applywizz_id, client_name, ca_email, current_ca_email'),
+          fetchBotDaemonStatus(),
         ]);
+
+        if (daemonRes?.success) {
+          setBotStatus(daemonRes);
+        }
 
         if (!isMounted) return;
 
@@ -356,8 +366,126 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
+  // Handle triggering autonomous 3-worker bot pool
+  const handleTriggerBot = async () => {
+    setIsTriggering(true);
+    setTriggerToast({ type: 'info', text: '⚡ Dispatching 3-Worker Autonomous Bot trigger...' });
+    try {
+      const res = await triggerAutonomousBot();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ Autonomous 3-Worker Bot Triggered! Workers are visiting unique links, populating scanned_jobs, pre-resolving questions, and distributing answers to all clients.',
+        });
+        setBotStatus((prev) => ({ ...prev, isRunning: true, state: 'running' }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch signal') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Trigger error: ' + err.message });
+    } finally {
+      setIsTriggering(false);
+      setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
   return (
     <div className="dashboard-container">
+      {/* 3-Worker Autonomous Bot Trigger Banner */}
+      <div style={{
+        background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
+        border: '1px solid #334155',
+        borderRadius: '8px',
+        padding: '1rem 1.5rem',
+        marginBottom: '1.25rem',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: '1rem',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <div style={{
+            width: '42px',
+            height: '42px',
+            borderRadius: '8px',
+            background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+            border: botStatus.isRunning ? '1px solid #10b981' : '1px solid #0284c7',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: botStatus.isRunning ? '#34d399' : '#38bdf8',
+            fontSize: '1.25rem'
+          }}>
+            {botStatus.isRunning ? '🚀' : '⚡'}
+          </div>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
+                Autonomous 3-Worker Bot Engine
+              </h3>
+              <span style={{
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                padding: '2px 8px',
+                borderRadius: '12px',
+                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
+                color: botStatus.isRunning ? '#34d399' : '#94a3b8',
+                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
+              }}>
+                {botStatus.isRunning ? 'ACTIVE • 3 WORKERS RUNNING' : 'STANDBY • READY TO TRIGGER'}
+              </span>
+            </div>
+            <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
+              Scrapes unique job links into <strong>scanned_jobs</strong>, pre-resolves 4-tier answers, and distributes to similar clients in <strong>job_distributions</strong> with status <strong>Ready for Review</strong>.
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
+          <button
+            type="button"
+            onClick={handleTriggerBot}
+            disabled={isTriggering || botStatus.isRunning}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '0.65rem 1.35rem',
+              borderRadius: '6px',
+              border: 'none',
+              background: botStatus.isRunning
+                ? '#334155'
+                : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+              color: '#ffffff',
+              fontSize: '0.9rem',
+              fontWeight: 700,
+              cursor: botStatus.isRunning ? 'not-allowed' : 'pointer',
+              boxShadow: botStatus.isRunning ? 'none' : '0 4px 12px rgba(2, 132, 199, 0.35)',
+              transition: 'all 0.15s ease',
+            }}
+          >
+            <span>{botStatus.isRunning ? '🚀 3 Workers Active & Processing...' : (isTriggering ? '⚡ Dispatching Signal...' : '⚡ Trigger 3-Worker Bot')}</span>
+          </button>
+        </div>
+      </div>
+
+      {triggerToast && (
+        <div style={{
+          padding: '0.75rem 1.25rem',
+          borderRadius: '6px',
+          marginBottom: '1rem',
+          fontSize: '0.85rem',
+          fontWeight: 600,
+          background: triggerToast.type === 'error' ? 'rgba(239, 68, 68, 0.15)' : 'rgba(16, 185, 129, 0.15)',
+          color: triggerToast.type === 'error' ? '#f87171' : '#34d399',
+          border: triggerToast.type === 'error' ? '1px solid rgba(239, 68, 68, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
+        }}>
+          {triggerToast.text}
+        </div>
+      )}
+
       {/* Tab Navigation */}
       <div className="sub-tab-bar">
         {tabs.map((tab) => (

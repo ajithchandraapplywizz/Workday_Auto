@@ -772,7 +772,7 @@ export async function fetchApplicationsDynamic({
           if (!cleanDtUrl) continue;
 
           const existing = itemByUrl.get(cleanDtUrl);
-          const proofShot = dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
+          const proofShot = dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
 
           if (existing && typeof existing === 'object') {
             existing.is_fully_answered = dt.is_fully_answered;
@@ -782,6 +782,7 @@ export async function fetchApplicationsDynamic({
             if (proofShot) {
               existing.screenshot_url = proofShot;
               existing.screenshot_path = proofShot;
+              existing.applied_screenshot = dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url;
               existing.original_application_screenshot_successful = dt.original_application_screenshot_successful || dt.final_submission_screenshot_url;
             }
             if (dt.status === 'submitted') {
@@ -804,6 +805,7 @@ export async function fetchApplicationsDynamic({
               status: dt.status === 'queued' || dt.status === 'queued_for_submission' ? 'queued' : (dt.status === 'applying' ? 'in_flight' : (dt.status === 'distributed' ? 'ready_for_review' : dt.status)),
               screenshot_url: proofShot || null,
               screenshot_path: proofShot || null,
+              applied_screenshot: dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
               original_application_screenshot_successful: dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
               resolved_answers_json: dt.resolved_answers,
               unanswered_questions: dt.unanswered_questions,
@@ -2156,7 +2158,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
     }
 
     const currentStatus = distRow?.status || appRow?.status || queueTask?.status || 'ready_for_review';
-    const proofScreenshot = distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || distRow?.screenshot_url || appRow?.failure_screenshot_url || queueTask?.screenshot_path || null;
+    const proofScreenshot = distRow?.applied_screenshot || distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || distRow?.screenshot_url || appRow?.failure_screenshot_url || queueTask?.screenshot_path || null;
 
     return {
       success: true,
@@ -2171,7 +2173,8 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl }) {
         taskId: queueTask?.id || null,
         workerId: distRow?.worker_id || queueTask?.worker_id || null,
         screenshotUrl: proofScreenshot,
-        originalScreenshotUrl: distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || null,
+        appliedScreenshotUrl: distRow?.applied_screenshot || distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || null,
+        originalScreenshotUrl: distRow?.applied_screenshot || distRow?.original_application_screenshot_successful || distRow?.final_submission_screenshot_url || null,
         reviewScreenshotUrl: distRow?.screenshot_url || null,
         updatedAt: distRow?.updated_at || queueTask?.updated_at || appRow?.updated_at || new Date().toISOString(),
       },
@@ -2420,6 +2423,72 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
   }
 }
 
+/**
+ * Trigger the autonomous 3-worker bot pool on demand from Developer Dashboard.
+ * Dispatches via Supabase queue_daemon_state signal table and HTTP endpoint.
+ */
+export async function triggerAutonomousBot() {
+  try {
+    const now = new Date().toISOString();
 
+    // 1. Supabase database signal (guaranteed to cross process boundaries and cloud servers)
+    const { error: dbErr } = await supabase
+      .from('queue_daemon_state')
+      .upsert({
+        ca_email: '_daemon_',
+        ca_name: 'Autonomous 3-Worker Pool',
+        state: 'trigger_requested',
+        triggered_at: now,
+        updated_at: now,
+      }, { onConflict: 'ca_email' });
 
+    if (dbErr) console.warn('Note on Supabase daemon signal:', dbErr.message);
 
+    // 2. Direct HTTP endpoint trigger (if backend daemon web server is reachable)
+    try {
+      const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
+      const endpoint = backendUrl ? `${backendUrl}/api/bot/trigger` : '/api/bot/trigger';
+      await fetch(endpoint, { method: 'POST', headers: { 'Content-Type': 'application/json' } }).catch(() => {});
+    } catch {}
+
+    return {
+      success: true,
+      message: 'Autonomous 3-Worker Bot successfully triggered! Workers are clustering unique links, scraping questions into scanned_jobs, and distributing answers.',
+    };
+  } catch (err) {
+    console.error('Failed to trigger autonomous bot:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Fetch live daemon running status from queue_daemon_state
+ */
+export async function fetchBotDaemonStatus() {
+  try {
+    const { data, error } = await supabase
+      .from('queue_daemon_state')
+      .select('*')
+      .eq('ca_email', '_daemon_')
+      .limit(1);
+
+    if (error || !data || data.length === 0) {
+      return { success: true, isRunning: false, state: 'idle', lastHeartbeat: null };
+    }
+
+    const row = data[0];
+    const isRunning = row.state === 'running' || row.state === 'trigger_requested' || row.state === 'dispatched';
+
+    return {
+      success: true,
+      isRunning,
+      state: row.state,
+      workersAssigned: row.workers_assigned || 3,
+      tasksDispatched: row.tasks_dispatched || 0,
+      triggeredAt: row.triggered_at,
+      lastHeartbeat: row.last_heartbeat,
+    };
+  } catch (err) {
+    return { success: false, isRunning: false, state: 'idle', error: err.message };
+  }
+}

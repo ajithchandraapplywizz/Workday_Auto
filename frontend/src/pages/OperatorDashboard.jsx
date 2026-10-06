@@ -11,7 +11,7 @@ import {
   syncLiveCAData,
   formatClientCompanyEmail,
 } from '../services/api';
-import ApplicationFormReviewModal from '../components/ApplicationFormReviewModal';
+import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   const { user, date, setDate, timeframe, smartSyncStatus, smartSyncMessage } = useAuth();
@@ -1036,21 +1036,27 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
         </div>
       )}
 
-      {/* Interactive Form Review & Submit Modal */}
-      {showReviewModal && (
-        <ApplicationFormReviewModal
-          isOpen={showReviewModal}
-          onClose={() => {
-            setShowReviewModal(false);
-            setReviewTargetApp(null);
-          }}
-          applywizzId={selectedCandidate?.id || reviewTargetApp?.applywizz_id}
-          jobUrl={reviewTargetApp?.job_url || reviewTargetApp?.url || ''}
-          companyName={reviewTargetApp?.company || ''}
-          roleTitle={reviewTargetApp?.job_title || reviewTargetApp?.role_title || ''}
-          onSubmitted={handleReviewSubmitted}
-        />
-      )}
+      {/* Interactive Form Review Slide Drawer */}
+      <ApplicationSlideDrawer
+        isOpen={showReviewModal}
+        onClose={() => {
+          setShowReviewModal(false);
+          setReviewTargetApp(null);
+        }}
+        application={reviewTargetApp ? {
+          ...reviewTargetApp,
+          applywizz_id: selectedCandidate?.id || reviewTargetApp.applywizz_id,
+          job_url: reviewTargetApp.job_url || reviewTargetApp.url || '',
+          company: reviewTargetApp.company || '',
+          job_title: reviewTargetApp.job_title || reviewTargetApp.role_title || '',
+        } : null}
+        onStatusUpdated={({ status }) => {
+          handleReviewSubmitted({
+            applywizzId: selectedCandidate?.id || reviewTargetApp?.applywizz_id,
+            jobUrl: reviewTargetApp?.job_url || reviewTargetApp?.url,
+          });
+        }}
+      />
     </div>
   );
 }

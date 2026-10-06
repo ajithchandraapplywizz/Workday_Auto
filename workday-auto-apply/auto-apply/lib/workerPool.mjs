@@ -225,7 +225,7 @@ export async function executeWorkerTask({
           }
         }
         if (loadedCount > 0) {
-          console.log(   ⚡ [] Loaded  pre-resolved answers from job_distributions for !);
+          console.log(`   ⚡ [${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
         }
       }
     } catch {}
@@ -857,6 +857,20 @@ export async function executeWorkerTask({
           status: unansweredCount > 0 ? 'needs_answers' : 'ready_for_review',
           clients: [{ applywizzId, jobId: task.job_id || task.jobId || null, jobUrl }],
         }).catch(() => {});
+        try {
+          const { saveScannedJob } = await import('./supabaseClient.mjs');
+          await saveScannedJob({
+            applywizzId,
+            jobUrl,
+            jobId: task.job_id || task.jobId || null,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            scrapedQuestions: finalScrapedQuestions,
+            screenshotPath: completionShotUrl,
+            clientCount: 1,
+            scanStatus: 'completed',
+          });
+        } catch {}
         await saveResolvedAnswers({
           applywizzId,
           jobUrl,

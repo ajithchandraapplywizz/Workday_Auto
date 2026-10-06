@@ -1770,6 +1770,7 @@ export async function completeSubmittedTask({
         prefer: 'return=minimal',
         body: {
           status: 'submitted',
+          applied_screenshot: screenshotUrl || null,
           original_application_screenshot_successful: screenshotUrl || null,
           final_submission_screenshot_url: screenshotUrl || null,
           screenshot_url: screenshotUrl || null,
@@ -1784,6 +1785,7 @@ export async function completeSubmittedTask({
         prefer: 'return=minimal',
         body: {
           status: 'submitted',
+          applied_screenshot: screenshotUrl || null,
           screenshot_url: screenshotUrl || null,
           worker_id: workerId || null,
           updated_at: now,
