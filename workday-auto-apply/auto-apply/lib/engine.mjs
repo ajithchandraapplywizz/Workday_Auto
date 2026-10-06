@@ -777,19 +777,20 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
   console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
-  let selectedCountry = profile.personal?.country || profile._applyWizzQa?.['country'] || '';
+  const { normalizeCountryForWorkday } = await import('./clientContact.mjs');
+  let selectedCountry = normalizeCountryForWorkday(profile.personal?.country || profile._applyWizzQa?.['country'] || profile._applyWizzQa?.['country / territory'] || '');
   try {
-    const countryControl = await locateWorkdayFieldByLabel(page, '^country$')
-      || page.locator('#address--country, [data-automation-id="address--country"], [data-automation-id="addressSection_country"]')
-          .locator('button, [role="combobox"], input').first();
+    const countryControl = await locateWorkdayFieldByLabel(page, '^(country|country\\s*\\/\\s*territory)$', { excludePatterns: ['phone', 'code', 'device'] })
+      || page.locator('[data-automation-id="addressSection_country"], [data-automation-id="address--country"], #address--country, [data-automation-id="countryDropdown"], button[aria-label*="Country" i]:not([aria-label*="Phone" i]):not([aria-label*="Code" i]), button[aria-label*="Country / Territory" i]:not([aria-label*="Phone" i])')
+          .first();
 
-    const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1200 }).catch(() => false);
+    const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false);
     if (isCountryVisible) {
       const liveText = ((await countryControl.innerText().catch(() => '')) ||
         (await countryControl.inputValue().catch(() => '')) ||
         (await countryControl.textContent().catch(() => '')) || '').trim();
       if (!selectedCountry && liveText && !/select\s*one|select/i.test(liveText)) {
-        selectedCountry = liveText;
+        selectedCountry = normalizeCountryForWorkday(liveText);
         console.log(`    ✓ Country already selected on form: "${selectedCountry}"`);
       }
     }
@@ -797,42 +798,27 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (!selectedCountry && profile._resumeText) {
       const { extractContactFromResumeText } = await import('./clientContact.mjs');
       const c = extractContactFromResumeText(profile._resumeText);
-      if (c.country) selectedCountry = c.country;
+      if (c.country) selectedCountry = normalizeCountryForWorkday(c.country);
     }
+    if (!selectedCountry) selectedCountry = 'United States of America';
 
     if (isCountryVisible && countryControl) {
-      // If still no country from Supabase or resume, inspect dropdown options
-      if (!selectedCountry) {
-        await interactAndRescan(page, async () => {
-          await countryControl.click({ force: true }).catch(() => countryControl.evaluate(el => el.click()));
-        });
-        const promptOptions = await page.$$eval('[role="listbox"] [role="option"], [data-automation-id="promptOption"]', els => els.map(e => (e.textContent || '').trim()).filter(Boolean)).catch(() => []);
-        if (promptOptions.length > 0) {
-          const preferred = promptOptions.find(o => /united states/i.test(o)) || promptOptions.find(o => !/india/i.test(o) && !/select/i.test(o)) || promptOptions[0];
-          if (preferred) {
-            selectedCountry = preferred;
-            console.log(`    ✓ Country chosen from dropdown options: "${selectedCountry}"`);
-          }
-        }
+      profile.personal = profile.personal || {};
+      profile.personal.country = selectedCountry;
+      if (!profile.personal.country_phone_code) {
+        profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
       }
 
-      if (selectedCountry) {
-        profile.personal = profile.personal || {};
-        profile.personal.country = selectedCountry;
-        if (!profile.personal.country_phone_code) {
-          profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || '';
-        }
-
-        const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
-        if (!cur || !cur.toLowerCase().includes(selectedCountry.toLowerCase())) {
-          await interactAndRescan(page, async () => {
-            await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
-          });
-          const query = selectedCountry.toLowerCase();
-          await handleSearchableDropdown(page, countryControl, query, selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
-          recordFilled(profile, 'Country', selectedCountry);
-          console.log(`    ✅ Country at top set: "${selectedCountry}"`);
-        }
+      const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
+      if (!cur || !cur.toLowerCase().includes(selectedCountry.toLowerCase())) {
+        await interactAndRescan(page, async () => {
+          await countryControl.scrollIntoViewIfNeeded().catch(() => {});
+          await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+        });
+        const query = selectedCountry.toLowerCase();
+        await handleSearchableDropdown(page, countryControl, query, selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
+        recordFilled(profile, 'Country', selectedCountry);
+        console.log(`    ✅ Country at top set: "${selectedCountry}"`);
       }
     }
   } catch (err) {
@@ -845,117 +831,62 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (!expectedPhoneCode && selectedCountry) {
       expectedPhoneCode = workdayPhoneCodeForCountry(selectedCountry) || '';
     }
+    if (!expectedPhoneCode || /united states|usa|\bu\.s\.\b|\bamerica\b/i.test(expectedPhoneCode)) {
+      expectedPhoneCode = 'United States of America (+1)';
+    }
 
-    const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code')
-      || page.locator('[data-automation-id="country-phone-code"]')
-        .locator('[role="combobox"], input, button[aria-haspopup="listbox"]')
-        .first()
-      || page.locator('#phoneNumber--countryPhoneCode, [id*="countryPhoneCode"]')
+    const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code|phone\\s*country\\s*code')
+      || page.locator('[data-automation-id="country-phone-code"], [data-automation-id="countryPhoneCode"], button[data-automation-id*="countryPhoneCode" i], button[data-automation-id*="country-phone-code" i], #phoneNumber--countryPhoneCode, [id*="countryPhoneCode"], button[aria-label*="Country Phone Code" i], button[aria-label*="Country/Territory Phone Code" i], button[aria-label*="Country / Territory Phone Code" i]')
         .first();
 
-    const isCountryVisible = await countryPhoneCodeControl.isVisible({ timeout: 2000 }).catch(() => false);
-    if (isCountryVisible) {
-      const currentCode = ((await countryPhoneCodeControl.inputValue().catch(() => '')) ||
+    const isPhoneCodeVisible = await countryPhoneCodeControl.isVisible({ timeout: 2000 }).catch(() => false);
+    if (isPhoneCodeVisible) {
+      let currentCode = ((await countryPhoneCodeControl.inputValue().catch(() => '')) ||
         (await countryPhoneCodeControl.innerText().catch(() => '')) ||
         (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
 
-      // If client didn't specify phone code in Supabase or resume, check if already selected
-      if (!expectedPhoneCode && currentCode && !/select\s*one|select/i.test(currentCode)) {
-        expectedPhoneCode = currentCode;
-      }
+      const dialDigits = (expectedPhoneCode.match(/\(\+(\d+)\)/) || [])[1] || '1';
+      const hasCorrectDialCode = currentCode.includes(`+${dialDigits}`) || currentCode.toLowerCase().includes('united states');
 
-      // If still empty, read available options from the dropdown
-      if (!expectedPhoneCode) {
-        await interactAndRescan(page, async () => {
-          await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
-        });
-        const promptOptions = await page.$$eval('[role="listbox"] [role="option"], [data-automation-id="promptOption"]', els => els.map(e => (e.textContent || '').trim()).filter(Boolean)).catch(() => []);
-        if (promptOptions.length > 0) {
-          const preferred = promptOptions.find(o => /united states|\+1/i.test(o)) || promptOptions.find(o => !/india|\+91/i.test(o) && !/select/i.test(o)) || promptOptions[0];
-          if (preferred) {
-            expectedPhoneCode = preferred;
-            console.log(`    ✓ Country phone code chosen from dropdown options: "${expectedPhoneCode}"`);
-          }
-        }
-      }
-
-      const query = expectedPhoneCode ? expectedPhoneCode.replace(/\s*\(\+?\d+\)/, '').trim().toLowerCase() : (selectedCountry ? selectedCountry.toLowerCase() : 'united states');
-
-      const alreadySelected = currentCode && !/select\s*one|select/i.test(currentCode) && (
-        (expectedPhoneCode && currentCode.toLowerCase().includes(expectedPhoneCode.toLowerCase())) ||
-        (selectedCountry && currentCode.toLowerCase().includes(selectedCountry.toLowerCase()))
-      );
-
-      if (alreadySelected) {
+      if (hasCorrectDialCode) {
         console.log(`    ✓ Country Phone Code already set: "${currentCode}"`);
         recordFilled(profile, 'Country / Territory Phone Code', currentCode);
-        logFieldTrace({
-          automationId: 'country-phone-code',
-          label: 'Country / Territory Phone Code',
-          controlType: 'combobox',
-          tier: 'tier1_profile_fact',
-          valueAttempted: currentCode,
-          success: true,
-          step: 'My Information',
-        });
-      } else if (expectedPhoneCode) {
-        // Only clear if previous selection was genuinely incorrect
-        const clearBtn = page.locator('[data-automation-id="country-phone-code"] [data-automation-id="delete-item"], #phoneNumber--countryPhoneCode [data-automation-id="delete-item"], [data-automation-id="country-phone-code"] [data-automation-id="clear-button"]').first();
-        if (await clearBtn.isVisible({ timeout: 500 }).catch(() => false)) {
-          await interactAndRescan(page, async () => {
-            await clearBtn.click({ force: true });
-          });
-          await page.waitForTimeout(150);
-        }
-
+      } else {
         await interactAndRescan(page, async () => {
           await countryPhoneCodeControl.scrollIntoViewIfNeeded().catch(() => {});
           await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
         });
+        await page.waitForTimeout(300);
 
-        const optionText = expectedPhoneCode;
-        const result = await handleSearchableDropdown(page, countryPhoneCodeControl, query, optionText, { confirmWithEnter: true, alreadyOpen: true });
-        if (!result.success) {
-          const candidates = [
-            optionText,
-            expectedPhoneCode,
-            selectedCountry,
-            query,
-          ];
+        const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], input[data-automation-id*="search" i]').filter({ has: page.locator(':visible') }).first();
+        if (await searchInput.isVisible({ timeout: 800 }).catch(() => false)) {
+          await searchInput.click().catch(() => {});
+          await searchInput.fill('');
+          await searchInput.pressSequentially('United States', { delay: 40 });
+          await page.waitForTimeout(400);
+        }
 
-          const clicked = await clickVisiblePromptOption(page, candidates);
-          if (clicked) {
-            await page.keyboard.press('Enter').catch(() => {});
-            console.log(`    ✓ Country option via DOM text: "${clicked}"`);
-          } else {
-            const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], [data-automation-id*="search" i], [data-uxi-element-id*="searchBox" i]').filter({ has: page.locator(':visible') }).first();
-            if (await searchInput.isVisible({ timeout: 600 }).catch(() => false)) {
-              await searchInput.click().catch(() => {});
-              await page.waitForTimeout(80);
-              await searchInput.fill('');
-              await page.waitForTimeout(50);
-              await searchInput.pressSequentially(query, { delay: 40 });
-            } else {
-              await page.waitForTimeout(300);
-              await page.keyboard.type(query, { delay: 50 });
-            }
-            await page.waitForTimeout(300);
-            await page.keyboard.press('Enter');
-          }
+        const opt = page.locator('[role="option"]:has-text("(+1)"), [data-automation-id="promptOption"]:has-text("(+1)"), [role="option"]:has-text("United States"), [data-automation-id="promptOption"]:has-text("United States")').first();
+        if (await opt.isVisible({ timeout: 1500 }).catch(() => false)) {
+          await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
+          await page.waitForTimeout(300);
+        } else {
+          await page.keyboard.press('Enter').catch(() => {});
         }
 
         await waitForDomSettled(page);
         const verified = ((await countryPhoneCodeControl.innerText().catch(() => '')) ||
           (await countryPhoneCodeControl.textContent().catch(() => '')) ||
           (await countryPhoneCodeControl.inputValue().catch(() => '')) || '').trim();
-        console.log(`    ✅ Field 3 Complete: searched "${query}" → "${verified || optionText}"`);
-        recordFilled(profile, 'Country / Territory Phone Code', verified || optionText);
+
+        console.log(`    ✅ Field 3 Complete: Country Phone Code → "${verified || expectedPhoneCode}"`);
+        recordFilled(profile, 'Country / Territory Phone Code', verified || expectedPhoneCode);
         logFieldTrace({
           automationId: 'country-phone-code',
           label: 'Country / Territory Phone Code',
           controlType: 'combobox',
           tier: 'tier1_profile_fact',
-          valueAttempted: optionText,
+          valueAttempted: expectedPhoneCode,
           success: Boolean(verified),
           step: 'My Information',
         });
@@ -1037,6 +968,18 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (cityResult.success && cityValueMatches(cityResult.domValue, cityResult.value)) {
       recordFilled(profile, CITY_LABEL, cityResult.value);
       citySuccess = true;
+    } else if (resolveCityValue(profile)?.includes(' ')) {
+      // Fallback: If city has spaces / two words, retry with gap removed
+      const noGap = resolveCityValue(profile).replace(/\s+/g, '');
+      console.log(`    🔄 Retrying City with gap removed: "${noGap}"...`);
+      const retryResult = await fillCityFromDom(page, {
+        ...profile,
+        personal: { ...(profile.personal || {}), city: noGap }
+      });
+      if (retryResult.success) {
+        recordFilled(profile, CITY_LABEL, retryResult.value);
+        citySuccess = true;
+      }
     }
 
     logFieldTrace({
@@ -1107,8 +1050,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   try {
     const countryValue = String(profile?.personal?.country || 'United States of America').trim() || 'United States of America';
     if (countryValue) {
-      const countryControl = await locateWorkdayFieldByLabel(page, '^country$')
-        || page.locator('#address--country, [data-automation-id="address--country"]').locator('button, [role="combobox"], input').first();
+      const countryControl = await locateWorkdayFieldByLabel(page, '^(country|country\\s*\\/\\s*territory)$', { excludePatterns: ['phone', 'code', 'device'] })
+        || page.locator('[data-automation-id="addressSection_country"], [data-automation-id="address--country"], #address--country, [data-automation-id="countryDropdown"], button[aria-label*="Country" i]:not([aria-label*="Phone" i]):not([aria-label*="Code" i]), button[aria-label*="Country / Territory" i]:not([aria-label*="Phone" i])').first();
       if (countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false)) {
         const current = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
         const want = countryValue.toLowerCase();
@@ -1346,11 +1289,15 @@ async function fillWorkdayField(page, field, mappedVal, profile) {
     return false;
   }
 
+  let finalFillVal = String(mappedVal);
+  if (/^city(\s*-\s*local)?$|^address--city/i.test(labelLower) || (field.automationId && /city/i.test(field.automationId))) {
+    finalFillVal = finalFillVal.toLowerCase();
+  }
   await el.click().catch(() => {});
-  await el.fill(String(mappedVal));
-  const display = String(mappedVal).length > 50 ? String(mappedVal).substring(0, 50) + '...' : mappedVal;
+  await el.fill(finalFillVal);
+  const display = finalFillVal.length > 50 ? finalFillVal.substring(0, 50) + '...' : finalFillVal;
   console.log(`    ✅ Filled: ${label} ← "${display}"`);
-  recordFilled(profile, label, mappedVal);
+  recordFilled(profile, label, finalFillVal);
   return true;
 }
 
@@ -1846,6 +1793,14 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'human-required';
   }
 
+  console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
+  await page.waitForLoadState('networkidle').catch(() => {});
+  await page.waitForFunction(
+    () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
+    { timeout: 12000 }
+  ).catch(() => {});
+  await page.waitForTimeout(2500);
+
   await takeScreenshot(page, 'workday-review-step');
   await attachFormMutationObserver(page);
   await acknowledgeAllPageAgreements(page, profile, 'Review');
@@ -1869,21 +1824,22 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
 
-  // Scrape all question-answer pairs from the Review page into profile
+  // Scrape strictly required and important question-answer pairs from the Review page into profile
   const scrapedReviewMap = {};
   if (review?.pairs && Array.isArray(review.pairs)) {
     for (const p of review.pairs) {
-      const lbl = (p.label || p.automationId || '').trim();
+      if (!p.isRequired && !p.isImportant) continue;
+      const lbl = (p.label || '').trim();
       const val = (p.value || p.text || '').trim();
-      if (lbl && val) {
+      if (lbl && val && val.length < 2000) {
         scrapedReviewMap[lbl] = val;
       }
     }
   }
   profile._scrapedReviewMap = scrapedReviewMap;
   const scrapedCount = Object.keys(scrapedReviewMap).length;
-  console.log(`  📋 Scraped ${scrapedCount} review fields from Step 5 into JSON.`);
-  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} question/answer pairs from Review page into JSON.`);
+  console.log(`  📋 Scraped ${scrapedCount} required/important question fields from Step 5 into JSON.`);
+  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} required question/answer pairs from Review page into JSON.`);
 
   // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
   if (!confirmSubmit || dryRun) {
@@ -1891,12 +1847,26 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
     try {
       if (page && !page.isClosed()) {
-        const reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+        console.log('  📸 Capturing full Review page screenshot with complete form text...');
+        await page.waitForLoadState('networkidle').catch(() => {});
+        await page.waitForFunction(
+          () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
+          { timeout: 10000 }
+        ).catch(() => {});
+        await page.waitForTimeout(2000);
+        const reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true }).catch(() => null);
         if (reviewBuf) {
           profile._submissionScreenshotBuffer = reviewBuf;
+          console.log('  📸 Full Review page screenshot captured successfully.');
         }
       }
     } catch {}
+
+    // Stay for 20 seconds at Review & Submit before advancing to next unique link
+    console.log('  ⏳ Reached Review & Submit! Staying on page for 20 seconds before advancing to next unique link...');
+    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 20 seconds, then advancing to next unique link.');
+    await page.waitForTimeout(20000).catch(() => {});
+
     return 'reached-review';
   }
 
@@ -2108,13 +2078,34 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     const liveFields = await discoverWorkdayFields(page);
     if (stepName && stepName !== 'Unknown') {
       profile._discoveredSteps?.add(stepName);
-      if ( Array.isArray(liveFields) && liveFields.length > 0) {
+      if (Array.isArray(liveFields) && liveFields.length > 0) {
         for (const lf of liveFields) {
           if (lf && !/password/i.test(lf.type || '') && !/password/i.test(lf.automationId || '')) {
             profile._harvestedFields.push({ ...lf, step: stepName });
           }
         }
       }
+      try {
+        const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
+        const harvestedBatch = await harvestPageQuestions(page, {
+          company: profile._company || '',
+          url: profile._canonicalJobUrl || page.url(),
+          stepName,
+        });
+        if (Array.isArray(harvestedBatch) && harvestedBatch.length > 0) {
+          for (const hb of harvestedBatch) {
+            profile._harvestedFields.push({
+              label: hb.label,
+              id: hb.label,
+              type: hb.fieldType,
+              fieldType: hb.fieldType,
+              required: hb.required,
+              options: hb.options || [],
+              step: stepName,
+            });
+          }
+        }
+      } catch {}
     }
     console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
     profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
@@ -2137,6 +2128,29 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     if (orch?.status === 'blocked') {
       console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
     }
+
+    // Re-harvest after step fill to capture any newly revealed or unlocked conditional questions
+    try {
+      const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
+      const postHarvest = await harvestPageQuestions(page, {
+        company: profile._company || '',
+        url: profile._canonicalJobUrl || page.url(),
+        stepName,
+      });
+      if (Array.isArray(postHarvest) && postHarvest.length > 0) {
+        for (const hb of postHarvest) {
+          profile._harvestedFields.push({
+            label: hb.label,
+            id: hb.label,
+            type: hb.fieldType,
+            fieldType: hb.fieldType,
+            required: hb.required,
+            options: hb.options || [],
+            step: stepName,
+          });
+        }
+      }
+    } catch {}
 
     console.log('  ➡️  Fill done — instant Save and Continue...');
     profile?._onLog?.(currentIteration, `Step ${currentIteration}: Completed filling "${stepName}". Clicking Save & Continue...`);
@@ -2771,9 +2785,24 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   try {
     const currentUrl = page.url();
     if (!currentUrl || currentUrl === 'about:blank' || currentUrl.startsWith('data:')) {
-      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-      try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch { /* partial load OK */ }
-      await page.waitForTimeout(400);
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      try {
+        await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i], div[data-automation-id*="skeleton" i]', { state: 'detached', timeout: 15000 });
+      } catch {}
+      try { await page.waitForLoadState('networkidle', { timeout: 4000 }); } catch { /* partial load OK */ }
+      await page.waitForFunction(() => {
+        const t = (document.body?.innerText || '').trim();
+        const hasApply = Boolean(
+          document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+          Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+        );
+        const hasWizard = Boolean(
+          document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+        );
+        const hasExpired = /doesn'?t exist|expired|not found|\berror 404\b|closed|filled/i.test(t);
+        return hasApply || hasWizard || hasExpired || t.length > 150;
+      }, { timeout: 20000 }).catch(() => {});
+      await page.waitForTimeout(1000);
     }
     if (await isWorkdayJobPageMissing(page)) {
       console.log('❌ Job page does not exist (dead/expired URL) — skipping');

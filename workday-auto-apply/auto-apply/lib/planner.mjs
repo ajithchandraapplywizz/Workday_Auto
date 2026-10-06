@@ -398,6 +398,9 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
         if (typeof res === 'string' && (path.includes('first_name') || path.includes('last_name') || path.includes('middle_name') || path.includes('full_name'))) {
           return toTitleCase(res);
         }
+        if (typeof res === 'string' && (path.includes('city') || /^city(\s*-\s*local)?$|^address--city/i.test(cleanLabel))) {
+          return res.toLowerCase();
+        }
         return res;
       }
     }

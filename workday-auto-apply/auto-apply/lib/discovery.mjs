@@ -169,30 +169,84 @@ export function detectATS(url) {
 }
 
 /**
- * Workday 404 / expired job posting — shown before login on bad URLs.
- * e.g. "The page you are looking for doesn't exist." + "Search for Jobs"
+ * Genuine Workday authentication error banner check (e.g. "Invalid user name or password").
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string|null>}
+ */
+export async function getWorkdayAuthErrorMessage(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return null;
+  return await page.evaluate(() => {
+    const errorEls = Array.from(document.querySelectorAll(
+      '[data-automation-id="errorMessage"], [role="alert"], .error-message, [data-automation-id*="error" i], div[class*="error" i]'
+    ));
+    for (const el of errorEls) {
+      if (el.offsetParent === null && el.getClientRects().length === 0) continue;
+      const text = (el.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+      const lower = text.toLowerCase();
+      if (
+        lower.includes('invalid user name or password') ||
+        lower.includes('invalid username or password') ||
+        lower.includes('incorrect password') ||
+        lower.includes('wrong password') ||
+        lower.includes('account has been locked') ||
+        lower.includes('account is locked') ||
+        lower.includes('temporarily locked') ||
+        lower.includes('too many failed attempts') ||
+        lower.includes('user already exists') ||
+        lower.includes('already registered')
+      ) {
+        return text;
+      }
+    }
+    return null;
+  }).catch(() => null);
+}
+
+/**
+ * Workday 404 / expired job posting — strictly verified via DOM.
+ * NEVER returns true if an Apply button exists or page is actively loading.
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
  */
 export async function isWorkdayJobPageMissing(page) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
   return await page.evaluate(() => {
+    // 1. If an Apply or Continue Application button is visible in the DOM, it is 100% NOT missing/expired
+    const hasApply = Boolean(
+      document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+      Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+    );
+    if (hasApply) return false;
+
+    // 2. If page is actively loading or spinning, do not declare missing
+    const hasSpinner = Boolean(
+      document.querySelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i], div[data-automation-id*="skeleton" i]')
+    );
+    if (hasSpinner) return false;
+
+    // 3. If multi-step wizard is active, not missing
+    const hasWizard = Boolean(
+      document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+    );
+    if (hasWizard) return false;
+
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!text) return false;
+    if (!text || text.length < 20) return false; // Still empty / loading, do not jump to conclusion
+
     const hasNotExist = /the page you are looking for doesn'?t exist/i.test(text)
       || /page (?:you are looking for )?doesn'?t exist/i.test(text)
       || /we couldn'?t find the page/i.test(text)
       || /page not found/i.test(text)
-      || /error 404/i.test(text);
+      || /\berror 404\b/i.test(text);
     const hasFilledOrExpired = /this job (?:posting )?has (?:been )?(?:filled|closed|expired|removed)/i.test(text)
       || /job (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
       || /position (?:has been )?filled/i.test(text)
       || /no longer accepting applications/i.test(text)
       || /posting has expired/i.test(text)
       || /job has expired/i.test(text);
-    const hasSearchJobs = /search for jobs/i.test(text);
 
-    return hasNotExist || hasFilledOrExpired || (hasSearchJobs && /doesn'?t exist|not found|expired|no longer/i.test(text));
+    return hasNotExist || hasFilledOrExpired;
   }).catch(() => false);
 }
 
@@ -757,6 +811,60 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
 
   console.log('📋 Workday detected — navigating to application form...');
 
+    // 0. Patient 30-second wait for Workday SPA to load its content, Apply button, or wizard
+    console.log('   ⏳ Waiting up to 30s for Workday page content & Apply button to render...');
+    try {
+      await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 15000 });
+    } catch {}
+
+    await page.waitForFunction(() => {
+      const text = (document.body?.innerText || '').trim();
+      const hasApply = Boolean(
+        document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+        Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+      );
+      const hasWizard = Boolean(
+        document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"], [data-automation-id="progressBarActiveStep"]')
+      );
+      const hasJobContent = Boolean(
+        (document.querySelector('[data-automation-id="jobPostingPage"], [data-automation-id="jobPostingHeader"], main, h1, h2') || text.length > 80) &&
+        !/loading\.\.\./i.test(text)
+      );
+      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|page not found|404\b/i.test(text);
+
+      return hasApply || hasWizard || hasJobContent || isExpired;
+    }, { timeout: 30000 }).catch(() => null);
+
+    // Settle time for React / Workday hydration
+    await page.waitForTimeout(1500);
+
+    // Check if page is truly expired AFTER waiting up to 30s
+    const pageCheck = await page.evaluate(() => {
+      // 1. If an Apply button is present, it is definitively active and NOT expired
+      const hasApply = Boolean(
+        document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+        Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+      );
+      if (hasApply) return { expired: false };
+
+      // 2. If wizard is active, not expired
+      const hasWizard = Boolean(
+        document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+      );
+      if (hasWizard) return { expired: false };
+
+      const text = (document.body?.innerText || '').trim();
+      const lower = text.toLowerCase();
+      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page not found|404\b/i.test(lower);
+      if (isExpired) return { expired: true, reason: 'job_expired' };
+      return { expired: false };
+    }).catch(() => ({ expired: false }));
+
+    if (pageCheck.expired) {
+      console.log('   ❌ Workday Job Inactive/Dead: Job expired or no longer accepting applications');
+      return { ok: false, reason: pageCheck.reason || 'job_expired', message: 'Job expired or no longer accepting applications' };
+    }
+
     // Accept cookie notice if present
     try {
       const cookieBtn = await page.$('button[data-automation-id="legalNoticeAcceptButton"], button:has-text("Accept Cookies"), button:has-text("Accept all"), button:has-text("Accept")');
@@ -809,10 +917,27 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
     ];
 
     let applyBtn = null;
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    // Patiently wait up to 15 attempts (15s) for Workday SPA React hydration & Apply button
+    for (let attempt = 1; attempt <= 15; attempt++) {
+      // If loading spinner/progress bar is active, wait for it to detach
+      const hasSpinner = await page.evaluate(() => {
+        const s = document.querySelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]');
+        return s && s.offsetParent !== null;
+      }).catch(() => false);
+      if (hasSpinner) {
+        await page.waitForTimeout(800);
+        continue;
+      }
+
+      // Check if page already entered wizard directly
+      if (await isWorkdayWizardVisible(page)) {
+        console.log('   ✅ Workday application wizard active — skipping Apply button search.');
+        return page.url();
+      }
+
       for (const sel of workdayApplySelectors) {
         try {
-          const btns = await page.$$(sel);
+          const btns = await page.$(sel);
           for (const btn of btns) {
             if (await btn.isVisible().catch(() => false)) {
               if (await isInNavOrHeader(btn)) continue;
@@ -824,6 +949,18 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         if (applyBtn) break;
       }
       if (applyBtn) break;
+
+      // Fallback: check for any visible element with text "Apply"
+      try {
+        const directApply = await page.$('button:has-text("Apply"), a:has-text("Apply")');
+        if (directApply && await directApply.isVisible().catch(() => false)) {
+          if (!await isInNavOrHeader(directApply)) {
+            applyBtn = directApply;
+            break;
+          }
+        }
+      } catch {}
+
       await page.waitForTimeout(1000);
     }
 
@@ -880,7 +1017,12 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
 
       if (!optionClicked) {
         console.log('   Waiting for "Apply Manually" popup option...');
-        for (let attempt = 0; attempt < 8; attempt++) {
+        for (let attempt = 0; attempt < 12; attempt++) {
+          // If direct transition to auth or wizard occurred without popup
+          if (page.url().includes('/login') || page.url().includes('/apply') || await isWorkdayWizardVisible(page)) {
+            optionClicked = true;
+            break;
+          }
           for (const sel of manualApplySelectors) {
             try {
               const opt = await page.$(sel);
@@ -889,13 +1031,13 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
                 console.log(`   Selecting Workday apply option: "${optText || 'Apply Manually'}"...`);
                 await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
                 optionClicked = true;
-                await page.waitForTimeout(2000);
+                await page.waitForTimeout(1500);
                 break;
               }
             } catch {}
           }
           if (optionClicked) break;
-          await page.waitForTimeout(500);
+          await page.waitForTimeout(600);
         }
       }
 

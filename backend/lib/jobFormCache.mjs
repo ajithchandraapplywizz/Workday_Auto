@@ -46,6 +46,14 @@ export async function checkAndPreResolveJobForClient({ jobUrl, profile = {} }) {
   }
   schema.fields_schema = validSchemaFields;
 
+  // Invalidate partial schemas (e.g. only 1 step like 'My Information' or under 20 fields)
+  const stepCount = (schema.step_names || []).length;
+  const isPartial = stepCount <= 1 && validSchemaFields.length < 20;
+  if (isPartial) {
+    console.log(`   ℹ️ [Partial Schema in Supabase] Cached schema only has ${validSchemaFields.length} fields on ${stepCount} step (${(schema.step_names || []).join(', ')}). Proceeding with full multi-page scan.`);
+    return { hit: false, schema, isPartial: true, preResolvedCount: 0 };
+  }
+
   const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.personal?.email || 'unknown';
   console.log(`\n📋 [Cache Hit] Found cached form schema for job in Supabase! (${schema.fields_schema.length} fields across steps)`);
   console.log(`   Scanned originally by: ${schema.scanned_by_applywizz_id || 'unknown'} | Role: ${schema.role_title || schema.company || 'Workday posting'}`);
@@ -119,13 +127,10 @@ export async function recordDiscoveredJobForm({
   const resolvedRole = roleTitle || profile._roleTitle || profile._jobTitle || '';
   const applywizzId = profile._applyWizzId || profile.applywizz_id || '';
 
-  // Deduplicate and filter ONLY REQUIRED application fields (never auth/password inputs)
+  // Deduplicate and store all application fields (First Name, Last Name, How did you hear, Questions, etc. - excluding auth passwords)
   const deduped = [];
   const seen = new Set();
   for (const f of fields) {
-    const isRequired = Boolean(f.required || f.is_required);
-    if (!isRequired) continue; // Only store required fields in the single cell schema
-
     const label = f.label || f.id || '';
     const autoId = f.automationId || f.dataAutomationId || f.id || '';
     const fType = f.fieldType || f.type || 'input';
@@ -137,12 +142,13 @@ export async function recordDiscoveredJobForm({
     if (!norm || seen.has(norm)) continue;
     seen.add(norm);
 
+    const isRequired = Boolean(f.required || f.is_required);
     deduped.push({
       label,
       normalized_label: norm,
       step: f.step || f.stepName || 'Application',
       field_type: fType,
-      is_required: true,
+      is_required: isRequired,
       options: Array.isArray(f.options) ? f.options.slice(0, 40) : [],
       automation_id: autoId,
     });
@@ -150,18 +156,7 @@ export async function recordDiscoveredJobForm({
 
   if (deduped.length === 0) return false;
 
-  // 1. Save to scanned_jobs table
-  await saveScannedJob({
-    applywizzId,
-    jobUrl,
-    company: resolvedCompany,
-    roleTitle: resolvedRole,
-    scrapedQuestions: deduped,
-    stepNames: Array.isArray(stepNames) && stepNames.length ? stepNames : [...new Set(deduped.map((d) => d.step))],
-    scanStatus: 'completed',
-  }).catch(() => {});
-
-  // 2. Save to job_form_schemas table for backward compatibility
+  // 1. Save to job_form_schemas table (scanned_jobs is strictly reserved for Review & Submit reached applications)
   const success = await upsertJobFormSchema({
     jobUrl,
     tenant: resolvedTenant,
@@ -308,15 +303,19 @@ export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} 
  * Pre-resolve answers for ALL remaining 'pending' tasks sharing the same job URL.
  * Called immediately after Client 1 saves the form schema (first-scan only).
  */
-export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, allowedCandidateIds = null }) {
+export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, allowedCandidateIds = null, tasks = null }) {
   if (!jobUrl || !schema?.fields_schema?.length || typeof loadProfileFn !== 'function') return;
 
   let pendingTasks = [];
-  try {
-    pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
-  } catch (err) {
+  if (Array.isArray(tasks) && tasks.length > 0) {
+    pendingTasks = tasks;
+  } else {
+    try {
+      pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
+    } catch (err) {
     console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
     return;
+    }
   }
 
   if (!pendingTasks.length) {

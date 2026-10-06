@@ -587,12 +587,21 @@ async function cmdApply(url, { isBatch = false } = {}) {
       isBatch,
     });
 
-    if (!cacheHit && Array.isArray(scan.fields) && scan.fields.length > 0) {
+    const combinedFields = [
+      ...(Array.isArray(scan.fields) ? scan.fields : []),
+      ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
+    ].filter((f) => f && f.type !== 'password' && !/password/i.test(f.name || '') && !/password/i.test(f.label || ''));
+
+    const existingCount = cacheResult?.schema?.fields_schema?.length || 0;
+    const isPartialCache = existingCount < 20 || (cacheResult?.schema?.step_names || []).length <= 1;
+    const hasMoreFields = combinedFields.length > existingCount;
+
+    if ((!cacheHit || isPartialCache || hasMoreFields) && combinedFields.length > 0) {
       try {
         await recordDiscoveredJobForm({
           jobUrl: url,
           profile,
-          fields: scan.fields,
+          fields: combinedFields,
           stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
           company: profile._company || company,
           roleTitle: profile._roleTitle || profile._jobTitle || '',

@@ -160,6 +160,7 @@ export function isMandatoryField(label = '', field = {}, stepName = '') {
 export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
+  if (/^password\b|confirm\s*password|verify\s*password/i.test(text)) return false;
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   if (isMinimumAgeQuestion(text)) return true;
   if (isMandatoryField(text, field, stepName)) return true;
@@ -167,11 +168,11 @@ export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   const plain = text.replace(/\*+$/, '').trim();
   const shortEeo = /^(race|ethnicity|gender|sex|hispanic|veteran(\s*status)?)$/i.test(plain);
   if (shortEeo) return true;
-  if (text.length < 4) return false;
-  if (isSkippableUnimportantLabel(text, field, stepName)) return false;
+  if (text.length < 3) return false;
+  if (/upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(text)) return false;
 
-  // Never catalog unknown optional fields
-  return false;
+  // Capture all discovered questions & form fields across all wizard pages
+  return true;
 }
 
 /** Skip fill/prompt for optional fields (default). Set profile._fillOptionalFields = true to fill everything. */

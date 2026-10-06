@@ -62,9 +62,7 @@ export async function resetQueueTasksForUrl(jobUrl) {
       body: {
         status: 'pending',
         worker_id: null,
-        started_at: null,
-        completed_at: null,
-        error_message: null,
+error_message: null,
         updated_at: new Date().toISOString(),
       },
     });
@@ -106,8 +104,7 @@ export async function broadcastScrapedQaToQueue(jobUrl, sourceTaskId, answersMap
       query: `?job_url=eq.${cleanUrl}&id=neq.${cleanId}`,
       prefer: 'return=minimal',
       body: {
-        pre_resolved_answers: answersMap,
-        status: 'pre_resolved',
+status: 'pre_resolved',
         updated_at: new Date().toISOString(),
       },
     });

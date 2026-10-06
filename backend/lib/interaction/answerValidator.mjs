@@ -48,6 +48,11 @@ export function validateAnswer(field = {}, resolved = {}, { minConfidence = DEFA
     const exact = options.find((opt) => opt === text || opt.toLowerCase() === text.toLowerCase());
     if (exact) return { ok: true, answer: exact, questionId };
 
+    // Space-insensitive / merged match (e.g. "Boca Raton" <-> "BocaRaton")
+    const textNoSpace = text.toLowerCase().replace(/\s+/g, '');
+    const spaceHit = options.find((opt) => opt.toLowerCase().replace(/\s+/g, '') === textNoSpace);
+    if (spaceHit) return { ok: true, answer: spaceHit, questionId };
+
     const polarity = extractYesNoAnswer(text) || (isYesNoQuestionLabel(label) ? extractYesNoAnswer(text) : null);
     if (polarity) {
       const yn = options.find((opt) => extractYesNoAnswer(opt) === polarity);

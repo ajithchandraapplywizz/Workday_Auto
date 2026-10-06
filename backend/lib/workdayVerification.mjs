@@ -6,6 +6,7 @@
  */
 
 import { extractWorkdayCompanyName, isInNavOrHeader, isWorkdayWizardVisible } from './discovery.mjs';
+import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers } from './zohoMailClient.mjs';
 
 /**
  * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
@@ -507,150 +508,110 @@ export async function resolveWorkdayVerification(page, { email, password, compan
     return { success: true, type: 'direct_wizard', onWizard: true };
   }
 
-  const cutoff = startTime ? (startTime - 60000) : (Date.now() - 30 * 60 * 1000);
-  const pollInterval = 3000; // 3 seconds
-  const deadline = Date.now() + timeoutMs;
-  const effectiveCompany = company || (page ? extractWorkdayCompanyName(page.url()) : '');
+  const cutoff = startTime ? (startTime - 60000) : (Date.now() - 5 * 60 * 1000);
+  const effectiveCompany = company || (page && typeof page.url === 'function' ? extractWorkdayCompanyName(page.url()) : '');
 
-  console.log(`   📧 [WorkdayBot] Waiting for verification email for ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
+  console.log(`   📧 [WorkdayBot] Polling Zoho Mail Reader for candidate ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
 
-  let notConnectedCount = 0;
-  while (Date.now() < deadline) {
-    if (await checkIfAlreadyOnApplicationWizard(page)) {
-      console.log('   🎉 [WorkdayBot] Application Wizard / My Information detected while waiting! Advancing to form fill immediately.');
-      return { success: true, type: 'direct_wizard', onWizard: true };
+  const pollRes = await pollZohoWorkdayAuth({
+    email,
+    company: effectiveCompany,
+    cutoffTime: cutoff,
+    timeoutMs,
+    pollIntervalMs: 3000,
+  });
+
+  if (pollRes?.found) {
+    if (pollRes.verificationLink) {
+      const cleanLink = sanitizeWorkdayUrl(pollRes.verificationLink);
+      if (!cleanLink) {
+        console.warn(`   ⚠️  [WorkdayBot] Invalid link extracted from Zoho: ${pollRes.verificationLink}`);
+        return { success: false, reason: 'invalid_link' };
+      }
+
+      console.log(`   🔗 [WorkdayBot] Captured link: ${cleanLink}`);
+      console.log('   🌐 [WorkdayBot] Navigating directly in active browser session...');
+      await page.goto(cleanLink, { waitUntil: 'domcontentloaded' });
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+      // Complete password setup form if present
+      const resetCompleted = await completeWorkdayPasswordResetForm(page, email, password);
+
+      // Check for post-action buttons
+      if (typeof page.locator === 'function') {
+        const actionBtn = page.locator([
+          'button:has-text("Continue")',
+          'a:has-text("Continue")',
+          'button[data-automation-id*="continue" i]',
+          'a[data-automation-id*="continue" i]',
+          'button:has-text("Sign In")',
+          'a:has-text("Sign In")',
+          'button[data-automation-id="adventureButton"]',
+          'a[data-automation-id="adventureButton"]',
+          'button[data-automation-id="jobPostingApplyButton"]',
+          'a[data-automation-id="jobPostingApplyButton"]',
+        ].join(', ')).first();
+
+        if (await actionBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
+          console.log('   🔗 [WorkdayBot] Clicking post-activation action button...');
+          await actionBtn.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(2000);
+          try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+        }
+      }
+
+      const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
+      console.log(`   ✅ [WorkdayBot] Account verification / password link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
+      return { success: true, type: pollRes.type || 'link', url: cleanLink, passwordReset: resetCompleted, onWizard };
     }
-    await page.waitForTimeout(pollInterval);
-    try {
-      const rawHost = process.env.ZOHO_MAIL_READER_HOST || process.env.ZOHO_MAIL_READER_URL || '127.0.0.1';
-      const baseUrl = /^https?:\/\//i.test(rawHost) ? rawHost.replace(/\/+$/, '') : `http://${rawHost}:5000`;
-      const url = new URL(`${baseUrl}/api/zoho/workday-verification`);
-      url.searchParams.set('email', email);
-      if (effectiveCompany) url.searchParams.set('company', effectiveCompany);
-      url.searchParams.set('receivedAfter', String(cutoff));
 
-      let res;
-      try {
-        res = await fetch(url.toString(), { signal: AbortSignal.timeout(10000) });
-      } catch (fetchErr) {
-        notConnectedCount++;
-        if (notConnectedCount >= 2) {
-          console.log(`   ℹ️  [WorkdayBot] Mailbox ${email} cannot connect to Zoho Mail Reader — skipping.`);
-          return { success: false, reason: 'mailbox_not_connected' };
-        }
-        continue;
+    if (pollRes.verificationCode) {
+      console.log(`   🔑 [WorkdayBot] Received verification code from Zoho: ${pollRes.verificationCode}`);
+      const codeInput = page.locator([
+        'input[data-automation-id="verificationCode"]',
+        'input[data-automation-id*="code" i]',
+        'input[data-automation-id*="verification" i]',
+        'input[name="code"]',
+        'input[id*="verification" i]',
+        'input[type="text"]:visible',
+      ].join(', ')).first();
+
+      if (await codeInput.isVisible({ timeout: 4000 }).catch(() => false)) {
+        await codeInput.fill(pollRes.verificationCode);
+      } else {
+        await page.keyboard.type(pollRes.verificationCode, { delay: 40 });
       }
 
-      if (!res.ok) {
-        notConnectedCount++;
-        if (notConnectedCount >= 2) {
-          return { success: false, reason: 'mailbox_not_connected' };
-        }
-        continue;
+      const submitBtn = page.locator([
+        'button[data-automation-id="submitButton"]',
+        'button[data-automation-id*="submit" i]',
+        'button[data-automation-id*="verify" i]',
+        'button:has-text("Verify")',
+        'button:has-text("Submit")',
+        'button[type="submit"]',
+      ].join(', ')).first();
+
+      if (await submitBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+        await submitBtn.click({ force: true });
+      } else {
+        await page.keyboard.press('Enter');
       }
-      const data = await res.json();
-      if (data.found) {
-        // Case A: Workday sends an Activation Link or Password Reset Link
-        if (data.verificationLink) {
-          const cleanLink = sanitizeWorkdayUrl(data.verificationLink);
-          if (!cleanLink) {
-            console.warn(`   ⚠️  [WorkdayBot] Received invalid verification link: ${data.verificationLink}`);
-            continue;
-          }
 
-          console.log(`   🔗 [WorkdayBot] Captured pure link (stripped of unwanted text): ${cleanLink}`);
-          console.log('   🌐 [WorkdayBot] Pasting and executing link directly in CURRENT ACTIVE browser session...');
-          // Navigate to the verification link directly in the CURRENT ACTIVE browser session to preserve cookies and login state
-          await page.goto(cleanLink, { waitUntil: 'domcontentloaded' });
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-          // Complete password setup form if present on the page
-          const resetCompleted = await completeWorkdayPasswordResetForm(page, email, password);
-
-          // After activation link loads, check if there is an action button (e.g. "Continue", "Sign In", "Apply")
-          if (typeof page.locator === 'function') {
-            const actionBtn = page.locator([
-              'button:has-text("Continue")',
-              'a:has-text("Continue")',
-              'button[data-automation-id*="continue" i]',
-              'a[data-automation-id*="continue" i]',
-              'button:has-text("Sign In")',
-              'a:has-text("Sign In")',
-              'button[data-automation-id="adventureButton"]',
-              'a[data-automation-id="adventureButton"]',
-              'button[data-automation-id="jobPostingApplyButton"]',
-              'a[data-automation-id="jobPostingApplyButton"]',
-            ].join(', ')).first();
-
-            if (await actionBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
-              console.log('   🔗 [WorkdayBot] Clicking post-activation action button...');
-              await actionBtn.click({ force: true }).catch(() => {});
-              await page.waitForTimeout(2000);
-              try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
-            }
-          }
-
-          const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
-          console.log(`   ✅ [WorkdayBot] Account verification / password link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
-          return { success: true, type: 'link', url: cleanLink, passwordReset: resetCompleted, onWizard };
-        }
-        // Case B: Workday sends a numeric verification code / PIN
-        if (data.verificationCode) {
-          console.log(`   🔑 [WorkdayBot] Received verification code: ${data.verificationCode}`);
-          // Fill code into the verification input on the current page
-          const codeInput = page.locator([
-            'input[data-automation-id="verificationCode"]',
-            'input[data-automation-id*="code" i]',
-            'input[data-automation-id*="verification" i]',
-            'input[name="code"]',
-            'input[id*="verification" i]',
-            'input[type="text"]:visible',
-          ].join(', ')).first();
-
-          if (await codeInput.isVisible({ timeout: 4000 }).catch(() => false)) {
-            await codeInput.fill(data.verificationCode);
-          } else {
-            // Fallback: keyboard type
-            await page.keyboard.type(data.verificationCode, { delay: 40 });
-          }
-
-          const submitBtn = page.locator([
-            'button[data-automation-id="submitButton"]',
-            'button[data-automation-id*="submit" i]',
-            'button[data-automation-id*="verify" i]',
-            'button:has-text("Verify")',
-            'button:has-text("Submit")',
-            'button[type="submit"]',
-          ].join(', ')).first();
-
-          if (await submitBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-            await submitBtn.click({ force: true });
-          } else {
-            await page.keyboard.press('Enter');
-          }
-
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-          return { success: true, type: 'code', code: data.verificationCode };
-        }
-        if (data.reason === 'mailbox_not_connected' || data.connected === false) {
-          console.log(`   ℹ️  [WorkdayBot] Candidate ${email} is not in the connected Zoho mail pool (193 pool) — skipping.`);
-          return { success: false, reason: 'mailbox_not_connected' };
-        }
-        console.log(`   ⏳ [WorkdayBot] Waiting for email... (${data.reason || 'pending'})`);
-      }
-    } catch (err) {
-      console.warn('   ⚠️  [WorkdayBot] Polling error:', err.message);
-      notConnectedCount++;
-      if (notConnectedCount >= 2) {
-        return { success: false, reason: 'mailbox_not_connected' };
-      }
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+      const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
+      return { success: true, type: 'code', code: pollRes.verificationCode, onWizard };
     }
   }
 
-  console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout.`);
-  return { success: false, reason: 'timeout' };
+  if (pollRes?.reason === 'mailbox_not_connected') {
+    console.log(`   ℹ️  [WorkdayBot] Candidate ${email} mailbox is not connected in Zoho Mail Reader.`);
+    return { success: false, reason: 'mailbox_not_connected' };
+  }
+
+  console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout (${pollRes?.reason || 'timeout'}).`);
+  return { success: false, reason: pollRes?.reason || 'timeout' };
 }
 
 /**

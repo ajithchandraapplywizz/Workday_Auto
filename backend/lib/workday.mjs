@@ -190,9 +190,93 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
  */
 async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin', profile = null }) {
   console.log('   No account on this tenant — clicking Create Account and registering...');
-  const createdPassword = await workdayCreateAccount(page, email, password);
+  const company = extractWorkdayCompanyName(page.url());
+  let createdPassword = await workdayCreateAccount(page, email, password);
+
   if (!createdPassword) {
-    console.log('   ❌ Account creation failed during signin fallback.');
+    console.log('   ⚠️ Account creation could not complete or looped back. Evaluating page state...');
+    await page.waitForTimeout(2000);
+
+    // 1. Check if application wizard already appeared
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   ✅ Application wizard active despite account creation submit note!');
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+
+    // 2. Check if email verification is requested
+    if (await isWorkdayVerificationPage(page)) {
+      console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
+      const verified = await resolveWorkdayVerification(page, {
+        email,
+        password,
+        company,
+        startTime: page._lastRegistrationTime || (Date.now() - 60000),
+        timeoutMs: 60000,
+      }).catch(() => null);
+
+      if (verified?.onWizard || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      if (verified?.success) {
+        await handleAdaptiveGateway(page, 'signin');
+        const loginAfterVerif = await workdayLogin(page, email, password);
+        if (loginAfterVerif === true || await isWorkdayWizardVisible(page)) {
+          return finishSuccessfulLogin(page, mode, profile);
+        }
+      }
+    }
+
+    // 3. Return to Sign In page and retry login or trigger Forgot Password
+    console.log('   🔁 Looped or failed on Create Account — navigating back to Sign In...');
+    await handleAdaptiveGateway(page, 'signin');
+    const retryLogin = await workdayLogin(page, email, password);
+    if (retryLogin === true || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+
+    if (retryLogin === 'needs-verification' || await isWorkdayVerificationPage(page)) {
+      console.log('   📩 Verification required on Sign In — polling Zoho Mail Reader...');
+      const verified = await resolveWorkdayVerification(page, {
+        email,
+        password,
+        company,
+        startTime: Date.now() - 60000,
+        timeoutMs: 60000,
+      }).catch(() => null);
+      if (verified?.onWizard || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+
+    // 4. Trigger automated Forgot Password via Zoho Mail
+    console.log('   🔑 Login still failing or looped — triggering automated Forgot Password recovery via Zoho Mail...');
+    const forgotResult = await executeWorkdayForgotPassword(page, {
+      email,
+      password: password || process.env.WORKDAY_PASSWORD,
+      company,
+      timeoutMs: 75000,
+    }).catch(() => null);
+
+    if (forgotResult?.reason === 'mailbox_not_connected') {
+      return 'mailbox_not_connected';
+    }
+
+    if (forgotResult?.success) {
+      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      await handleAdaptiveGateway(page, 'signin');
+      const postResetLogin = await workdayLogin(page, email, password);
+      if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+
+    if (await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+
+    console.log('   ❌ Auth recovery via Create Account and Forgot Password exhausted.');
     return false;
   }
 
@@ -205,8 +289,6 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     console.log('   ✅ Successfully entered application wizard after account creation.');
     return true;
   }
-
-  const company = extractWorkdayCompanyName(page.url());
 
   // 2. If the account was detected as already existing, attempt sign in or trigger forgot password
   if (page._accountAlreadyExists) {
@@ -365,6 +447,27 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       if (await isWorkdayWizardVisible(page)) {
         return true;
       }
+    }
+  }
+
+  // Final recovery: try Forgot Password before failing auth
+  console.log('   🔄 Attempting automated Forgot Password recovery via Zoho Mail before ending auth...');
+  const effectivePassword = createdPassword || password || process.env.WORKDAY_PASSWORD;
+  const finalForgot = await executeWorkdayForgotPassword(page, {
+    email,
+    password: effectivePassword,
+    company,
+    timeoutMs: 75000,
+  }).catch(() => null);
+
+  if (finalForgot?.success) {
+    if (finalForgot.onWizard || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+    await handleAdaptiveGateway(page, 'signin');
+    const postLogin = await workdayLogin(page, email, effectivePassword);
+    if (postLogin === true || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
     }
   }
 

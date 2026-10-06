@@ -211,16 +211,17 @@ export async function detachFormMutationObserver(page) {
 }
 
 /**
- * Wait until the observer reports 300ms of quiet DOM activity.
+ * Wait until the observer reports 100ms of quiet DOM activity.
+ * Fast, non-blocking: allows swift form filling without artificial lag.
  * @param {import('playwright').Page} page
  * @param {{ timeout?: number }} [opts]
  */
-export async function waitForDomSettled(page, { timeout = 8000 } = {}) {
+export async function waitForDomSettled(page, { timeout = 350 } = {}) {
   try {
     await page.waitForFunction(() => {
       if (typeof window.__workdayLastMutation !== 'number') return true;
-      return !window.__workdayDomDirty && (Date.now() - window.__workdayLastMutation) >= 300;
-    }, { timeout });
+      return !window.__workdayDomDirty && (Date.now() - window.__workdayLastMutation) >= 100;
+    }, { timeout: Math.min(timeout, 800) });
   } catch {
     /* timeout is acceptable — continue with current DOM */
   }
@@ -1127,33 +1128,101 @@ export function printUnresolvedFields(unresolved = []) {
 export async function parseReviewDOM(page) {
   return page.evaluate(() => {
     const pairs = [];
+    const seen = new Set();
 
+    function isRequiredOrImportant(container, labelEl, text) {
+      if (!text) return false;
+      const lower = text.toLowerCase();
+
+      // 1. Explicit indicator: asterisk (*) or text containing (required) / impo
+      if (/\*|\(required\)|required|\bimpo\b/i.test(text)) return true;
+
+      // 2. Check DOM markers inside labelEl or container (e.g., [data-automation-id*="required"], abbr, aria-required)
+      const searchRoots = [labelEl, container].filter(Boolean);
+      for (const root of searchRoots) {
+        if (
+          root.querySelector?.(
+            '[data-automation-id*="required" i], [data-automation-id="required"], abbr[title*="required" i], [aria-required="true"], .required, [data-uxi-element-id*="required" i]'
+          )
+        ) {
+          return true;
+        }
+        const prev = root.previousElementSibling;
+        if (prev && (prev.getAttribute?.('data-automation-id') === 'required' || prev.textContent?.trim() === '*')) {
+          return true;
+        }
+      }
+
+      // 3. Core mandatory Workday fields
+      const coreMandatoryPatterns = [
+        /\b(first\s*name|given\s*name)\b/i,
+        /\b(last\s*name|family\s*name|surname)\b/i,
+        /\b(email(\s*address)?)\b/i,
+        /\b(phone(\s*number)?|mobile(\s*number)?)\b/i,
+        /\b(address(\s*line\s*1)?)\b/i,
+        /\b(city)\b/i,
+        /\b(postal\s*code|zip(\s*code)?)\b/i,
+        /\b(country(\s*code)?|region)\b/i,
+        /\b(authorized\s*to\s*work|legal(ly)?\s*authori[zs]ed)\b/i,
+        /\b(sponsorship|require\s*sponsorship|visa\s*sponsorship)\b/i,
+      ];
+      if (coreMandatoryPatterns.some(p => p.test(lower))) {
+        if (lower.includes('(optional)') || lower.includes('optional')) return false;
+        return true;
+      }
+
+      return false;
+    }
+
+    function cleanLabel(raw) {
+      if (!raw) return '';
+      return raw
+        .replace(/^[\s*•\-–—:]+/, '')
+        .replace(/[\s*•\-–—:]+$/, '')
+        .replace(/\s*\((required|optional|impo.*?)\)/gi, '')
+        .replace(/\s*(required|important)\s*$/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    // 1. Definition lists (dt/dd)
     document.querySelectorAll('dt').forEach(dt => {
       const dd = dt.nextElementSibling;
       if (dd && dd.tagName === 'DD') {
-        pairs.push({ label: (dt.textContent || '').trim(), value: (dd.textContent || '').trim() });
+        const rawLabel = (dt.textContent || '').trim();
+        const value = (dd.textContent || '').trim();
+        if (isRequiredOrImportant(dt, dt, rawLabel)) {
+          const lbl = cleanLabel(rawLabel);
+          if (lbl && !seen.has(lbl.toLowerCase())) {
+            seen.add(lbl.toLowerCase());
+            pairs.push({ label: lbl, rawLabel, value, isRequired: true, isImportant: true });
+          }
+        }
       }
     });
 
+    // 2. Standard form fields (labeled inputs, textareas, selects, radio/checkbox groups)
     document.querySelectorAll('[data-automation-id*="formField"], [class*="formField"]').forEach(field => {
       const labelEl = field.querySelector('label, [data-automation-id*="label"], legend');
       if (!labelEl) return;
+      const rawLabel = (labelEl.textContent || '').trim();
+      if (!isRequiredOrImportant(field, labelEl, rawLabel)) return;
+
       const valueEl = field.querySelector(
         'input, textarea, select, [data-automation-id*="selectedItem"], [data-automation-id*="promptOption"], [data-automation-id*="value"]'
       );
-      const label = (labelEl.textContent || '').trim();
       let value = '';
       if (valueEl) {
         value = (valueEl.value || valueEl.textContent || '').trim();
+      } else {
+        value = (field.textContent || '').trim();
       }
-      if (label) pairs.push({ label, value: value || (field.textContent || '').trim() });
-    });
 
-    document.querySelectorAll('[data-automation-id]').forEach(el => {
-      const id = el.getAttribute('data-automation-id') || '';
-      if (!/review|summary|display|selectedItem/i.test(id)) return;
-      const text = (el.textContent || '').trim();
-      if (text && text.length < 400) pairs.push({ automationId: id, text, value: text });
+      const lbl = cleanLabel(rawLabel);
+      if (lbl && !seen.has(lbl.toLowerCase())) {
+        seen.add(lbl.toLowerCase());
+        pairs.push({ label: lbl, rawLabel, value, isRequired: true, isImportant: true });
+      }
     });
 
     return { pairs, bodyText: document.body?.innerText || '' };
