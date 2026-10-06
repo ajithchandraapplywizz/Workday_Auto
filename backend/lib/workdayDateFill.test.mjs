@@ -157,3 +157,34 @@ test('month maxlength 2 still gets 06/2025 not 2/2025', async () => {
     await browser.close();
   }
 });
+
+test('fills single date input control with MM/YYYY properly', async () => {
+  const html = `<!doctype html><html><body>
+    <section data-automation-id="workExperienceSection">
+      <h2>Work Experience</h2>
+      <div data-automation-id="formField-startDate">
+        <label>From *</label>
+        <div data-automation-id="dateInputWrapper">
+          <input type="text" placeholder="MM/YYYY" aria-label="Start Date" />
+        </div>
+      </div>
+    </section>
+  </body></html>`;
+  const browser = await chromium.launch({ headless: true });
+  const page = await browser.newPage();
+  try {
+    await page.setContent(html);
+    const from = await fillWorkdayDateField(page, {
+      labelPattern: '^From\\b',
+      sectionType: 'work',
+      value: '05/2025',
+      mode: 'monthyear',
+    });
+    assert.equal(from.ok, true, from.attempts.join('; '));
+    const val = await page.evaluate(() => document.querySelector('input').value);
+    assert.equal(val, '05/2025');
+  } finally {
+    await browser.close();
+  }
+});
+

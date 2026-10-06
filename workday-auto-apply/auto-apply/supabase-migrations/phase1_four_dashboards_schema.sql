@@ -143,10 +143,9 @@ CREATE TABLE IF NOT EXISTS public.worker_status (
     updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
--- Pre-seed 10 workers for pool tracking
+-- Pre-seed 1 worker for pool tracking (Strictly 1 worker allocated)
 INSERT INTO public.worker_status (worker_id, state)
-SELECT 'Worker-' || i, 'idle'
-FROM generate_series(1, 10) AS i
+VALUES ('Worker-1', 'idle')
 ON CONFLICT (worker_id) DO NOTHING;
 
 -- 7. Table: automation_trace (Debug execution trace stream per application)
@@ -159,6 +158,8 @@ CREATE TABLE IF NOT EXISTS public.automation_trace (
 );
 
 CREATE INDEX IF NOT EXISTS idx_automation_trace_app_ts ON public.automation_trace (application_id, ts DESC);
+ALTER TABLE public.automation_trace ADD COLUMN IF NOT EXISTS applywizz_id TEXT;
+CREATE INDEX IF NOT EXISTS idx_automation_trace_applywizz_id ON public.automation_trace (applywizz_id, ts DESC);
 
 -- 8. Table: job_templates (Keyed primarily on tenant + posting_id to prevent URL tracking param undercounting)
 CREATE TABLE IF NOT EXISTS public.job_templates (
@@ -191,24 +192,58 @@ ALTER TABLE public.automation_trace ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.job_templates ENABLE ROW LEVEL SECURITY;
 
 -- Service Role (Full bypass for backend worker engines and CLI scripts)
+DROP POLICY IF EXISTS "service_role_all_managers" ON public.managers;
 CREATE POLICY "service_role_all_managers" ON public.managers FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_operators" ON public.operators;
 CREATE POLICY "service_role_all_operators" ON public.operators FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_assignment_log" ON public.client_assignment_log;
 CREATE POLICY "service_role_all_assignment_log" ON public.client_assignment_log FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_applications" ON public.applications;
 CREATE POLICY "service_role_all_applications" ON public.applications FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_answers" ON public.application_answers;
 CREATE POLICY "service_role_all_answers" ON public.application_answers FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_workers" ON public.worker_status;
 CREATE POLICY "service_role_all_workers" ON public.worker_status FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_trace" ON public.automation_trace;
 CREATE POLICY "service_role_all_trace" ON public.automation_trace FOR ALL TO service_role USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "service_role_all_templates" ON public.job_templates;
 CREATE POLICY "service_role_all_templates" ON public.job_templates FOR ALL TO service_role USING (true) WITH CHECK (true);
 
 -- Explicit Read/Write Policies for Authenticated & Public Dashboard Sessions
 -- (Allows dashboard reading and updates while backend/app layer supplies scoping)
+DROP POLICY IF EXISTS "allow_read_managers" ON public.managers;
 CREATE POLICY "allow_read_managers" ON public.managers FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_read_operators" ON public.operators;
 CREATE POLICY "allow_read_operators" ON public.operators FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_read_assignment_log" ON public.client_assignment_log;
 CREATE POLICY "allow_read_assignment_log" ON public.client_assignment_log FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_read_applications" ON public.applications;
 CREATE POLICY "allow_read_applications" ON public.applications FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_write_applications" ON public.applications;
 CREATE POLICY "allow_write_applications" ON public.applications FOR UPDATE USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "allow_read_answers" ON public.application_answers;
 CREATE POLICY "allow_read_answers" ON public.application_answers FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_write_answers" ON public.application_answers;
 CREATE POLICY "allow_write_answers" ON public.application_answers FOR ALL USING (true) WITH CHECK (true);
+
+DROP POLICY IF EXISTS "allow_read_workers" ON public.worker_status;
 CREATE POLICY "allow_read_workers" ON public.worker_status FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_read_trace" ON public.automation_trace;
 CREATE POLICY "allow_read_trace" ON public.automation_trace FOR SELECT USING (true);
+
+DROP POLICY IF EXISTS "allow_read_templates" ON public.job_templates;
 CREATE POLICY "allow_read_templates" ON public.job_templates FOR SELECT USING (true);

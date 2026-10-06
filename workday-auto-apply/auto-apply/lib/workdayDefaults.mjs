@@ -299,6 +299,7 @@ export function selectionMatchesAnswer(actual, expected) {
   const e = String(expected ?? '').replace(/\s+/g, ' ').trim().toLowerCase();
   if (!a || !e) return false;
   if (a === e) return true;
+  if (a.replace(/\s+/g, '') === e.replace(/\s+/g, '')) return true;
 
   const expectedYesNo = leadingYesNo(e);
   if (expectedYesNo) return leadingYesNo(a) === expectedYesNo;
@@ -329,6 +330,8 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (isWorkEligibilityQuestion(label)) return 'Yes';
   if (isAdverseHistoryQuestion(label)) return 'No';
   if (isPriorAssociationQuestion(label)) return 'No';
+  // "I have a preferred name" — always "No" to avoid opening required sub-textboxes
+  if (/i have a preferred name|do you have a preferred name|preferred name checkbox/i.test(String(label || ''))) return 'No';
   if (isMinimumAgeQuestion(label)) return 'Yes';
   const t = String(label || '');
   if (/sponsor|visa|authorized to work|legally authorized|work authorization/i.test(t)) return null;

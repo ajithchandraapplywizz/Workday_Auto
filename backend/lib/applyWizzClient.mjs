@@ -1183,8 +1183,9 @@ export function mergeApplyWizzQaInMemory(profile = {}, rawLabel = '', answer = '
   if (!profile || !norm || answer == null || answer === '') return;
   profile._applyWizzQa = profile._applyWizzQa || {};
   profile._applyWizzQa[norm] = String(answer);
-  if (cache?.qaIndex && cache.id === profile._applyWizzId) {
-    cache.qaIndex[norm] = String(answer);
+  const cached = clientCaches.get(profile._applyWizzId);
+  if (cached?.qaIndex) {
+    cached.qaIndex[norm] = String(answer);
   }
 }
 

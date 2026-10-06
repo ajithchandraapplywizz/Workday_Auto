@@ -117,16 +117,17 @@ export default function ApplicationFormReviewModal({
         company: applicationData?.company || companyName,
         roleTitle: applicationData?.roleTitle || roleTitle,
         fields,
-        status: 'submitted',
+        status: 'approved_for_submission',
       });
 
       if (res.success) {
-        setSuccessMsg('Application successfully reviewed and submitted to Supabase!');
+        setSuccessMsg('Review approved! Bot is performing final submission & capturing proof screenshot...');
         if (onSubmitted) {
           onSubmitted({
             applywizzId,
             jobUrl: applicationData?.jobUrl || jobUrl,
             fields,
+            status: 'in_progress',
           });
         }
         setTimeout(() => {
@@ -311,6 +312,18 @@ export default function ApplicationFormReviewModal({
             <div className="fr-state-box">
               <div className="fr-spinner" />
               <p>Hydrating pre-filled questions and answers from Supabase...</p>
+            </div>
+          ) : fields.length === 0 ? (
+            <div className="fr-state-box" style={{ padding: '3rem 2rem', textAlign: 'center', background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', margin: '1rem' }}>
+              <div style={{ fontSize: '2.5rem', marginBottom: '1rem' }}>⚡</div>
+              <h3 style={{ color: '#38bdf8', marginBottom: '0.5rem', fontSize: '1.15rem' }}>Bot Filling Application in Background</h3>
+              <p style={{ color: '#94a3b8', maxWidth: '520px', margin: '0 auto', fontSize: '0.88rem', lineHeight: '1.6' }}>
+                Worker-1 is currently processing this application and filling Steps 1 through 4. Genuine scraped questions and answers will appear here as soon as the bot arrives at <strong>Step 5: Review & Submit</strong>.
+              </p>
+              <div style={{ marginTop: '1.25rem', display: 'inline-flex', alignItems: 'center', gap: '8px', background: 'rgba(56, 189, 248, 0.1)', border: '1px solid rgba(56, 189, 248, 0.25)', padding: '6px 14px', borderRadius: '20px', color: '#38bdf8', fontSize: '0.8rem' }}>
+                <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#38bdf8', display: 'inline-block', animation: 'pulse 1.5s infinite' }} />
+                <span>Execution status: {applicationData?.status ? applicationData.status.toUpperCase() : 'IN PROGRESS'}</span>
+              </div>
             </div>
           ) : visibleFields.length === 0 ? (
             <div className="fr-state-box">

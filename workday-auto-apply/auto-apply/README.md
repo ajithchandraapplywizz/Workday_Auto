@@ -120,6 +120,15 @@ Deep specs: `../ProjectDocs/` and `AGENTS.md` at repo root (Local Phase only).
 - Post-fill DOM verification before advancing.
 - Secrets in `.env` only; never commit `profile.yml` or credentials.
 
+## Diagnostics & Self-Healing
+
+| Symptom | Resolution |
+|---------|------------|
+| Chromium fails to launch | `npx playwright install chromium` |
+| Bot pauses waiting for email verification while on "My Information" | Resolved via `checkIfAlreadyOnApplicationWizard`: skips Zoho email polling when DOM is already inside application wizard |
+| `ReferenceError: roleTitle is not defined` | Resolved by hoisting `roleTitle` declaration to function scope in `workerPool.mjs` |
+| Stale offline CA dispatched | `queue_daemon.mjs` strictly verifies active session heartbeat (`ageSec <= 180`) |
+
 ---
 
 ## License

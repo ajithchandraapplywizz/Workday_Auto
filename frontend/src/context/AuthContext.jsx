@@ -16,6 +16,7 @@ const DEFAULT_USER = {
   email: 'ajithchandranimmala@applywizz.ai',
   name: 'Ajith Chandra Nimmala',
   role: 'dev', // 'dev' | 'admin' | 'manager' | 'operator'
+  baseRole: 'dev', // Preserves developer privileges across role switches
   manager_id: null,
   authProvider: 'Microsoft Authenticator',
   date: getTodayDateStr(),
@@ -51,32 +52,48 @@ export function AuthProvider({ children }) {
     const em = user.email.toLowerCase().trim();
 
     // 1. Initial touch on mount/login
+    const nowIso = new Date().toISOString();
     supabase
       .from('operators')
-      .update({ status: 'active', updated_at: new Date().toISOString() })
+      .update({ status: 'active', updated_at: nowIso })
+      .ilike('email', em)
+      .then(() => {})
+      .catch(() => {});
+    supabase
+      .from('auth_users')
+      .update({ status: 'active', updated_at: nowIso })
       .ilike('email', em)
       .then(() => {})
       .catch(() => {});
 
-    // 2. Periodic heartbeat every 30s
+    // 2. Periodic heartbeat every 20s to keep session dynamically active
     const heartbeatTimer = setInterval(() => {
+      const pingIso = new Date().toISOString();
       supabase
         .from('operators')
-        .update({ status: 'active', updated_at: new Date().toISOString() })
+        .update({ status: 'active', updated_at: pingIso })
         .ilike('email', em)
         .then(() => {})
         .catch(() => {});
-    }, 30000);
+      supabase
+        .from('auth_users')
+        .update({ status: 'active', updated_at: pingIso })
+        .ilike('email', em)
+        .then(() => {})
+        .catch(() => {});
+    }, 20000);
 
     // 3. Browser disconnect on tab/window close
     const handleBeforeUnload = () => {
-      const nowIso = new Date().toISOString();
-      const payload = JSON.stringify({ updated_at: nowIso });
+      const closeIso = new Date().toISOString();
+      // Use supabase client directly to update status to inactive
       try {
-        const url = `${supabase.supabaseUrl}/rest/v1/operators?email=ilike.${encodeURIComponent(em)}`;
-        if (navigator.sendBeacon) {
-          navigator.sendBeacon(url, payload);
-        }
+        supabase
+          .from('operators')
+          .update({ status: 'inactive', updated_at: closeIso })
+          .ilike('email', em)
+          .then(() => {})
+          .catch(() => {});
       } catch {}
     };
 
@@ -105,18 +122,21 @@ export function AuthProvider({ children }) {
     if (normalizedEmail === 'ramakrishnaa.tejavath@applywizz.ai') {
       return { role: 'manager', name: 'Ramakrishna Tejavath', manager_id: 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' };
     }
-    // 3. Admins
+    // 3. Admins (Super Admin & Platform Admins)
     const adminEmails = [
+      'admin@applywizz.ai',
+      'admin@applywizz.com',
+      'superadmin@applywizz.ai',
       'ramakrishna@applywizz.ai',
       'anushabandreddy@applywizz.ai',
       'shyam@applywizz.ai',
       'jagan@applywizz.ai'
     ];
-    if (adminEmails.includes(normalizedEmail)) {
+    if (normalizedEmail.includes('admin') || adminEmails.includes(normalizedEmail)) {
       const namePart = normalizedEmail.split('@')[0];
       return {
         role: 'admin',
-        name: namePart.charAt(0).toUpperCase() + namePart.slice(1),
+        name: normalizedEmail.includes('admin') ? 'Super Admin' : (namePart.charAt(0).toUpperCase() + namePart.slice(1)),
         manager_id: null
       };
     }
@@ -133,6 +153,7 @@ export function AuthProvider({ children }) {
    */
   const loginWithAuthenticator = async ({ email, code }) => {
     const normalizedEmail = email.trim().toLowerCase();
+    const auto = resolveRoleFromEmail(normalizedEmail);
 
     // 1. Query Supabase auth_users table
     let { data: authUser, error } = await supabase
@@ -144,10 +165,12 @@ export function AuthProvider({ children }) {
     let resolvedProfile;
 
     if (authUser) {
+      // Ensure admin or dev emails are never demoted to operator by stale DB records
+      const effectiveRole = (auto.role === 'admin' || auto.role === 'dev') ? auto.role : (authUser.role || auto.role);
       resolvedProfile = {
         email: authUser.email,
-        name: authUser.name,
-        role: authUser.role,
+        name: authUser.name || auto.name,
+        role: effectiveRole,
         manager_id: authUser.manager_id,
       };
 
@@ -156,6 +179,7 @@ export function AuthProvider({ children }) {
         .from('auth_users')
         .update({
           status: 'active',
+          role: effectiveRole,
           last_sign_in: new Date().toISOString(),
           updated_at: new Date().toISOString(),
         })
@@ -182,16 +206,36 @@ export function AuthProvider({ children }) {
       });
     }
 
-    // Update operators table to reflect active session
+    // Update or insert operators table to reflect active session
     try {
-      await supabase
+      const { data: existingOp } = await supabase
         .from('operators')
-        .update({
-          status: 'active',
-          last_sign_in: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .ilike('email', normalizedEmail);
+        .select('id')
+        .ilike('email', normalizedEmail)
+        .maybeSingle();
+
+      if (existingOp) {
+        await supabase
+          .from('operators')
+          .update({
+            status: 'active',
+            last_sign_in: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq('id', existingOp.id);
+      } else {
+        await supabase
+          .from('operators')
+          .insert({
+            email: normalizedEmail,
+            name: resolvedProfile.name || normalizedEmail.split('@')[0],
+            role: resolvedProfile.role || 'operator',
+            manager_id: resolvedProfile.manager_id || null,
+            status: 'active',
+            last_sign_in: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          });
+      }
     } catch (err) {
       console.warn('Failed to update operator active status:', err);
     }
@@ -264,10 +308,12 @@ export function AuthProvider({ children }) {
   };
 
   const switchRole = (newRole) => {
-    // Only Developer can switch roles globally
-    if (user?.role !== 'dev' && newRole !== user?.role) return;
+    // Only Developer (Ajith) can switch roles globally across all 4 dashboards
+    const isDev = user?.baseRole === 'dev' || user?.role === 'dev' || user?.email === 'ajithchandranimmala@applywizz.ai';
+    if (!isDev) return;
     setUser((prev) => ({
       ...prev,
+      baseRole: 'dev',
       role: newRole,
     }));
   };

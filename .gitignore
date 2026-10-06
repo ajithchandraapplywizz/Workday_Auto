@@ -39,6 +39,10 @@ supabase/.temp/
 **/bot-state.json
 **/captured_details.csv
 **/data/profile.csv
+**/data/client-resumes/
+data/client-resumes/
+*.pdf
+**/*.pdf
 **/debug-onboarding.png
 **/test-resume.pdf
 signup.png
@@ -100,6 +104,10 @@ data/*.html
 **/data/*.json
 **/data/*.csv
 **/data/*.html
+screenshots/
+**/screenshots/
+forms/
+**/forms/
 sync_ids.txt
 **/sync_ids.txt
 workday-auto-apply/data/

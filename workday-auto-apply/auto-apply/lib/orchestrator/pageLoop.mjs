@@ -449,20 +449,26 @@ export async function runPageOrchestrator({
         pageNumber,
         confidence: decision.confidence,
       });
-      await adapter.waitStable(page);
-      const read = await adapter.readValue(page, field, { pageNumber, stepName: step });
-      if (read.all?.length) {
-        let newFields = dedupeFields(read.all);
-        if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
-          newFields = newFields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
-        }
-        fields = newFields;
+      let actual = '';
+      if (lastFill?.success === true && lastFill?.verifiedValue) {
+        // Fast-path: Field interaction handler already confirmed DOM fill & verified value
+        actual = lastFill.verifiedValue;
       } else {
-        fields = dedupeFields(fields);
-      }
-      let actual = read.current ?? '';
-      if (!actual && lastFill?.success === true) {
-        actual = lastFill?.verifiedValue || '';
+        await adapter.waitStable(page);
+        const read = await adapter.readValue(page, field, { pageNumber, stepName: step });
+        if (read.all?.length) {
+          let newFields = dedupeFields(read.all);
+          if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
+            newFields = newFields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
+          }
+          fields = newFields;
+        } else {
+          fields = dedupeFields(fields);
+        }
+        actual = read.current ?? '';
+        if (!actual && lastFill?.success === true) {
+          actual = lastFill?.verifiedValue || '';
+        }
       }
       if (isSelectOnePlaceholder(actual)) {
         actual = '';
@@ -654,6 +660,12 @@ export async function runPageOrchestrator({
     } // end multi-fill per cycle
 
     if (filled === filledBeforeCycle) {
+      // Check if all mandatory fields are already satisfied before declaring a stall
+      const checkNow = await adapter.validatePage(page, profile, step).catch(() => ({ ok: false }));
+      if (checkNow?.ok === true) {
+        logOrchestrator('page_already_satisfied', { step, cycle });
+        break;
+      }
       cyclesWithoutFill += 1;
       if (cyclesWithoutFill >= 3) {
         logOrchestrator('stall_break', { step, cycle, reason: 'no_verified_fills' });

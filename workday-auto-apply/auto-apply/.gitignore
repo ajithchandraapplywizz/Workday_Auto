@@ -1,13 +1,87 @@
-# Dependencies
-node_modules/
-package-lock.json
-
-# User data (never commit)
+# Environment files
 .env
 .env.*
-*.env*
+.env*.local
+*.env
+*.env.*
+*.local
+**/.env
+**/.env.*
+**/.env*.local
 **/*.env*
-!.env.example
+
+# Dependencies
+node_modules/
+**/node_modules/
+
+# Vercel
+.vercel/
+.vercel
+**/.vercel/
+**/.vercel
+
+# Expo & Bundler caches
+.expo/
+**/.expo/
+.metro-cache/
+**/dist-web/
+dist-web/
+
+# Supabase CLI cache (linked project metadata — never commit)
+supabase/.temp/
+**/supabase/.temp/
+
+# Local purge artifacts (never commit)
+.git-filter-repo-replacements.txt
+.pre-purge-wip.patch
+
+# Bot runtime artifacts (may contain PII)
+**/bot-state.json
+**/captured_details.csv
+**/data/profile.csv
+**/data/client-resumes/
+data/client-resumes/
+*.pdf
+**/*.pdf
+**/debug-onboarding.png
+**/test-resume.pdf
+signup.png
+**/signup.png
+*.png
+**/*.png
+scratch/
+**/scratch/
+**/scratch/**
+
+# WhatsApp Baileys session storage (never commit private keys)
+sessions/
+**/sessions/
+**/sessions/**
+
+# Local scratch scripts
+test-tele.js
+**/test-tele.js
+*scratch*
+
+# GitHub Actions workflows (kept local for now)
+.github/
+**/.github/
+
+# OS & Logs
+.DS_Store
+Thumbs.db
+*.log
+**/*.log
+# Project planning / documentation - keep local
+CODEBASE-ANALYSIS.md
+FLOW-REPORT.md
+SESSION-CHECKPOINT.md
+WORKFLOW-MAP.md
+WORKFLOW.md
+workday-cascading-dropdown-master-prompt.md
+
+# Cursor local configuration
+.cursor/
 
 # YAML files (ignore all yml/yaml files)
 *.yml
@@ -17,36 +91,24 @@ package-lock.json
 !**/*.example.yml
 !**/*.example.yaml
 
-targets.txt
-sync_ids.txt
-resumes/*.pdf
-data/applied.csv
-data/queue.csv
-data/today.csv
-data/jobs.csv
-data/learnings.json
-data/qa-store.json
-data/llm-qa-store.json
-data/required-fields-db.json
-data/application-clients.json
-data/client-resumes/
-data/manual-review.json
-data/workday200.csv
-data/*.csv
-data/*.json
-
-# Generated files
-tests/reports/metrics.ndjson
-forms/*
-!forms/.gitkeep
-screenshots/*
-!screenshots/.gitkeep
+# Generated reports
+reports/
+tests/reports/
 runs/
+**/runs/
 
-# OS
-.DS_Store
-Thumbs.db
-
-# IDE
-.vscode/
-.idea/
+# Generated scan / runtime data
+data/*.json
+data/*.csv
+data/*.html
+**/data/*.json
+**/data/*.csv
+**/data/*.html
+screenshots/
+**/screenshots/
+forms/
+**/forms/
+sync_ids.txt
+**/sync_ids.txt
+workday-auto-apply/data/
+**/workday-auto-apply/data/**

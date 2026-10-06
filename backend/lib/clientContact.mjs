@@ -515,6 +515,16 @@ export async function savePersonalFieldsToYaml(partial = {}, profilePath) {
  * @param {object} profile
  * @returns {Promise<object>} profile
  */
+export function normalizeCountryForWorkday(countryStr = '') {
+  const c = String(countryStr || '').trim();
+  if (!c) return US_COUNTRY_NAME;
+  if (/united states|usa|\bu\.s\.\b|\bamerica\b/i.test(c)) return US_COUNTRY_NAME;
+  if (/^india$/i.test(c)) return IN_COUNTRY_NAME;
+  if (/^canada$/i.test(c)) return 'Canada';
+  if (/united kingdom|great britain|\buk\b/i.test(c)) return 'United Kingdom';
+  return c;
+}
+
 /**
  * Align phone + country + country phone code with Apply Wizz API / resume (no forced US override).
  * @param {object} profile
@@ -524,9 +534,13 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
   const qa = profile._applyWizzQa || {};
 
   // 1. Supabase / CRM is primary source of truth:
-  if (!profile.personal.country && qa.country) profile.personal.country = qa.country;
-  if (!profile.personal.country_phone_code && (qa['country phone code'] || qa['country territory phone code'])) {
-    profile.personal.country_phone_code = qa['country phone code'] || qa['country territory phone code'];
+  const rawCountry = profile.personal.country || qa.country || qa['country / territory'] || qa['country territory'] || profile._applyWizzClientContext?.additional_information?.zip_or_country || '';
+  if (rawCountry) {
+    profile.personal.country = normalizeCountryForWorkday(rawCountry);
+  }
+  const rawPhoneCode = profile.personal.country_phone_code || qa['country phone code'] || qa['country territory phone code'] || qa['country / territory phone code'] || '';
+  if (rawPhoneCode) {
+    profile.personal.country_phone_code = rawPhoneCode;
   }
   if (!profile.personal.state && qa.state) profile.personal.state = qa.state;
   if (!profile.personal.city && qa.city) profile.personal.city = qa.city;
@@ -536,30 +550,31 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
   mergeResumeContactIntoProfile(profile);
   const p = profile.personal;
 
-  const countryHint = p.country || p.country_phone_code || '';
-  const fromApi = normalizePhoneForCountry(
-    p.phone || qa.phone || profile._applyWizzClientContext?.additional_information?.primary_phone || '',
-    countryHint,
-  );
+  if (p.country) {
+    p.country = normalizeCountryForWorkday(p.country);
+  } else {
+    p.country = US_COUNTRY_NAME;
+  }
+
+  if (!p.country_phone_code) {
+    p.country_phone_code = workdayPhoneCodeForCountry(p.country) || US_COUNTRY_PHONE_CODE;
+  }
+  if (/united states|usa|\bu\.s\.\b|\bamerica\b/i.test(p.country_phone_code)) {
+    p.country_phone_code = US_COUNTRY_PHONE_CODE;
+  }
+
+  // Ensure Phone Device Type is set
+  p.phone_device_type = p.phone_device_type || qa['phone device type'] || qa['device type'] || 'Mobile';
+
+  const countryHint = `${p.country} ${p.country_phone_code}`;
+  const rawPhone = p.phone || qa['phone number'] || qa.phone || profile._applyWizzClientContext?.additional_information?.primary_phone || profile._applyWizzClientContext?.client?.callable_phone || '';
+  const fromApi = normalizePhoneForCountry(rawPhone, countryHint);
   if (fromApi && fromApi.length >= 10) {
     p.phone = fromApi;
   }
 
-  if (p.country) {
-    const codeFromCountry = workdayPhoneCodeForCountry(p.country);
-    if (codeFromCountry) {
-      p.country_phone_code = codeFromCountry;
-    }
-  }
-
-  if (/united states|usa|\bu\.s\.\b/i.test(String(p.country || ''))) {
-    p.country = US_COUNTRY_NAME;
-  } else if (/^india$/i.test(String(p.country || '').trim())) {
-    p.country = IN_COUNTRY_NAME;
-  }
-
-  let phone = normalizePhoneForCountry(p.phone || '', `${p.country} ${p.country_phone_code}`);
-  const usJob = /united states|usa|\+\s*1\b/i.test(`${p.country_phone_code} ${p.country}`);
+  let phone = normalizePhoneForCountry(p.phone || '', countryHint);
+  const usJob = /united states|usa|\+\s*1\b/i.test(countryHint);
   if (!phone || phone.length < 10) {
     if (usJob && isUsTenDigitPhone(formatPlainUsPhone(phone))) {
       phone = formatPlainUsPhone(phone);
@@ -572,6 +587,7 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
         phone,
         country_phone_code: p.country_phone_code,
         country: p.country,
+        phone_device_type: p.phone_device_type,
       });
     }
   }

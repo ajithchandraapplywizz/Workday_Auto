@@ -30,6 +30,9 @@ export function parseErrorFieldNames(errors = []) {
     if (/postal\s*code|zip\s*code/i.test(text)) {
       names.add('Postal Code');
     }
+    if (/\bcity\b/i.test(text)) {
+      names.add('City');
+    }
     const patterns = [
       /the field ([\s\S]{2,600}?) is required/gi,
       /\bError-([A-Za-z0-9 /'&-]{2,300}?)(?=The field|Select|$)/g,
@@ -200,6 +203,15 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
   );
   if (/postal\s*code|zip\s*code/i.test(label)) {
     return resolvePostalForWorkday(profile);
+  }
+  if (/^city$|address.*city/i.test(label)) {
+    const baseCity = String(profile?.personal?.city || profile?.personal?.City || profile?.qa_answers?.city || '').trim();
+    if (baseCity && baseCity.includes(' ')) {
+      const merged = baseCity.replace(/\s+/g, '');
+      console.log(`    🏙️ [Error Repair] Retrying City merged as fallback: "${merged}"...`);
+      return merged;
+    }
+    return baseCity || null;
   }
 
   if (engineHit?.answer) {

@@ -31,8 +31,8 @@ export async function detectWorkdayStep(page) {
       if (/my\s*information/i.test(text)) return 'My Information';
       if (/my\s*experience/i.test(text)) return 'My Experience';
       if (/application\s*questions/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
-      if (/self\s*identify/i.test(text)) return 'Self Identify';
+      if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
+      if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
       if (/review/i.test(text)) return 'Review';
     }
 
@@ -43,8 +43,8 @@ export async function detectWorkdayStep(page) {
       if (/^my\s*information$/i.test(text)) return 'My Information';
       if (/^my\s*experience$/i.test(text)) return 'My Experience';
       if (/^application\s*questions/i.test(text)) return 'Application Questions';
-      if (/^voluntary\s*disclosures/i.test(text)) return 'Voluntary Disclosures';
-      if (/^self\s*identify/i.test(text)) return 'Self Identify';
+      if (/^(voluntary\s*disclosures?|equal\s*employment|eeo|diversity)/i.test(text)) return 'Voluntary Disclosures';
+      if (/^(self[- ]?identif|disability|cc-?305)/i.test(text)) return 'Self Identify';
       if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
     }
 
@@ -54,7 +54,8 @@ export async function detectWorkdayStep(page) {
     }
     if (/Work Experience/i.test(bodyText) && (/Resume\/CV|Education|Skills/i.test(bodyText))) return 'My Experience';
     if (/Conflict of Interest/i.test(bodyText)) return 'Application Questions';
-    if (/Voluntary Self-Identification of Disability/i.test(bodyText) || /CC-305/i.test(bodyText)) return 'Self Identify';
+    if (/Voluntary Self-Identification of Disability/i.test(bodyText) || /CC-305/i.test(bodyText) || /OMB Control Number 1250-0005/i.test(bodyText)) return 'Self Identify';
+    if (/Voluntary Disclosures|Equal Employment Opportunity|Veteran Status|Race\/Ethnicity/i.test(bodyText)) return 'Voluntary Disclosures';
     if (/Review/i.test(bodyText) && (document.querySelector('button[data-automation-id*="submit"], button:has-text("Submit")') || /Review/i.test(document.title))) return 'Review';
 
     return 'Unknown';

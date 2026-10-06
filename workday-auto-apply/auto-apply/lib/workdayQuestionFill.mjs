@@ -1112,6 +1112,80 @@ export async function fillAllWorkdaySelectOneDropdowns(page, profile, stepName =
 }
 
 /**
+ * Check whether required fields in Voluntary Disclosures / Self-Identification steps are filled.
+ * @param {import('playwright').Page} page
+ * @param {object} profile
+ * @returns {Promise<{unfilledCount: number, missing: string[]}>}
+ */
+export async function checkVoluntaryDisclosuresRequiredFields(page, profile = {}) {
+  return await page.evaluate(() => {
+    const missing = [];
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+
+    const fields = document.querySelectorAll('[data-automation-id*="formField"], fieldset, [role="group"]');
+    let hasGender = false;
+    let genderFilled = false;
+    let hasHispanic = false;
+    let hispanicFilled = false;
+    let hasVeteran = false;
+    let veteranFilled = false;
+
+    for (const f of fields) {
+      const labelText = norm(f.querySelector('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]')?.textContent || '');
+      if (!labelText) continue;
+
+      if (/gender\b|^sex\b|please select your (gender|sex)/i.test(labelText)) {
+        hasGender = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) genderFilled = true;
+      }
+
+      if (/hispanic|latino/i.test(labelText) && !/terms|privacy|policy/i.test(labelText)) {
+        hasHispanic = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) hispanicFilled = true;
+      }
+
+      if (/veteran\s*status|describe\s*your\s*veteran/i.test(labelText)) {
+        hasVeteran = true;
+        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
+        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+        if (v && !/^select(\s+one)?\.?$/i.test(v)) veteranFilled = true;
+      }
+    }
+
+    if (hasGender && !genderFilled) missing.push('Voluntary Disclosures: Gender');
+    if (hasHispanic && !hispanicFilled) missing.push('Voluntary Disclosures: Hispanic/Latino');
+    if (hasVeteran && !veteranFilled) missing.push('Voluntary Disclosures: Veteran Status');
+
+    // CC-305 check if CC-305 is rendered on the page
+    const bodyText = document.body?.innerText || '';
+    const hasCc305 = /cc-305|omb control|voluntary self-identification of disability/i.test(bodyText);
+    if (hasCc305) {
+      // Check disability radio
+      const radioChecked = Boolean(document.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked'));
+      if (!radioChecked) missing.push('Self-Identification: Disability Status Selection');
+
+      // Check name
+      const nameInput = document.querySelector('[data-automation-id*="formField"] input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])');
+      const nameVal = norm(nameInput?.value || '');
+      if (!nameVal) missing.push('Self-Identification: Name');
+
+      // Check date
+      const dateSpins = document.querySelectorAll('input[role="spinbutton"]');
+      const dateFilled = dateSpins.length >= 3
+        ? Boolean(norm(dateSpins[0].value) && norm(dateSpins[1].value) && norm(dateSpins[2].value))
+        : Boolean(norm(document.querySelector('input[type="date"], [data-automation-id*="dateSection"] input')?.value || ''));
+      if (!dateFilled) missing.push('Self-Identification: Date');
+    }
+
+    return { unfilledCount: missing.length, missing };
+  }).catch(() => ({ unfilledCount: 0, missing: [] }));
+}
+
+/**
  * Count mandatory questions on the current step that are still empty in the live DOM.
  */
 export async function countUnfilledMandatoryQuestions(page, profile, stepName = '') {
@@ -1126,6 +1200,28 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
     const expected = peekExpectedAnswer(questionLabel, profile, tenant);
     if (!isQuestionDomFilled(q, questionLabel, expected, profile)) unfilled++;
   }
+
+  // Guard for My Experience step: verify Work Experience and Education required fields
+  if (/my\s*experience/i.test(stepName)) {
+    try {
+      const { checkMyExperienceRequiredFields } = await import('./workdayExperience.mjs');
+      const expCheck = await checkMyExperienceRequiredFields(page, profile);
+      if (expCheck?.unfilledCount > 0) {
+        unfilled += expCheck.unfilledCount;
+      }
+    } catch (_) {}
+  }
+
+  // Guard for Voluntary Disclosures / Self Identify step: verify EEO & CC-305 required fields
+  if (/voluntary|self[- ]?identif|disclos|eeo|equal|diversity/i.test(stepName)) {
+    try {
+      const discCheck = await checkVoluntaryDisclosuresRequiredFields(page, profile);
+      if (discCheck?.unfilledCount > 0) {
+        unfilled += discCheck.unfilledCount;
+      }
+    } catch (_) {}
+  }
+
   return unfilled;
 }
 
@@ -1934,25 +2030,16 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const nativeValue = getTodayISODate(dynamicDateAction.timeZone);
       const fillValue = await dateInput.evaluate((el) => el.type || 'text').catch(() => 'text');
       const targetValue = fillValue === 'date' ? nativeValue : valueToFill;
-      await dateInput.scrollIntoViewIfNeeded().catch(() => {});
       if (spinButtonCount >= 3) {
         const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        await selectCurrentDateFromCalendar(page, fieldBox, dateInput, dynamicDateAction.timeZone).catch(() => false);
-        await spinButtons.nth(0).fill(String(Number(month)));
-        await spinButtons.nth(1).fill(String(Number(day)));
-        await spinButtons.nth(2).fill(year);
+        await spinButtons.nth(0).fill(String(month).padStart(2, '0'));
+        await spinButtons.nth(1).fill(String(day).padStart(2, '0'));
+        await spinButtons.nth(2).fill(String(year));
       } else if (fillValue === 'date') {
         await dateInput.fill(targetValue);
       } else {
-        const selectedFromCalendar = await selectCurrentDateFromCalendar(
-          page,
-          fieldBox,
-          dateInput,
-          dynamicDateAction.timeZone
-        );
-        if (!selectedFromCalendar) {
-          await dateInput.fill(targetValue);
-        }
+        await dateInput.click({ force: true }).catch(() => {});
+        await dateInput.fill(targetValue).catch(() => {});
       }
       await dateInput.press('Tab');
       const expectedPattern = fillValue === 'date' ? /^\d{4}-\d{2}-\d{2}$/ : /^\d{2}\/\d{2}\/\d{4}$/;
@@ -1966,9 +2053,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (!expectedPattern.test(actual) || (fillValue !== 'date' && actual !== valueToFill)) {
         if (spinButtonCount >= 3) {
           const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-          await spinButtons.nth(0).fill(String(Number(month)));
-          await spinButtons.nth(1).fill(String(Number(day)));
-          await spinButtons.nth(2).fill(year);
+          await spinButtons.nth(0).fill(String(month).padStart(2, '0'));
+          await spinButtons.nth(1).fill(String(day).padStart(2, '0'));
+          await spinButtons.nth(2).fill(String(year));
           await spinButtons.nth(2).press('Tab');
           const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.value));
           actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
@@ -1979,20 +2066,12 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         }
       }
       if (!expectedPattern.test(actual)) {
-        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
-        const screenshotPath = `screenshots/manual-review-date-${stamp}.png`;
-        const htmlPath = `screenshots/manual-review-date-${stamp}.html`;
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-        const html = await page.content().catch(() => '');
-        await writeFile(htmlPath, html).catch(() => {});
         if (profile) {
           profile._manualReview = profile._manualReview || [];
           profile._manualReview.push(createManualReviewItem(label, {
             reason: 'Dynamic current-date field validation failed',
             expected: fillValue === 'date' ? nativeValue : valueToFill,
             actual,
-            screenshot: screenshotPath,
-            domSnapshot: htmlPath,
           }));
         }
         console.error('[date] Dynamic current-date field validation failed; manual review required');
@@ -2013,14 +2092,28 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
     } else if (
       /date\s*of\s*birth|\bdob\b|birth\s*date|birthday/i.test(label)
+      || /willing\s*to\s*join|available\s*(to\s*)?(start|join)|when\s*(can|are)\s*you\s*(start|join)|earliest\s*start|target\s*start|start\s*date/i.test(label)
       || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(answer).trim())
       || /date/i.test(fieldType)
     ) {
-      const formattedDate = formatToMMDDYYYY(answer);
+      let rawDateAnswer = String(answer || '').trim();
+      if (!/^\d{1,2}\/\d{1,2}\/\d{4}$/.test(rawDateAnswer)) {
+        const now = new Date();
+        const target = new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000);
+        const mm = String(target.getMonth() + 1).padStart(2, '0');
+        const dd = String(target.getDate()).padStart(2, '0');
+        const yyyy = String(target.getFullYear());
+        rawDateAnswer = `${mm}/${dd}/${yyyy}`;
+      }
+      const formattedDate = formatToMMDDYYYY(rawDateAnswer) || rawDateAnswer;
       const spinButtons = fieldBox.locator('input[role="spinbutton"], input[data-automation-id*="dateSection"]');
       const spinCount = await spinButtons.count().catch(() => 0);
+      let spinsFilled = 0;
       if (spinCount >= 2 && formattedDate) {
-        const [month, day, year] = formattedDate.split('/');
+        const parts = formattedDate.split('/');
+        const month = String(parts[0] || '01').padStart(2, '0');
+        const day = String(parts[1] || '01').padStart(2, '0');
+        const year = String(parts[2] || new Date().getFullYear());
         for (let i = 0; i < spinCount; i++) {
           const sp = spinButtons.nth(i);
           const hint = (
@@ -2028,18 +2121,27 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
             (await sp.getAttribute('data-automation-id') || '') + ' ' +
             (await sp.getAttribute('placeholder') || '')
           ).toLowerCase();
-          if (/month|\bmm\b|datesectionmonth/i.test(hint)) await sp.fill(String(Number(month))).catch(() => {});
-          else if (/day|\bdd\b|datesectionday/i.test(hint)) await sp.fill(String(Number(day))).catch(() => {});
-          else if (/year|yyyy|datesectionyear/i.test(hint)) await sp.fill(year).catch(() => {});
+          if (/month|\bmm\b|datesectionmonth/i.test(hint)) {
+            await sp.fill(month).catch(() => {});
+            spinsFilled++;
+          } else if (/day|\bdd\b|datesectionday/i.test(hint)) {
+            await sp.fill(day).catch(() => {});
+            spinsFilled++;
+          } else if (/year|yyyy|datesectionyear/i.test(hint)) {
+            await sp.fill(year).catch(() => {});
+            spinsFilled++;
+          }
         }
-        ok = true;
+        if (spinsFilled >= 2) {
+          ok = true;
+        }
       }
       if (!ok) {
         const input = fieldBox.locator('input[type="date"], input[type="text"], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
         if (await input.isVisible({ timeout: 600 }).catch(() => false)) {
           await input.scrollIntoViewIfNeeded().catch(() => {});
           await input.click({ force: true }).catch(() => {});
-          await input.fill(formattedDate || String(answer));
+          await input.fill(formattedDate || rawDateAnswer);
           await input.press('Tab').catch(() => {});
           ok = true;
         }
@@ -2440,7 +2542,7 @@ async function bruteForceSelfIdentifyNameDate(page, fullName, dateValue) {
       const labelEl = field.querySelector('label, legend, [data-automation-id*="label"]');
       const labelText = (labelEl?.textContent || '').replace(/\*+/g, '').trim().toLowerCase();
 
-      if (labelText === 'name' && fullName) {
+      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(labelText) && fullName) {
         const input = field.querySelector(
           'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea, [contenteditable="true"]'
         );
@@ -2456,7 +2558,7 @@ async function bruteForceSelfIdentifyNameDate(page, fullName, dateValue) {
         }
       }
 
-      if (labelText === 'date' && month && day && year) {
+      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(labelText) && month && day && year) {
         const spins = field.querySelectorAll('input[role="spinbutton"]');
         if (spins.length >= 3) {
           spins[0].focus();
@@ -2510,11 +2612,11 @@ async function readSelfIdentifyFieldStatus(page) {
         const t = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
         if (t && !/^select/i.test(t)) status.language = t;
       }
-      if (label === 'name') {
+      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(label)) {
         const input = field.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
         status.name = (input?.value || '').trim();
       }
-      if (label === 'date') {
+      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(label)) {
         const spins = field.querySelectorAll('input[role="spinbutton"]');
         if (spins.length >= 3) {
           status.date = `${spins[0]?.value || ''}/${spins[1]?.value || ''}/${spins[2]?.value || ''}`;
@@ -3267,6 +3369,29 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
   const vibe = await acknowledgeVibePrivacyOnce(page, profile);
   const foregoing = await acknowledgeForegoingStatementOnce(page, profile);
   const agreements = await acknowledgeAllPageAgreements(page, profile, 'Voluntary Disclosures');
+
+  const hasDisabilityOnPage = await page.evaluate(() => /cc-305|omb control|voluntary self-identification of disability/i.test(document.body?.innerText || '')).catch(() => false);
+  if (hasDisabilityOnPage) {
+    await ensureSelfIdentifyComplete(page, profile);
+  }
+
+  // Post-fill verification: if any required voluntary field remains empty, retry it specifically
+  const discCheck = await checkVoluntaryDisclosuresRequiredFields(page, profile);
+  if (discCheck.unfilledCount > 0) {
+    console.log(`    ↻ Voluntary Disclosures missing ${discCheck.unfilledCount} field(s): ${discCheck.missing.join(', ')} — retrying`);
+    if (discCheck.missing.some((m) => /gender/i.test(m))) {
+      await fillGenderDropdown(page, profile?.eeo?.gender || '', profile);
+    }
+    if (discCheck.missing.some((m) => /veteran/i.test(m))) {
+      await fillVeteranStatusDropdown(page, profile?.eeo?.veteran_status || '', profile);
+    }
+    if (discCheck.missing.some((m) => /hispanic/i.test(m))) {
+      await fillWorkdayCustomDropdown(page, { label: 'Are you Hispanic/Latino?', fieldType: 'dropdown' }, 'No');
+    }
+    if (discCheck.missing.some((m) => /disability|self-identification/i.test(m))) {
+      await ensureSelfIdentifyComplete(page, profile);
+    }
+  }
 
   const after = await discoverVoluntaryDisclosureDom(page);
   const genderOk = Boolean(after.gender?.currentValue && !/^select/i.test(after.gender.currentValue));

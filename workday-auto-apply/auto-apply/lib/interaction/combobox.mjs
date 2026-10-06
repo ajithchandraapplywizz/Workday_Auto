@@ -29,7 +29,7 @@ export async function fillCombobox(page, field, answer, ctx = {}) {
     ok = await delegateDropdown(page, field, answer);
   }
   if (!ok) ok = await delegateExistingFill(page, field, answer, ctx.profile);
-  await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
+  await waitForDomSettled(page, { timeout: 200 }).catch(() => {});
   if (ok) return okResult(field, answer, 2);
   return failResult(field, custom.reason || 'custom_combobox_option_not_found', {
     recoverable: true,

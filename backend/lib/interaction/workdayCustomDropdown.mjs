@@ -514,7 +514,7 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
     lastOptions = await collectOpenOptions(page);
     if (!lastOptions.length) {
       await typeIntoOpenPrompt(page, typeNeedle);
-      await page.waitForTimeout(350);
+      await page.waitForTimeout(150);
       lastOptions = await collectOpenOptions(page);
     }
     const pick = matchDemographicOption(wanted, lastOptions);
@@ -530,7 +530,7 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
       };
     }
     const clicked = await clickExactOption(page, pick);
-    await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
+    await waitForDomSettled(page, { timeout: 200 }).catch(() => {});
     const actual = await readMarkedValue(page);
     if (clicked && actual && matchDemographicOption(wanted, [actual]) && !isSelectOnePlaceholder(actual)) {
       return { success: true, verifiedValue: actual, options: lastOptions, widgetKind, attempts: attempt };

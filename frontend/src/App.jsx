@@ -7,11 +7,17 @@ import AdminDashboard from './pages/AdminDashboard';
 import ManagerDashboard from './pages/ManagerDashboard';
 import OperatorDashboard from './pages/OperatorDashboard';
 import CADashboard from './pages/CADashboard';
+import LoginPage from './pages/LoginPage';
 import './App.css';
 
 function MainLayout() {
   const { user, isAuthModalOpen, setIsAuthModalOpen } = useAuth();
   const [operatorView, setOperatorView] = useState('dashboard'); // 'dashboard' | 'stats' | 'review'
+
+  // If not logged in, render the dedicated professional LoginPage
+  if (!user) {
+    return <LoginPage />;
+  }
 
   return (
     <div className="video-app-wrapper">
@@ -32,7 +38,7 @@ function MainLayout() {
         {user?.role === 'dev' && <DeveloperDashboard />}
         {user?.role === 'admin' && <AdminDashboard />}
         {user?.role === 'manager' && <ManagerDashboard />}
-        {(user?.role === 'operator' || user?.role === 'ca' || !user?.role) && (
+        {(user?.role === 'operator' || user?.role === 'ca') && (
           operatorView === 'review' ? (
             <CADashboard />
           ) : (

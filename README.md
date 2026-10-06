@@ -292,11 +292,11 @@ The following paths are excluded from version control and must not be committed:
 
 ---
 
-## Diagnostics
-
 | Symptom | Resolution |
 |---------|------------|
 | Chromium fails to launch | `npx playwright install chromium` |
+| Bot pauses waiting for email verification while on "My Information" | Resolved via `checkIfAlreadyOnApplicationWizard`: skips Zoho email polling when DOM is already inside application wizard |
+| `ReferenceError: roleTitle is not defined` | Resolved by hoisting `roleTitle` declaration to function scope in `workerPool.mjs` |
 | Field not persisting after fill | Inspect structured logs (`┌── Section › Field ──`); update profile or `workdayDefaults.mjs` |
 | Wizard step loop | Review `screenshots/workday-step-*.png` and terminal validation output |
 | Git authentication failure | `gh auth login` · verify remote `origin` URL |

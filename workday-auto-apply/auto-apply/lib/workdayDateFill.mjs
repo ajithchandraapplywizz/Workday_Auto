@@ -105,6 +105,17 @@ export function isRequiredLabelText(text = '') {
 export function parseDateFillValue(value, mode = 'monthyear') {
   const raw = String(value || '').trim();
   if (!raw) return null;
+  const mdy = raw.match(/^(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{4})$/);
+  if (mdy) {
+    const month = Number(mdy[1]);
+    const day = Number(mdy[2]);
+    const year = Number(mdy[3]);
+    if (month >= 1 && month <= 12 && day >= 1 && day <= 31 && year >= 1900 && year <= 2100) {
+      const mm = String(month).padStart(2, '0');
+      const dd = String(day).padStart(2, '0');
+      return { month: mm, day: dd, year: String(year), padded: `${mm}/${dd}/${year}` };
+    }
+  }
   const my = raw.match(/^(\d{1,2})\s*[/\-.]\s*(\d{4})$/);
   if (my) {
     const month = Number(my[1]);
@@ -146,12 +157,13 @@ function dateHintFromEl(el) {
  */
 export async function markDateWidget(page, opts) {
   return await page.evaluate(({ labelPattern, sectionType, dateSel, optionalRe }) => {
-    document.querySelectorAll('[data-wd-date-month], [data-wd-date-year], [data-wd-date-day], [data-wd-date-root]')
+    document.querySelectorAll('[data-wd-date-month], [data-wd-date-year], [data-wd-date-day], [data-wd-date-root], [data-wd-date-single]')
       .forEach((el) => {
         el.removeAttribute('data-wd-date-month');
         el.removeAttribute('data-wd-date-year');
         el.removeAttribute('data-wd-date-day');
         el.removeAttribute('data-wd-date-root');
+        el.removeAttribute('data-wd-date-single');
       });
 
     const labelRe = new RegExp(labelPattern, 'i');
@@ -321,28 +333,36 @@ export async function markDateWidget(page, opts) {
         const targetWidget = specific || (isStartOrFrom ? allWidgets[0] : (allWidgets[1] || allWidgets[0]));
         if (targetWidget && targetWidget.controls.length > 0) {
           const controls = targetWidget.controls;
-          let monthEl = controls.find((el) => classify(el) === 'month');
-          let yearEl = controls.find((el) => classify(el) === 'year');
-          let dayEl = controls.find((el) => classify(el) === 'day');
-          if (!monthEl && !yearEl) {
-            if (controls.length >= 3) { monthEl = controls[0]; dayEl = controls[1]; yearEl = controls[2]; }
-            else if (controls.length >= 2) { monthEl = controls[0]; yearEl = controls[1]; }
-            else { yearEl = controls[0]; }
+          let singleEl = null;
+          let monthEl = null;
+          let yearEl = null;
+          let dayEl = null;
+          if (controls.length === 1) {
+            singleEl = controls[0];
+          } else {
+            monthEl = controls.find((el) => classify(el) === 'month');
+            yearEl = controls.find((el) => classify(el) === 'year');
+            dayEl = controls.find((el) => classify(el) === 'day');
+            if (!monthEl && !yearEl) {
+              if (controls.length >= 3) { monthEl = controls[0]; dayEl = controls[1]; yearEl = controls[2]; }
+              else if (controls.length >= 2) { monthEl = controls[0]; yearEl = controls[1]; }
+            }
+            if (!monthEl && controls.length >= 2) monthEl = controls[0];
+            if (!yearEl && controls.length >= 2) yearEl = controls[controls.length - 1];
           }
-          if (!yearEl && controls.length === 1) yearEl = controls[0];
-          if (!monthEl && controls.length >= 2) monthEl = controls[0];
-          if (!yearEl && controls.length >= 2) yearEl = controls[controls.length - 1];
 
           const root = targetWidget.wrap;
           if (root) root.setAttribute('data-wd-date-root', '1');
+          if (singleEl) singleEl.setAttribute('data-wd-date-single', '1');
           if (monthEl) monthEl.setAttribute('data-wd-date-month', '1');
           if (yearEl) yearEl.setAttribute('data-wd-date-year', '1');
           if (dayEl) dayEl.setAttribute('data-wd-date-day', '1');
 
           return {
-            found: Boolean(monthEl || yearEl),
+            found: Boolean(singleEl || monthEl || yearEl),
             required: true,
             count: controls.length,
+            hasSingle: Boolean(singleEl),
             hasMonth: Boolean(monthEl),
             hasYear: Boolean(yearEl),
             hasDay: Boolean(dayEl),
@@ -437,38 +457,44 @@ export async function markDateWidget(page, opts) {
 
     if (!controls.length) return { found: false, required: labelRequired(labelEl, []), count: 0, reason: 'no date spins near label' };
 
-    let monthEl = controls.find((el) => classify(el) === 'month');
-    let yearEl = controls.find((el) => classify(el) === 'year');
-    let dayEl = controls.find((el) => classify(el) === 'day');
-    if (!monthEl && !yearEl) {
-      if (controls.length >= 3) {
-        monthEl = controls[0];
-        dayEl = controls[1];
-        yearEl = controls[2];
-      } else if (controls.length >= 2) {
-        monthEl = controls[0];
-        yearEl = controls[1];
-      } else {
-        yearEl = controls[0];
+    let singleEl = null;
+    let monthEl = null;
+    let yearEl = null;
+    let dayEl = null;
+    if (controls.length === 1) {
+      singleEl = controls[0];
+    } else {
+      monthEl = controls.find((el) => classify(el) === 'month');
+      yearEl = controls.find((el) => classify(el) === 'year');
+      dayEl = controls.find((el) => classify(el) === 'day');
+      if (!monthEl && !yearEl) {
+        if (controls.length >= 3) {
+          monthEl = controls[0];
+          dayEl = controls[1];
+          yearEl = controls[2];
+        } else if (controls.length >= 2) {
+          monthEl = controls[0];
+          yearEl = controls[1];
+        }
       }
+      if (!monthEl && controls.length >= 2) monthEl = controls[0];
+      if (!yearEl && controls.length >= 2) yearEl = controls[controls.length - 1];
     }
-    if (!yearEl && controls.length === 1) yearEl = controls[0];
-    if (!monthEl && controls.length >= 2) monthEl = controls[0];
-    if (!yearEl && controls.length >= 2) yearEl = controls[controls.length - 1];
 
-    const root = monthEl?.closest('[data-automation-id*="dateInputWrapper"], [data-automation-id*="formField"], [role="group"]')
-      || yearEl?.closest('[data-automation-id*="dateInputWrapper"], [data-automation-id*="formField"], [role="group"]')
+    const root = (singleEl || monthEl || yearEl)?.closest('[data-automation-id*="dateInputWrapper"], [data-automation-id*="formField"], [role="group"]')
       || labelEl.closest('[data-automation-id*="formField"]')
       || labelEl.parentElement;
     if (root) root.setAttribute('data-wd-date-root', '1');
+    if (singleEl) singleEl.setAttribute('data-wd-date-single', '1');
     if (monthEl) monthEl.setAttribute('data-wd-date-month', '1');
     if (yearEl) yearEl.setAttribute('data-wd-date-year', '1');
     if (dayEl) dayEl.setAttribute('data-wd-date-day', '1');
 
     return {
-      found: Boolean(monthEl || yearEl),
+      found: Boolean(singleEl || monthEl || yearEl),
       required: labelRequired(labelEl, controls),
       count: controls.length,
+      hasSingle: Boolean(singleEl),
       hasMonth: Boolean(monthEl),
       hasYear: Boolean(yearEl),
       hasDay: Boolean(dayEl),
@@ -490,6 +516,17 @@ async function readMarkedDate(page) {
       if (!raw || junk.test(raw)) return '';
       return raw;
     };
+    const single = spinVal(document.querySelector('[data-wd-date-single]'));
+    if (single) {
+      const matchMY = single.match(/\b(\d{1,2})\s*[/\-.]\s*(\d{4})\b/);
+      if (matchMY) {
+        return { month: matchMY[1], year: matchMY[2], day: '', text: `${matchMY[1].padStart(2, '0')}/${matchMY[2]}` };
+      }
+      if (/^\d{4}$/.test(single)) {
+        return { month: '', year: single, day: '', text: single };
+      }
+      return { month: '', year: '', day: '', text: single };
+    }
     const month = spinVal(document.querySelector('[data-wd-date-month]'));
     const year = spinVal(document.querySelector('[data-wd-date-year]'));
     const day = spinVal(document.querySelector('[data-wd-date-day]'));
@@ -530,32 +567,22 @@ function numbersEqual(actual, expected) {
 async function typeSegment(page, locator, digits) {
   if (!(await locator.count())) return false;
   const wanted = String(digits);
-  const variants = [wanted];
-  if (wanted.startsWith('0') && wanted.length === 2) variants.push(String(Number(wanted)));
 
   await locator.scrollIntoViewIfNeeded().catch(() => {});
 
-  for (const variant of variants) {
-    await locator.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(70);
-    await locator.press('Control+A').catch(() => {});
-    await locator.press('Delete').catch(() => {});
-    await locator.press('Backspace').catch(() => {});
-    for (const ch of variant) {
-      await locator.press(ch).catch(() => {});
-      await page.waitForTimeout(35);
-    }
-    if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
-
-    await locator.click({ force: true }).catch(() => {});
-    await locator.press('Control+A').catch(() => {});
-    await locator.pressSequentially(variant, { delay: 50 }).catch(() => {});
-    if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
-  }
-
+  // 1. Direct fast fill
+  await locator.click({ force: true }).catch(() => {});
   await locator.fill(wanted).catch(() => {});
   if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
 
+  // 2. Rapid keystrokes if spinbutton requires key sequence
+  await locator.click({ force: true }).catch(() => {});
+  await locator.press('Control+A').catch(() => {});
+  await locator.press('Backspace').catch(() => {});
+  await locator.pressSequentially(wanted, { delay: 15 }).catch(() => {});
+  if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
+
+  // 3. DOM property setter fallback
   await locator.evaluate((el, v) => {
     el.focus();
     const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
@@ -604,16 +631,29 @@ export async function fillWorkdayDateField(page, opts) {
     return { ok: true, skippedOptional: true, attempts: ['optional (no *) — skipped'] };
   }
 
+  const singleLoc = page.locator('[data-wd-date-single]').first();
   const monthLoc = page.locator('[data-wd-date-month]').first();
   const yearLoc = page.locator('[data-wd-date-year]').first();
   const dayLoc = page.locator('[data-wd-date-day]').first();
+  const hasSingle = (await singleLoc.count()) > 0;
   const hasMonth = (await monthLoc.count()) > 0;
   const hasYear = (await yearLoc.count()) > 0;
   const hasDay = (await dayLoc.count()) > 0;
 
   const before = await readMarkedDate(page);
-  if (strictDateMatch(before, parsed, { requireMonth: hasMonth })) {
+  if (strictDateMatch(before, parsed, { requireMonth: hasMonth || (hasSingle && mode === 'monthyear') })) {
     return { ok: true, attempts: [`already ${before.text || parsed.padded}`], after: before.text || parsed.padded };
+  }
+
+  if (hasSingle) {
+    const targetVal = mode === 'year' ? parsed.year : parsed.padded;
+    await singleLoc.scrollIntoViewIfNeeded().catch(() => {});
+    await singleLoc.click({ force: true }).catch(() => {});
+    const ok = await typeSegment(page, singleLoc, targetVal);
+    await singleLoc.press('Tab').catch(() => {});
+    await page.waitForTimeout(40);
+    const after = await readMarkedDate(page);
+    return { ok: ok || Boolean(after.text), attempts, after: after.text || targetVal };
   }
 
   // Activate the widget (lazy spins / display divs) by clicking the month or wrapper.
@@ -631,7 +671,8 @@ export async function fillWorkdayDateField(page, opts) {
     attempts.push(`month ${parsed.month} ${monthOk ? '✓' : '✗'}`);
   }
   if (hasDay) {
-    const dayOk = await typeSegment(page, dayLoc, '01');
+    const dayVal = parsed.day || '01';
+    const dayOk = await typeSegment(page, dayLoc, dayVal);
     attempts.push(`day 01 ${dayOk ? '✓' : '✗'}`);
   }
   if (hasYear) {
@@ -652,8 +693,8 @@ export async function fillWorkdayDateField(page, opts) {
     attempts.push(`year rewrite ${parsed.year} ${yearOk ? '✓' : '✗'}`);
   }
 
-  await yearLoc.press('Enter').catch(() => {});
-  await page.waitForTimeout(100);
+  await (hasYear ? yearLoc : monthLoc).press('Tab').catch(() => {});
+  await page.waitForTimeout(40);
 
   let after = await readMarkedDate(page);
   if (strictDateMatch(after, parsed, { requireMonth: needMonth })) {

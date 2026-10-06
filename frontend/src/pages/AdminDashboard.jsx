@@ -127,7 +127,7 @@ export default function AdminDashboard() {
     }
   };
 
-  // Helper: Live operator status considering 3-minute disconnect window
+  // Helper: Live operator status considering 2-minute disconnect window
   const getOperatorEffectiveStatus = (op) => {
     if (!op) return 'inactive';
     const raw = (op.status || '').toLowerCase();
@@ -135,8 +135,8 @@ export default function AdminDashboard() {
     if (raw !== 'active') return 'inactive';
     if (!op.updated_at && !op.last_sign_in) return 'inactive';
     const last = new Date(op.updated_at || op.last_sign_in).getTime();
-    if (Date.now() - last > 3 * 60 * 1000) {
-      return 'inactive'; // Disconnected > 3 minutes
+    if (Date.now() - last > 2 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 2 minutes
     }
     return 'active';
   };
@@ -149,6 +149,16 @@ export default function AdminDashboard() {
   const inactiveOpsCount = useMemo(() => {
     return operators.filter((o) => getOperatorEffectiveStatus(o) !== 'active').length;
   }, [operators]);
+
+  // Clients / Applications flagged with zoho_mail_not_connected
+  const zohoNotConnectedCount = useMemo(() => {
+    return applications.filter((a) =>
+      a.failure_reason === 'zoho_mail_not_connected' ||
+      (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) ||
+      a.error_message === 'zoho_mail_not_connected' ||
+      (a.error_message && a.error_message.includes('zoho_mail_not_connected'))
+    ).length;
+  }, [applications]);
 
   // Clickable Active / Inactive operators tile navigation
   const handleOperatorFilterClick = (status) => {
@@ -422,6 +432,18 @@ export default function AdminDashboard() {
             <div className="video-kpi-box">
               <span className="vkpi-label">FAILED</span>
               <span className="vkpi-val">{kpis.failed}</span>
+            </div>
+
+            {/* Zoho Gateway Integration Status */}
+            <div
+              className="video-kpi-box"
+              style={{ borderLeft: '3px solid #10b981' }}
+              title={zohoNotConnectedCount > 0 ? `Zoho Mail Gateway connected (${zohoNotConnectedCount} client mailbox(es) unlinked in pool)` : "Zoho Mail Gateway online and connected"}
+            >
+              <span className="vkpi-label" style={{ color: '#10b981' }}>ZOHO INTEGRATION</span>
+              <span className="vkpi-val" style={{ color: '#10b981', fontSize: '1.05rem', fontWeight: 'bold' }}>
+                CONNECTED
+              </span>
             </div>
 
             {/* Supabase Answer % */}
@@ -727,9 +749,15 @@ export default function AdminDashboard() {
                       </td>
                       <td>{app.company || 'Workday Tenant'}</td>
                       <td>
-                        <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
-                          {app.status?.toUpperCase() || 'QUEUED'}
-                        </span>
+                        {app.failure_reason === 'zoho_mail_not_connected' || (app.failure_reason && app.failure_reason.includes('zoho_mail_not_connected')) ? (
+                          <span className="video-status-tag" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.35)' }}>
+                            ZOHO NOT CONNECTED
+                          </span>
+                        ) : (
+                          <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
+                            {app.status?.toUpperCase() || 'QUEUED'}
+                          </span>
+                        )}
                       </td>
                       <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
                       <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>

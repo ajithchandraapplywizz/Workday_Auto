@@ -11,7 +11,7 @@
  */
 
 import { chromium } from 'playwright';
-import { resolve, dirname } from 'path';
+import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
 import { readFile, writeFile } from 'fs/promises';
@@ -21,9 +21,23 @@ import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
-import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, uploadStorageScreenshot, getActiveOperators } from './supabaseClient.mjs';
+import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+
+const DEAD_JOB_URLS = new Set();
+
+async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId, screenshotUrl = null) {
+  DEAD_JOB_URLS.add(jobUrl);
+  console.log(`   🚫 [${workerId}] Purging dead job URL from queue for ALL clients: "${jobUrl}"`);
+  try {
+    const { purgeDeadJobUrlFromQueue } = await import('./supabaseClient.mjs');
+    const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${screenshotUrl ? ` [screenshot: ${screenshotUrl}]` : ''}`;
+    await purgeDeadJobUrlFromQueue(jobUrl, { expiredReason, screenshotUrl });
+  } catch (err) {
+    console.log(`   ⚠️ [${workerId}] Queue purge notice: ${err.message}`);
+  }
+}
 
 function findFilePath(relPath) {
   const candidates = [
@@ -54,6 +68,9 @@ export async function executeWorkerTask({
     allowedCandidateIds = null,
   } = options;
 
+  const isApprovedForSubmission = task.status === 'approved_for_submission' || task.status === 'approved_by_ca' || task.status === 'queued_for_submission';
+  const effectiveConfirmSubmit = isApprovedForSubmission ? true : confirmSubmit;
+
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
   const rawJobUrl = task.jobUrl || task.job_url || task.url || '';
   const jobUrl = String(rawJobUrl).replace(/\s+/g, '').trim();
@@ -66,12 +83,56 @@ export async function executeWorkerTask({
   console.log(`   🔗 URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
 
+  // Ensure application record exists in Supabase so trace events are linked to the application ID
+  let liveApplicationId = null;
+  try {
+    const initApp = await upsertSupabaseApplication({
+      applywizzId,
+      jobUrl,
+      company,
+      roleTitle: 'Workday Application',
+      status: isApprovedForSubmission ? 'in_progress' : 'in_progress',
+    });
+    if (initApp?.id) liveApplicationId = initApp.id;
+  } catch {}
+
+  const appLog = (stepIndex, msg) => {
+    logAutomationTrace({
+      applicationId: liveApplicationId,
+      applywizzId,
+      stepIndex,
+      message: `[${workerId}] ${msg}`
+    }).catch(() => {});
+  };
+
+  appLog(1, `Supabase: Fetched queue task ${queueTaskId ? `(${queueTaskId.slice(0, 8)})` : ''} for candidate ${applywizzId}. Initializing worker session.`);
+
   // 1. Validate Workday URL
   const check = validateWorkdayUrl(jobUrl);
   if (!check.valid) {
     console.error(`   ❌ [${workerId}] Invalid Workday URL: ${check.reason}`);
+    appLog(1, `Validation Error: Invalid Workday URL: ${check.reason}`);
     if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: check.reason });
     return { status: 'invalid_url', error: check.reason };
+  }
+
+  if (DEAD_JOB_URLS.has(jobUrl)) {
+    console.log(`   ⚡ [${workerId}] Skipping ${applywizzId} for "${jobUrl}" — URL verified dead/expired for all clients.`);
+    const expiredReason = 'Link Expired: The page you are looking for doesn\'t exist [step: Link Expired]';
+    appLog(1, `Job URL Expired: "${jobUrl.slice(0, 60)}" confirmed dead across all candidates.`);
+    if (queueTaskId) {
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: expiredReason });
+    }
+    await upsertSupabaseApplication({
+      applywizzId,
+      jobUrl,
+      company,
+      roleTitle: 'Workday Application',
+      status: 'failed',
+      failureReason: expiredReason,
+      stoppedAtStep: 'Link Expired',
+    }).catch(() => {});
+    return { status: 'failed', reason: 'Link Expired' };
   }
 
   // 2. Load isolated Client Profile for this applywizzId
@@ -82,9 +143,12 @@ export async function executeWorkerTask({
     profile._applyWizzId = applywizzId;
     profile._canonicalJobUrl = jobUrl;
     profile._jobUrl = jobUrl;
+    profile._applicationId = liveApplicationId;
+    profile._onLog = (stepIndex, msg) => appLog(stepIndex, msg);
     if (company) profile._company = company;
   } catch (err) {
     console.error(`   ❌ [${workerId}] Failed to load profile for ${applywizzId}: ${err.message}`);
+    appLog(1, `Supabase Profile Error: Failed loading profile for ${applywizzId}: ${err.message}`);
     if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err.message });
     return { status: 'profile_load_failed', error: err.message };
   }
@@ -94,11 +158,16 @@ export async function executeWorkerTask({
   const workdayEmail = candidateEmail || profile.personal?.email || '';
   const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || '';
 
+  const expCount = profile.experience?.length || profile.work_experience?.length || 0;
+  const skillsCount = profile.skills?.length || 0;
+  appLog(2, `Supabase Profile: Loaded candidate record for ${applywizzId} (${workdayEmail}). Indexed ${expCount} job experiences, ${skillsCount} verified skills.`);
+
   console.log(`   📧 [${workerId}] Using candidate credentials: ${workdayEmail} for ${applywizzId}`);
 
   if (!workdayEmail || !workdayPassword) {
     const err = `Missing credentials for ${applywizzId} (${workdayEmail || 'no-email'})`;
     console.error(`   ❌ [${workerId}] ${err}`);
+    appLog(2, `Auth Error: Missing Workday login credentials for ${applywizzId}`);
     if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err });
     return { status: 'auth_missing', error: err };
   }
@@ -118,6 +187,7 @@ export async function executeWorkerTask({
 
   // 4. Check Job Form Cache in Supabase (Duplicate Link Detection & Pre-Resolved Cell)
   let cacheHit = false;
+  let cacheResult = null;
   const queuePreResolved = task.pre_resolved_answers || task.preResolvedAnswers;
   if (queuePreResolved && typeof queuePreResolved === 'object' && Object.keys(queuePreResolved).length > 0) {
     cacheHit = true;
@@ -126,14 +196,18 @@ export async function executeWorkerTask({
     for (const [k, v] of Object.entries(queuePreResolved)) {
       profile._answerCache.set(k, v);
     }
-    console.log(`   ⚡ [${workerId}] Queue Pre-Resolved Hit: ${Object.keys(queuePreResolved).length} answers loaded directly from queue cell for instant fill.`);
+    const preCount = Object.keys(queuePreResolved).length;
+    appLog(3, `Supabase QA Cache HIT: Loaded ${preCount} pre-resolved answers from queue cell for instant fill.`);
+    console.log(`   ⚡ [${workerId}] Queue Pre-Resolved Hit: ${preCount} answers loaded directly from queue cell for instant fill.`);
   } else {
     try {
-      const cacheResult = await checkAndPreResolveJobForClient({ jobUrl, profile });
+      cacheResult = await checkAndPreResolveJobForClient({ jobUrl, profile });
       cacheHit = cacheResult.hit;
       if (cacheHit) {
+        appLog(3, `Supabase Cache HIT: Stored form structure loaded for ${company || 'Workday'}. Pre-resolved answers mapped.`);
         console.log(`   ⚡ [${workerId}] Cache Hit: Stored form structure loaded from Supabase.`);
       } else {
+        appLog(3, `Supabase Cache: First encounter for ${company || 'Workday'}. Form fields will be scanned & cached.`);
         console.log(`   🔍 [${workerId}] Cache Miss: First time encountering this job. Form will be scanned & cached.`);
       }
     } catch (err) {
@@ -142,15 +216,18 @@ export async function executeWorkerTask({
   }
 
   // 5. Launch isolated Playwright browser context
+  appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching headless Chrome.`);
   const browser = await chromium.launch({ headless });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
   });
   const page = await context.newPage();
+  let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
     // Step A: Scan Form
+    appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
     console.log(`   [${workerId}] Step 1: Scanning form fields...`);
     const scan = await scanForm(jobUrl, {
       browser,
@@ -163,16 +240,158 @@ export async function executeWorkerTask({
       profile,
     });
 
-    const roleTitle = await extractJobRoleFromDom(page, jobUrl);
-    if (roleTitle) {
+    if (scan.jobMissing || scan.jobExpired || scan.reason === 'job_expired_or_not_found' || scan.reason === 'no_apply_button' || scan.reason === 'job_expired' || scan.reason === 'empty_page') {
+      // Patiently verify if the page actually displays an Apply button or is still loading!
+      try {
+        await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 10000 });
+      } catch {}
+
+      const hasApplyNow = await page.evaluate(() => {
+        return Boolean(
+          document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+          Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+        );
+      }).catch(() => false);
+
+      if (hasApplyNow) {
+        console.log(`   🔎 [${workerId}] Page actually displays Apply button — NOT expired! Entering application wizard...`);
+        const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
+        await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
+        scan.jobMissing = false;
+        scan.jobExpired = false;
+        delete scan.reason;
+      } else {
+        const genuineExpired = await page.evaluate(() => {
+          const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+          return /the page you are looking for doesn'?t exist|job (?:posting )?has (?:been )?(?:filled|closed|expired)|no longer accepting applications|\berror 404\b/i.test(text);
+        }).catch(() => false);
+
+        console.log(`   ❌ [${workerId}] Dead / expired job posting confirmed in DOM ("The page you are looking for doesn't exist" / "Job Expired").`);
+        let expiredShotUrl = null;
+        try {
+          if (page && !page.isClosed()) {
+            // Scroll to the error message so the screenshot captures exact proof of problem
+            await page.evaluate(() => {
+              const headings = Array.from(document.querySelectorAll('h1, h2, h3, p, [role="alert"], [data-automation-id*="error" i]'));
+              const match = headings.find(h => /doesn'?t exist|expired|closed|filled|404/i.test(h.textContent || ''));
+              if (match) match.scrollIntoView({ behavior: 'instant', block: 'center' });
+            }).catch(() => {});
+            await page.waitForTimeout(300);
+            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+            if (buf) {
+              expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
+            }
+          }
+        } catch {}
+
+        await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
+
+        await browser.close().catch(() => {});
+        if (queueTaskId) {
+          await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
+        }
+        await upsertSupabaseApplication({
+          applywizzId,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          status: 'failed',
+          failureReason: 'Job page does not exist (dead/expired URL)',
+          failureScreenshotUrl: expiredShotUrl,
+        }).catch(() => {});
+
+        try {
+          const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: 'Job page does not exist (dead/expired URL or no Apply button)',
+            failedAtStep: 'Job Discovery / Link Expired',
+            screenshotPath: expiredShotUrl,
+          });
+          await recordApplicationFailure({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: 'Job page does not exist (dead/expired URL or no Apply button)',
+            screenshotPath: expiredShotUrl,
+          });
+        } catch {}
+
+        return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl };
+      }
+    }
+
+    const extractedRole = await extractJobRoleFromDom(page, jobUrl);
+    if (extractedRole) {
+      roleTitle = extractedRole;
       profile._jobTitle = roleTitle;
       profile._roleTitle = roleTitle;
       console.log(`   [${workerId}] 💼 Role: ${roleTitle}`);
     }
 
     if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
-      const wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+      let wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+
+      // Check if the page is still displaying an Apply button before jumping to auth failed!
       if (!wizardNow) {
+        const stillHasApply = await page.$([
+          'a[data-automation-id="adventureButton"]:visible',
+          'button[data-automation-id="adventureButton"]:visible',
+          'a[data-automation-id="applyButton"]:visible',
+          'button[data-automation-id="applyButton"]:visible',
+          '[data-automation-id="jobPostingApplyButton"]:visible',
+          'button:has-text("Apply"):visible',
+          'a:has-text("Apply"):visible',
+        ].join(', ')).catch(() => null);
+
+        if (stillHasApply) {
+          console.log(`   🔎 [${workerId}] Page still displays Apply button — clicking Apply to enter application wizard...`);
+          const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
+          await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
+          await page.waitForTimeout(1500);
+          wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+        }
+      }
+
+      // Check if on login form or modal
+      if (!wizardNow) {
+        const isAuthScreen = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
+        if (isAuthScreen) {
+          console.log(`   🔑 [${workerId}] Login screen detected — submitting credentials for ${workdayEmail}...`);
+          const { handleWorkday } = await import('./workday.mjs');
+          await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
+          await page.waitForTimeout(1500);
+          wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+        }
+      }
+
+      // Check if still loading
+      if (!wizardNow) {
+        try {
+          await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 10000 });
+        } catch {}
+        await page.waitForTimeout(1000);
+        wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+      }
+
+      if (wizardNow) {
+        // Application wizard reached! Refresh fields so we don't treat this as 0 fields
+        const { discoverFields } = await import('./scanner.mjs');
+        const freshFields = await discoverFields(page);
+        scan.fields = freshFields;
+        scan.field_count = freshFields.length;
+        scan.authFailed = false;
+        console.log(`   ✅ [${workerId}] Application wizard active — DOM scan discovered ${scan.field_count} fields.`);
+      } else {
+        const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
+        const authErrorMsg = await getWorkdayAuthErrorMessage(page);
+
         const isMailboxNotConnected = scan.authReason === 'mailbox_not_connected' || scan.reason === 'mailbox_not_connected';
         if (isMailboxNotConnected) {
           console.log(`   ⚠️ [${workerId}] Skipping ${applywizzId}: Zoho mail not connected for password reset/verification (193 pool).`);
@@ -190,10 +409,21 @@ export async function executeWorkerTask({
           }).catch(() => {});
           return { status: 'skipped', reason: 'zoho_email_not_connected' };
         }
-        console.log(`   ❌ [${workerId}] Authentication failed for ${workdayEmail}.`);
+
+        const failReasonText = authErrorMsg ? `Authentication failed: ${authErrorMsg}` : 'Application wizard not accessible after discovery';
+        console.log(`   ❌ [${workerId}] ${failReasonText}`);
         let authShotUrl = null;
         try {
           if (page && !page.isClosed()) {
+            if (authErrorMsg) {
+              await page.evaluate(() => {
+                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i]');
+                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
+              }).catch(() => {});
+            } else {
+              await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+            }
+            await page.waitForTimeout(300);
             const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
             if (buf) {
               authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_auth_fail.jpg`, buf);
@@ -208,10 +438,34 @@ export async function executeWorkerTask({
           company,
           roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
           status: 'failed',
-          failureReason: 'Authentication failed',
+          failureReason: failReasonText,
           failureScreenshotUrl: authShotUrl,
           stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
         }).catch(() => {});
+
+        try {
+          const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: failReasonText,
+            failedAtStep: 'Auth Gateway (Sign In / Sign Up)',
+            screenshotPath: authShotUrl,
+          });
+          await recordApplicationFailure({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: failReasonText,
+            screenshotPath: authShotUrl,
+          });
+        } catch {}
+
         return { status: 'auth_failed', screenshotUrl: authShotUrl };
       }
     }
@@ -220,18 +474,28 @@ export async function executeWorkerTask({
     console.log(`   [${workerId}] Step 2: Preparing resume...`);
     let jdText = '';
     try { jdText = await extractJDText(page); } catch {}
+    const jdWords = jdText ? jdText.split(/\s+/).filter(Boolean).length : 0;
     const resumesYml = findFilePath('config/resumes.yml');
     let resumePath = null;
     if (existsSync(resumesYml)) {
       resumePath = await pickResume(jdText, resumesYml);
     }
     if (resumePath) profile._resumePath = resumePath;
+    const resumeFile = resumePath ? basename(resumePath) : 'Candidate_ATS_Resume.pdf';
+    appLog(6, `Job Description: Parsed ${jdText.length} characters (~${jdWords} words). Selected resume: "${resumeFile}" tailored to JD.`);
 
     // Step C: Generate fill plan
     console.log(`   [${workerId}] Step 3: Generating plan...`);
     const plan = await generatePlan(scan, profile, { resumePath, jdText, url: jobUrl });
     if (company) plan.company = company;
     if (roleTitle) plan.role = roleTitle;
+    const questionsCount = plan.answers ? Object.keys(plan.answers).length : (scan.field_count || 12);
+    appLog(7, `LLM Reasoning: Generating structured answers for ${questionsCount} form fields using candidate knowledge and JD context.`);
+
+    // Hook wizard step changes for live frontend execution trace
+    profile._onStepChange = (iteration, stepName) => {
+      appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
+    };
 
     // Save local plan backup
     try {
@@ -241,6 +505,7 @@ export async function executeWorkerTask({
     } catch {}
 
     // Step D: Fill & Submit
+    appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
     console.log(`   [${workerId}] Step 4: Filling application...`);
     const status = await fillForm(jobUrl, plan, {
       browser,
@@ -250,10 +515,69 @@ export async function executeWorkerTask({
       workdayEmail,
       workdayPassword,
       mode: 'signin',
-      confirmSubmit,
+      confirmSubmit: effectiveConfirmSubmit,
       dryRun,
       isBatch: true,
     });
+
+    if (status === 'job_not_found') {
+      console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — capturing screenshot & purging queue for all clients.`);
+      let expiredShotUrl = null;
+      try {
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+          if (buf) {
+            expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
+          }
+        }
+      } catch {}
+
+      await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
+
+      const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${expiredShotUrl ? ` [screenshot: ${expiredShotUrl}]` : ''}`;
+      if (queueTaskId) {
+        await updateQueueTaskStatus(queueTaskId, {
+          status: 'failed',
+          errorMessage: expiredReason,
+          screenshotPath: expiredShotUrl,
+        });
+      }
+      await upsertSupabaseApplication({
+        applywizzId,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+        status: 'failed',
+        failureReason: expiredReason,
+        failureScreenshotUrl: expiredShotUrl,
+        stoppedAtStep: 'Link Expired',
+      }).catch(() => {});
+
+      try {
+        const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          failureReason: expiredReason,
+          failedAtStep: 'Job Discovery / Link Expired',
+          screenshotPath: expiredShotUrl,
+        });
+        await recordApplicationFailure({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          failureReason: expiredReason,
+          screenshotPath: expiredShotUrl,
+        });
+      } catch {}
+
+      return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl };
+    }
 
     // Step E: Save newly discovered form schema to Supabase if unique link
     const combinedFields = [
@@ -261,7 +585,12 @@ export async function executeWorkerTask({
       ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
     ].filter((f) => f && f.type !== 'password' && !/password/i.test(f.name || '') && !/password/i.test(f.label || ''));
 
-    if (!cacheHit && combinedFields.length > 0) {
+    const existingCount = cacheResult?.schema?.fields_schema?.length || 0;
+    const existingSteps = cacheResult?.schema?.step_names || [];
+    const isPartialCache = existingCount < 20 || existingSteps.length <= 1;
+    const hasMoreFields = combinedFields.length > existingCount;
+
+    if ((!cacheHit || isPartialCache || hasMoreFields) && combinedFields.length > 0) {
       try {
         const saved = await recordDiscoveredJobForm({
           jobUrl,
@@ -302,9 +631,16 @@ export async function executeWorkerTask({
 
     // Step F: Record status to Supabase
     let completionShotUrl = null;
+    let detectedStep = null;
     try {
       if (page && !page.isClosed()) {
-        const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+        const { detectWorkdayStep } = await import('./stateDetector.mjs');
+        detectedStep = await detectWorkdayStep(page).catch(() => null);
+        if (status !== 'submitted' && status !== 'reached-review' && status !== 'reached_review') {
+          await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+          await page.waitForTimeout(500).catch(() => {});
+        }
+        const buf = profile?._submissionScreenshotBuffer || await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true }).catch(() => null);
         if (buf) {
           const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
             ? 'application-successes'
@@ -317,59 +653,263 @@ export async function executeWorkerTask({
     const isSuccessStatus = (status === 'submitted' || status === 'reached-review' || status === 'reached_review');
     const stoppedBlock = isSuccessStatus
       ? 'Step 5: Review & Submit'
-      : (profile._currentStep || 'Step 3: Application Questions');
+      : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+
+    let fullFailureReason = null;
+    if (!isSuccessStatus) {
+      fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
+      if (completionShotUrl) {
+        fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
+      }
+    } else if (completionShotUrl) {
+      fullFailureReason = `[screenshot: ${completionShotUrl}]`;
+    }
+
+    const appStatus = (status === 'submitted')
+      ? 'submitted'
+      : (status === 'reached-review' || status === 'reached_review')
+        ? 'ready_for_review'
+        : status;
 
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl,
       company,
       roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-      status,
-      failureReason: isSuccessStatus ? null : `wizard_did_not_reach_review (stopped at ${stoppedBlock})`,
-      failureScreenshotUrl: isSuccessStatus ? null : completionShotUrl,
-      stoppedAtStep: isSuccessStatus ? null : stoppedBlock,
+      status: appStatus,
+      failureReason: fullFailureReason,
+      failureScreenshotUrl: completionShotUrl,
+      stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
     }).catch(() => {});
 
     if (queueTaskId) {
       const finalStatus = (status === 'submitted')
         ? 'submitted'
         : (status === 'reached-review' || status === 'reached_review')
-          ? 'reached_review'
+          ? 'ready_for_review'
           : (status === 'skipped' ? 'skipped' : 'failed');
-      const answersMap = profile._supabaseQa || (profile._answerCache ? Object.fromEntries(profile._answerCache) : {});
+      const answersMap = {
+        ...(profile._scrapedReviewMap || {}),
+        ...(profile._supabaseQa || {}),
+        ...(profile._answerCache ? Object.fromEntries(profile._answerCache) : {})
+      };
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
+        errorMessage: fullFailureReason,
         preResolvedAnswers: answersMap,
         screenshotPath: completionShotUrl,
       });
     }
 
+    if (!isSuccessStatus) {
+      try {
+        const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+          failedAtStep: stoppedBlock,
+          screenshotPath: completionShotUrl,
+        });
+        await recordApplicationFailure({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+          screenshotPath: completionShotUrl,
+        });
+      } catch {}
+    }
+
+    if (status === 'submitted') {
+      try {
+        const { completeSubmittedTask } = await import('./supabaseClient.mjs');
+        await completeSubmittedTask({
+          applywizzId,
+          jobUrl,
+          screenshotUrl: completionShotUrl,
+          workerId,
+        });
+      } catch {}
+      appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
+    } else if (status === 'reached-review' || status === 'reached_review') {
+      try {
+        const { saveResolvedAnswers, saveScannedJob, recordJobDistributions } = await import('./supabaseClient.mjs');
+        
+        // Prepare strictly the required/important questions scraped from Review & Submit
+        const reviewQuestionsFormatted = Object.entries(profile._scrapedReviewMap || {}).map(([label, value]) => ({
+          label,
+          value,
+          required: true,
+          important: true,
+          type: 'review_question'
+        }));
+        
+        const finalScrapedQuestions = reviewQuestionsFormatted.length > 0
+          ? reviewQuestionsFormatted
+          : (combinedFields || []).filter(f => f.required || f.important);
+
+        await saveScannedJob({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          scrapedQuestions: finalScrapedQuestions,
+          stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
+          screenshotPath: completionShotUrl,
+          scanStatus: 'completed',
+        });
+        const unansweredQuestions = [];
+
+        // Check review questions that have empty / incomplete answers
+        for (const q of reviewQuestionsFormatted) {
+          const val = String(q.value || '').trim();
+          if (!val || /^(select(\s*one)?|select\.\.\.|choose(\s*one)?|unanswered|please\s*select)$/i.test(val)) {
+            unansweredQuestions.push({
+              question: q.label,
+              field_type: q.type || 'text',
+              step: 'Review & Submit',
+              options: q.options || [],
+            });
+          }
+        }
+
+        // Check wizard steps for blocked or unanswered required questions
+        if (profile._stepBlocked) {
+          for (const [step, items] of Object.entries(profile._stepBlocked)) {
+            for (const item of (Array.isArray(items) ? items : [])) {
+              const qText = typeof item === 'string' ? item : (item.label || item.id || item.question);
+              if (qText && !unansweredQuestions.some(u => u.question.toLowerCase() === qText.toLowerCase())) {
+                unansweredQuestions.push({
+                  question: qText,
+                  field_type: item.type || item.controlType || 'unknown',
+                  step,
+                  options: item.options || [],
+                });
+              }
+            }
+          }
+        }
+
+        if (Array.isArray(profile._unansweredQuestions)) {
+          for (const item of profile._unansweredQuestions) {
+            const qText = typeof item === 'string' ? item : (item.label || item.id || item.question);
+            if (qText && !unansweredQuestions.some(u => u.question.toLowerCase() === qText.toLowerCase())) {
+              unansweredQuestions.push({
+                question: qText,
+                field_type: item.type || item.controlType || 'unknown',
+                step: item.step || 'Application',
+                options: item.options || [],
+              });
+            }
+          }
+        }
+
+        const unansweredCount = unansweredQuestions.length;
+
+        await recordJobDistributions({
+          leadApplywizzId: applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          scrapedQuestions: finalScrapedQuestions,
+          resolvedAnswers: profile._scrapedReviewFields || [],
+          unansweredQuestions,
+          unansweredCount,
+          screenshotUrl: completionShotUrl,
+          status: unansweredCount > 0 ? 'needs_answers' : 'ready_for_review',
+          clients: [{ applywizzId, jobId: task.job_id || task.jobId || null, jobUrl }],
+        }).catch(() => {});
+        await saveResolvedAnswers({
+          applywizzId,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          resolvedAnswersJson: profile._scrapedReviewFields || [],
+          isFullyAnswered: true,
+          unansweredCount: 0,
+          status: 'ready_for_review',
+          screenshotUrl: completionShotUrl,
+        });
+      } catch {}
+      appLog(15, `Playwright: Reached Step 5 (Review & Submit). Form paused for CA review. High-res verification screenshot saved: ${completionShotUrl || 'Supabase'}`);
+    }
+
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
-    return { status, cacheHit, screenshotUrl: completionShotUrl };
+    return {
+      status,
+      cacheHit,
+      screenshotUrl: completionShotUrl,
+      answersMap: profile._answers || profile._resolvedAnswersMap || {},
+      harvestedFields: combinedFields,
+      scrapedQuestionsCount: combinedFields.length,
+    };
   } catch (err) {
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
+    // Failed job: skipped saving schema to scanned_jobs
     let errShotUrl = null;
+    let errStep = profile?._currentStep || 'Runtime Exception';
     try {
       if (page && !page.isClosed()) {
+        const { detectWorkdayStep } = await import('./stateDetector.mjs');
+        const liveStep = await detectWorkdayStep(page).catch(() => null);
+        if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
         const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
         if (buf) {
           errShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_error.jpg`, buf);
         }
       }
     } catch {}
+
+    let fullErrReason = `${err.message} (stopped at ${errStep}) [step: ${errStep}]`;
+    if (errShotUrl) fullErrReason += ` [screenshot: ${errShotUrl}]`;
+
+    appLog(99, `Task halted: ${fullErrReason}`);
+
     if (queueTaskId) {
-      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err.message, screenshotPath: errShotUrl });
+      await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: fullErrReason, screenshotPath: errShotUrl });
     }
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl,
       company,
-      roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+      roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
       status: 'failed',
-      failureReason: err.message,
+      failureReason: fullErrReason,
       failureScreenshotUrl: errShotUrl,
-      stoppedAtStep: profile._currentStep || 'Runtime Exception',
+      stoppedAtStep: errStep,
     }).catch(() => {});
+
+    try {
+      const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+      await recordFailedJob({
+        applywizzId,
+        jobId: task.job_id || task.jobId || null,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
+        failureReason: fullErrReason,
+        failedAtStep: errStep,
+        screenshotPath: errShotUrl,
+      });
+      await recordApplicationFailure({
+        applywizzId,
+        jobId: task.job_id || task.jobId || null,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
+        failureReason: fullErrReason,
+        screenshotPath: errShotUrl,
+      });
+    } catch {}
+
     return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl };
   } finally {
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
@@ -378,10 +918,10 @@ export async function executeWorkerTask({
 }
 
 /**
- * Run tasks using a pool of N concurrent workers (default 3).
+ * Run tasks using a pool of N concurrent workers (default 1).
  */
 export async function runWorkerPool(tasks = [], {
-  concurrency = 3,
+  concurrency = 1,
   headless = true,
   confirmSubmit = false,
   dryRun = false,
@@ -472,7 +1012,7 @@ export async function runWorkerPool(tasks = [], {
  *   5. Workers atomically claim their pre-assigned task by ID.
  */
 export async function runQueueWorkerPool({
-  concurrency = 3,
+  concurrency = 1,
   headless = true,
   dryRun = false,
   confirmSubmit = !dryRun,
@@ -494,7 +1034,13 @@ export async function runQueueWorkerPool({
     console.log(`   Active CA(s): ${activeEmails.length ? activeEmails.join(', ') : 'None'}`);
     console.log(`   Assigned Clients (${allowedCandidateIds.length}): ${allowedCandidateIds.join(', ') || 'None'}`);
     if (allowedCandidateIds.length === 0) {
-      console.log('   ⚠️ No candidates found for active CA(s). No tasks will be leased.');
+      console.log('   🛑 [WORKER POOL] No candidates found for active CA(s). Bot will NOT trigger.');
+      return [];
+    }
+
+    const totalApps = await getTotalApplicationCountForCandidates(allowedCandidateIds);
+    if (totalApps === 0) {
+      console.log('   🛑 [WORKER POOL] STOPPED: Application count is 0 for all clients of active CA(s). Bot will NOT trigger.');
       return [];
     }
   }
@@ -512,7 +1058,7 @@ export async function runQueueWorkerPool({
   console.log(`${'═'.repeat(70)}\n`);
 
   if (pendingCount === 0) {
-    console.log('ℹ️  No pending or pre_resolved tasks found in Supabase batch_job_queue.');
+    console.log('🛑 [WORKER POOL] STOPPED: 0 pending tasks found. Bot will NOT trigger.');
     return [];
   }
 
@@ -576,11 +1122,16 @@ export async function runQueueWorkerPool({
     }
   }
 
-  // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks
+  // Preserve round-robin order while placing each URL's blueprint task before its cache-fill tasks.
+  // CRITICAL: Tasks that have been approved by CA ('approved_for_submission') receive top priority
+  // so final submission triggers immediately when CA clicks Submit in the review modal!
+  const approvedTasks = orderedTasks.filter((t) => t.status === 'approved_for_submission' || t.status === 'approved_by_ca' || t.status === 'queued_for_submission');
+  const regularTasks = orderedTasks.filter((t) => t.status !== 'approved_for_submission' && t.status !== 'approved_by_ca' && t.status !== 'queued_for_submission');
+
   const urlOrder = new Map();
   const blueprintTasks = [];
   const cacheFillTasks = [];
-  for (const t of orderedTasks) {
+  for (const t of regularTasks) {
     const url = String(t.job_url || '').replace(/\s+/g, '').trim();
     if (!urlOrder.has(url)) {
       urlOrder.set(url, 'blueprint');
@@ -589,9 +1140,9 @@ export async function runQueueWorkerPool({
       cacheFillTasks.push(t);
     }
   }
-  const fairTasks = [...blueprintTasks, ...cacheFillTasks];
+  const fairTasks = [...approvedTasks, ...blueprintTasks, ...cacheFillTasks];
 
-  console.log(`   Fair-Share Order Built: ${fairTasks.length} tasks across ${caTaskBuckets.size} active CA(s)\n`);
+  console.log(`   Fair-Share Order Built: ${fairTasks.length} tasks (${approvedTasks.length} CA-approved for instant submit) across ${caTaskBuckets.size} active CA(s)\n`);
 
   // ── 5. Cluster Synchronization Primitives ──────────────────────────
   // urlCluster: URL → { state: 'scanning'|'cached'|'failed', resolve: fn }
@@ -633,7 +1184,7 @@ export async function runQueueWorkerPool({
     const workerId = `Worker-${workerNumber}`;
 
     while (taskPointer < taskLimit) {
-      // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 3-min grace on browser disconnect) ──
+      // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 2-min grace on browser disconnect) ──
       if (activeCaOnly && caEmails?.length) {
         try {
           const ops = await getActiveOperators().catch(() => []);
@@ -643,8 +1194,8 @@ export async function runQueueWorkerPool({
             break;
           }
           const lastActivity = new Date(ca.updated_at || ca.last_sign_in || 0).getTime();
-          if (Date.now() - lastActivity > 3 * 60 * 1000) {
-            console.log(`   ⏹ [${workerId}] CA browser session disconnected for > 3 minutes. Terminating worker pool.`);
+          if (Date.now() - lastActivity > 2 * 60 * 1000) {
+            console.log(`   ⏹ [${workerId}] CA browser session disconnected for > 2 minutes. Terminating worker pool.`);
             break;
           }
         } catch {}

@@ -72,8 +72,7 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
 
   for (const f of domFields) {
     const label = f.label || f.id;
-    if (!label || label.length < 4) continue;
-    if (/how did you hear|phone device|country.*phone|postal|address line/i.test(label)) continue;
+    if (!label || label.length < 3) continue;
     await add({
       label,
       fieldType: f.type || f.role || 'input',

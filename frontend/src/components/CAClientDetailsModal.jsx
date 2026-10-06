@@ -177,15 +177,17 @@ export default function CAClientDetailsModal({
                 <th>CLIENT NAME</th>
                 <th>APPLYWIZZ ID</th>
                 <th>EMAIL</th>
+                <th style={{ textAlign: 'center' }}>ZOHO STATUS</th>
                 <th style={{ textAlign: 'center' }}>APPLIED</th>
                 <th style={{ textAlign: 'center' }}>SUBMITTED</th>
+                <th style={{ textAlign: 'center' }}>STATUS</th>
                 <th>WORK DATE</th>
               </tr>
             </thead>
             <tbody>
               {loading ? (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
+                  <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#94a3b8' }}>
                     Fetching live allotted clients from CA management backend...
                   </td>
                 </tr>
@@ -213,6 +215,17 @@ export default function CAClientDetailsModal({
                       </span>
                     </td>
                     <td style={{ textAlign: 'center' }}>
+                      {c.zoho_status === 'not_connected' ? (
+                        <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: '600', background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                          ⚠️ Not Connected
+                        </span>
+                      ) : (
+                        <span style={{ padding: '3px 8px', borderRadius: '4px', fontSize: '0.72rem', fontWeight: '600', background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                          ✓ Connected
+                        </span>
+                      )}
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
                       <span style={{ color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#64748b', fontWeight: 'bold' }}>
                         {c.jobs_applied || 0}
                       </span>
@@ -220,6 +233,23 @@ export default function CAClientDetailsModal({
                     <td style={{ textAlign: 'center' }}>
                       <span style={{ color: (c.emails_submitted || 0) > 0 ? '#10b981' : '#64748b', fontWeight: 'bold' }}>
                         {c.emails_submitted || 0}
+                      </span>
+                    </td>
+                    <td style={{ textAlign: 'center' }}>
+                      <span style={{
+                        padding: '3px 8px',
+                        borderRadius: '4px',
+                        fontSize: '0.72rem',
+                        fontWeight: 'bold',
+                        background: c.status === 'Completed'
+                          ? 'rgba(16, 185, 129, 0.15)'
+                          : (c.status === '⚡ Bot Filling' ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.15)'),
+                        color: c.status === 'Completed'
+                          ? '#34d399'
+                          : (c.status === '⚡ Bot Filling' ? '#38bdf8' : '#94a3b8'),
+                        border: `1px solid ${c.status === 'Completed' ? 'rgba(16, 185, 129, 0.3)' : (c.status === '⚡ Bot Filling' ? 'rgba(56, 189, 248, 0.3)' : 'rgba(100, 116, 139, 0.3)')}`
+                      }}>
+                        {c.status || 'Queued'}
                       </span>
                     </td>
                     <td>
@@ -231,7 +261,7 @@ export default function CAClientDetailsModal({
                 ))
               ) : (
                 <tr>
-                  <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#64748b' }}>
+                  <td colSpan={8} style={{ textAlign: 'center', padding: '2.5rem', color: '#64748b' }}>
                     No active clients allotted to {operator.name} for {activeDate}.
                   </td>
                 </tr>

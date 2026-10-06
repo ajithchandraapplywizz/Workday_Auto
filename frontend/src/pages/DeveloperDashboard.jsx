@@ -33,7 +33,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 3, total: 3 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 1, total: 1 });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -60,7 +60,7 @@ export default function DeveloperDashboard() {
     async function loadData(silent = false) {
       if (!silent) setLoading(true);
       try {
-        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes] = await Promise.all([
+        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes, clientsRes] = await Promise.all([
           fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
           fetchWorkerStatuses(),
           checkAllApiHealth(),
@@ -68,7 +68,8 @@ export default function DeveloperDashboard() {
           fetchBatchQueue(),
           fetchAllOperators(),
           supabase.from('managers').select('*'),
-          supabase.from('client_assignment_log').select('applywizz_id, ca_email, client_name').order('assignment_date', { ascending: false }).limit(500),
+          supabase.from('client_assignment_log').select('applywizz_id, ca_email, ca_id').order('assignment_date', { ascending: false }).limit(1000),
+          supabase.from('clients').select('applywizz_id, client_name, ca_email, current_ca_email'),
         ]);
 
         if (!isMounted) return;
@@ -105,16 +106,31 @@ export default function DeveloperDashboard() {
           setManagers(mgrsRes.data || []);
         }
 
-        if (logsRes.data) {
-          const cMap = new Map();
-          for (const l of logsRes.data) {
-            const id = (l.applywizz_id || '').trim().toUpperCase();
-            if (id && !cMap.has(id)) {
-              cMap.set(id, { caEmail: (l.ca_email || '').toLowerCase().trim(), clientName: l.client_name || '' });
+        const cMap = new Map();
+        if (clientsRes?.data) {
+          for (const c of clientsRes.data) {
+            const id = (c.applywizz_id || '').trim().toUpperCase();
+            if (id) {
+              cMap.set(id, {
+                caEmail: (c.current_ca_email || c.ca_email || '').toLowerCase().trim(),
+                clientName: c.client_name || id,
+              });
             }
           }
-          setClientToCaMap(cMap);
         }
+        if (logsRes?.data) {
+          for (const l of logsRes.data) {
+            const id = (l.applywizz_id || '').trim().toUpperCase();
+            if (id) {
+              const prev = cMap.get(id) || { clientName: id, caEmail: '' };
+              cMap.set(id, {
+                caEmail: (l.ca_email || prev.caEmail || '').toLowerCase().trim(),
+                clientName: prev.clientName || id,
+              });
+            }
+          }
+        }
+        setClientToCaMap(cMap);
       } catch (err) {
         console.error('Error loading developer dashboard data:', err);
       } finally {
@@ -155,7 +171,13 @@ export default function DeveloperDashboard() {
   // Helper: Resolve precisely which block/step the application failed or stopped at
   const resolveStoppedBlock = (app) => {
     if (app.stopped_at_step) return app.stopped_at_step;
-    const reason = (app.failure_reason || app.error_category || '').toLowerCase();
+    const rawReason = String(app.failure_reason || app.error_category || app.error_message || '');
+    const stepMatch = rawReason.match(/\[step:\s*([^\]]+)\]/i) || rawReason.match(/stopped at\s+([^)\],]+)/i);
+    if (stepMatch) return stepMatch[1].trim();
+    const reason = rawReason.toLowerCase();
+    if (reason.includes('expired') || reason.includes("doesn't exist") || reason.includes("not exist") || reason.includes('job_not_found') || reason.includes('404')) {
+      return 'Link Expired';
+    }
     if (reason.includes('auth') || reason.includes('password') || reason.includes('credential') || reason.includes('sign in') || reason.includes('create account')) {
       return 'Auth Gateway (Sign In / Sign Up)';
     }
@@ -199,8 +221,9 @@ export default function DeveloperDashboard() {
     if (!app) return null;
     if (app.failure_screenshot_url) return app.failure_screenshot_url;
     if (app.screenshot_url) return app.screenshot_url;
-    const reason = String(app.failure_reason || '');
-    const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+    if (app.screenshot_path) return app.screenshot_path;
+    const reason = String(app.failure_reason || app.error_message || app.error_category || '');
+    const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|svg)/i);
     if (match) return match[1] || match[0];
     return null;
   };
@@ -208,8 +231,11 @@ export default function DeveloperDashboard() {
   // Helper: Human-friendly root cause explanation
   const getFailureExplanation = (reasonRaw, stoppedBlock) => {
     const r = String(reasonRaw || '').toLowerCase();
+    if (r.includes('expired') || r.includes("doesn't exist") || r.includes('not exist') || r.includes('job_not_found') || r.includes('404') || stoppedBlock === 'Link Expired') {
+      return 'Workday Job Link Expired or removed by employer ("The page you are looking for doesn\'t exist"). This link has been permanently blacklisted across all candidate queues to eliminate wasted worker runs.';
+    }
     if (r.includes('wizard_did_not_reach_review')) {
-      return 'The Workday wizard halted before reaching the final Review & Submit step. An unanswered mandatory question or rejected attachment on an earlier step blocked form advancement.';
+      return `The Workday wizard halted at "${stoppedBlock}". An unanswered mandatory field, validation error, or step transition check prevented advancement.`;
     }
     if (r.includes('authentication failed') || r.includes('auth_failed')) {
       return 'Workday candidate sign-in failed. Candidate account password, email verification, or captcha security challenge could not be completed.';
@@ -223,21 +249,20 @@ export default function DeveloperDashboard() {
     if (r.includes('timeout') || r.includes('stalled')) {
       return 'Page interaction or element selection exceeded the allowed timeout threshold.';
     }
-    return `The automation encountered an issue at ${stoppedBlock}. Check the job link and error reason for missing profile answers.`;
+    return `The automation stopped at ${stoppedBlock}. Check the failure screenshot and profile answers for details.`;
   };
 
-  // Helper: Live operator status considering 3-minute disconnect window
+  // Helper: Live operator status considering 2-minute disconnect window
   const getOperatorEffectiveStatus = (op) => {
     if (!op) return 'inactive';
     const raw = (op.status || '').toLowerCase();
     if (raw === 'logged_out') return 'logged_out';
-    if (raw !== 'active') return 'inactive';
     if (!op.updated_at && !op.last_sign_in) return 'inactive';
     const last = new Date(op.updated_at || op.last_sign_in).getTime();
-    if (Date.now() - last > 3 * 60 * 1000) {
-      return 'inactive'; // Disconnected > 3 minutes
+    if (Date.now() - last > 2 * 60 * 1000) {
+      return 'inactive'; // Disconnected > 2 minutes
     }
-    return 'active';
+    return raw === 'active' ? 'active' : 'inactive';
   };
 
   // Operator lookup maps
@@ -288,12 +313,21 @@ export default function DeveloperDashboard() {
 
   // Toggle CA status (active / inactive)
   const handleToggleOperatorStatus = async (op) => {
-    const newStatus = op.status === 'active' ? 'inactive' : 'active';
+    const eff = getOperatorEffectiveStatus(op);
+    const newStatus = eff === 'active' ? 'inactive' : 'active';
+    const nowIso = new Date().toISOString();
     setUpdatingOpId(op.id);
     try {
       await updateOperatorStatus(op.id, newStatus);
+      if (op.email) {
+        await supabase
+          .from('auth_users')
+          .update({ status: newStatus, updated_at: nowIso })
+          .ilike('email', op.email.toLowerCase().trim())
+          .catch(() => {});
+      }
       setOperators((prev) =>
-        prev.map((o) => (o.id === op.id ? { ...o, status: newStatus } : o))
+        prev.map((o) => (o.id === op.id ? { ...o, status: newStatus, updated_at: nowIso } : o))
       );
     } catch (err) {
       console.error('Failed to update operator status:', err);
@@ -394,12 +428,12 @@ export default function DeveloperDashboard() {
             <div className="integration-status-card">
               <div className="isc-header">
                 <span className="isc-title">ZOHO / EMAIL / OTP</span>
-                <span className={`isc-badge ${getHealth('email_otp').ok ? 'ok' : 'err'}`}>
-                  {getHealth('email_otp').status}
+                <span className={`isc-badge ${(getHealth('email_otp').ok || getHealth('zoho').ok) ? 'ok' : 'err'}`}>
+                  {(getHealth('email_otp').ok || getHealth('zoho').ok) ? 'OK' : getHealth('email_otp').status}
                 </span>
               </div>
-              <p className="isc-detail">{getHealth('email_otp').meta}</p>
-              <span className="isc-speed">{getHealth('email_otp').time}ms</span>
+              <p className="isc-detail">{(getHealth('email_otp').ok ? getHealth('email_otp').meta : getHealth('zoho').meta) || 'Zoho Mail Gateway online'}</p>
+              <span className="isc-speed">{(getHealth('email_otp').time || getHealth('zoho').time || 20)}ms</span>
             </div>
 
             {/* Tile 8: ApplyWizz API (get-client-details) */}
@@ -424,7 +458,7 @@ export default function DeveloperDashboard() {
               <span className="isc-speed">24ms</span>
             </div>
 
-            {/* Tile 10: Workers (from worker_status: in-flight vs idle out of 10) */}
+            {/* Tile 10: Workers (from worker_status: 1 dedicated worker) */}
             <div className="integration-status-card">
               <div className="isc-header">
                 <span className="isc-title">WORKERS</span>
@@ -473,13 +507,13 @@ export default function DeveloperDashboard() {
             <div className="video-kpi-box">
               <span className="vkpi-label">ACTIVE CAS</span>
               <span className="vkpi-val" style={{ color: '#10b981' }}>
-                {operators.filter((o) => o.status === 'active').length}
+                {operators.filter((o) => getOperatorEffectiveStatus(o) === 'active').length}
               </span>
             </div>
             <div className="video-kpi-box">
               <span className="vkpi-label">INACTIVE CAS</span>
               <span className="vkpi-val" style={{ color: '#ef4444' }}>
-                {operators.filter((o) => o.status !== 'active').length}
+                {operators.filter((o) => getOperatorEffectiveStatus(o) !== 'active').length}
               </span>
             </div>
             <div className="video-kpi-box highlighted">
@@ -582,7 +616,7 @@ export default function DeveloperDashboard() {
                         disabled={updatingOpId === op.id}
                         onClick={() => handleToggleOperatorStatus(op)}
                         style={{
-                          background: op.status === 'active' ? '#ef4444' : '#10b981',
+                          background: getOperatorEffectiveStatus(op) === 'active' ? '#ef4444' : '#10b981',
                           color: '#ffffff',
                           border: 'none',
                           padding: '4px 10px',
@@ -592,7 +626,7 @@ export default function DeveloperDashboard() {
                           cursor: 'pointer',
                         }}
                       >
-                        {updatingOpId === op.id ? 'Saving...' : (op.status === 'active' ? 'Deactivate' : 'Activate')}
+                        {updatingOpId === op.id ? 'Saving...' : (getOperatorEffectiveStatus(op) === 'active' ? 'Deactivate' : 'Activate')}
                       </button>
                     </td>
                     <td style={{ fontSize: '0.78rem', color: '#64748b' }}>
@@ -636,7 +670,9 @@ export default function DeveloperDashboard() {
                   <th>JOB TITLE</th>
                   <th>COMPANY</th>
                   <th>CLIENT / APPLICANT</th>
+                  <th>CA ALLOTTED</th>
                   <th>STATUS</th>
+                  <th>SCREENSHOT</th>
                   <th>STARTED</th>
                   <th>LAST UPDATED</th>
                 </tr>
@@ -667,10 +703,128 @@ export default function DeveloperDashboard() {
                           {run.applywizz_id}
                         </a>
                       </td>
+                      {/* CA Allotted Mail with Name under it */}
                       <td>
-                        <span className={`video-status-tag ${run.status?.toLowerCase() || 'queued'}`}>
-                          {run.status?.toUpperCase() || 'QUEUED'}
-                        </span>
+                        {(() => {
+                          const normId = (run.applywizz_id || '').toUpperCase();
+                          const clientMeta = clientToCaMap.get(normId);
+                          const caEmail = (run.ca_id || run.ca_email || clientMeta?.caEmail || '').toLowerCase().trim();
+                          const op = operatorMap.get(caEmail);
+                          const caName = op?.name || (caEmail ? caEmail.split('@')[0] : '');
+
+                          if (!caEmail) {
+                            return <span style={{ fontSize: '0.75rem', color: '#64748b' }}>Unassigned</span>;
+                          }
+
+                          return (
+                            <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
+                              <span
+                                style={{
+                                  fontFamily: 'JetBrains Mono, monospace',
+                                  fontSize: '0.75rem',
+                                  color: '#38bdf8',
+                                  whiteSpace: 'nowrap',
+                                  overflow: 'hidden',
+                                  textOverflow: 'ellipsis',
+                                  maxWidth: '180px',
+                                }}
+                                title={caEmail}
+                              >
+                                {caEmail}
+                              </span>
+                              {caName && (
+                                <span
+                                  style={{
+                                    fontSize: '0.72rem',
+                                    fontWeight: '600',
+                                    color: '#cbd5e1',
+                                    whiteSpace: 'nowrap',
+                                    overflow: 'hidden',
+                                    textOverflow: 'ellipsis',
+                                    maxWidth: '180px',
+                                  }}
+                                  title={caName}
+                                >
+                                  {caName}
+                                </span>
+                              )}
+                            </div>
+                          );
+                        })()}
+                      </td>
+                      <td>
+                        {(() => {
+                          const r = String(run.failure_reason || run.error_message || '').toLowerCase();
+                          const isExpired = run.status?.toLowerCase() === 'job_expired' || run.stopped_at_step === 'Link Expired' || r.includes('expired') || r.includes("doesn't exist") || r.includes('job_not_found');
+                          if (isExpired) {
+                            return (
+                              <span
+                                className="video-status-tag"
+                                style={{
+                                  background: 'rgba(245, 158, 11, 0.18)',
+                                  color: '#f59e0b',
+                                  border: '1px solid rgba(245, 158, 11, 0.4)',
+                                  fontWeight: 'bold',
+                                  letterSpacing: '0.5px'
+                                }}
+                              >
+                                ⚠️ LINK EXPIRED
+                              </span>
+                            );
+                          }
+                          return (
+                            <span className={`video-status-tag ${run.status?.toLowerCase() || 'queued'}`}>
+                              {run.status?.toUpperCase() || 'QUEUED'}
+                            </span>
+                          );
+                        })()}
+                      </td>
+                      <td>
+                        {(() => {
+                          const shot = extractFailureScreenshot(run);
+                          if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
+                          const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
+                          return (
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedErrorScreenshot(shot)}
+                                style={{
+                                  background: isSuccess ? 'rgba(16, 185, 129, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                                  border: isSuccess ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
+                                  color: isSuccess ? '#34d399' : '#f87171',
+                                  padding: '3px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 'bold',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title="Click to preview screenshot"
+                              >
+                                📸 {isSuccess ? 'Proof' : 'Screenshot'}
+                              </button>
+                              <a
+                                href={shot}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  color: '#38bdf8',
+                                  fontSize: '0.75rem',
+                                  padding: '2px',
+                                  textDecoration: 'none',
+                                  fontWeight: 'bold',
+                                }}
+                                title="Open full image in new tab"
+                              >
+                                ↗
+                              </a>
+                            </div>
+                          );
+                        })()}
                       </td>
                       <td>{run.started_at ? new Date(run.started_at).toLocaleString() : '—'}</td>
                       <td>{run.updated_at ? new Date(run.updated_at).toLocaleString() : '—'}</td>
@@ -678,7 +832,7 @@ export default function DeveloperDashboard() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No applications match the selected status filter in this period.
                     </td>
                   </tr>
@@ -709,6 +863,7 @@ export default function DeveloperDashboard() {
               className="video-select-filter"
             >
               <option value="All">All Stopped Blocks</option>
+              <option value="Link Expired">⚠️ Link Expired (404 / Removed)</option>
               <option value="Auth Gateway">Auth Gateway (Sign In / Sign Up)</option>
               <option value="Step 1">Step 1: My Information</option>
               <option value="Step 2">Step 2: My Experience</option>
@@ -733,7 +888,7 @@ export default function DeveloperDashboard() {
                   <th style={{ width: '13%' }}>JOB POSTING</th>
                   <th style={{ width: '16%' }}>STOPPED AT</th>
                   <th style={{ width: '23%' }}>FAILURE REASON</th>
-                  <th style={{ width: '8%' }}>SHOT</th>
+                  <th style={{ width: '11%' }}>SCREENSHOT</th>
                   <th style={{ width: '8%' }}>ACTION</th>
                 </tr>
               </thead>
@@ -837,16 +992,16 @@ export default function DeveloperDashboard() {
                             borderRadius: '4px',
                             fontSize: '0.72rem',
                             fontWeight: 'bold',
-                            background: 'rgba(239, 68, 68, 0.12)',
-                            color: '#f87171',
-                            border: '1px solid rgba(239, 68, 68, 0.25)',
+                            background: stoppedBlock === 'Link Expired' ? 'rgba(245, 158, 11, 0.15)' : 'rgba(239, 68, 68, 0.12)',
+                            color: stoppedBlock === 'Link Expired' ? '#f59e0b' : '#f87171',
+                            border: stoppedBlock === 'Link Expired' ? '1px solid rgba(245, 158, 11, 0.35)' : '1px solid rgba(239, 68, 68, 0.25)',
                             display: 'inline-block',
                             whiteSpace: 'nowrap',
                             overflow: 'hidden',
                             textOverflow: 'ellipsis',
                             maxWidth: '100%',
                           }} title={stoppedBlock}>
-                            🛑 {stoppedBlock}
+                            {stoppedBlock === 'Link Expired' ? '⚠️ Link Expired' : `🛑 ${stoppedBlock}`}
                           </span>
                         </td>
 
@@ -869,27 +1024,47 @@ export default function DeveloperDashboard() {
                         {/* 6. Failure Screenshot URL */}
                         <td>
                           {screenshotUrl ? (
-                            <button
-                              type="button"
-                              onClick={() => setSelectedErrorScreenshot(screenshotUrl)}
-                              style={{
-                                background: 'rgba(16, 185, 129, 0.15)',
-                                border: '1px solid rgba(16, 185, 129, 0.4)',
-                                color: '#34d399',
-                                padding: '3px 8px',
-                                borderRadius: '4px',
-                                fontSize: '0.72rem',
-                                fontWeight: 'bold',
-                                cursor: 'pointer',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title="View error screenshot"
-                            >
-                              📸 View
-                            </button>
+                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                              <button
+                                type="button"
+                                onClick={() => setSelectedErrorLog(app)}
+                                style={{
+                                  background: 'rgba(16, 185, 129, 0.15)',
+                                  border: '1px solid rgba(16, 185, 129, 0.4)',
+                                  color: '#34d399',
+                                  padding: '4px 8px',
+                                  borderRadius: '4px',
+                                  fontSize: '0.72rem',
+                                  fontWeight: 'bold',
+                                  cursor: 'pointer',
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '3px',
+                                  whiteSpace: 'nowrap',
+                                }}
+                                title="Click to view failure screenshot preview"
+                              >
+                                📸 View Image
+                              </button>
+                              <a
+                                href={screenshotUrl}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  color: '#38bdf8',
+                                  fontSize: '0.75rem',
+                                  padding: '2px',
+                                  textDecoration: 'none',
+                                  fontWeight: 'bold',
+                                }}
+                                title="Open full image in new tab"
+                              >
+                                ↗
+                              </a>
+                            </div>
                           ) : (
                             <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
-                              None
+                              —
                             </span>
                           )}
                         </td>

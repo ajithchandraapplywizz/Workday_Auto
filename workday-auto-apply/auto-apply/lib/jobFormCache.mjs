@@ -10,7 +10,16 @@
  *   3. Fills with zero discovery or LLM delay.
  */
 
-import { loadJobFormSchema, upsertJobFormSchema, canonicalJobPostingUrl, getPendingQueueTasksForUrl, updateQueueTaskStatus } from './supabaseClient.mjs';
+import {
+  loadJobFormSchema,
+  upsertJobFormSchema,
+  canonicalJobPostingUrl,
+  getPendingQueueTasksForUrl,
+  updateQueueTaskStatus,
+  saveScannedJob,
+  saveResolvedAnswers,
+  recordNovelQABankAnswer,
+} from './supabaseClient.mjs';
 import { resolveClientAnswer } from './clientAnswer.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 
@@ -36,6 +45,14 @@ export async function checkAndPreResolveJobForClient({ jobUrl, profile = {} }) {
     return { hit: false, preResolvedCount: 0 };
   }
   schema.fields_schema = validSchemaFields;
+
+  // Invalidate partial schemas (e.g. only 1 step like 'My Information' or under 20 fields)
+  const stepCount = (schema.step_names || []).length;
+  const isPartial = stepCount <= 1 && validSchemaFields.length < 20;
+  if (isPartial) {
+    console.log(`   ℹ️ [Partial Schema in Supabase] Cached schema only has ${validSchemaFields.length} fields on ${stepCount} step (${(schema.step_names || []).join(', ')}). Proceeding with full multi-page scan.`);
+    return { hit: false, schema, isPartial: true, preResolvedCount: 0 };
+  }
 
   const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.personal?.email || 'unknown';
   console.log(`\n📋 [Cache Hit] Found cached form schema for job in Supabase! (${schema.fields_schema.length} fields across steps)`);
@@ -110,13 +127,10 @@ export async function recordDiscoveredJobForm({
   const resolvedRole = roleTitle || profile._roleTitle || profile._jobTitle || '';
   const applywizzId = profile._applyWizzId || profile.applywizz_id || '';
 
-  // Deduplicate and filter ONLY REQUIRED application fields (never auth/password inputs)
+  // Deduplicate and store all application fields (First Name, Last Name, How did you hear, Questions, etc. - excluding auth passwords)
   const deduped = [];
   const seen = new Set();
   for (const f of fields) {
-    const isRequired = Boolean(f.required || f.is_required);
-    if (!isRequired) continue; // Only store required fields in the single cell schema
-
     const label = f.label || f.id || '';
     const autoId = f.automationId || f.dataAutomationId || f.id || '';
     const fType = f.fieldType || f.type || 'input';
@@ -128,12 +142,13 @@ export async function recordDiscoveredJobForm({
     if (!norm || seen.has(norm)) continue;
     seen.add(norm);
 
+    const isRequired = Boolean(f.required || f.is_required);
     deduped.push({
       label,
       normalized_label: norm,
       step: f.step || f.stepName || 'Application',
       field_type: fType,
-      is_required: true,
+      is_required: isRequired,
       options: Array.isArray(f.options) ? f.options.slice(0, 40) : [],
       automation_id: autoId,
     });
@@ -141,6 +156,7 @@ export async function recordDiscoveredJobForm({
 
   if (deduped.length === 0) return false;
 
+  // 1. Save to job_form_schemas table (scanned_jobs is strictly reserved for Review & Submit reached applications)
   const success = await upsertJobFormSchema({
     jobUrl,
     tenant: resolvedTenant,
@@ -152,25 +168,58 @@ export async function recordDiscoveredJobForm({
   });
 
   if (success) {
-    console.log(`  💾 Saved required job form schema to Supabase single cell (${deduped.length} required fields) for future candidate reuse.`);
+    console.log(`  💾 Saved required job form schema to Supabase scanned_jobs & schemas (${deduped.length} required fields) for candidate reuse.`);
+  }
+
+  // 3. Immediately pre-resolve and save for the initiating client if profile is present
+  if (applywizzId) {
+    try {
+      const detailed = await preResolveClientAnswersDetailed({
+        jobUrl,
+        schema: { fields_schema: deduped, tenant: resolvedTenant, company: resolvedCompany, role_title: resolvedRole },
+        profile,
+      });
+      await saveResolvedAnswers({
+        applywizzId,
+        jobUrl,
+        company: resolvedCompany,
+        roleTitle: resolvedRole,
+        resolvedAnswersJson: detailed.structuredAnswers,
+        isFullyAnswered: detailed.isFullyAnswered,
+        unansweredCount: detailed.unansweredCount,
+        status: detailed.isFullyAnswered ? 'ready_for_review' : 'incomplete',
+      }).catch(() => {});
+    } catch {}
   }
 
   return success;
 }
 
 /**
- * Pre-resolve all required answers for a candidate and return as a single JSON object.
+ * Pre-resolve all required answers for a candidate with full metadata & source tagging.
  */
-export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} }) {
-  if (!schema?.fields_schema?.length) return {};
+export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile = {} }) {
+  if (!schema?.fields_schema?.length) {
+    return { answersMap: {}, structuredAnswers: [], isFullyAnswered: false, unansweredCount: 0 };
+  }
   const answersMap = {};
+  const structuredAnswers = [];
+  let unansweredCount = 0;
+  const awlId = profile?._applyWizzId || profile?.applywizz_id || '';
+
   for (const field of schema.fields_schema) {
-    const norm = field.normalized_label || normalizeLabel(field.label);
+    const rawLabel = field.label || field.question_label || '';
+    const norm = field.normalized_label || normalizeLabel(rawLabel);
     if (!norm) continue;
+
+    let ansVal = null;
+    let sourceTag = '[API]';
+    let rawSource = 'api';
+
     try {
       const resolved = await resolveClientAnswer({
         ...field,
-        label: field.label,
+        label: rawLabel,
         required: true,
       }, profile, {
         url: jobUrl,
@@ -178,40 +227,95 @@ export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} 
         company: schema.company,
         forceLlm: false,
       });
+
       if (resolved?.answer != null) {
-        answersMap[norm] = String(resolved.answer);
+        ansVal = String(resolved.answer);
+        rawSource = String(resolved.source || '').toLowerCase();
+        if (rawSource.includes('supabase') || rawSource.includes('db')) {
+          sourceTag = '[Supabase]';
+          rawSource = 'supabase';
+        } else if (rawSource.includes('resume') || rawSource.includes('experience')) {
+          sourceTag = '[Resume]';
+          rawSource = 'resume';
+        } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter')) {
+          sourceTag = '[LLM]';
+          rawSource = 'llm';
+          if (awlId && ansVal) {
+            recordNovelQABankAnswer({
+              applywizzId: awlId,
+              question: rawLabel,
+              questionNormalized: norm,
+              answer: ansVal,
+              fieldType: field.field_type || 'text',
+              source: 'llm',
+            }).catch(() => {});
+          }
+        } else {
+          sourceTag = '[API]';
+          rawSource = 'api';
+        }
       }
     } catch {}
+
+    const isAnswered = Boolean(ansVal && ansVal.trim().length > 0);
+    if (!isAnswered && Boolean(field.is_required || field.required)) {
+      unansweredCount++;
+    }
+
+    if (isAnswered) {
+      answersMap[norm] = ansVal;
+    }
+
+    structuredAnswers.push({
+      question: rawLabel,
+      question_normalized: norm,
+      answer: ansVal || '',
+      field_type: field.field_type || 'text',
+      options: field.options || [],
+      step: field.step || 'Application',
+      source: sourceTag,
+      raw_source: rawSource,
+      is_required: Boolean(field.is_required || field.required),
+      is_answered: isAnswered,
+    });
   }
-  return answersMap;
+
+  const isFullyAnswered = unansweredCount === 0;
+
+  return {
+    answersMap,
+    structuredAnswers,
+    isFullyAnswered,
+    unansweredCount,
+  };
+}
+
+/**
+ * Pre-resolve all required answers for a candidate and return as a single JSON object.
+ */
+export async function preResolveClientAnswersMap({ jobUrl, schema, profile = {} }) {
+  if (!schema?.fields_schema?.length) return {};
+  const detailed = await preResolveClientAnswersDetailed({ jobUrl, schema, profile });
+  return detailed.answersMap;
 }
 
 /**
  * Pre-resolve answers for ALL remaining 'pending' tasks sharing the same job URL.
  * Called immediately after Client 1 saves the form schema (first-scan only).
- *
- * Flow:
- *  1. Fetch all pending queue rows for this canonical job URL.
- *  2. For each row, load that client's profile via the injected loadProfileFn.
- *  3. Resolve every required field answer from their profile/resume/LLM.
- *  4. Write the answers JSON to pre_resolved_answers cell in batch_job_queue.
- *  5. Flip that row's status from 'pending' → 'pre_resolved'.
- *
- * @param {object} params
- * @param {string} params.jobUrl
- * @param {object} params.schema   — the saved job_form_schemas row (has fields_schema array)
- * @param {Function} params.loadProfileFn — async (applywizzId) => profile object
- *                                          injected from workerPool to avoid circular imports
  */
-export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, allowedCandidateIds = null }) {
+export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, allowedCandidateIds = null, tasks = null }) {
   if (!jobUrl || !schema?.fields_schema?.length || typeof loadProfileFn !== 'function') return;
 
   let pendingTasks = [];
-  try {
-    pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
-  } catch (err) {
+  if (Array.isArray(tasks) && tasks.length > 0) {
+    pendingTasks = tasks;
+  } else {
+    try {
+      pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
+    } catch (err) {
     console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
     return;
+    }
   }
 
   if (!pendingTasks.length) {
@@ -219,26 +323,40 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
     return;
   }
 
-  console.log(`\n  🔄 Bulk pre-resolving for ${pendingTasks.length} pending task(s) sharing the same job URL...`);
+  console.log(`\n  🔄 Bulk pre-resolving across 4-tier engine for ${pendingTasks.length} pending task(s)...`);
 
   for (const row of pendingTasks) {
     const awlId = row.applywizz_id;
     try {
       const profile = await loadProfileFn(awlId);
-      const answersMap = await preResolveClientAnswersMap({ jobUrl, schema, profile });
-      const count = Object.keys(answersMap).length;
+      const detailed = await preResolveClientAnswersDetailed({ jobUrl, schema, profile });
+      const count = Object.keys(detailed.answersMap).length;
 
+      // Update resolved_answers table (with zero-incomplete check)
+      await saveResolvedAnswers({
+        applywizzId: awlId,
+        scannedJobId: schema.id || null,
+        jobUrl,
+        company: schema.company || row.company || 'Workday',
+        roleTitle: schema.role_title || row.role_title || 'Application',
+        resolvedAnswersJson: detailed.structuredAnswers,
+        isFullyAnswered: detailed.isFullyAnswered,
+        unansweredCount: detailed.unansweredCount,
+        status: detailed.isFullyAnswered ? 'ready_for_review' : 'incomplete',
+      }).catch(() => {});
+
+      // Keep batch_job_queue synchronized
       await updateQueueTaskStatus(row.id, {
-        status: 'pre_resolved',
-        preResolvedAnswers: answersMap,
+        status: detailed.isFullyAnswered ? 'pre_resolved' : 'pending',
+        preResolvedAnswers: detailed.answersMap,
       });
 
-      console.log(`  ✅ Pre-resolved ${count} field(s) for ${awlId} → status set to pre_resolved.`);
+      console.log(`  ✅ [${awlId}] Pre-resolved ${count}/${detailed.structuredAnswers.length} fields (${detailed.isFullyAnswered ? '100% COMPLETE' : detailed.unansweredCount + ' UNANSWERED'}). Status: ${detailed.isFullyAnswered ? 'ready_for_review' : 'incomplete'}`);
     } catch (err) {
       console.log(`  ⚠️  Failed to pre-resolve for ${awlId}: ${err.message}`);
-      // Non-fatal: task remains 'pending' and will fall back to live discovery
     }
   }
 
-  console.log(`  ✅ Bulk pre-resolution complete for ${pendingTasks.length} queued task(s).\n`);
+  console.log(`  ✅ Bulk 4-tier pre-resolution complete for ${pendingTasks.length} queued task(s).\n`);
 }
+

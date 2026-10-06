@@ -1,8 +1,8 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   fetchCAEmails,
-  fetchCAWorkHistory,
+  fetchCABotAutomationStats,
   fetchClientDetails,
   fetchAssignedClientsForCA,
   fetchApplicationsDynamic,
@@ -58,7 +58,22 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   const [selectedApp, setSelectedApp] = useState(null);
   const [traceLogs, setTraceLogs] = useState([]);
   const [candidateSearch, setCandidateSearch] = useState('');
-  const [workHistoryRecords, setWorkHistoryRecords] = useState([]);
+  const terminalBottomRef = useRef(null);
+
+  useEffect(() => {
+    if (terminalBottomRef.current) {
+      terminalBottomRef.current.scrollIntoView({ behavior: 'smooth' });
+    }
+  }, [traceLogs]);
+  const [botAutomationStats, setBotAutomationStats] = useState({
+    totals: { total: 0, queued: 0, inFlight: 0, readyForReview: 0, submitted: 0, failed: 0 },
+    clientStats: [],
+  });
+
+  // Calculate total application count across all assigned candidates for this CA
+  const totalCaApplications = useMemo(() => {
+    return candidates.reduce((sum, c) => sum + (c.jobs_applied || 0), 0);
+  }, [candidates]);
 
   // Form Review Modal state
   const [showReviewModal, setShowReviewModal] = useState(false);
@@ -73,7 +88,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     setApplications((prev) =>
       prev.map((a) =>
         a.id === reviewTargetApp?.id || (a.applywizz_id === applywizzId && (a.job_url === jobUrl || a.url === jobUrl))
-          ? { ...a, status: 'submitted' }
+          ? { ...a, status: 'in_progress' }
           : a
       )
     );
@@ -179,7 +194,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
         setApplications(appsRes.applications);
         setSelectedApp(appsRes.applications[0]);
         // Load trace for first app
-        const trace = await fetchAutomationTrace(appsRes.applications[0].id);
+        const trace = await fetchAutomationTrace({
+          applicationId: appsRes.applications[0].id,
+          applywizzId: candidate.id,
+        });
         if (trace.success) {
           setTraceLogs(trace.trace);
         }
@@ -196,7 +214,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   // Switch inspected application in queue
   const handleSelectApp = async (app) => {
     setSelectedApp(app);
-    const trace = await fetchAutomationTrace(app.id);
+    const trace = await fetchAutomationTrace({
+      applicationId: app.id,
+      applywizzId: selectedCandidate?.id,
+    });
     if (trace.success) {
       setTraceLogs(trace.trace);
     }
@@ -204,7 +225,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
   // Live polling: automatically reflects real-time background bot progress in CA portal
   useEffect(() => {
-    if (!selectedCandidate?.id) return;
+    // If no candidate is selected OR total applications across all assigned clients is 0, do not poll
+    if (!selectedCandidate?.id || totalCaApplications === 0) return;
     let isMounted = true;
 
     const refreshActiveCandidateApps = async () => {
@@ -219,57 +241,66 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
             return updated || curr;
           });
         }
+        const trace = await fetchAutomationTrace({
+          applicationId: selectedApp?.id || null,
+          applywizzId: selectedCandidate?.id || null,
+        });
+        if (isMounted && trace.success && (trace.logs || trace.trace)) {
+          setTraceLogs(trace.logs || trace.trace);
+        }
       } catch (err) {
         console.warn('Silent live polling error:', err);
       }
     };
 
-    const intervalId = setInterval(refreshActiveCandidateApps, 3500);
+    const intervalId = setInterval(refreshActiveCandidateApps, 2000);
     return () => {
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [selectedCandidate?.id]);
+  }, [selectedCandidate?.id, totalCaApplications]);
 
-  // Load Work History for Stats Tab with IST bounds
+  // Load Live Bot Automation Stats for Stats Tab
   useEffect(() => {
     if (operatorView !== 'stats') return;
     let isMounted = true;
-    async function loadHistory() {
+    async function loadStats() {
       setLoading(true);
       try {
-        const bounds = getISTDateBounds(date, timeframe);
-        const res = await fetchCAWorkHistory({
-          from: bounds.startDateStr,
-          to: bounds.endDateStr,
+        const res = await fetchCABotAutomationStats({
           caEmail: sessionCaEmail,
+          dateStr: activeWorkDate || date,
         });
 
         if (!isMounted) return;
         if (res.success) {
-          setWorkHistoryRecords(res.records || []);
+          setBotAutomationStats(res);
         }
       } catch (err) {
-        console.error('Error loading CA work history:', err);
+        console.error('Error loading CA bot automation stats:', err);
       } finally {
         if (isMounted) setLoading(false);
       }
     }
 
-    loadHistory();
-    return () => { isMounted = false; };
-  }, [operatorView, sessionCaEmail, date, timeframe]);
+    loadStats();
+    const intervalId = setInterval(loadStats, 5000);
+    return () => {
+      isMounted = false;
+      clearInterval(intervalId);
+    };
+  }, [operatorView, sessionCaEmail, activeWorkDate, date]);
 
-  // Overall counts for this CA in this period
+  // Overall counts for this CA in this period (Strictly verified submissions with screenshot proof)
   const totals = useMemo(() => {
-    const totalCandidatesApps = candidates.reduce((acc, c) => acc + (Number(c.jobs_applied) || 0), 0);
-    const totalCandidatesSubmitted = candidates.reduce((acc, c) => acc + (Number(c.emails_submitted) || 0), 0);
+    const hasProof = (a) => Boolean(a.screenshot_url || a.screenshot_path || a.failure_screenshot_url);
     const currentTotal = applications.length;
-    const currentSubmitted = applications.filter((a) => a.status === 'submitted').length;
+    const currentSubmitted = applications.filter((a) => (a.status === 'submitted' || a.status === 'completed') && hasProof(a)).length;
     const currentFailed = applications.filter((a) => a.status === 'failed').length;
+    const totalCandidatesApps = candidates.reduce((acc, c) => acc + (Number(c.jobs_applied) || 0), 0);
     return {
       total: Math.max(totalCandidatesApps, currentTotal),
-      submitted: Math.max(totalCandidatesSubmitted, currentSubmitted),
+      submitted: currentSubmitted,
       failed: currentFailed,
     };
   }, [applications, candidates]);
@@ -420,37 +451,48 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
       {loading && <div className="loading-indicator">Synchronizing candidate records for {sessionCaEmail}...</div>}
 
-      {/* STATS VIEW */}
+      {/* STATS VIEW: Real-time Playwright Bot Automation & Queue Breakdown */}
       {operatorView === 'stats' ? (
         <div className="tab-body-fade width-full" style={{ padding: '1.5rem' }}>
           <div className="operator-stats-view">
-            <h2 className="stats-heading">Career Associate Work History ({timeframe.toUpperCase()})</h2>
-            <p className="stats-sub" style={{ color: '#94a3b8' }}>
-              Snapshot work records for <strong>{sessionCaEmail}</strong> queried from live CA Management API with IST timezone bounds.
-            </p>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+              <div>
+                <h2 className="stats-heading" style={{ margin: 0, fontSize: '1.35rem', color: '#f8fafc' }}>
+                  Career Associate Live Bot Automation Stats
+                </h2>
+                <p className="stats-sub" style={{ color: '#94a3b8', margin: '0.35rem 0 0 0', fontSize: '0.85rem' }}>
+                  Real-time Playwright bot execution and queue state for candidates assigned to <strong>{sessionCaEmail}</strong>.
+                </p>
+              </div>
+              <span style={{ fontSize: '0.75rem', background: 'rgba(56, 189, 248, 0.1)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.25)', padding: '4px 10px', borderRadius: '4px', fontWeight: 'bold' }}>
+                ⚡ Live Polling Every 5s
+              </span>
+            </div>
 
             <div className="video-admin-kpi-grid" style={{ marginTop: '1.25rem' }}>
               <div className="video-kpi-box">
-                <span className="vkpi-label">TOTAL WORK ENTRIES</span>
-                <span className="vkpi-val">{workHistoryRecords.length}</span>
+                <span className="vkpi-label">TOTAL QUEUE TASKS</span>
+                <span className="vkpi-val">{botAutomationStats.totals.total}</span>
               </div>
               <div className="video-kpi-box">
-                <span className="vkpi-label">JOBS APPLIED</span>
-                <span className="vkpi-val">
-                  {workHistoryRecords.reduce((acc, r) => acc + (Number(r.jobs_applied) || 0), 0)}
-                </span>
+                <span className="vkpi-label">IN QUEUE</span>
+                <span className="vkpi-val">{botAutomationStats.totals.queued}</span>
               </div>
-              <div className="video-kpi-box highlighted">
-                <span className="vkpi-label">EMAILS SUBMITTED</span>
-                <span className="vkpi-val">
-                  {workHistoryRecords.reduce((acc, r) => acc + (Number(r.emails_submitted) || 0), 0)}
-                </span>
+              <div className="video-kpi-box" style={{ borderColor: 'rgba(56, 189, 248, 0.4)' }}>
+                <span className="vkpi-label" style={{ color: '#38bdf8' }}>BOT FILLING IN BACKGROUND</span>
+                <span className="vkpi-val" style={{ color: '#38bdf8' }}>{botAutomationStats.totals.inFlight}</span>
+              </div>
+              <div className="video-kpi-box" style={{ borderColor: 'rgba(245, 158, 11, 0.4)' }}>
+                <span className="vkpi-label" style={{ color: '#f59e0b' }}>READY TO REVIEW & SUBMIT</span>
+                <span className="vkpi-val" style={{ color: '#f59e0b' }}>{botAutomationStats.totals.readyForReview}</span>
+              </div>
+              <div className="video-kpi-box highlighted" style={{ borderColor: 'rgba(16, 185, 129, 0.5)' }}>
+                <span className="vkpi-label" style={{ color: '#34d399' }}>VERIFIED SUBMISSIONS (PROOF)</span>
+                <span className="vkpi-val" style={{ color: '#34d399' }}>{botAutomationStats.totals.submitted}</span>
               </div>
               <div className="video-kpi-box">
-                <span className="vkpi-label">REQUIRED TARGET</span>
-                <span className="vkpi-val">
-                  {workHistoryRecords.reduce((acc, r) => acc + (Number(r.emails_required) || 0), 0)}
-                </span>
+                <span className="vkpi-label" style={{ color: '#fca5a5' }}>FAILED / BLOCKED</span>
+                <span className="vkpi-val" style={{ color: '#fca5a5' }}>{botAutomationStats.totals.failed}</span>
               </div>
             </div>
 
@@ -458,34 +500,44 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
               <table className="video-data-table">
                 <thead>
                   <tr>
-                    <th>DATE</th>
                     <th>CLIENT NAME</th>
                     <th>APPLYWIZZ ID</th>
-                    <th>JOBS APPLIED</th>
-                    <th>EMAILS SUBMITTED</th>
-                    <th>STATUS</th>
+                    <th style={{ textAlign: 'center' }}>TOTAL JOBS</th>
+                    <th style={{ textAlign: 'center' }}>IN QUEUE</th>
+                    <th style={{ textAlign: 'center' }}>BOT FILLING</th>
+                    <th style={{ textAlign: 'center' }}>READY TO REVIEW</th>
+                    <th style={{ textAlign: 'center' }}>VERIFIED SUBMISSIONS</th>
+                    <th>BOT STATUS</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {workHistoryRecords.length > 0 ? (
-                    workHistoryRecords.map((r, i) => (
-                      <tr key={i}>
-                        <td>{r.date}</td>
-                        <td><strong>{r.client_name}</strong></td>
-                        <td><span className="app-id-tag">{r.applywizz_id}</span></td>
-                        <td>{r.jobs_applied || 0}</td>
-                        <td>{r.emails_submitted || 0}</td>
+                  {botAutomationStats.clientStats?.length > 0 ? (
+                    botAutomationStats.clientStats.map((cs) => (
+                      <tr key={cs.id}>
+                        <td><strong>{cs.name}</strong></td>
+                        <td><span className="app-id-tag">{cs.id}</span></td>
+                        <td style={{ textAlign: 'center', fontWeight: 'bold' }}>{cs.totalJobs}</td>
+                        <td style={{ textAlign: 'center', color: '#94a3b8' }}>{cs.queued}</td>
+                        <td style={{ textAlign: 'center', color: cs.inFlight > 0 ? '#38bdf8' : '#64748b', fontWeight: cs.inFlight > 0 ? 'bold' : 'normal' }}>
+                          {cs.inFlight}
+                        </td>
+                        <td style={{ textAlign: 'center', color: cs.readyForReview > 0 ? '#f59e0b' : '#64748b', fontWeight: cs.readyForReview > 0 ? 'bold' : 'normal' }}>
+                          {cs.readyForReview}
+                        </td>
+                        <td style={{ textAlign: 'center', color: cs.submitted > 0 ? '#34d399' : '#64748b', fontWeight: cs.submitted > 0 ? 'bold' : 'normal' }}>
+                          {cs.submitted}
+                        </td>
                         <td>
-                          <span className={`video-status-tag ${r.status?.toLowerCase() || 'submitted'}`}>
-                            {r.status || 'DONE'}
+                          <span className={`video-status-tag ${cs.inFlight > 0 ? 'in_flight' : cs.readyForReview > 0 ? 'ready_for_review' : cs.submitted > 0 ? 'submitted' : 'queued'}`}>
+                            {cs.botState}
                           </span>
                         </td>
                       </tr>
                     ))
                   ) : (
                     <tr>
-                      <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
-                        No work history recorded for {sessionCaEmail} in this period.
+                      <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                        No candidate queue tasks found for {sessionCaEmail} on this date.
                       </td>
                     </tr>
                   )}
@@ -504,6 +556,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                 <span className="shb-title">ASSIGNED CANDIDATES</span>
                 <div className="shb-badges">
                   <span className="shb-badge red">{candidates.length} Clients</span>
+                  <span
+                    className="shb-badge"
+                    style={{
+                      background: totalCaApplications > 0 ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.2)',
+                      color: totalCaApplications > 0 ? '#38bdf8' : '#94a3b8',
+                      border: `1px solid ${totalCaApplications > 0 ? 'rgba(56, 189, 248, 0.35)' : 'rgba(100, 116, 139, 0.35)'}`,
+                      fontWeight: totalCaApplications > 0 ? 'bold' : 'normal',
+                    }}
+                  >
+                    {totalCaApplications > 0 ? `${totalCaApplications} Apps` : '0 Apps (Bot Stopped)'}
+                  </span>
                 </div>
               </div>
               <div className="sidebar-search-box">
@@ -552,6 +615,43 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
           {/* Right Main Panel: Detail Panel & Application Queue */}
           <main className="operator-workspace">
+            {totalCaApplications === 0 && candidates.length > 0 && !loading && (
+              <div style={{
+                background: 'rgba(239, 68, 68, 0.08)',
+                border: '1px solid rgba(239, 68, 68, 0.25)',
+                borderRadius: '8px',
+                padding: '10px 16px',
+                marginBottom: '1rem',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  <span style={{ fontSize: '1.2rem' }}>🛑</span>
+                  <div>
+                    <div style={{ color: '#f87171', fontWeight: 'bold', fontSize: '0.86rem' }}>
+                      Bot Triggering Stopped: 0 Applications Across All Clients
+                    </div>
+                    <div style={{ color: '#94a3b8', fontSize: '0.78rem', marginTop: '1px' }}>
+                      All {candidates.length} assigned clients have 0 application links recorded. The automated bot is completely stopped and will not trigger.
+                    </div>
+                  </div>
+                </div>
+                <span style={{
+                  background: 'rgba(239, 68, 68, 0.18)',
+                  color: '#fca5a5',
+                  padding: '3px 8px',
+                  borderRadius: '4px',
+                  fontSize: '0.72rem',
+                  fontWeight: 'bold',
+                  border: '1px solid rgba(239, 68, 68, 0.35)',
+                  whiteSpace: 'nowrap'
+                }}>
+                  BOT IDLE (0 APPS)
+                </span>
+              </div>
+            )}
+
             {selectedCandidate ? (
               <div className="candidate-detail-screen">
                 {/* 1. Candidate Full Profile Detail Panel from get-client-details */}
@@ -604,100 +704,179 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     <h3 style={{ color: '#e2e8f0', fontSize: '1.1rem', margin: 0 }}>
                       Assigned Workday Application Queue
                     </h3>
-                    {applications.length > 0 && (
-                      <button
-                        type="button"
-                        className="video-btn-start"
-                        style={{ padding: '5px 14px', fontSize: '0.8rem', background: '#0284c7', borderColor: '#38bdf8' }}
-                        onClick={() => handleOpenReview(selectedApp || applications[0])}
-                      >
-                        📋 Review Application Form
-                      </button>
-                    )}
                   </div>
 
                   <div className="video-table-container">
                     <table className="video-data-table">
                       <thead>
                         <tr>
-                          <th>JOB TITLE</th>
+                          <th>JOB TITLE & LINK</th>
                           <th>COMPANY</th>
                           <th>ATS</th>
                           <th>STATUS</th>
+                          <th style={{ textAlign: 'center' }}>SCREENSHOT</th>
                           <th>ACTION</th>
                         </tr>
                       </thead>
                       <tbody>
-                        {applications.length > 0 ? (
-                          applications.map((app) => (
+                        {(() => {
+                          // In 1-worker architecture, at most ONE application can ever be actively filled by the bot.
+                          // Find the single active in-flight application; all other queued/stale apps render as 'queued'.
+                          const activeInFlightAppId = (() => {
+                            const flight = applications.find((app) => {
+                              const rs = (app.status || '').toLowerCase();
+                              const proof = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url;
+                              if ((rs === 'submitted' || rs === 'completed') && proof) return false;
+                              if (['ready_for_review', 'reached_review', 'pre_resolved', 'failed'].includes(rs)) return false;
+                              return ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(rs);
+                            });
+                            return flight?.id || null;
+                          })();
+
+                          return applications.length > 0 ? (
+                            applications.map((app) => {
+                              const proofShot = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url || (() => {
+                                const r = String(app.failure_reason || app.error_message || '');
+                                const m = r.match(/\[screenshot:\s*([^\s\]]+)\]/i) || r.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+                                return m ? (m[1] || m[0]) : null;
+                              })();
+                              const rawStatus = (app.status || '').toLowerCase();
+                              const hasProof = Boolean(proofShot);
+                              const isGenuineSubmitted = (rawStatus === 'submitted' || rawStatus === 'completed') && hasProof;
+                              const isFailed = rawStatus === 'failed';
+                              const isReady = ['ready_for_review', 'reached_review', 'pre_resolved'].includes(rawStatus);
+                              const isInFlight = app.id === activeInFlightAppId;
+                              
+                              // Dynamic real-time status: never show fake submitted without genuine proof!
+                              const s = isGenuineSubmitted
+                                ? 'submitted'
+                                : isReady
+                                  ? 'ready_for_review'
+                                  : isInFlight
+                                    ? 'in_flight'
+                                    : isFailed
+                                      ? 'failed'
+                                      : 'queued';
+
+                            const jobUrl = app.job_url || app.url || '';
+                            const displayTitle = app.job_title || app.role_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
+
+                            return (
                             <tr
                               key={app.id}
                               style={{ background: selectedApp?.id === app.id ? '#1e293b' : 'transparent', cursor: 'pointer' }}
                               onClick={() => {
                                 handleSelectApp(app);
-                                const s = (app.status || '').toLowerCase();
-                                if (['ready_for_review', 'reached_review', 'pre_resolved', 'submitted', 'completed'].includes(s)) {
+                                if (isReady) {
                                   handleOpenReview(app);
                                 }
                               }}
                             >
                               <td>
-                                <strong>{app.job_title || app.role_title || 'Workday Position'}</strong>
+                                <div>
+                                  <strong>{displayTitle}</strong>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                                    {jobUrl && (
+                                      <a
+                                        href={jobUrl}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{ color: '#38bdf8', fontSize: '0.74rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                                        title={jobUrl}
+                                      >
+                                        🔗 Link ↗
+                                      </a>
+                                    )}
+                                  </div>
+                                </div>
                               </td>
                               <td>{app.company || 'Workday Tenant'}</td>
                               <td>{app.ats || 'Workday'}</td>
                               <td>
                                 {(() => {
-                                  const s = (app.status || '').toLowerCase();
                                   if (s === 'failed') {
                                     return (
                                       <span className="video-status-tag failed" title={app.failure_reason}>
-                                        Failed – {app.error_category || app.failure_reason || 'Unknown error'}
+                                        Failed – {app.error_category || app.failure_reason || 'Execution error'}
                                       </span>
                                     );
                                   }
                                   if (s === 'submitted') {
-                                    return <span className="video-status-tag submitted">SUBMITTED</span>;
+                                    return <span className="video-status-tag submitted">✓ SUBMITTED</span>;
                                   }
-                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress') {
-                                    return <span className="video-status-tag in_flight">RUNNING IN BACKGROUND</span>;
-                                  }
-                                  if (s === 'ready_for_review' || s === 'reached_review') {
+                                  if (s === 'ready_for_review') {
                                     return <span className="video-status-tag ready_for_review">READY TO REVIEW & SUBMIT</span>;
                                   }
-                                  if (s === 'pending' || s === 'queued') {
-                                    return <span className="video-status-tag queued">IN QUEUE</span>;
+                                  if (s === 'in_flight') {
+                                    return <span className="video-status-tag in_flight">⚡ BOT FILLING IN BACKGROUND</span>;
                                   }
-                                  return <span className={`video-status-tag ${s || 'queued'}`}>{(app.status || 'QUEUED').toUpperCase()}</span>;
+                                  return <span className="video-status-tag queued">⏳ IN QUEUE</span>;
+                                })()}
+                              </td>
+                              <td style={{ textAlign: 'center' }}>
+                                {(() => {
+                                  if (proofShot) {
+                                    return (
+                                      <a
+                                        href={proofShot}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
+                                        style={{
+                                          padding: '3px 8px',
+                                          borderRadius: '4px',
+                                          fontSize: '0.74rem',
+                                          fontWeight: 'bold',
+                                          textDecoration: 'none',
+                                          background: isGenuineSubmitted ? 'rgba(16, 185, 129, 0.15)' : isFailed ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+                                          color: isGenuineSubmitted ? '#34d399' : isFailed ? '#fca5a5' : '#38bdf8',
+                                          border: `1px solid ${isGenuineSubmitted ? 'rgba(16, 185, 129, 0.3)' : isFailed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(56, 189, 248, 0.3)'}`,
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                        }}
+                                        title="Click to view genuine Playwright screenshot proof stored in Supabase"
+                                      >
+                                        📸 {isGenuineSubmitted ? 'Submission Proof ↗' : isFailed ? 'Fail Shot ↗' : 'Review Step ↗'}
+                                      </a>
+                                    );
+                                  }
+                                  if (s === 'in_flight') {
+                                    return <span style={{ fontSize: '0.74rem', color: '#38bdf8' }}>⚡ In progress...</span>;
+                                  }
+                                  return <span style={{ fontSize: '0.74rem', color: '#475569' }}>—</span>;
                                 })()}
                               </td>
                               <td>
                                 {(() => {
-                                  const s = (app.status || '').toLowerCase();
-                                  if (s === 'submitted' || s === 'completed') {
+                                  if (isGenuineSubmitted) {
                                     return (
-                                      <button
-                                        type="button"
-                                        className="video-btn-start"
+                                      <a
+                                        href={proofShot}
+                                        target="_blank"
+                                        rel="noreferrer"
+                                        onClick={(e) => e.stopPropagation()}
                                         style={{
-                                          padding: '5px 12px',
-                                          fontSize: '0.8rem',
-                                          background: '#065f46',
-                                          borderColor: '#10b981',
-                                          color: '#ecfdf5',
-                                          cursor: 'pointer',
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '4px',
+                                          fontSize: '0.78rem',
+                                          color: '#34d399',
+                                          fontWeight: 'bold',
+                                          background: 'rgba(16, 185, 129, 0.12)',
+                                          border: '1px solid rgba(16, 185, 129, 0.3)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                          textDecoration: 'none',
                                         }}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleSelectApp(app);
-                                          handleOpenReview(app);
-                                        }}
+                                        title="Verified Playwright submission screenshot stored in Supabase"
                                       >
-                                        ✓ View Submitted Form
-                                      </button>
+                                        ✓ Verified Submitted ↗
+                                      </a>
                                     );
                                   }
-                                  if (s === 'ready_for_review' || s === 'reached_review' || s === 'pre_resolved') {
+                                  if (s === 'ready_for_review') {
                                     return (
                                       <button
                                         type="button"
@@ -718,11 +897,11 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           handleOpenReview(app);
                                         }}
                                       >
-                                        📋 Review & Confirm
+                                        📋 Review & Submit
                                       </button>
                                     );
                                   }
-                                  if (s === 'in_flight' || s === 'processing' || s === 'in_progress' || s === 'started' || s === 'applying') {
+                                  if (s === 'in_flight') {
                                     return (
                                       <span
                                         style={{
@@ -739,25 +918,6 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                         }}
                                       >
                                         ⚡ Bot Filling Form...
-                                      </span>
-                                    );
-                                  }
-                                  if (s === 'pending' || s === 'queued' || s === 'in_queue') {
-                                    return (
-                                      <span
-                                        style={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: '6px',
-                                          fontSize: '0.78rem',
-                                          color: '#94a3b8',
-                                          background: 'rgba(148, 163, 184, 0.08)',
-                                          border: '1px solid rgba(148, 163, 184, 0.2)',
-                                          padding: '4px 10px',
-                                          borderRadius: '4px',
-                                        }}
-                                      >
-                                        ⏳ Queued (Waiting for Bot)
                                       </span>
                                     );
                                   }
@@ -786,53 +946,83 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                     );
                                   }
                                   return (
-                                    <span style={{ fontSize: '0.78rem', color: '#64748b' }}>
-                                      {app.status ? app.status.toUpperCase() : 'QUEUED'}
+                                    <span
+                                      style={{
+                                        display: 'inline-flex',
+                                        alignItems: 'center',
+                                        gap: '4px',
+                                        fontSize: '0.78rem',
+                                        color: '#94a3b8',
+                                        background: 'rgba(100, 116, 139, 0.12)',
+                                        border: '1px solid rgba(100, 116, 139, 0.25)',
+                                        padding: '4px 10px',
+                                        borderRadius: '4px',
+                                      }}
+                                    >
+                                      ⏳ In Queue
                                     </span>
                                   );
                                 })()}
                               </td>
                             </tr>
-                          ))
-                        ) : (
-                          <tr>
-                            <td colSpan={5} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
-                              <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
-                                No applications recorded or queued yet for {selectedCandidate.id}.
-                              </div>
-                              <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
-                                Application links will appear here once ingested for processing.
-                              </div>
-                            </td>
-                          </tr>
-                        )}
-                      </tbody>
+                          );
+                        })
+                      ) : (
+                        <tr>
+                          <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                            <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
+                              No applications recorded or queued yet for {selectedCandidate.id}.
+                            </div>
+                            <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
+                              Application links will appear here once ingested for processing.
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })()}
+                  </tbody>
                     </table>
                   </div>
                 </div>
 
                 {/* 3. Automation Execution Trace Panel */}
-                <div style={{ marginTop: '1.5rem', background: '#090d16', border: '1px solid #1e293b', borderRadius: '8px', padding: '1rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '0.5rem' }}>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#38bdf8' }}>
-                      AUTOMATION EXECUTION TRACE {selectedApp ? `(${selectedApp.job_title || selectedApp.company || selectedApp.id})` : ''}
-                    </span>
-                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                      Live debug stream from public.automation_trace
-                    </span>
+                <div style={{ marginTop: '1.5rem', background: '#070b14', border: '1px solid #1e293b', borderRadius: '8px', overflow: 'hidden' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.65rem 1rem', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ display: 'inline-flex', gap: '5px' }}>
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444' }} />
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#f59e0b' }} />
+                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#10b981' }} />
+                      </span>
+                      <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#38bdf8', marginLeft: '6px' }}>
+                        AUTOMATION EXECUTION TRACE {selectedApp ? `(${selectedApp.company || selectedApp.job_title || selectedCandidate?.id || 'Worker-1'})` : '(Worker-1 Live)'}
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'inline-block' }} />
+                      <span style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
+                        Live Terminal Output (1 Worker Allocated)
+                      </span>
+                    </div>
                   </div>
 
-                  <div style={{ maxHeight: '180px', overflowY: 'auto', fontFamily: 'monospace', fontSize: '0.8rem', background: '#020617', padding: '0.75rem', borderRadius: '4px' }}>
+                  <div style={{ maxHeight: '200px', overflowY: 'auto', fontFamily: 'Consolas, Monaco, "Courier New", monospace', fontSize: '0.8rem', background: '#020617', padding: '0.85rem 1rem', lineHeight: '1.6' }}>
                     {traceLogs.length > 0 ? (
-                      traceLogs.map((log) => (
-                        <div key={log.id} style={{ marginBottom: '0.35rem', color: '#cbd5e1' }}>
-                          <span style={{ color: '#64748b' }}>[{new Date(log.ts).toLocaleTimeString()}]</span> Step {log.step_index}: {log.message}
-                        </div>
-                      ))
+                      traceLogs.map((log) => {
+                        const isErr = /fail|error|invalid|expired/i.test(log.message || '');
+                        const isSuccess = /submit|success|reached.*review/i.test(log.message || '');
+                        return (
+                          <div key={log.id} style={{ marginBottom: '0.35rem', color: isErr ? '#fca5a5' : isSuccess ? '#86efac' : '#cbd5e1' }}>
+                            <span style={{ color: '#64748b', marginRight: '8px' }}>[{new Date(log.ts).toLocaleTimeString()}]</span>
+                            <span style={{ color: '#38bdf8', fontWeight: 'bold', marginRight: '8px' }}>Step {log.step_index}:</span>
+                            <span>{log.message}</span>
+                          </div>
+                        );
+                      })
                     ) : (
-                      <span style={{ color: '#64748b' }}>
-                        No automation trace events logged yet for this application.
-                      </span>
+                      <div style={{ color: '#64748b', fontStyle: 'italic', padding: '0.5rem 0' }}>
+                        Waiting for Worker-1 trace events... When CA logs in and worker fills applications, live terminal steps will stream here in real time.
+                      </div>
                     )}
                   </div>
                 </div>

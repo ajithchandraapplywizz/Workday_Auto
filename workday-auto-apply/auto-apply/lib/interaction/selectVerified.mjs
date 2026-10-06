@@ -42,6 +42,11 @@ export function matchOptionSafely(answer = '', options = []) {
   const exact = options.find((o) => String(o || '').trim().toLowerCase() === normA);
   if (exact) return { match: exact, strategy: 'exact' };
 
+  // 1b. Space-insensitive / merged match (e.g. "Boca Raton" <-> "BocaRaton")
+  const normNoSpace = normA.replace(/\s+/g, '');
+  const spaceInsensitive = options.find((o) => String(o || '').trim().toLowerCase().replace(/\s+/g, '') === normNoSpace);
+  if (spaceInsensitive) return { match: spaceInsensitive, strategy: 'space_insensitive' };
+
   // 2. Synonym map
   const synList = SYNONYMS.get(normA);
   if (synList) {
@@ -183,7 +188,7 @@ export async function fillSelectVerified(page, field, answer, ctx = {}) {
     await page.keyboard.press('Enter').catch(() => {});
   }
 
-  await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
+  await waitForDomSettled(page, { timeout: 200 }).catch(() => {});
 
   // Wait listbox detach
   const detached = await page.waitForSelector(LISTBOX_SELECTOR, { timeout: 1500, state: 'detached' }).catch(() => null);
