@@ -24,44 +24,24 @@ export default function ManagerDashboard() {
 
   // Managers roster
   const [managers, setManagers] = useState([]);
-  const [activeManagerId, setActiveManagerId] = useState(
-    user?.email?.toLowerCase().includes('balaji')
-      ? '9dc9376e-fbc5-440b-932f-38da10b89a70'
-      : 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744'
-  );
+  const [activeManagerId, setActiveManagerId] = useState('');
 
-  // Synchronize activeManagerId if user email changes
-  useEffect(() => {
-    if (user?.email?.toLowerCase().includes('balaji')) {
-      setActiveManagerId('9dc9376e-fbc5-440b-932f-38da10b89a70');
-    } else if (user?.email?.toLowerCase().includes('ramakrishna')) {
-      setActiveManagerId('bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744');
-    }
-  }, [user?.email]);
-
-  // Real dynamic states
-  const [operators, setOperators] = useState([]);
-  const [teamClients, setTeamClients] = useState([]);
-  const [applications, setApplications] = useState([]);
-  const [activeWorkDate, setActiveWorkDate] = useState(date);
-  const [isFallbackDate, setIsFallbackDate] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
-  const [appStatusFilter, setAppStatusFilter] = useState('All');
-  const [appSearchQuery, setAppSearchQuery] = useState('');
-
-  const tabs = ['Home', 'Applications', 'Operators', 'Activity', 'Reports', 'Guide'];
-
-  // Load managers list once
+  // Load managers list dynamically and select matching manager
   useEffect(() => {
     async function loadManagers() {
       const res = await fetchManagers();
       if (res.success && res.managers?.length) {
         setManagers(res.managers);
+        const match = res.managers.find(
+          (m) =>
+            (user?.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) ||
+            (user?.email && m.name && user.email.toLowerCase().includes(m.name.toLowerCase().split(' ')[0]))
+        );
+        setActiveManagerId(match ? match.id : res.managers[0].id);
       }
     }
     loadManagers();
-  }, []);
+  }, [user?.email]);
 
   // Sync dateRange button click with global timeframe
   const handleDateRangeChange = (range) => {

@@ -247,11 +247,14 @@ export default function CADashboard() {
       }
 
       // Merge real jobs from job_distributions (primary) and batch_job_queue (fallback)
+      // Strictly only display jobs in the review & submit pipeline; exclude failed/error/skipped jobs
       const jobsMap = new Map();
       if (distRes.data && distRes.data.length > 0) {
         for (const dj of distRes.data) {
           const u = (dj.job_url || '').trim().toLowerCase();
           const sj = scannedMap.get(u);
+          const st = (dj.status || '').toLowerCase();
+          if (st.includes('fail') || st.includes('err') || st.includes('skip')) continue;
           if (u && !jobsMap.has(u)) {
             jobsMap.set(u, {
               id: dj.id,
@@ -279,6 +282,8 @@ export default function CADashboard() {
         for (const qj of queueRes.data) {
           const u = (qj.job_url || '').trim().toLowerCase();
           const sj = scannedMap.get(u);
+          const st = (qj.status || '').toLowerCase();
+          if (st.includes('fail') || st.includes('err') || st.includes('skip')) continue;
           if (u && !jobsMap.has(u)) {
             jobsMap.set(u, {
               id: qj.id,
@@ -335,9 +340,7 @@ export default function CADashboard() {
     }
   };
 
-  useEffect(() => {
-    loadClientProfile('AWL-34133');
-  }, []);
+
 
   // Live polling: automatically reflects background bot progress for selected candidate
   useEffect(() => {
@@ -743,19 +746,6 @@ export default function CADashboard() {
                 <h2 className="panel-title">Workday Auto-Apply Automation</h2>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <button
-                  type="button"
-                  className="btn-icon-label"
-                  style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', fontSize: '0.78rem' }}
-                  onClick={() => {
-                    setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
-                    setShowSlideDrawer(true);
-                  }}
-                  disabled={!clientData}
-                >
-                  <FileText size={14} />
-                  <span>Review AI Form Answers</span>
-                </button>
                 <span className="console-speed-tag">Tier-1 Engine Active</span>
               </div>
             </div>
@@ -805,29 +795,8 @@ export default function CADashboard() {
                 )}
 
                 {applyStep === 3 && (
-                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      className="btn-accent-run"
-                      style={{ flex: 1.2, background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)' }}
-                      onClick={() => {
-                        setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
-                        setShowSlideDrawer(true);
-                      }}
-                    >
-                      <FileText size={16} />
-                      <span>Review AI Questions &amp; Answers</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-success-submit"
-                      style={{ flex: 1 }}
-                      onClick={handleFinalSubmit}
-                      disabled={submitting}
-                    >
-                      <CheckCircle2 size={16} />
-                      <span>Quick Submit</span>
-                    </button>
+                  <div style={{ width: '100%', padding: '10px 14px', background: 'rgba(2, 132, 199, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '6px', fontSize: '0.82rem', color: '#7dd3fc', textAlign: 'center' }}>
+                    Application ready for review. Click any application below to slide open unique AI answers and submit.
                   </div>
                 )}
               </div>

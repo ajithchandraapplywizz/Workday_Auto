@@ -30,9 +30,9 @@ export default function AdminDashboard() {
 
   // Real dynamic states
   const [reconciliation, setReconciliation] = useState({
-    apiCount: 59,
-    dbCount: 59,
-    matchedCount: 59,
+    apiCount: 0,
+    dbCount: 0,
+    matchedCount: 0,
     hasMismatch: false,
     missingInDb: [],
     missingInApi: [],
