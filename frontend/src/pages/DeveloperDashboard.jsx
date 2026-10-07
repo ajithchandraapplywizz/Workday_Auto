@@ -8,8 +8,8 @@ import {
   fetchBatchQueue,
   fetchAutomationTrace,
   fetchAllOperators,
-  updateOperatorStatus,
   triggerAutonomousBot,
+  stopAutonomousBot,
   fetchBotDaemonStatus,
   supabase,
 } from '../services/api';
@@ -35,7 +35,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 1, total: 1 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 3, total: 3 });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -389,6 +389,29 @@ export default function DeveloperDashboard() {
     }
   };
 
+  // Handle stopping autonomous workers
+  const handleStopBot = async () => {
+    setIsTriggering(true);
+    setTriggerToast({ type: 'info', text: '🛑 Halting all 3 background workers...' });
+    try {
+      const res = await stopAutonomousBot();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ All autonomous background workers have been STOPPED and paused.',
+        });
+        setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop workers') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
+    } finally {
+      setIsTriggering(false);
+      setTimeout(() => setTriggerToast(null), 8000);
+    }
+  };
+
   return (
     <div className="dashboard-container">
       {/* 3-Worker Autonomous Bot Trigger Banner */}
@@ -430,11 +453,11 @@ export default function DeveloperDashboard() {
                 fontWeight: 700,
                 padding: '2px 8px',
                 borderRadius: '12px',
-                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
-                color: botStatus.isRunning ? '#34d399' : '#94a3b8',
-                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
+                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.15)',
+                color: botStatus.isRunning ? '#34d399' : '#f87171',
+                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {botStatus.isRunning ? 'ACTIVE • 3 WORKERS RUNNING' : 'STANDBY • READY TO TRIGGER'}
+                {botStatus.isRunning ? 'ACTIVE • 3 WORKERS RUNNING' : 'STOPPED • WORKERS PAUSED'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
@@ -443,31 +466,77 @@ export default function DeveloperDashboard() {
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <button
-            type="button"
-            onClick={handleTriggerBot}
-            disabled={isTriggering || botStatus.isRunning}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '0.65rem 1.35rem',
-              borderRadius: '6px',
-              border: 'none',
-              background: botStatus.isRunning
-                ? '#334155'
-                : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-              color: '#ffffff',
-              fontSize: '0.9rem',
-              fontWeight: 700,
-              cursor: botStatus.isRunning ? 'not-allowed' : 'pointer',
-              boxShadow: botStatus.isRunning ? 'none' : '0 4px 12px rgba(2, 132, 199, 0.35)',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            <span>{botStatus.isRunning ? '🚀 3 Workers Active & Processing...' : (isTriggering ? '⚡ Dispatching Signal...' : '⚡ Trigger 3-Worker Bot')}</span>
-          </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {botStatus.isRunning ? (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              disabled={isTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(239, 68, 68, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>🛑 Stop 3-Worker Bot</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerBot}
+              disabled={isTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start 3-Worker Bot'}</span>
+            </button>
+          )}
+
+          {botStatus.isRunning && (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '0.65rem 1rem',
+                borderRadius: '6px',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                background: 'rgba(239, 68, 68, 0.15)',
+                color: '#f87171',
+                fontSize: '0.85rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+              title="Force pause background workers"
+            >
+              Pause
+            </button>
+          )}
         </div>
       </div>
 

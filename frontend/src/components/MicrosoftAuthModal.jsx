@@ -1,36 +1,38 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { CheckCircle2, AlertCircle, ArrowRight } from 'lucide-react';
+import { CheckCircle2, AlertCircle, ArrowRight, QrCode, Smartphone, X, Lock, Eye, EyeOff } from 'lucide-react';
 import './MicrosoftAuthModal.css';
 
 export default function MicrosoftAuthModal({ isOpen, onClose }) {
-  const { loginWithAuthenticator, sendVerificationCode } = useAuth();
+  const { loginWithCredentials, sendVerificationCode, getMfaSetupDetails } = useAuth();
   
   const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
-  const [email, setEmail] = useState('ajithchandranimmala@applywizz.ai');
-  const [code, setCode] = useState('000000');
-  const [sentCode, setSentCode] = useState(null);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('Created@123');
+  const [showPassword, setShowPassword] = useState(false);
+  const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
   const [loading, setLoading] = useState(false);
+  const [showQrSetup, setShowQrSetup] = useState(false);
+  const [qrDetails, setQrDetails] = useState(null);
 
   if (!isOpen) return null;
 
   const handleSendCode = async (e) => {
     e?.preventDefault();
     if (!email) {
-      setError('Please enter a valid email address');
+      setError('Please enter a valid work email address');
       return;
     }
     setError('');
     setLoading(true);
 
     try {
-      const res = await sendVerificationCode({ email });
-      setSentCode(res.code);
+      const res = await sendVerificationCode({ email: email.trim().toLowerCase() });
       setCode(res.code);
-      setSuccessMsg(`Verification code sent via Azure Communication Services: ${res.code}`);
-      setMode('signin'); // Switch to code verification
+      setSuccessMsg(`Verification code sent to ${email}: ${res.code}`);
+      setMode('signin');
     } catch (err) {
       setError(err.message || 'Failed to send verification code');
     } finally {
@@ -41,18 +43,26 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
   const handleSignIn = async (e) => {
     e?.preventDefault();
     if (!email) {
-      setError('Please enter your email address');
+      setError('Please enter your work email address');
       return;
     }
-    if (!code || code.length < 6) {
-      setError('Please enter the 6-digit verification code');
+    if (!password) {
+      setError('Please enter organization password');
+      return;
+    }
+    if (!code || code.trim().length !== 6) {
+      setError('Please enter the 6-digit verification code from Microsoft Authenticator');
       return;
     }
     setError('');
     setLoading(true);
 
     try {
-      await loginWithAuthenticator({ email, code });
+      await loginWithCredentials({
+        email: email.trim().toLowerCase(),
+        password: password.trim(),
+        code: code.trim(),
+      });
       if (onClose) onClose();
     } catch (err) {
       setError(err.message || 'Authentication failed');
@@ -61,11 +71,19 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
     }
   };
 
-  const handleQuickFill = (fillEmail) => {
-    setEmail(fillEmail);
-    setCode('000000');
+  const handleToggleQr = async () => {
+    if (!email) {
+      setError('Please enter your email address to generate the Authenticator QR code');
+      return;
+    }
     setError('');
-    setSuccessMsg('');
+    try {
+      const details = await getMfaSetupDetails(email.trim().toLowerCase());
+      setQrDetails(details);
+      setShowQrSetup(!showQrSetup);
+    } catch (err) {
+      setError(err.message || 'Failed to generate QR details');
+    }
   };
 
   return (
@@ -74,7 +92,7 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
 
       <div className="ms-auth-container animate-fade-in">
         <div className="ms-auth-card">
-          {/* Logo & Brand Header (Matching Screenshot) */}
+          {/* Logo & Brand Header */}
           <div className="ms-brand-header">
             <div className="ms-logo-badge">
               <svg width="28" height="28" viewBox="0 0 32 32" fill="none">
@@ -84,10 +102,10 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
               </svg>
             </div>
             <h1 className="ms-brand-title">APPLYWIZZ</h1>
-            <p className="ms-brand-subtitle">Operator Portal</p>
+            <p className="ms-brand-subtitle">Production Secure Sign In</p>
           </div>
 
-          {/* Toggle Pill: Sign In | Sign Up (Matching Screenshot) */}
+          {/* Toggle Pill: Sign In | Sign Up */}
           <div className="ms-tab-pill">
             <button
               type="button"
@@ -125,7 +143,7 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
             </div>
           )}
 
-          {/* SIGN UP VIEW (Image 1) */}
+          {/* SIGN UP VIEW */}
           {mode === 'signup' ? (
             <form onSubmit={handleSendCode} className="ms-form">
               <div className="ms-field">
@@ -152,10 +170,10 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
               </button>
             </form>
           ) : (
-            /* SIGN IN VIEW (Image 2) */
+            /* SIGN IN VIEW */
             <form onSubmit={handleSignIn} className="ms-form">
               <div className="ms-field">
-                <label className="ms-label">EMAIL ADDRESS</label>
+                <label className="ms-label">WORK EMAIL ADDRESS</label>
                 <input
                   type="email"
                   value={email}
@@ -167,9 +185,40 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
               </div>
 
               <div className="ms-field">
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
+                  <label className="ms-label" style={{ marginBottom: 0 }}>PASSWORD</label>
+                  <span style={{ fontSize: '0.68rem', color: '#38bdf8' }}>Standard: Created@123</span>
+                </div>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    type={showPassword ? 'text' : 'password'}
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="Created@123"
+                    className="ms-input"
+                    required
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
+                  >
+                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
+              </div>
+
+              <div className="ms-field">
                 <div className="ms-label-row">
-                  <label className="ms-label">MICROSOFT AUTHENTICATOR CODE</label>
-                  <span className="ms-badge-digits">6 digits</span>
+                  <label className="ms-label">MICROSOFT AUTHENTICATOR 6-DIGIT CODE</label>
+                  <button
+                    type="button"
+                    onClick={handleToggleQr}
+                    style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.72rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '4px' }}
+                  >
+                    <QrCode size={13} />
+                    <span>{showQrSetup ? 'Hide QR' : 'Show QR'}</span>
+                  </button>
                 </div>
                 <input
                   type="text"
@@ -185,71 +234,32 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
                 </p>
               </div>
 
+              {/* QR Code Setup Box */}
+              {showQrSetup && qrDetails && (
+                <div style={{ background: '#0a0f1d', border: '1px solid rgba(56, 189, 248, 0.25)', borderRadius: '10px', padding: '12px', textAlign: 'center', marginBottom: '1rem' }}>
+                  <p style={{ fontSize: '0.75rem', color: '#94a3b8', margin: '0 0 8px 0' }}>
+                    Scan with Microsoft Authenticator app:
+                  </p>
+                  <img
+                    src={qrDetails.qrCodeUrl}
+                    alt="Microsoft Authenticator QR"
+                    style={{ width: '140px', height: '140px', background: '#fff', borderRadius: '8px', padding: '6px' }}
+                  />
+                  <div style={{ marginTop: '8px', fontSize: '0.72rem', color: '#38bdf8', fontFamily: 'monospace' }}>
+                    Key: {qrDetails.formattedSecret}
+                  </div>
+                </div>
+              )}
+
               <button
                 type="submit"
                 disabled={loading}
                 className="ms-btn ms-btn-purple"
               >
-                {loading ? 'VERIFYING...' : 'SIGN IN WITH AUTHENTICATOR →'}
+                {loading ? 'VERIFYING CREDENTIALS...' : 'SIGN IN WITH AUTHENTICATOR →'}
               </button>
             </form>
           )}
-
-          {/* Quick Select Preset Credentials */}
-          <div className="ms-presets">
-            <span className="ms-presets-title">QUICK ROLES FOR VERIFICATION:</span>
-            <div className="ms-presets-grid">
-              <button
-                type="button"
-                className="ms-preset-btn dev"
-                onClick={() => handleQuickFill('ajithchandranimmala@applywizz.ai')}
-              >
-                Developer (Ajith)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn manager"
-                onClick={() => handleQuickFill('balaji@applywizz.ai')}
-              >
-                Manager (Balaji)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn manager"
-                onClick={() => handleQuickFill('ramakrishnaa.tejavath@applywizz.ai')}
-              >
-                Manager (Ramakrishna)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn admin"
-                onClick={() => handleQuickFill('ramakrishna@applywizz.ai')}
-              >
-                Admin (Ramakrishna)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn admin"
-                onClick={() => handleQuickFill('anushabandreddy@applywizz.ai')}
-              >
-                Admin (Anusha)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn ca"
-                onClick={() => handleQuickFill('sana@applywizz.com')}
-              >
-                CA (Sana)
-              </button>
-              <button
-                type="button"
-                className="ms-preset-btn ca"
-                onClick={() => handleQuickFill('manasa@applywizz.com')}
-              >
-                CA (Manasa)
-              </button>
-            </div>
-          </div>
         </div>
       </div>
     </div>

@@ -38,7 +38,8 @@ function MainLayout() {
         {user?.role === 'dev' && <DeveloperDashboard />}
         {user?.role === 'admin' && <AdminDashboard />}
         {user?.role === 'manager' && <ManagerDashboard />}
-        {(user?.role === 'operator' || user?.role === 'ca') && (
+        {user?.role === 'ca' && <CADashboard />}
+        {user?.role === 'operator' && (
           operatorView === 'review' ? (
             <CADashboard />
           ) : (

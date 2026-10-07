@@ -769,6 +769,52 @@ export async function fetchApplicationsDynamic({
       return item;
     });
 
+    // If zero applications matched the specific date bounds, fall back to the most recent recorded applications
+    if (list.length === 0 && dateStr && timeframe) {
+      let fallbackQuery = supabase.from('applications').select('*').order('updated_at', { ascending: false }).limit(limit);
+      if (status && status !== 'All') {
+        if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
+          fallbackQuery = fallbackQuery.in('status', ['in_progress', 'started', 'applying']);
+        } else {
+          fallbackQuery = fallbackQuery.eq('status', status.toLowerCase());
+        }
+      }
+      if (managerId && managerId !== 'All') {
+        fallbackQuery = fallbackQuery.eq('manager_id', managerId);
+      }
+      if (caEmail && caEmail !== 'All') {
+        fallbackQuery = fallbackQuery.eq('ca_id', caEmail);
+      }
+      if (applywizzId) {
+        fallbackQuery = fallbackQuery.eq('applywizz_id', applywizzId);
+      }
+      const { data: fbData } = await fallbackQuery;
+      if (fbData && fbData.length > 0) {
+        list = fbData.map((item) => {
+          if (item.failure_reason) {
+            if (!item.failure_screenshot_url) {
+              const matchShot = item.failure_reason.match(/\[screenshot:\s*([^\]\s]+)\]/i) || item.failure_reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+              if (matchShot) {
+                item.failure_screenshot_url = matchShot[1] || matchShot[0];
+                item.screenshot_url = item.failure_screenshot_url;
+              }
+            }
+            if (!item.stopped_at_step) {
+              const matchStep = item.failure_reason.match(/\[step:\s*([^\]]+)\]/i) || item.failure_reason.match(/stopped at\s+([^)\],]+)/i);
+              if (matchStep) {
+                item.stopped_at_step = matchStep[1].trim();
+              }
+            }
+          }
+          const hasProof = Boolean(item.screenshot_url || item.screenshot_path || item.failure_screenshot_url);
+          if ((item.status === 'submitted' || item.status === 'completed') && !hasProof) {
+            item.status = 'queued';
+          }
+          return item;
+        });
+      }
+    }
+
     // Query job_distributions for pre-resolved answers, queued/applying states, and proof screenshots
     try {
       let distQuery = supabase
@@ -794,7 +840,7 @@ export async function fetchApplicationsDynamic({
           if (!cleanDtUrl) continue;
 
           const existing = itemByUrl.get(cleanDtUrl);
-          const proofShot = dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
+          const proofShot = dt.application_submitted_screenshot_url || dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
 
           if (existing && typeof existing === 'object') {
             existing.is_fully_answered = dt.is_fully_answered;
@@ -987,13 +1033,13 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     const now = Date.now();
     const submitted = allApps.filter((a) => a.status === 'submitted').length;
     
-    // Only count as applying if active within the last 3 minutes and capped at max worker concurrency 1
+    // Active applying count for the 3-worker execution pool
     const activeApplying = allApps.filter((a) => {
       if (!['in_progress', 'started', 'applying'].includes(a.status)) return false;
       const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
       return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
     });
-    const applying = Math.min(activeApplying.length, 1);
+    const applying = Math.min(activeApplying.length, 3);
 
     const failed = allApps.filter((a) => a.status === 'failed').length;
     const skipped = allApps.filter((a) => a.status === 'skipped').length;
@@ -2088,20 +2134,78 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 }
 
 /**
- * Trigger the autonomous 3-worker bot pool on demand from Developer Dashboard.
- * Dispatches via Supabase worker_status signal row and direct HTTP daemon endpoint.
+ * Trigger the autonomous 3-worker bot pool on demand from Developer/**
+ * Trigger the autonomous 3-worker background bot on demand.
+ * Resumes paused queue tasks and sets active in_flight signal.
  */
 export async function triggerAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Supabase database signal in worker_status table
+    // 1. Unpause any queue tasks that were paused by the user
+    try {
+      await supabase
+        .from('batch_job_queue')
+        .update({
+          status: 'pending',
+          error_message: null,
+          updated_at: now,
+        })
+        .eq('status', 'skipped')
+        .eq('error_message', 'PAUSED_BY_USER');
+    } catch (qErr) {
+      console.warn('Note on unpausing batch_job_queue:', qErr?.message);
+    }
+
+    // 2. Supabase database signal: clear stop flag and set in_flight
     const { error: dbErr } = await supabase
       .from('worker_status')
       .upsert([
         {
+          worker_id: 'bot_stop_flag',
+          state: 'idle',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
           worker_id: 'bot_controller',
-          state: 'trigger_requested',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-1',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-2',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-3',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-1-Lead',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-2-Lead',
+          state: 'in_flight',
+          current_application_id: null,
+          updated_at: now,
+        },
+        {
+          worker_id: 'Worker-3-Lead',
+          state: 'in_flight',
           current_application_id: null,
           updated_at: now,
         },
@@ -2127,7 +2231,7 @@ export async function triggerAutonomousBot() {
 
     if (dbErr) console.warn('Note on Supabase worker_status signal:', dbErr.message);
 
-    // 2. Direct HTTP endpoint trigger (via Vite proxy & local daemon port 3001)
+    // 3. Direct HTTP endpoint trigger (via Vite proxy & local daemon port 3001)
     try {
       const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
       const urls = [
@@ -2158,6 +2262,82 @@ export async function triggerAutonomousBot() {
 }
 
 /**
+ * Instantly stop/pause the autonomous 3-worker background bot.
+ * 1. Sets bot_stop_flag in Supabase worker_status (state: in_flight).
+ * 2. Sets all worker rows to idle in Supabase worker_status.
+ * 3. Pauses pending/processing queue items so all workers halt immediately.
+ * 4. Calls local HTTP /api/bot/stop if daemon is running.
+ */
+export async function stopAutonomousBot() {
+  try {
+    const now = new Date().toISOString();
+
+    // 1. Direct HTTP endpoint stop (via Vite proxy & local daemon port 3001)
+    try {
+      const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
+      const urls = [
+        backendUrl ? `${backendUrl}/api/bot/stop` : null,
+        '/api/bot/stop',
+        'http://localhost:3001/api/bot/stop',
+      ].filter(Boolean);
+
+      await Promise.any(
+        urls.map((u) =>
+          fetch(u, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ stop: true, timestamp: now }),
+            signal: AbortSignal.timeout(2000),
+          })
+        )
+      ).catch(() => {});
+    } catch {}
+
+    // 2. Set persistent bot_stop_flag in Supabase worker_status (state: in_flight signals active stop request)
+    await supabase.from('worker_status').upsert([
+      {
+        worker_id: 'bot_stop_flag',
+        state: 'in_flight',
+        current_application_id: null,
+        updated_at: now,
+      },
+    ], { onConflict: 'worker_id' });
+
+    // 3. Mark ALL worker rows idle in Supabase worker_status
+    await supabase
+      .from('worker_status')
+      .update({
+        state: 'idle',
+        current_application_id: null,
+        updated_at: now,
+      })
+      .neq('worker_id', 'bot_stop_flag');
+
+    // 4. Pause any active tasks in batch_job_queue so all background workers halt immediately
+    try {
+      await supabase
+        .from('batch_job_queue')
+        .update({
+          status: 'skipped',
+          error_message: 'PAUSED_BY_USER',
+          updated_at: now,
+        })
+        .in('status', ['pending', 'pre_resolved', 'processing']);
+    } catch (qErr) {
+      console.warn('Note on pausing batch_job_queue tasks:', qErr?.message);
+    }
+
+    return {
+      success: true,
+      message: 'Autonomous workers have been stopped and paused in worker_status.',
+    };
+  } catch (err) {
+    console.error('Failed to stop autonomous bot:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Fetch live daemon running status from worker_status table
  */
 export async function fetchBotDaemonStatus() {
@@ -2183,8 +2363,20 @@ export async function fetchBotDaemonStatus() {
       return { success: true, isRunning: daemonApiRunning, state: daemonApiRunning ? 'running' : 'idle', workers: [] };
     }
 
+    const stopFlag = data.find((r) => r.worker_id === 'bot_stop_flag');
+    if (stopFlag?.state === 'in_flight') {
+      return {
+        success: true,
+        isRunning: false,
+        state: 'stopped',
+        workersAssigned: daemonApiWorkers || 3,
+        workers: data.filter((r) => r.worker_id !== 'bot_stop_flag'),
+        triggeredAt: stopFlag.updated_at,
+      };
+    }
+
     const controller = data.find((r) => r.worker_id === 'bot_controller');
-    const workers = data.filter((r) => r.worker_id && r.worker_id.toLowerCase().startsWith('worker-'));
+    const workers = data.filter((r) => r.worker_id && r.worker_id !== 'bot_stop_flag' && r.worker_id.toLowerCase().startsWith('worker-'));
 
     const now = Date.now();
     const isControllerRunning = controller?.state === 'running' || controller?.state === 'trigger_requested';
@@ -2273,7 +2465,8 @@ export async function fetchClientApplications(applywizzId) {
           unanswered_questions: unans,
           unanswered_count: unansCount,
           is_fully_answered: d.is_fully_answered ?? (unansCount === 0),
-          screenshot_url: d.screenshot_url || d.proof_screenshot_url || null,
+          screenshot_url: d.application_submitted_screenshot_url || d.screenshot_url || d.proof_screenshot_url || null,
+          application_submitted_screenshot_url: d.application_submitted_screenshot_url || null,
           created_at: d.created_at,
           updated_at: d.updated_at,
           source: 'job_distributions',
@@ -2450,7 +2643,8 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       company: distRow?.company || scannedBlueprint?.company || 'Workday Employer',
       roleTitle: distRow?.role_title || scannedBlueprint?.role_title || 'Workday Role',
       status: distRow?.status || 'ready_for_review',
-      screenshotUrl: distRow?.screenshot_url || distRow?.proof_screenshot_url || scannedBlueprint?.screenshot_path || null,
+      screenshotUrl: distRow?.application_submitted_screenshot_url || distRow?.screenshot_url || distRow?.proof_screenshot_url || scannedBlueprint?.screenshot_path || null,
+      application_submitted_screenshot_url: distRow?.application_submitted_screenshot_url || null,
       unansweredCount: unansweredFields.length,
     };
 
@@ -2640,12 +2834,12 @@ export async function submitApplicationReview({
     const cleanId = String(applywizzId).trim().toUpperCase();
     const now = new Date().toISOString();
 
-    // 1. Update job_distributions
+    // 1. Update job_distributions to in_queue (dynamically signals queued state for CA/Manager)
     if (distributionId) {
       await supabase
         .from('job_distributions')
         .update({
-          status: 'approved_for_submission',
+          status: 'in_queue',
           reviewed_at: now,
           reviewed_by: 'Career Associate',
           updated_at: now,
@@ -2655,7 +2849,7 @@ export async function submitApplicationReview({
       await supabase
         .from('job_distributions')
         .update({
-          status: 'approved_for_submission',
+          status: 'in_queue',
           reviewed_at: now,
           reviewed_by: 'Career Associate',
           updated_at: now,
@@ -2664,7 +2858,7 @@ export async function submitApplicationReview({
         .eq('job_url', jobUrl);
     }
 
-    // 2. Update batch_job_queue if present
+    // 2. Update batch_job_queue if present so worker pool leases it immediately
     if (cleanId && jobUrl) {
       await supabase
         .from('batch_job_queue')

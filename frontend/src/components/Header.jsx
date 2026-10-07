@@ -54,6 +54,13 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 >
                   Stats
                 </button>
+                <button
+                  type="button"
+                  className={`operator-pill-btn ${operatorView === 'review' ? 'active' : ''}`}
+                  onClick={() => onOperatorViewChange('review')}
+                >
+                  Review & Submit
+                </button>
               </div>
             ) : (
               <h1 className="header-main-title">{getMainTitle()}</h1>
@@ -71,6 +78,7 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 { id: 'admin', label: 'Admin' },
                 { id: 'manager', label: 'Manager' },
                 { id: 'operator', label: 'Operator' },
+                { id: 'ca', label: 'CA Review' },
               ].map((r) => (
                 <button
                   key={r.id}

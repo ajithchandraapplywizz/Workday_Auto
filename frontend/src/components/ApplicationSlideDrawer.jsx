@@ -279,7 +279,7 @@ export default function ApplicationSlideDrawer({
     StatusIcon = Sparkles;
   }
 
-  const proofShot = appDetails?.screenshotUrl || application?.screenshot_url || application?.proof_screenshot_url || application?.applied_screenshot;
+  const proofShot = appDetails?.application_submitted_screenshot_url || appDetails?.screenshotUrl || application?.application_submitted_screenshot_url || application?.screenshot_url || application?.proof_screenshot_url || application?.applied_screenshot;
 
   return (
     <div className="slide-drawer-overlay" onClick={onClose}>
@@ -294,17 +294,20 @@ export default function ApplicationSlideDrawer({
               </div>
 
               {/* View Screenshot button directly beside status badge */}
-              {proofShot && (
-                <button
-                  type="button"
-                  className="sd-shot-btn-prominent"
-                  onClick={() => setSelectedScreenshot(proofShot)}
-                  title="View Verified Application Screenshot"
-                >
-                  <Eye size={13} />
-                  <span>View Screenshot</span>
-                </button>
-              )}
+              <button
+                type="button"
+                className="sd-shot-btn-prominent"
+                onClick={() => setSelectedScreenshot(proofShot || { isPlaceholder: true, company: appDetails?.company, status: effectiveStatus })}
+                style={{
+                  background: proofShot ? 'rgba(16, 185, 129, 0.18)' : 'rgba(51, 65, 85, 0.5)',
+                  borderColor: proofShot ? 'rgba(16, 185, 129, 0.4)' : '#475569',
+                  color: proofShot ? '#34d399' : '#cbd5e1',
+                }}
+                title={proofShot ? "View Verified Application Screenshot Proof" : "Screenshot available upon review/submission"}
+              >
+                <Eye size={13} />
+                <span>{proofShot ? 'View Screenshot' : 'Screenshot (Pending)'}</span>
+              </button>
             </div>
 
             <h2 className="sd-company-title">
@@ -350,11 +353,30 @@ export default function ApplicationSlideDrawer({
             <div className="sd-meta-item">
               <span className="sd-unans-badge">
                 <AlertTriangle size={12} />
-                <span>{missingFields.length} Unanswered Question(s)</span>
+                <span>{missingFields.length} Unresolved Question(s)</span>
               </span>
             </div>
           )}
         </div>
+
+        {/* Prominent Banner for Questions Unresolved by 4-Tier Engine */}
+        {missingFields.length > 0 && (
+          <div style={{
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.35)',
+            borderRadius: '6px',
+            padding: '10px 14px',
+            margin: '0 1.25rem 0.75rem 1.25rem',
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+          }}>
+            <AlertTriangle size={18} style={{ color: '#fbbf24', flexShrink: 0 }} />
+            <div style={{ fontSize: '0.8rem', color: '#fef3c7' }}>
+              <strong>{missingFields.length} Question(s) Unresolved by 4-Tier Engine:</strong> Please enter candidate answers below and click <strong>"Save to QA Bank"</strong>. Once answered, you can approve and submit this application into the queue.
+            </div>
+          </div>
+        )}
 
         {/* Filter Toggle: AI & Missing vs Missing Only vs All */}
         <div className="sd-filter-row">
@@ -519,11 +541,50 @@ export default function ApplicationSlideDrawer({
                   <ImageIcon size={16} style={{ color: '#34d399' }} />
                   <span>Workday Application Proof Screenshot</span>
                 </div>
-                <button type="button" onClick={() => setSelectedScreenshot(null)}>
-                  <X size={18} />
-                </button>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                  {(selectedScreenshot.url || (typeof selectedScreenshot === 'string' && selectedScreenshot.startsWith('http'))) && (
+                    <a
+                      href={selectedScreenshot.url || selectedScreenshot}
+                      target="_blank"
+                      rel="noreferrer"
+                      style={{ fontSize: '0.75rem', color: '#38bdf8', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+                    >
+                      <span>Open Full</span>
+                      <ExternalLink size={12} />
+                    </a>
+                  )}
+                  <button type="button" onClick={() => setSelectedScreenshot(null)}>
+                    <X size={18} />
+                  </button>
+                </div>
               </div>
-              <img src={selectedScreenshot} alt="Workday Application Proof" className="sd-full-shot" />
+
+              {selectedScreenshot.isPlaceholder ? (
+                <div style={{ padding: '2.5rem 1.5rem', textAlign: 'center', color: '#cbd5e1' }}>
+                  <Clock size={38} style={{ color: '#f59e0b', marginBottom: '0.75rem' }} />
+                  <h4 style={{ fontSize: '1.05rem', color: '#f8fafc', marginBottom: '0.5rem' }}>
+                    Application Proof Screenshot Pending
+                  </h4>
+                  <p style={{ fontSize: '0.82rem', color: '#94a3b8', maxWidth: '440px', margin: '0 auto 1.25rem auto' }}>
+                    This application for <strong>{selectedScreenshot.company || appDetails?.company || 'Workday Partner'}</strong> is in status <strong>{selectedScreenshot.status || effectiveStatus}</strong>.
+                    The verified confirmation screenshot will automatically appear here once submitted.
+                  </p>
+                  <button
+                    type="button"
+                    className="sd-btn-secondary"
+                    onClick={() => setSelectedScreenshot(null)}
+                    style={{ padding: '6px 14px', fontSize: '0.8rem' }}
+                  >
+                    Close
+                  </button>
+                </div>
+              ) : (
+                <img
+                  src={selectedScreenshot.url || selectedScreenshot}
+                  alt="Workday Application Proof"
+                  className="sd-full-shot"
+                />
+              )}
             </div>
           </div>
         )}
