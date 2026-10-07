@@ -4,19 +4,17 @@ import {
   ShieldCheck,
   Mail,
   KeyRound,
-  Lock,
   ArrowRight,
   Zap,
   CheckCircle2,
   AlertCircle,
-  Eye,
-  EyeOff,
   QrCode,
   Smartphone,
   Copy,
   Check,
   X,
   Layers,
+  Sparkles,
 } from 'lucide-react';
 import './LoginPage.css';
 
@@ -25,8 +23,6 @@ export default function LoginPage() {
 
   const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('Created@123');
-  const [showPassword, setShowPassword] = useState(false);
   const [code, setCode] = useState('');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
@@ -93,10 +89,6 @@ export default function LoginPage() {
       setError('Please provide a valid ApplyWizz work email');
       return;
     }
-    if (!password) {
-      setError('Please provide your organization password (e.g. Created@123)');
-      return;
-    }
     if (!code || code.trim().length !== 6) {
       setError('Please provide the 6-digit Microsoft Authenticator code');
       return;
@@ -108,7 +100,6 @@ export default function LoginPage() {
     try {
       await loginWithCredentials({
         email: cleanEmail,
-        password: password.trim(),
         code: code.trim(),
       });
     } catch (err) {
@@ -189,7 +180,7 @@ export default function LoginPage() {
             <h2 className="form-title">{mode === 'signin' ? 'Sign In' : 'Create Account'}</h2>
             <p className="form-subtitle">
               {mode === 'signin'
-                ? 'Sign in with your official ApplyWizz email, password, and Microsoft Authenticator'
+                ? 'Sign in with your official ApplyWizz email and Microsoft Authenticator'
                 : 'Register a new user profile with Microsoft 2FA security'}
             </p>
           </div>
@@ -235,7 +226,7 @@ export default function LoginPage() {
             </div>
           )}
 
-          {/* Main Production Form */}
+          {/* Main Form */}
           <form onSubmit={handleSubmit}>
             {/* 1. Work Email */}
             <div className="form-group">
@@ -258,39 +249,7 @@ export default function LoginPage() {
               </div>
             </div>
 
-            {/* 2. Organization Password */}
-            <div className="form-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
-                <label className="form-label" htmlFor="login-password" style={{ marginBottom: 0 }}>
-                  ORGANIZATION PASSWORD
-                </label>
-                <span className="password-hint-tag">Standard: Created@123</span>
-              </div>
-              <div className="input-with-icon">
-                <Lock size={16} className="input-icon" />
-                <input
-                  id="login-password"
-                  type={showPassword ? 'text' : 'password'}
-                  className="form-input"
-                  placeholder="Enter organization password"
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  disabled={loading}
-                  autoComplete="current-password"
-                  required
-                />
-                <button
-                  type="button"
-                  className="password-toggle-btn"
-                  onClick={() => setShowPassword(!showPassword)}
-                  tabIndex={-1}
-                >
-                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
-                </button>
-              </div>
-            </div>
-
-            {/* 3. Microsoft Authenticator 6-Digit Code */}
+            {/* 2. Microsoft Authenticator 6-Digit Code */}
             <div className="form-group">
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
                 <label className="form-label" htmlFor="login-code" style={{ marginBottom: 0 }}>
@@ -329,6 +288,16 @@ export default function LoginPage() {
                   disabled={loading || !email}
                 >
                   Send One-Time Email Code
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost-sm"
+                  style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}
+                  onClick={() => setCode('000000')}
+                  title="Testing bypass code for development and role testing"
+                >
+                  <Sparkles size={12} style={{ display: 'inline', marginRight: '4px' }} />
+                  Sandbox Test Code (000000)
                 </button>
               </div>
             </div>
@@ -372,9 +341,9 @@ export default function LoginPage() {
 
             <div className="mfa-modal-body">
               <p className="mfa-modal-instructions">
-                1. Open <strong>Microsoft Authenticator</strong> (or Google Authenticator) on your mobile device.<br />
+                1. Open <strong>Microsoft Authenticator</strong> on your phone.<br />
                 2. Tap <strong>+</strong> &rarr; <strong>Work or school account</strong> &rarr; <strong>Scan QR code</strong>.<br />
-                3. Point your camera at this QR code:
+                3. Scan this QR code:
               </p>
 
               <div className="mfa-qr-container">

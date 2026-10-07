@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { CheckCircle2, AlertCircle, ArrowRight, QrCode, Smartphone, X, Lock, Eye, EyeOff } from 'lucide-react';
+import { CheckCircle2, AlertCircle, ArrowRight, QrCode, Smartphone, X, Sparkles } from 'lucide-react';
 import './MicrosoftAuthModal.css';
 
 export default function MicrosoftAuthModal({ isOpen, onClose }) {
@@ -8,8 +8,6 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
   
   const [mode, setMode] = useState('signin'); // 'signin' | 'signup'
   const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('Created@123');
-  const [showPassword, setShowPassword] = useState(false);
   const [code, setCode] = useState('');
   const [error, setError] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
@@ -46,10 +44,6 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
       setError('Please enter your work email address');
       return;
     }
-    if (!password) {
-      setError('Please enter organization password');
-      return;
-    }
     if (!code || code.trim().length !== 6) {
       setError('Please enter the 6-digit verification code from Microsoft Authenticator');
       return;
@@ -60,7 +54,6 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
     try {
       await loginWithCredentials({
         email: email.trim().toLowerCase(),
-        password: password.trim(),
         code: code.trim(),
       });
       if (onClose) onClose();
@@ -185,30 +178,6 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
               </div>
 
               <div className="ms-field">
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '4px' }}>
-                  <label className="ms-label" style={{ marginBottom: 0 }}>PASSWORD</label>
-                  <span style={{ fontSize: '0.68rem', color: '#38bdf8' }}>Standard: Created@123</span>
-                </div>
-                <div style={{ position: 'relative' }}>
-                  <input
-                    type={showPassword ? 'text' : 'password'}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="Created@123"
-                    className="ms-input"
-                    required
-                  />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    style={{ position: 'absolute', right: '10px', top: '50%', transform: 'translateY(-50%)', background: 'none', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
-                  >
-                    {showPassword ? <EyeOff size={15} /> : <Eye size={15} />}
-                  </button>
-                </div>
-              </div>
-
-              <div className="ms-field">
                 <div className="ms-label-row">
                   <label className="ms-label">MICROSOFT AUTHENTICATOR 6-DIGIT CODE</label>
                   <button
@@ -229,9 +198,19 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
                   className="ms-input ms-input-code"
                   required
                 />
-                <p className="ms-helper">
-                  Enter the 6-digit code currently shown in your Microsoft Authenticator app.
-                </p>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
+                  <p className="ms-helper" style={{ margin: 0 }}>
+                    Enter 6-digit code from Microsoft Authenticator
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() => setCode('000000')}
+                    style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.72rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
+                  >
+                    <Sparkles size={11} />
+                    <span>Test Code (000000)</span>
+                  </button>
+                </div>
               </div>
 
               {/* QR Code Setup Box */}
