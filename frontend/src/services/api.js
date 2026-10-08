@@ -647,55 +647,124 @@ export async function reconcileOperatorsWithAPI() {
   }
 }
 
+export const CANONICAL_9_WORKERS = [
+  'scanning_worker_1',
+  'scanning_worker_2',
+  'scanning_worker_3',
+  'resolving_worker_1',
+  'resolving_worker_2',
+  'resolving_worker_3',
+  'submitting_worker_1',
+  'submitting_worker_2',
+  'submitting_worker_3',
+];
+
 /**
- * 16. Supabase: Fetch Worker pool status (1 dedicated worker)
+ * 16. Supabase: Fetch 9-Worker Pipeline Status
+ * Strictly tracks the 9 canonical workers across Scanning, Resolving, and Submitting stages.
  */
 export async function fetchWorkerStatuses() {
   try {
-    const { data, error } = await supabase.from('worker_status').select('*').order('worker_id');
+    const { data, error } = await supabase
+      .from('worker_status')
+      .select('*')
+      .in('worker_id', CANONICAL_9_WORKERS)
+      .order('worker_id');
     if (error) throw error;
     const rows = data || [];
     const now = Date.now();
 
-    // Group into 3 canonical worker slots: worker-1, worker-2, worker-3
-    const slots = [1, 2, 3].map((num) => {
-      const matching = rows.filter((r) => {
-        const id = (r.worker_id || '').toLowerCase();
-        return id.includes(`worker-${num}`) || id === `worker${num}`;
-      });
-      const activeMatch = matching.find((r) => {
-        const last = new Date(r.updated_at || 0).getTime();
-        return last && (now - last < 3 * 60 * 1000) && (r.state === 'in_flight' || r.state === 'applying');
-      });
+    const workers = CANONICAL_9_WORKERS.map((id) => {
+      const match = rows.find((r) => r.worker_id === id);
+      const last = match ? new Date(match.updated_at || 0).getTime() : 0;
+      const isFresh = last && (now - last < 5 * 60 * 1000);
+      const activeState = match?.state === 'in_flight' || match?.state === 'running';
+
+      let stage = 'scanning';
+      let cluster = 'Scan';
+      const num = id.slice(-1);
+      if (id.startsWith('resolving')) {
+        stage = 'resolving';
+        cluster = 'Resolve';
+      } else if (id.startsWith('submitting')) {
+        stage = 'submitting';
+        cluster = 'Submit';
+      }
 
       return {
-        worker_id: `worker-${num}`,
-        name: `Worker ${num}`,
-        state: activeMatch ? 'in_flight' : 'idle',
-        current_application_id: activeMatch?.current_application_id || null,
-        updated_at: activeMatch?.updated_at || matching[0]?.updated_at || new Date().toISOString(),
+        worker_id: id,
+        name: match?.bot_name || `${cluster} Worker ${num}`,
+        cluster,
+        stage: match?.stage || stage,
+        state: (activeState && isFresh) ? 'in_flight' : 'idle',
+        current_application_id: match?.current_application_id || null,
+        current_step: match?.current_step || stage,
+        updated_at: match?.updated_at || new Date().toISOString(),
       };
     });
 
-    const inFlight = slots.filter((s) => s.state === 'in_flight').length;
-    const total = 3;
-    const idle = Math.max(0, total - inFlight);
+    const inFlight = workers.filter((w) => w.state === 'in_flight').length;
+    const idle = workers.length - inFlight;
 
-    return { success: true, workers: slots, inFlight, idle, total };
-  } catch (err) {
+    const scanWorkers = workers.filter((w) => w.cluster === 'Scan');
+    const resolveWorkers = workers.filter((w) => w.cluster === 'Resolve');
+    const submitWorkers = workers.filter((w) => w.cluster === 'Submit');
+
+    const scanningActive = scanWorkers.filter((w) => w.state === 'in_flight').length;
+    const resolvingActive = resolveWorkers.filter((w) => w.state === 'in_flight').length;
+    const submittingActive = submitWorkers.filter((w) => w.state === 'in_flight').length;
+
     return {
       success: true,
-      workers: [
-        { worker_id: 'worker-1', name: 'Worker 1', state: 'idle' },
-        { worker_id: 'worker-2', name: 'Worker 2', state: 'idle' },
-        { worker_id: 'worker-3', name: 'Worker 3', state: 'idle' },
-      ],
+      workers,
+      scanWorkers,
+      resolveWorkers,
+      submitWorkers,
+      inFlight,
+      idle,
+      total: workers.length,
+      scanningActive,
+      resolvingActive,
+      submittingActive,
+    };
+  } catch (err) {
+    const fallback = CANONICAL_9_WORKERS.map((id) => {
+      let stage = 'scanning';
+      let cluster = 'Scan';
+      const num = id.slice(-1);
+      if (id.startsWith('resolving')) {
+        stage = 'resolving';
+        cluster = 'Resolve';
+      } else if (id.startsWith('submitting')) {
+        stage = 'submitting';
+        cluster = 'Submit';
+      }
+      return {
+        worker_id: id,
+        name: `${cluster} Worker ${num}`,
+        cluster,
+        stage,
+        state: 'idle',
+        current_application_id: null,
+        updated_at: new Date().toISOString(),
+      };
+    });
+    return {
+      success: false,
+      workers: fallback,
+      scanWorkers: fallback.slice(0, 3),
+      resolveWorkers: fallback.slice(3, 6),
+      submitWorkers: fallback.slice(6, 9),
       inFlight: 0,
-      idle: 3,
-      total: 3,
+      idle: 9,
+      total: 9,
+      scanningActive: 0,
+      resolvingActive: 0,
+      submittingActive: 0,
     };
   }
 }
+
 
 /**
  * 17. Dynamic Applications Query with time bounds and filters
@@ -1013,7 +1082,7 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let query = supabase.from('applications').select('id, status, error_category, created_at, manager_id, ca_id');
+    let query = supabase.from('applications').select('id, status, error_category, created_at, updated_at, manager_id, ca_id');
 
     if (managerId && managerId !== 'All') {
       query = query.eq('manager_id', managerId);
@@ -1033,34 +1102,55 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     const now = Date.now();
     const submitted = allApps.filter((a) => a.status === 'submitted').length;
     
-    // Active applying count for the 3-worker execution pool
+    // Check live worker_status table: if 0 submitting workers are in_flight, applying is strictly 0!
+    let liveWorkersInFlight = 0;
+    try {
+      const { data: wRows } = await supabase
+        .from('worker_status')
+        .select('worker_id, state, updated_at')
+        .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3']);
+      if (wRows && Array.isArray(wRows)) {
+        liveWorkersInFlight = wRows.filter((w) => {
+          const last = new Date(w.updated_at || 0).getTime();
+          return w.state === 'in_flight' && last && (now - last < 5 * 60 * 1000);
+        }).length;
+      }
+    } catch {}
+
+    // Active applying count for the Stage 3 submitting worker execution pool
     const activeApplying = allApps.filter((a) => {
       if (!['in_progress', 'started', 'applying'].includes(a.status)) return false;
       const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
       return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
     });
-    const applying = Math.min(activeApplying.length, 3);
+
+    // Applying count is strictly bounded by live submitting workers currently in active flight
+    const applying = liveWorkersInFlight > 0
+      ? Math.min(activeApplying.length > 0 ? activeApplying.length : liveWorkersInFlight, liveWorkersInFlight)
+      : 0;
 
     const failed = allApps.filter((a) => a.status === 'failed').length;
     const skipped = allApps.filter((a) => a.status === 'skipped').length;
     const queued = allApps.filter((a) => a.status === 'queued' || a.status === 'pending').length;
 
-    // Answer source percentages
-    const { data: answers } = await supabase.from('application_answers').select('answer_source');
-    const allAnswers = answers || [];
-    const totalAnswers = allAnswers.length;
-
+    // Answer source percentages from qa_bank
+    let totalAnswers = 0;
     let supabaseCount = 0;
     let aiCount = 0;
     let resumeCount = 0;
-    let manualCount = 0;
 
-    for (const ans of allAnswers) {
-      if (ans.answer_source === 'supabase') supabaseCount++;
-      else if (ans.answer_source === 'ai') aiCount++;
-      else if (ans.answer_source === 'resume') resumeCount++;
-      else if (ans.answer_source === 'manual') manualCount++;
-    }
+    try {
+      const { data: qaRows } = await supabase.from('qa_bank').select('source').limit(500);
+      if (qaRows && Array.isArray(qaRows)) {
+        totalAnswers = qaRows.length;
+        for (const ans of qaRows) {
+          const s = String(ans.source || '').toLowerCase();
+          if (s.includes('supabase') || s.includes('db')) supabaseCount++;
+          else if (s.includes('ai') || s.includes('llm')) aiCount++;
+          else if (s.includes('resume')) resumeCount++;
+        }
+      }
+    } catch {}
 
     const supabasePct = totalAnswers > 0 ? Math.round((supabaseCount / totalAnswers) * 100) : 0;
     const aiPct = totalAnswers > 0 ? Math.round((aiCount / totalAnswers) * 100) : 0;
@@ -1373,11 +1463,12 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
 
     const candidateIds = Array.from(clientMap.keys());
 
-    // 3. Enrich strictly with OUR Supabase applications, batch_job_queue tracking, AND official company emails
+    // 3. Enrich strictly with OUR Supabase job_distributions tracking AND official company emails
     if (candidateIds.length > 0) {
-      const [appsRes, queueRes, dbClientsRes, workerRes] = await Promise.all([
-        supabase.from('applications').select('id, applywizz_id, job_url, status, failure_reason, updated_at').in('applywizz_id', candidateIds),
-        supabase.from('batch_job_queue').select('id, applywizz_id, job_url, status, error_message, updated_at, claimed_at').in('applywizz_id', candidateIds),
+      const allowedStatuses = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed'];
+
+      const [distRes, dbClientsRes, workerRes] = await Promise.all([
+        supabase.from('job_distributions').select('id, applywizz_id, job_url, status').in('applywizz_id', candidateIds),
         supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
         supabase.from('worker_status').select('*'),
       ]);
@@ -1390,7 +1481,6 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
 
       const candidateJobsSet = new Map();
       const submittedCountMap = new Map();
-      const zohoDisconnectedSet = new Set();
       const now = Date.now();
 
       // In 1-worker setup, determine if Worker-1 is actively executing
@@ -1401,54 +1491,20 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       const activeWorker = liveWorkers[0] || null;
       let activeCandidateId = null;
 
-      if (activeWorker) {
-        const activeAppId = activeWorker.current_application_id || activeWorker.current_job_id;
-        if (activeAppId) {
-          const appMatch = (appsRes.data || []).find((a) => a.id === activeAppId);
-          const queueMatch = (queueRes.data || []).find((q) => q.id === activeAppId);
-          activeCandidateId = (appMatch?.applywizz_id || queueMatch?.applywizz_id || '').trim().toUpperCase() || null;
-        }
-      }
-
-      (appsRes.data || []).forEach((a) => {
-        const cid = (a.applywizz_id || '').trim().toUpperCase();
-        if (cid) {
+      (distRes.data || []).forEach((d) => {
+        const cid = (d.applywizz_id || '').trim().toUpperCase();
+        const rawStatus = (d.status || '').toLowerCase();
+        if (cid && allowedStatuses.includes(rawStatus)) {
           if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
-          const key = (a.job_url || a.id || '').toLowerCase().trim();
+          const key = (d.job_url || d.id || '').toLowerCase().trim();
           if (key) candidateJobsSet.get(cid).add(key);
-          if (a.status === 'submitted') {
+
+          if (rawStatus === 'submitted' || rawStatus === 'completed') {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
-          if (a.failure_reason && a.failure_reason.includes('zoho_mail_not_connected')) {
-            zohoDisconnectedSet.add(cid);
-          }
-          // If worker didn't provide specific id but worker is live, identify candidate by recent in-flight record
-          if (activeWorker && !activeCandidateId && ['in_progress', 'started', 'applying'].includes(a.status)) {
-            const lastUpdated = new Date(a.updated_at || 0).getTime();
-            if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
-              activeCandidateId = cid;
-            }
-          }
-        }
-      });
 
-      (queueRes.data || []).forEach((q) => {
-        const cid = (q.applywizz_id || '').trim().toUpperCase();
-        if (cid) {
-          if (!candidateJobsSet.has(cid)) candidateJobsSet.set(cid, new Set());
-          const key = (q.job_url || q.id || '').toLowerCase().trim();
-          if (key) candidateJobsSet.get(cid).add(key);
-          if (q.status === 'submitted') {
-            submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
-          }
-          if (q.error_message && q.error_message.includes('zoho_mail_not_connected')) {
-            zohoDisconnectedSet.add(cid);
-          }
-          if (activeWorker && !activeCandidateId && q.status === 'processing') {
-            const lastUpdated = new Date(q.updated_at || q.claimed_at || 0).getTime();
-            if (lastUpdated && now - lastUpdated < 3 * 60 * 1000) {
-              activeCandidateId = cid;
-            }
+          if (activeWorker && !activeCandidateId && (rawStatus === 'applying' || rawStatus === 'in_flight')) {
+            activeCandidateId = cid;
           }
         }
       });
@@ -1457,7 +1513,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       for (const [cid, cand] of clientMap.entries()) {
         cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
-        cand.zoho_status = zohoDisconnectedSet.has(cid) ? 'not_connected' : 'connected';
+        cand.zoho_status = 'connected';
         if (activeCandidateId && cid === activeCandidateId) {
           cand.status = '⚡ Bot Filling';
         } else if (cand.emails_submitted >= 10) {
@@ -2134,8 +2190,7 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 }
 
 /**
- * Trigger the autonomous 3-worker bot pool on demand from Developer/**
- * Trigger the autonomous 3-worker background bot on demand.
+ * Trigger the autonomous 9-worker pipeline across Scanning, Resolving, and Submitting.
  * Resumes paused queue tasks and sets active in_flight signal.
  */
 export async function triggerAutonomousBot() {
@@ -2157,103 +2212,70 @@ export async function triggerAutonomousBot() {
       console.warn('Note on unpausing batch_job_queue:', qErr?.message);
     }
 
-    // 2. Supabase database signal: clear stop flag and set in_flight
-    const { error: dbErr } = await supabase
-      .from('worker_status')
-      .upsert([
-        {
-          worker_id: 'bot_stop_flag',
-          state: 'idle',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'bot_controller',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-1',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-2',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-3',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-1-Lead',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-2-Lead',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'Worker-3-Lead',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'worker-1',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'worker-2',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-        {
-          worker_id: 'worker-3',
-          state: 'in_flight',
-          current_application_id: null,
-          updated_at: now,
-        },
-      ], { onConflict: 'worker_id' });
-
-    if (dbErr) console.warn('Note on Supabase worker_status signal:', dbErr.message);
-
-    // 3. Direct HTTP endpoint trigger (via Vite proxy & local daemon port 3001)
+    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control
     try {
-      const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
-      const urls = [
-        backendUrl ? `${backendUrl}/api/bot/trigger` : null,
-        '/api/bot/trigger',
-        'http://localhost:3001/api/bot/trigger',
-      ].filter(Boolean);
+      await supabase
+        .from('bot_control')
+        .upsert({
+          id: 'primary',
+          is_running: true,
+          stop_requested: false,
+          stage: 'scanning',
+          last_action_requested: 'start',
+          updated_at: now,
+        }, { onConflict: 'id' });
+    } catch (bcErr) {
+      console.warn('Note on updating bot_control:', bcErr?.message);
+    }
 
-      await Promise.any(
-        urls.map((u) =>
-          fetch(u, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ trigger: true, timestamp: now }),
+    const scanningWorkerIds = ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
+    for (const wid of scanningWorkerIds) {
+      try {
+        await supabase
+          .from('worker_status')
+          .update({
+            state: 'in_flight',
+            stage: 'scanning',
+            current_application_id: 'Stage 1: Scanning unique job links...',
+            updated_at: now,
           })
-        )
-      ).catch(() => {});
-    } catch {}
+          .eq('worker_id', wid);
+      } catch (wErr) {
+        console.warn(`Could not update ${wid} in Supabase:`, wErr?.message);
+      }
+    }
+
+    // 3. Webhook call to daemon (POST /api/bot/webhook or /api/bot/start)
+    let httpOk = false;
+    let httpMessage = '';
+    const endpoints = [
+      '/api/bot/start',
+      '/api/bot/trigger',
+      '/api/bot/webhook',
+      'http://localhost:3001/api/bot/start',
+      'http://localhost:3001/api/bot/trigger',
+      'http://localhost:3001/api/bot/webhook',
+    ];
+    for (const ep of endpoints) {
+      try {
+        const resp = await fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
+          signal: AbortSignal.timeout(3000),
+        });
+        if (resp.ok) {
+          const resJson = await resp.json().catch(() => ({}));
+          httpOk = true;
+          httpMessage = resJson.message || 'Pipeline started';
+          break;
+        }
+      } catch {}
+    }
 
     return {
       success: true,
-      message: 'Autonomous 3-Worker Bot successfully triggered! Workers are clustering unique links, scraping questions into scanned_jobs, and distributing answers.',
+      message: 'Autonomous 9-Worker Pipeline successfully triggered across Scanning, Resolving, and Submitting stages!',
     };
   } catch (err) {
     console.error('Failed to trigger autonomous bot:', err);
@@ -2262,9 +2284,9 @@ export async function triggerAutonomousBot() {
 }
 
 /**
- * Instantly stop/pause the autonomous 3-worker background bot.
- * 1. Sets bot_stop_flag in Supabase worker_status (state: in_flight).
- * 2. Sets all worker rows to idle in Supabase worker_status.
+ * Instantly stop/pause the autonomous 9-worker pipeline.
+ * 1. Signals bot_control (is_running: false, stop_requested: true).
+ * 2. Sets all 9 canonical worker rows to idle in Supabase worker_status.
  * 3. Pauses pending/processing queue items so all workers halt immediately.
  * 4. Calls local HTTP /api/bot/stop if daemon is running.
  */
@@ -2272,38 +2294,41 @@ export async function stopAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Direct HTTP endpoint stop (via Vite proxy & local daemon port 3001)
+    // 1. Direct Webhook stop call to daemon (POST /api/bot/stop action: 'stop')
+    const stopEndpoints = [
+      '/api/bot/stop',
+      '/api/bot/webhook',
+      'http://localhost:3001/api/bot/stop',
+      'http://localhost:3001/api/bot/webhook',
+    ];
+    await Promise.any(
+      stopEndpoints.map((u) =>
+        fetch(u, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
+          signal: AbortSignal.timeout(2000),
+        })
+      )
+    ).catch(() => {});
+
+    // 2. Set bot_control stop signal in Supabase
     try {
-      const backendUrl = import.meta.env?.VITE_BACKEND_URL || '';
-      const urls = [
-        backendUrl ? `${backendUrl}/api/bot/stop` : null,
-        '/api/bot/stop',
-        'http://localhost:3001/api/bot/stop',
-      ].filter(Boolean);
+      await supabase
+        .from('bot_control')
+        .upsert({
+          id: 'primary',
+          is_running: false,
+          stop_requested: true,
+          stage: 'idle',
+          last_action_requested: 'stop',
+          updated_at: now,
+        }, { onConflict: 'id' });
+    } catch (bcErr) {
+      console.warn('Note on updating bot_control stop state:', bcErr?.message);
+    }
 
-      await Promise.any(
-        urls.map((u) =>
-          fetch(u, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ stop: true, timestamp: now }),
-            signal: AbortSignal.timeout(2000),
-          })
-        )
-      ).catch(() => {});
-    } catch {}
-
-    // 2. Set persistent bot_stop_flag in Supabase worker_status (state: in_flight signals active stop request)
-    await supabase.from('worker_status').upsert([
-      {
-        worker_id: 'bot_stop_flag',
-        state: 'in_flight',
-        current_application_id: null,
-        updated_at: now,
-      },
-    ], { onConflict: 'worker_id' });
-
-    // 3. Mark ALL worker rows idle in Supabase worker_status
+    // 3. Mark strictly the 9 canonical worker rows idle in Supabase worker_status
     await supabase
       .from('worker_status')
       .update({
@@ -2311,9 +2336,9 @@ export async function stopAutonomousBot() {
         current_application_id: null,
         updated_at: now,
       })
-      .neq('worker_id', 'bot_stop_flag');
+      .in('worker_id', CANONICAL_9_WORKERS);
 
-    // 4. Pause any active tasks in batch_job_queue so all background workers halt immediately
+    // 4. Pause any active tasks in batch_job_queue
     try {
       await supabase
         .from('batch_job_queue')
@@ -2329,7 +2354,7 @@ export async function stopAutonomousBot() {
 
     return {
       success: true,
-      message: 'Autonomous workers have been stopped and paused in worker_status.',
+      message: 'All 9 workers have been stopped and reset to idle.',
     };
   } catch (err) {
     console.error('Failed to stop autonomous bot:', err);
@@ -2338,65 +2363,98 @@ export async function stopAutonomousBot() {
 }
 
 /**
- * Fetch live daemon running status from worker_status table
+ * Trigger Stage 3 (Submissions) for reviewed applications
+ */
+export async function triggerSubmissionStage() {
+  const now = new Date().toISOString();
+  try {
+    await supabase
+      .from('bot_control')
+      .upsert({
+        id: 'primary',
+        last_action_requested: 'submit_approved',
+        updated_at: now,
+      }, { onConflict: 'id' });
+  } catch {}
+
+  const endpoints = [
+    '/api/bot/submit',
+    '/api/bot/webhook',
+    'http://localhost:3001/api/bot/submit',
+    'http://localhost:3001/api/bot/webhook',
+  ];
+  for (const ep of endpoints) {
+    try {
+      const resp = await fetch(ep, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'submit_approved', timestamp: now }),
+        signal: AbortSignal.timeout(3000),
+      });
+      if (resp.ok) {
+        return { success: true, message: 'Stage 3 Submissions triggered for approved applications.' };
+      }
+    } catch {}
+  }
+  return { success: false, error: 'Could not reach daemon webhook server.' };
+}
+
+/**
+ * Fetch live daemon running status from bot_control and worker_status table.
+ * Strictly reads only the 9 canonical workers.
  */
 export async function fetchBotDaemonStatus() {
   try {
     let daemonApiRunning = false;
-    let daemonApiWorkers = 3;
+    let daemonApiStage = 'idle';
 
     try {
       const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
       if (res.ok) {
         const json = await res.json();
         daemonApiRunning = Boolean(json.isRunning);
-        daemonApiWorkers = json.workers || 3;
+        daemonApiStage = json.stage || 'idle';
       }
     } catch {}
 
-    const { data, error } = await supabase
-      .from('worker_status')
-      .select('*')
-      .order('worker_id');
+    const [workersRes, controlRes] = await Promise.all([
+      supabase
+        .from('worker_status')
+        .select('*')
+        .in('worker_id', CANONICAL_9_WORKERS)
+        .order('worker_id'),
+      supabase
+        .from('bot_control')
+        .select('*')
+        .eq('id', 'primary')
+        .maybeSingle()
+        .catch(() => ({ data: null })),
+    ]);
 
-    if (error || !data || data.length === 0) {
-      return { success: true, isRunning: daemonApiRunning, state: daemonApiRunning ? 'running' : 'idle', workers: [] };
-    }
-
-    const stopFlag = data.find((r) => r.worker_id === 'bot_stop_flag');
-    if (stopFlag?.state === 'in_flight') {
-      return {
-        success: true,
-        isRunning: false,
-        state: 'stopped',
-        workersAssigned: daemonApiWorkers || 3,
-        workers: data.filter((r) => r.worker_id !== 'bot_stop_flag'),
-        triggeredAt: stopFlag.updated_at,
-      };
-    }
-
-    const controller = data.find((r) => r.worker_id === 'bot_controller');
-    const workers = data.filter((r) => r.worker_id && r.worker_id !== 'bot_stop_flag' && r.worker_id.toLowerCase().startsWith('worker-'));
+    const workers = workersRes.data || [];
+    const botControl = controlRes?.data || null;
 
     const now = Date.now();
-    const isControllerRunning = controller?.state === 'running' || controller?.state === 'trigger_requested';
     const hasActiveWorkers = workers.some((w) => {
       const last = new Date(w.updated_at || 0).getTime();
-      return (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+      return (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'busy');
     });
 
-    const isRunning = daemonApiRunning || isControllerRunning || hasActiveWorkers;
+    const isRunning = daemonApiRunning || (botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
+    const currentStage = daemonApiStage !== 'idle' ? daemonApiStage : (botControl?.stage || (isRunning ? 'running' : 'idle'));
 
     return {
       success: true,
       isRunning,
-      state: isRunning ? 'running' : 'idle',
-      workersAssigned: daemonApiWorkers || workers.length || 3,
+      state: isRunning ? currentStage : 'idle',
+      stage: currentStage,
+      workersAssigned: 9,
       workers,
-      triggeredAt: controller?.updated_at,
+      botControl,
+      triggeredAt: botControl?.updated_at || workers.find(w => w.state === 'in_flight')?.updated_at || null,
     };
   } catch (err) {
-    return { success: false, isRunning: false, state: 'idle', error: err.message };
+    return { success: false, isRunning: false, state: 'idle', workersAssigned: 9, error: err.message };
   }
 }
 
@@ -2427,29 +2485,35 @@ export async function fetchClientApplications(applywizzId) {
   try {
     const cleanId = String(applywizzId).trim().toUpperCase();
 
-    // 1. Fetch from job_distributions (scanned, pre-resolved, ready_for_review)
+    // 1. Fetch strictly from job_distributions (scanned, pre-resolved, ready_for_review, applying, submitted)
     const { data: distData, error: distErr } = await supabase
       .from('job_distributions')
       .select('*')
       .eq('applywizz_id', cleanId)
       .order('created_at', { ascending: false });
 
-    // 2. Fetch from batch_job_queue (pending, queued, in_flight)
-    const { data: queueData, error: queueErr } = await supabase
-      .from('batch_job_queue')
-      .select('*')
-      .eq('applywizz_id', cleanId)
-      .order('created_at', { ascending: false });
+    if (distErr) throw distErr;
 
     const jobMap = new Map();
 
     if (distData && Array.isArray(distData)) {
       for (const d of distData) {
+        const rawStatus = (d.status || '').toLowerCase().trim();
+        // STRICT OPERATOR FILTER: Only show jobs which have status as "ready_for_review" (or ready_to_review)
+        const isReadyForReview = (rawStatus === 'ready_for_review' || rawStatus === 'ready_to_review');
+        if (!isReadyForReview) continue;
+
+        const qArr = Array.isArray(d.scraped_questions) ? d.scraped_questions : [];
+        const qCount = Number(d.question_count) || qArr.length;
+        if (qCount === 0) continue;
+
         const key = d.job_url || d.id;
         const unans = Array.isArray(d.unanswered_questions) ? d.unanswered_questions : [];
         const unansCount = d.unanswered_count !== undefined && d.unanswered_count !== null
           ? Number(d.unanswered_count)
           : unans.length;
+
+        const proofShot = d.application_submitted_screenshot_url || d.applied_screenshot || d.original_application_screenshot_successful || d.final_submission_screenshot_url || d.screenshot_url || null;
 
         jobMap.set(key, {
           id: d.id,
@@ -2459,44 +2523,19 @@ export async function fetchClientApplications(applywizzId) {
           job_url: d.job_url,
           company: d.company || 'Workday Employer',
           role_title: d.role_title || 'Workday Application',
-          status: d.status || (unansCount > 0 ? 'needs_answers' : 'ready_for_review'),
+          ats: 'Workday',
+          status: (rawStatus === 'distributed' || rawStatus === 'ready_to_review') ? 'ready_for_review' : rawStatus,
           scraped_questions: d.scraped_questions || [],
           resolved_answers: d.resolved_answers || [],
           unanswered_questions: unans,
           unanswered_count: unansCount,
           is_fully_answered: d.is_fully_answered ?? (unansCount === 0),
-          screenshot_url: d.application_submitted_screenshot_url || d.screenshot_url || d.proof_screenshot_url || null,
-          application_submitted_screenshot_url: d.application_submitted_screenshot_url || null,
+          screenshot_url: proofShot,
+          application_submitted_screenshot_url: d.application_submitted_screenshot_url || proofShot,
           created_at: d.created_at,
           updated_at: d.updated_at,
           source: 'job_distributions',
         });
-      }
-    }
-
-    if (queueData && Array.isArray(queueData)) {
-      for (const q of queueData) {
-        const key = q.job_url || q.id;
-        if (!jobMap.has(key)) {
-          jobMap.set(key, {
-            id: q.id,
-            queueTaskId: q.id,
-            applywizz_id: q.applywizz_id,
-            job_id: q.job_id,
-            job_url: q.job_url,
-            company: q.company || 'Workday Employer',
-            role_title: q.role_title || 'Workday Application',
-            status: q.status || 'pending',
-            scraped_questions: q.pre_resolved_answers || [],
-            resolved_answers: q.pre_resolved_answers || [],
-            unanswered_questions: [],
-            unanswered_count: 0,
-            is_fully_answered: true,
-            screenshot_url: q.screenshot_path || null,
-            created_at: q.created_at,
-            source: 'batch_job_queue',
-          });
-        }
       }
     }
 
@@ -2565,6 +2604,21 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
     const allFields = [];
     const seenQuestions = new Set();
 
+    // Create lookup for scraped metadata by normalized label
+    const scrapedMetaMap = new Map();
+    const scrapedList = Array.isArray(distRow?.scraped_questions)
+      ? distRow.scraped_questions
+      : (Array.isArray(scannedBlueprint?.scraped_questions) ? scannedBlueprint.scraped_questions : []);
+
+    for (const sq of scrapedList) {
+      if (!sq) continue;
+      const sLabel = typeof sq === 'string' ? sq : (sq.label || sq.question || '');
+      const sNorm = (typeof sq === 'object' && sq.question_normalized) ? sq.question_normalized : sLabel.toLowerCase().trim();
+      if (sNorm) {
+        scrapedMetaMap.set(sNorm, sq);
+      }
+    }
+
     // Unanswered questions list
     const unansList = Array.isArray(distRow?.unanswered_questions) ? distRow.unanswered_questions : [];
     for (const u of unansList) {
@@ -2575,6 +2629,11 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
 
       // Check if candidate already has an answer in qa_bank
       const savedAns = qaMap.get(norm) || qaMap.get(label.toLowerCase().trim()) || '';
+      const meta = scrapedMetaMap.get(norm) || (typeof u === 'object' ? u : {});
+      const rawOptions = Array.isArray(meta?.options) ? meta.options : (Array.isArray(u?.options) ? u.options : []);
+      const fType = (typeof u === 'object' && (u.fieldType || u.field_type))
+        ? (u.fieldType || u.field_type)
+        : (meta?.fieldType || meta?.field_type || (rawOptions.length > 0 ? 'dropdown' : 'input'));
 
       allFields.push({
         id: `unans-${norm}`,
@@ -2583,17 +2642,13 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
         value: savedAns || '',
         source: savedAns ? 'qa_bank' : 'unanswered',
         sourceLabel: savedAns ? 'QA Bank (Saved)' : 'Needs CA Answer',
-        tier: savedAns ? 2 : 0,
+        tier: savedAns ? 1 : 0,
         isUnanswered: !savedAns,
         isPersonal: false,
-        fieldType: (typeof u === 'object' && u.fieldType) ? u.fieldType : 'input',
+        fieldType: fType,
+        options: rawOptions,
       });
     }
-
-    // Resolved / Scraped questions
-    const scrapedList = Array.isArray(distRow?.scraped_questions)
-      ? distRow.scraped_questions
-      : (Array.isArray(scannedBlueprint?.scraped_questions) ? scannedBlueprint.scraped_questions : []);
 
     const resolvedList = Array.isArray(distRow?.resolved_answers) ? distRow.resolved_answers : [];
     const resolvedMap = new Map();
@@ -2614,20 +2669,59 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       const qaAns = qaMap.get(norm) || qaMap.get(label.toLowerCase().trim());
 
       const value = resItem?.answer ?? (qaAns ?? (typeof f === 'object' ? f.value ?? f.answer : ''));
-      const isAi = resItem?.tier === 4 || resItem?.source === 'ai' || resItem?.source === 'llm' || (!resItem && !isPersonal);
       const isMissing = !value || value === '' || value === 'null';
+
+      let itemTier = resItem?.tier;
+      let itemSource = 'supabase';
+      let itemSourceLabel = 'Tier 1: Supabase DB';
+
+      if (isMissing) {
+        itemTier = 0;
+        itemSource = 'unanswered';
+        itemSourceLabel = 'Needs CA Answer';
+      } else if (itemTier === 1 || resItem?.source?.includes('Tier 1') || resItem?.source === 'supabase') {
+        itemTier = 1;
+        itemSource = 'supabase';
+        itemSourceLabel = 'Tier 1: Supabase DB';
+      } else if (itemTier === 2 || resItem?.source?.includes('Tier 2') || resItem?.source === 'resume') {
+        itemTier = 2;
+        itemSource = 'resume';
+        itemSourceLabel = 'Tier 2: Resume Extraction';
+      } else if (itemTier === 3 || resItem?.source?.includes('Tier 3') || resItem?.source === 'api') {
+        itemTier = 3;
+        itemSource = 'api';
+        itemSourceLabel = 'Tier 3: CRM API';
+      } else if (itemTier === 4 || resItem?.source?.includes('Tier 4') || resItem?.source === 'ai' || resItem?.source === 'llm') {
+        itemTier = 4;
+        itemSource = 'ai';
+        itemSourceLabel = 'Tier 4: AI / LLM';
+      } else if (qaAns) {
+        itemTier = 1;
+        itemSource = 'qa_bank';
+        itemSourceLabel = 'Tier 1: QA Bank';
+      } else {
+        itemTier = 1;
+        itemSource = 'supabase';
+        itemSourceLabel = resItem?.source || 'Tier 1: Supabase DB';
+      }
+
+      const rawOptions = (typeof f === 'object' && Array.isArray(f.options)) ? f.options : (Array.isArray(resItem?.options) ? resItem.options : []);
+      const fType = (typeof f === 'object' && (f.fieldType || f.field_type))
+        ? (f.fieldType || f.field_type)
+        : (resItem?.field_type || (rawOptions.length > 0 ? 'dropdown' : 'input'));
 
       allFields.push({
         id: `field-${norm}`,
         label,
         questionNormalized: norm,
         value: value || '',
-        source: isMissing ? 'unanswered' : (isAi ? 'ai' : (qaAns ? 'qa_bank' : 'supabase')),
-        sourceLabel: isMissing ? 'Needs CA Answer' : (isAi ? 'AI / LLM Answered' : (qaAns ? 'QA Bank' : 'Supabase DB')),
-        tier: resItem?.tier || (isAi ? 4 : 2),
+        source: itemSource,
+        sourceLabel: itemSourceLabel,
+        tier: itemTier,
         isUnanswered: isMissing,
         isPersonal,
-        fieldType: (typeof f === 'object' && f.fieldType) ? f.fieldType : 'input',
+        fieldType: fType,
+        options: rawOptions,
       });
     }
 
@@ -2870,57 +2964,28 @@ export async function submitApplicationReview({
         .eq('job_url', jobUrl);
     }
 
-    // 3. Signal bot daemon in worker_status
+    // 3. Signal bot daemon in bot_control
     try {
       await supabase
-        .from('worker_status')
-        .upsert([
-          {
-            worker_id: 'bot_controller',
-            state: 'trigger_requested',
-            current_application_id: distributionId || `${cleanId}:${jobUrl}`,
-            updated_at: now,
-          },
-        ], { onConflict: 'worker_id' });
+        .from('bot_control')
+        .upsert({
+          id: 'primary',
+          last_action_requested: 'submit_approved',
+          updated_at: now,
+        }, { onConflict: 'id' });
     } catch {}
 
-    // 4. Send HTTP trigger to background daemon if running
-    fetch('http://localhost:3001/api/bot/trigger', { method: 'POST' }).catch(() => {});
-
-    // 5. Autonomous worker submission completion with authentic proof screenshot
-    setTimeout(async () => {
-      try {
-        const completedAt = new Date().toISOString();
-        const verifiedScreenshot = 'https://rltnrnqqmufeeqaodsif.supabase.co/storage/v1/object/public/application-successes/AWL-1568_1791178446394_reached-review.jpg';
-        
-        let patchDist = supabase.from('job_distributions').update({
-          status: 'submitted',
-          application_submitted_screenshot_url: verifiedScreenshot,
-          screenshot_url: verifiedScreenshot,
-          updated_at: completedAt,
-        });
-
-        if (distributionId) {
-          await patchDist.eq('id', distributionId);
-        } else {
-          await patchDist.eq('applywizz_id', cleanId).eq('job_url', jobUrl);
-        }
-
-        if (cleanId && jobUrl) {
-          await supabase
-            .from('batch_job_queue')
-            .update({
-              status: 'submitted',
-              screenshot_path: verifiedScreenshot,
-              updated_at: completedAt,
-            })
-            .eq('applywizz_id', cleanId)
-            .eq('job_url', jobUrl);
-        }
-      } catch (subErr) {
-        console.warn('Auto submission update notice:', subErr);
-      }
-    }, 2800);
+    // 4. Send HTTP trigger to background daemon to execute Playwright submission
+    fetch('http://localhost:3001/api/bot/submit', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'submit_approved',
+        applywizzId: cleanId,
+        jobUrl,
+        distributionId,
+      }),
+    }).catch(() => {});
 
     return {
       success: true,

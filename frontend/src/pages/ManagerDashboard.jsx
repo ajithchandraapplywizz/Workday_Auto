@@ -24,7 +24,27 @@ export default function ManagerDashboard() {
 
   // Managers roster
   const [managers, setManagers] = useState([]);
-  const [activeManagerId, setActiveManagerId] = useState('');
+  const [activeManagerId, setActiveManagerId] = useState(() => {
+    if (user?.manager_id) return user.manager_id;
+    const em = (user?.email || '').toLowerCase();
+    if (em.includes('ramakrishna')) return 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744';
+    return '9dc9376e-fbc5-440b-932f-38da10b89a70';
+  });
+
+  // Real dynamic states
+  const [operators, setOperators] = useState([]);
+  const [teamClients, setTeamClients] = useState([]);
+  const [applications, setApplications] = useState([]);
+  const [activeWorkDate, setActiveWorkDate] = useState(date);
+  const [isFallbackDate, setIsFallbackDate] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  // Applications Tab states
+  const [appSearchQuery, setAppSearchQuery] = useState('');
+  const [appStatusFilter, setAppStatusFilter] = useState('All');
+  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
+
+  const tabs = ['Home', 'Applications', 'Operators', 'Activity', 'Reports', 'Guide'];
 
   // Load managers list dynamically and select matching manager
   useEffect(() => {
@@ -35,13 +55,16 @@ export default function ManagerDashboard() {
         const match = res.managers.find(
           (m) =>
             (user?.email && m.email && m.email.toLowerCase() === user.email.toLowerCase()) ||
-            (user?.email && m.name && user.email.toLowerCase().includes(m.name.toLowerCase().split(' ')[0]))
+            (user?.email && m.name && user.email.toLowerCase().includes(m.name.toLowerCase().split(' ')[0])) ||
+            (user?.manager_id && m.id === user.manager_id)
         );
-        setActiveManagerId(match ? match.id : res.managers[0].id);
+        if (match) {
+          setActiveManagerId(match.id);
+        }
       }
     }
     loadManagers();
-  }, [user?.email]);
+  }, [user?.email, user?.manager_id]);
 
   // Sync dateRange button click with global timeframe
   const handleDateRangeChange = (range) => {
@@ -846,6 +869,7 @@ export default function ManagerDashboard() {
         onClose={() => setSelectedAppForDrawer(null)}
         application={selectedAppForDrawer}
         onStatusUpdated={() => loadManagerData()}
+        readOnly
       />
     </div>
   );

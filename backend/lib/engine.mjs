@@ -43,6 +43,7 @@ import {
 import { runStepDomPrep } from './stepDomPrep.mjs';
 import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
 import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
+import { isGlobalStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -961,15 +962,18 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     }
   } catch {}
 
-  console.log('  🎯 [Field 5] Resolving City (mandatory — DOM verify)...');
+  console.log('  🎯 [Field 5] Resolving City (DOM verify / commit with Enter)...');
   try {
     let citySuccess = false;
     const cityResult = await fillCityFromDom(page, profile);
-    if (cityResult.success && cityValueMatches(cityResult.domValue, cityResult.value)) {
-      recordFilled(profile, CITY_LABEL, cityResult.value);
+    if (cityResult.skipped) {
+      console.log('    ✓ City field skipped (optional or not present on page)');
+      citySuccess = true;
+    } else if (cityResult.success && (cityValueMatches(cityResult.domValue, cityResult.value) || !cityResult.domValue)) {
+      if (cityResult.value) recordFilled(profile, CITY_LABEL, cityResult.value);
       citySuccess = true;
     } else if (resolveCityValue(profile)?.includes(' ')) {
-      // Fallback: If city has spaces / two words, retry with gap removed
+      // Fallback: If city has spaces / two words, retry once with gap removed
       const noGap = resolveCityValue(profile).replace(/\s+/g, '');
       console.log(`    🔄 Retrying City with gap removed: "${noGap}"...`);
       const retryResult = await fillCityFromDom(page, {
@@ -977,7 +981,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         personal: { ...(profile.personal || {}), city: noGap }
       });
       if (retryResult.success) {
-        recordFilled(profile, CITY_LABEL, retryResult.value);
+        if (retryResult.value) recordFilled(profile, CITY_LABEL, retryResult.value);
         citySuccess = true;
       }
     }
@@ -992,7 +996,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       step: 'My Information',
     });
 
-    if (!citySuccess) {
+    if (!citySuccess && !cityResult.skipped) {
       console.log(`    ⚠️  City is required but could not be verified in DOM (wanted "${resolveCityValue(profile)}")`);
     }
   } catch (err) {
@@ -1417,7 +1421,10 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
 
   if (stepName === 'My Information') {
     await handleStep1MyInformation(page, profile, plan);
-    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 });
+    const unfilled = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+    if (unfilled > 0) {
+      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
+    }
     return;
   }
 
@@ -1444,7 +1451,10 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
     }
     await handleStep2MyExperience(page, profile);
     await fillWorkdaySkillsSection(page, profile);
-    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 });
+    const unfilledExp = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+    if (unfilledExp > 0) {
+      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
+    }
     return;
   }
 
@@ -1461,7 +1471,7 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   await runStepDomPrep(page, stepName, profile);
 
   await runWorkdayQuestionWorkflow(page, profile, plan, stepName, {
-    maxPasses: /application questions|voluntary disclosures|self identify/i.test(stepName) ? 6 : 5,
+    maxPasses: /application questions/i.test(stepName) ? 3 : 2,
     maxOuterPasses: 1,
   });
 
@@ -1573,9 +1583,46 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
 }
 
 
+// ─── Pre-Advance DOM Verification & Committal ──────────────────────────────
+export async function verifyAndRepairPageValidation(page, stepName = '') {
+  try {
+    // 1. Commit/dismiss hanging prompt option popups
+    const hangingPopup = page.locator('[data-automation-id="promptOption"]:visible, [role="option"]:visible').first();
+    if (await hangingPopup.isVisible({ timeout: 250 }).catch(() => false)) {
+      console.log('  🔧 Pre-advance: clicking hanging prompt option and committing...');
+      await hangingPopup.click({ force: true }).catch(() => {});
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Escape').catch(() => {});
+    }
+
+    // 2. Scan for fields that have text typed but show validation errors (uncommitted inputs)
+    const uncommittedInputs = await page.$$('input[aria-invalid="true"], textarea[aria-invalid="true"], [data-automation-id*="error"] input');
+    for (const inp of uncommittedInputs) {
+      const val = await inp.inputValue().catch(() => '');
+      if (val && val.trim().length > 0) {
+        console.log(`  🔧 Pre-advance: re-committing uncommitted field with value "${val.slice(0, 25)}"...`);
+        await inp.focus().catch(() => {});
+        await page.keyboard.press('Enter').catch(() => {});
+        await inp.evaluate((el) => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }).catch(() => {});
+        await page.waitForTimeout(150);
+      }
+    }
+  } catch (err) {
+    // Non-fatal pre-advance check
+  }
+}
+
 // ─── Workday Step Advance (Save and Continue) ───────────────────────────────
 async function advanceWorkdayStep(page, currentStep = '') {
   const step = currentStep || await detectWorkdayStep(page);
+
+  // Pre-advance validation & value committal pass
+  await verifyAndRepairPageValidation(page, step);
 
   if (step === 'Application Questions') {
     const aqInfo = await getApplicationQuestionsPageInfo(page);
@@ -1783,14 +1830,17 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
   if (profile?._humanRequired?.length) {
-    console.log('\n  🛑 Cannot auto-submit — unresolved required field(s):');
+    console.log('\n  🛑 Unresolved required field(s) flagged during wizard flow:');
     for (const item of profile._humanRequired.slice(0, 8)) {
       console.log(`     • [${item.section}] ${String(item.label || '').slice(0, 80)} (${item.field_type || 'field'})`);
     }
     if (profile._humanRequired.length > 8) {
       console.log(`     … and ${profile._humanRequired.length - 8} more`);
     }
-    return 'human-required';
+    if (confirmSubmit && !dryRun) {
+      return 'human-required';
+    }
+    console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
   }
 
   console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
@@ -1824,11 +1874,10 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
 
-  // Scrape strictly required and important question-answer pairs from the Review page into profile
+  // Scrape question-answer pairs from the Review page and wizard steps into profile
   const scrapedReviewMap = {};
   if (review?.pairs && Array.isArray(review.pairs)) {
     for (const p of review.pairs) {
-      if (!p.isRequired && !p.isImportant) continue;
       const lbl = (p.label || '').trim();
       const val = (p.value || p.text || '').trim();
       if (lbl && val && val.length < 2000) {
@@ -1836,10 +1885,41 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       }
     }
   }
+  // Merge questions answered during wizard steps
+  if (profile?._filledValues) {
+    for (const [k, v] of Object.entries(profile._filledValues)) {
+      if (k && v && !scrapedReviewMap[k]) {
+        scrapedReviewMap[k] = String(v);
+      }
+    }
+  }
   profile._scrapedReviewMap = scrapedReviewMap;
-  const scrapedCount = Object.keys(scrapedReviewMap).length;
-  console.log(`  📋 Scraped ${scrapedCount} required/important question fields from Step 5 into JSON.`);
-  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} required question/answer pairs from Review page into JSON.`);
+
+  // Cross-correlate Candidate 1's answered values from Review DOM with wizard-scraped required questions
+  if (profile._scrapedWizardQuestions instanceof Map) {
+    for (const [qNorm, qItem] of profile._scrapedWizardQuestions.entries()) {
+      if (scrapedReviewMap[qItem.label]) {
+        qItem.value = scrapedReviewMap[qItem.label];
+      } else {
+        for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
+          const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+          if (normLbl === qNorm || qNorm.includes(normLbl) || normLbl.includes(qNorm)) {
+            qItem.value = val;
+            break;
+          }
+        }
+      }
+    }
+    profile._scrapedQuestions = Array.from(profile._scrapedWizardQuestions.values());
+    profile._scrapedReviewFields = profile._scrapedQuestions;
+  } else {
+    profile._scrapedQuestions = [];
+    profile._scrapedReviewFields = [];
+  }
+
+  const scrapedCount = profile._scrapedQuestions?.length || Object.keys(scrapedReviewMap).length;
+  console.log(`  📋 Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
+  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
 
   // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
   if (!confirmSubmit || dryRun) {
@@ -1847,25 +1927,59 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
     try {
       if (page && !page.isClosed()) {
-        console.log('  📸 Capturing full Review page screenshot with complete form text...');
-        await page.waitForLoadState('networkidle').catch(() => {});
-        await page.waitForFunction(
-          () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
-          { timeout: 10000 }
-        ).catch(() => {});
-        await page.waitForTimeout(2000);
-        const reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true }).catch(() => null);
+        console.log('  📸 Capturing mandatory Review & Submit complete page screenshot...');
+        await page.waitForLoadState('domcontentloaded').catch(() => {});
+        await page.waitForTimeout(1500).catch(() => {});
+
+        // Level 1: Full page screenshot with 8s timeout
+        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
+
+        // Level 2: High-resolution viewport screenshot fallback
+        if (!reviewBuf) {
+          console.log('  📸 fullPage screenshot timed out; falling back to viewport screenshot...');
+          reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+        }
+
+        // Level 3: Body element screenshot fallback
+        if (!reviewBuf) {
+          const bodyEl = await page.$('body').catch(() => null);
+          if (bodyEl) {
+            reviewBuf = await bodyEl.screenshot({ type: 'jpeg', quality: 80, timeout: 5000 }).catch(() => null);
+          }
+        }
+
         if (reviewBuf) {
           profile._submissionScreenshotBuffer = reviewBuf;
-          console.log('  📸 Full Review page screenshot captured successfully.');
+          console.log('  📸 Review & Submit screenshot buffer captured successfully.');
+
+          // Immediately upload to Supabase Storage right while on page!
+          try {
+            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+            const cleanAwl = String(profile._applyWizzId || profile?.applywizz_id || 'AWL').trim().toUpperCase();
+            const shotUrl = await uploadStorageScreenshot(
+              'application-successes',
+              `${cleanAwl}_${Date.now()}_review_and_submit.jpg`,
+              reviewBuf
+            );
+            if (shotUrl) {
+              profile._submissionScreenshotUrl = shotUrl;
+              console.log(`  📸 Review & Submit screenshot uploaded to Supabase Storage: ${shotUrl}`);
+            }
+          } catch (uploadErr) {
+            console.log(`  ⚠️ Note uploading review screenshot: ${uploadErr.message}`);
+          }
+        } else {
+          console.error('  ❌ Warning: Failed to capture Review & Submit screenshot buffer.');
         }
       }
-    } catch {}
+    } catch (ssErr) {
+      console.log(`  ⚠️ Review screenshot capture error: ${ssErr.message}`);
+    }
 
-    // Stay for 20 seconds at Review & Submit before advancing to next unique link
-    console.log('  ⏳ Reached Review & Submit! Staying on page for 20 seconds before advancing to next unique link...');
-    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 20 seconds, then advancing to next unique link.');
-    await page.waitForTimeout(20000).catch(() => {});
+    // Stay for 5 seconds at Review & Submit before advancing to next unique link
+    console.log('  ⏳ Reached Review & Submit! Staying on page for 5 seconds before advancing to next unique link...');
+    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 5 seconds, then advancing to next unique link.');
+    await page.waitForTimeout(5000).catch(() => {});
 
     return 'reached-review';
   }
@@ -1957,6 +2071,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   resetPerApplicationSessionState(profile);
   profile._discoveredSteps = new Set();
   profile._harvestedFields = [];
+  profile._scrapedWizardQuestions = new Map();
 
   const initialJobUrl = plan?.url || profile._jobUrl || page.url();
   profile._canonicalJobUrl = profile._canonicalJobUrl || initialJobUrl;
@@ -2027,6 +2142,10 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
+    if (isGlobalStopRequested()) {
+      console.log('🛑 [Workday Wizard] Global stop requested! Terminating wizard loop immediately.');
+      return 'stopped';
+    }
     currentIteration++;
 
     const refreshed = await refreshWorkdayPageOnce(page);
@@ -2103,9 +2222,31 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
               options: hb.options || [],
               step: stepName,
             });
+            if (hb.required) {
+              const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+              const existing = profile._scrapedWizardQuestions.get(qNorm);
+              const existingOpts = existing?.options || [];
+              const newOpts = hb.options || [];
+              profile._scrapedWizardQuestions.set(qNorm, {
+                question: hb.label,
+                label: hb.label,
+                question_normalized: qNorm,
+                field_type: hb.fieldType || 'text',
+                type: hb.fieldType || 'text',
+                options: newOpts.length ? newOpts : existingOpts,
+                required: true,
+                is_required: true,
+                step: stepName,
+                value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+              });
+            }
           }
+          const stepReqCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
+          console.log(`  📋 Scraped ${stepReqCount} mandatory question(s) on "${stepName}" with types & options.`);
         }
-      } catch {}
+      } catch (hErr) {
+        console.log(`  ⚠️  Question scrape notice on "${stepName}": ${hErr.message}`);
+      }
     }
     console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
     profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
@@ -2129,7 +2270,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
     }
 
-    // Re-harvest after step fill to capture any newly revealed or unlocked conditional questions
+    // Re-harvest after step fill to capture any newly revealed or unlocked conditional questions and filled answers
     try {
       const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
       const postHarvest = await harvestPageQuestions(page, {
@@ -2148,6 +2289,24 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
             options: hb.options || [],
             step: stepName,
           });
+          if (hb.required) {
+            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+            const existing = profile._scrapedWizardQuestions.get(qNorm);
+            const existingOpts = existing?.options || [];
+            const newOpts = hb.options || [];
+            profile._scrapedWizardQuestions.set(qNorm, {
+              question: hb.label,
+              label: hb.label,
+              question_normalized: qNorm,
+              field_type: hb.fieldType || 'text',
+              type: hb.fieldType || 'text',
+              options: newOpts.length ? newOpts : existingOpts,
+              required: true,
+              is_required: true,
+              step: stepName,
+              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+            });
+          }
         }
       }
     } catch {}
@@ -2773,6 +2932,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   const ats = detectATS(url);
   const ownBrowser = !existingBrowser;
   const browser = existingBrowser || await chromium.launch({ headless });
+  if (ownBrowser) registerActiveBrowser(browser);
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
@@ -2878,7 +3038,6 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       console.log(`\n${'─'.repeat(60)}`);
       console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status}`);
       console.log(`   Screenshots: screenshots/`);
-      console.log(`   Report: data/applied.csv`);
       console.log(`${'─'.repeat(60)}`);
 
       // Determine hold time before browser close based on outcome:
@@ -2900,6 +3059,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           await page.waitForTimeout(holdMs);
         } catch {}
         try {
+          unregisterActiveBrowser(browser);
           await browser.close();
         } catch {}
       }
@@ -3287,7 +3447,6 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`🏁 Result: ${status}`);
     console.log(`   Screenshots: screenshots/`);
-    console.log(`   Report: data/applied.csv`);
     console.log(`${'─'.repeat(60)}`);
 
     console.log(`\n   — Closing browser...`);

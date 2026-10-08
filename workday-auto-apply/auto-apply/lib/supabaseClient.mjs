@@ -869,9 +869,9 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
     .map((it) => ({
       applywizz_id: String(it.applywizzId || it.applywizz_id).trim(),
       job_url: String(it.jobUrl || it.job_url).trim(),
-      company: it.company ? String(it.company).trim() : null,
-      role_title: it.roleTitle || it.role_title ? String(it.roleTitle || it.role_title).trim() : null,
-      job_id: it.jobId || it.job_id ? String(it.jobId || it.job_id).trim() : null,
+      company: it.company || null,
+      role_title: it.role_title || it.roleTitle || null,
+      job_id: it.job_id || it.jobId || null,
       status: 'pending',
       created_at: new Date().toISOString(),
       updated_at: new Date().toISOString(),
@@ -879,16 +879,55 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
 
   if (!rows.length) return { inserted: 0 };
 
+  // Fetch existing items in batch_job_queue to prevent duplicates if no DB constraint
+  const existingSet = new Set();
+  try {
+    const existing = await request('batch_job_queue', { query: '?select=applywizz_id,job_url' });
+    if (Array.isArray(existing)) {
+      for (const row of existing) {
+        existingSet.add(`${row.applywizz_id}::${row.job_url}`);
+      }
+    }
+  } catch (e) {
+    // ignore
+  }
+
+  // Deduplicate unique pairs
+  const dedupedRows = [];
+  const seenInBatch = new Set();
+  for (const r of rows) {
+    const k = `${r.applywizz_id}::${r.job_url}`;
+    if (!seenInBatch.has(k) && !existingSet.has(k)) {
+      seenInBatch.add(k);
+      dedupedRows.push(r);
+    }
+  }
+
+  if (!dedupedRows.length) return { inserted: 0 };
+
   let totalInserted = 0;
-  for (let i = 0; i < rows.length; i += chunkSize) {
-    const chunk = rows.slice(i, i + chunkSize);
+  for (let i = 0; i < dedupedRows.length; i += chunkSize) {
+    const chunk = dedupedRows.slice(i, i + chunkSize);
     try {
-      await request('batch_job_queue', {
-        method: 'POST',
-        query: '?on_conflict=applywizz_id%2Cjob_url',
-        prefer: 'resolution=ignore-duplicates,return=minimal',
-        body: chunk,
-      });
+      try {
+        await request('batch_job_queue', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id%2Cjob_url',
+          prefer: 'resolution=ignore-duplicates,return=minimal',
+          body: chunk,
+        });
+      } catch (err) {
+        if (err.message && err.message.includes('42P10')) {
+          // No unique constraint on remote DB, insert directly
+          await request('batch_job_queue', {
+            method: 'POST',
+            prefer: 'return=minimal',
+            body: chunk,
+          });
+        } else {
+          throw err;
+        }
+      }
       totalInserted += chunk.length;
     } catch (err) {
       console.log(`  ⚠️  ingestCsvToBatchQueue chunk error: ${err.message?.slice(0, 100)}`);
@@ -956,7 +995,7 @@ export async function getTotalApplicationCountForCandidates(candidateIds = []) {
         query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=id,applywizz_id,job_url`,
       }),
       request('batch_job_queue', {
-        query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=id,applywizz_id,job_url`,
+        query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=applywizz_id,job_url`,
       }),
     ]);
     const jobKeySet = new Set();
@@ -1021,7 +1060,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
 
 export async function updateQueueTaskStatus(taskId, {
   status = 'completed',
-  errorMessage = null,
+  workerId = undefined,
   screenshotPath = null,
   preResolvedAnswers = undefined,
 } = {}) {
@@ -1032,7 +1071,7 @@ export async function updateQueueTaskStatus(taskId, {
     updated_at: now,
   };
   
-  if (errorMessage !== undefined) body.error_message = errorMessage;
+  if (workerId !== undefined) body.worker_id = workerId;
   if (screenshotPath !== undefined) body.screenshot_path = screenshotPath;
   try {
     await request('batch_job_queue', {
@@ -1054,7 +1093,6 @@ export async function purgeDeadJobUrlFromQueue(jobUrl, { expiredReason = 'Link E
   try {
     const payload = {
       status: 'failed',
-      error_message: expiredReason,
       updated_at: new Date().toISOString(),
     };
     if (screenshotUrl) payload.screenshot_path = screenshotUrl;
@@ -1197,46 +1235,187 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
  * Update worker state in Supabase worker_status table.
  * State can be 'idle', 'in_flight', 'applying'.
  */
-export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null } = {}) {
+export const CANONICAL_9_WORKERS = new Set([
+  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
+  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3',
+  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3',
+]);
+
+const WORKER_STAGE_MAP = {
+  scanning_worker_1: { stage: 'scanning', botName: 'Scanning Worker 1' },
+  scanning_worker_2: { stage: 'scanning', botName: 'Scanning Worker 2' },
+  scanning_worker_3: { stage: 'scanning', botName: 'Scanning Worker 3' },
+  resolving_worker_1: { stage: 'resolving', botName: 'Resolving Worker 1' },
+  resolving_worker_2: { stage: 'resolving', botName: 'Resolving Worker 2' },
+  resolving_worker_3: { stage: 'resolving', botName: 'Resolving Worker 3' },
+  submitting_worker_1: { stage: 'submitting', botName: 'Submitting Worker 1' },
+  submitting_worker_2: { stage: 'submitting', botName: 'Submitting Worker 2' },
+  submitting_worker_3: { stage: 'submitting', botName: 'Submitting Worker 3' },
+};
+
+/**
+ * Normalizes any worker ID alias to one of the 9 canonical database worker IDs.
+ */
+export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
+  if (!workerId) return null;
+  let cleanId = String(workerId).trim().toLowerCase();
+
+  if (CANONICAL_9_WORKERS.has(cleanId)) return cleanId;
+
+  // Handle explicit stage aliases
+  if (cleanId.includes('scan')) {
+    if (cleanId.endsWith('1')) return 'scanning_worker_1';
+    if (cleanId.endsWith('2')) return 'scanning_worker_2';
+    if (cleanId.endsWith('3')) return 'scanning_worker_3';
+    return 'scanning_worker_1';
+  }
+  if (cleanId.includes('resolve')) {
+    if (cleanId.endsWith('1')) return 'resolving_worker_1';
+    if (cleanId.endsWith('2')) return 'resolving_worker_2';
+    if (cleanId.endsWith('3')) return 'resolving_worker_3';
+    return 'resolving_worker_1';
+  }
+  if (cleanId.includes('submit')) {
+    if (cleanId.endsWith('1')) return 'submitting_worker_1';
+    if (cleanId.endsWith('2')) return 'submitting_worker_2';
+    if (cleanId.endsWith('3')) return 'submitting_worker_3';
+    return 'submitting_worker_1';
+  }
+
+  // Handle generic worker-1..3 using defaultStage context
+  const numMatch = cleanId.match(/[123]/);
+  const num = numMatch ? numMatch[0] : '1';
+  if (defaultStage === 'resolving') return `resolving_worker_${num}`;
+  if (defaultStage === 'submitting') return `submitting_worker_${num}`;
+  return `scanning_worker_${num}`;
+}
+
+/**
+ * Update worker state in Supabase worker_status table across the 9 canonical rows.
+ */
+export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null, stage = null, bot_name = null } = {}) {
   if (!isSupabaseConfigured() || !workerId) return false;
   try {
-    let cleanId = String(workerId).toLowerCase().trim();
-    if (cleanId.includes('worker-1') || cleanId.includes('worker1')) cleanId = 'worker-1';
-    else if (cleanId.includes('worker-2') || cleanId.includes('worker2')) cleanId = 'worker-2';
-    else if (cleanId.includes('worker-3') || cleanId.includes('worker3')) cleanId = 'worker-3';
-    else if (cleanId.includes('controller')) cleanId = 'bot_controller';
+    const cleanId = normalizeCanonicalWorkerId(workerId, stage);
+    if (!cleanId || !CANONICAL_9_WORKERS.has(cleanId)) {
+      return false;
+    }
 
-    const row = {
-      worker_id: cleanId,
-      state: String(state),
+    const validState = (state === 'in_flight' || state === 'busy' || state === 'running') ? 'in_flight' : 'idle';
+    const meta = WORKER_STAGE_MAP[cleanId] || {};
+
+    const body = {
+      state: validState,
       current_application_id: current_application_id || null,
+      stage: stage || meta.stage || 'idle',
+      bot_name: bot_name || meta.botName || cleanId,
       updated_at: new Date().toISOString(),
     };
+
     await request('worker_status', {
-      method: 'POST',
-      query: '?on_conflict=worker_id',
-      prefer: 'resolution=merge-duplicates,return=minimal',
-      body: row,
+      method: 'PATCH',
+      query: `?worker_id=eq.${encodeURIComponent(cleanId)}`,
+      prefer: 'return=minimal',
+      body,
     });
     return true;
   } catch (err) {
-    try {
-      let cleanId = String(workerId).toLowerCase().trim();
-      if (cleanId.includes('worker-1') || cleanId.includes('worker1')) cleanId = 'worker-1';
-      else if (cleanId.includes('worker-2') || cleanId.includes('worker2')) cleanId = 'worker-2';
-      else if (cleanId.includes('worker-3') || cleanId.includes('worker3')) cleanId = 'worker-3';
-      else if (cleanId.includes('controller')) cleanId = 'bot_controller';
+    return false;
+  }
+}
 
-      await request('worker_status', {
-        method: 'PATCH',
-        query: `?worker_id=eq.${encode(cleanId)}`,
-        prefer: 'return=minimal',
-        body: { state: String(state), updated_at: new Date().toISOString() },
-      });
-      return true;
-    } catch {
-      return false;
+/**
+ * Fetch all 9 worker rows from worker_status table.
+ */
+export async function getWorkerStatuses() {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const res = await request('worker_status', {
+      method: 'GET',
+      query: '?select=worker_id,bot_name,stage,state,current_application_id,updated_at&order=worker_id',
+    });
+    return Array.isArray(res) ? res : [];
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Ensures strictly the 9 canonical worker rows exist in worker_status.
+ * Prunes any obsolete/polluting rows.
+ */
+export async function ensureCanonicalWorkers() {
+  if (!isSupabaseConfigured()) return;
+  try {
+    const current = await getWorkerStatuses();
+    const currentIds = new Set(current.map(r => r.worker_id));
+    const now = new Date().toISOString();
+
+    for (const id of CANONICAL_9_WORKERS) {
+      if (!currentIds.has(id)) {
+        const meta = WORKER_STAGE_MAP[id] || {};
+        await request('worker_status', {
+          method: 'POST',
+          prefer: 'resolution=merge-duplicates',
+          body: {
+            worker_id: id,
+            bot_name: meta.botName || id,
+            stage: meta.stage || 'idle',
+            state: 'idle',
+            current_application_id: null,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      }
     }
+
+    // Delete any non-canonical rows
+    for (const r of current) {
+      if (!CANONICAL_9_WORKERS.has(r.worker_id)) {
+        await request('worker_status', {
+          method: 'DELETE',
+          query: `?worker_id=eq.${encodeURIComponent(r.worker_id)}`,
+        }).catch(() => {});
+      }
+    }
+  } catch {}
+}
+
+/**
+ * Fetch the global bot_control primary row.
+ */
+export async function getBotControl() {
+  if (!isSupabaseConfigured()) return null;
+  try {
+    const rows = await request('bot_control', {
+      method: 'GET',
+      query: '?id=eq.primary&limit=1',
+    });
+    return rows?.[0] || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Update the global bot_control table state.
+ */
+export async function updateBotControl(patch = {}) {
+  if (!isSupabaseConfigured()) return false;
+  try {
+    const body = {
+      ...patch,
+      updated_at: new Date().toISOString(),
+    };
+    await request('bot_control', {
+      method: 'PATCH',
+      query: '?id=eq.primary',
+      prefer: 'return=minimal',
+      body,
+    });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -1468,6 +1647,7 @@ export async function saveScannedJob({
   errorMessage = null,
   screenshotPath = null,
   clientCount = null,
+  resolvedAnswers = [],
 } = {}) {
   if (!isSupabaseConfigured() || !jobUrl) return null;
   const cleanUrl = String(jobUrl).trim();
@@ -1480,6 +1660,7 @@ export async function saveScannedJob({
     role_title: roleTitle || 'Position',
     scraped_questions: questionsArr,
     question_count: questionsArr.length,
+    resolved_answers: Array.isArray(resolvedAnswers) ? resolvedAnswers : [],
     step_names: Array.isArray(stepNames) ? stepNames : [],
     scan_status: scanStatus,
     error_message: errorMessage || null,
@@ -1489,6 +1670,7 @@ export async function saveScannedJob({
   if (screenshotPath) payload.screenshot_path = screenshotPath;
   if (clientCount) payload.client_count = clientCount;
 
+  let savedRow = null;
   try {
     const res = await request('scanned_jobs', {
       method: 'POST',
@@ -1496,12 +1678,21 @@ export async function saveScannedJob({
       prefer: 'resolution=merge-duplicates,return=representation',
       body: payload,
     });
-    return Array.isArray(res) ? res[0] : res;
+    if (res) {
+      const row = Array.isArray(res) ? res[0] : res;
+      if (row?.id) savedRow = row;
+    }
   } catch (err) {
+    console.log(`   ⚠️ [scanned_jobs] Initial upsert error: ${err.message?.slice(0, 140)}`);
     if (err?.message?.includes('PGRST204') || err?.message?.includes('column')) {
       delete payload.screenshot_path;
       delete payload.client_count;
+      delete payload.resolved_answers;
     }
+  }
+
+  // Fallback 1: Try PATCH directly by cleanUrl
+  if (!savedRow) {
     try {
       const patched = await request('scanned_jobs', {
         method: 'PATCH',
@@ -1509,11 +1700,41 @@ export async function saveScannedJob({
         prefer: 'return=representation',
         body: payload,
       });
-      return Array.isArray(patched) ? patched[0] : patched;
-    } catch {
-      return null;
+      if (Array.isArray(patched) && patched.length > 0) savedRow = patched[0];
+    } catch (patchErr) {
+      console.log(`   ⚠️ [scanned_jobs] Fallback PATCH error: ${patchErr.message?.slice(0, 140)}`);
     }
   }
+
+  // Fallback 2: Try direct POST without on_conflict
+  if (!savedRow) {
+    try {
+      const inserted = await request('scanned_jobs', {
+        method: 'POST',
+        prefer: 'return=representation',
+        body: payload,
+      });
+      if (inserted) savedRow = Array.isArray(inserted) ? inserted[0] : inserted;
+    } catch (postErr) {
+      console.log(`   ⚠️ [scanned_jobs] Fallback POST error: ${postErr.message?.slice(0, 140)}`);
+    }
+  }
+
+  if (savedRow) {
+    console.log(`\n📥 [SUPABASE INGESTION] table: scanned_jobs | action: UPSERT`);
+    console.log(`   • Scanned Job ID:       ${savedRow.id || 'Generated'}`);
+    console.log(`   • Company & Role:       ${payload.company} — ${payload.role_title}`);
+    console.log(`   • Job URL:              ${cleanUrl}`);
+    console.log(`   • Lead Candidate:       ${payload.applywizz_id || 'N/A'}`);
+    console.log(`   • Mandatory Questions:  ${payload.question_count} fields`);
+    console.log(`   • Lead Resolved Q&A:    ${payload.resolved_answers?.length || 0} answers`);
+    console.log(`   • Proof Screenshot:     ${payload.screenshot_path || 'None'}`);
+    console.log(`   • Total Clients:        ${payload.client_count || 1}`);
+    console.log(`   • Scan Status:          ${payload.scan_status}\n`);
+    return savedRow;
+  }
+
+  return null;
 }
 
 /**
@@ -1573,17 +1794,30 @@ export async function saveResolvedAnswers({
   const cleanUrl = String(jobUrl).trim();
   const answersArr = Array.isArray(resolvedAnswersJson) ? resolvedAnswersJson : [];
 
+  // STRICT GATE: Ensure target job exists in scanned_jobs with question_count > 0
+  let scanned = null;
+  try {
+    scanned = await getScannedJob(cleanUrl);
+  } catch {}
+  if (!scanned || !Array.isArray(scanned.scraped_questions) || scanned.scraped_questions.length === 0) {
+    return null;
+  }
+
   const payload = {
     applywizz_id: cleanId,
     job_id: jobId ? String(jobId).trim() : null,
     job_url: cleanUrl,
-    company: company || 'Workday Employer',
-    role_title: roleTitle || 'Position',
+    scanned_job_id: scanned.id || null,
+    company: company || scanned.company || 'Workday Employer',
+    role_title: roleTitle || scanned.role_title || 'Position',
+    scraped_questions: scanned.scraped_questions || [],
+    question_count: (scanned.scraped_questions || []).length,
     resolved_answers: answersArr,
     is_fully_answered: Boolean(isFullyAnswered),
     unanswered_count: Number(unansweredCount) || 0,
     status: isFullyAnswered ? status : (status === 'submitted' ? 'submitted' : 'incomplete'),
-    screenshot_url: screenshotUrl || null,
+    screenshot_url: screenshotUrl || scanned.screenshot_path || null,
+    applied_screenshot: screenshotUrl || scanned.screenshot_path || null,
     error_message: errorMessage || null,
     updated_at: new Date().toISOString(),
   };
@@ -1842,36 +2076,21 @@ export async function completeSubmittedTask({
   const now = new Date().toISOString();
 
   try {
-    // 1. Update job_distributions with dedicated screenshot proof columns
-    try {
-      await request('job_distributions', {
-        method: 'PATCH',
-        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
-        prefer: 'return=minimal',
-        body: {
-          status: 'submitted',
-          applied_screenshot: screenshotUrl || null,
-          original_application_screenshot_successful: screenshotUrl || null,
-          final_submission_screenshot_url: screenshotUrl || null,
-          screenshot_url: screenshotUrl || null,
-          worker_id: workerId || null,
-          updated_at: now,
-        },
-      });
-    } catch {
-      await request('job_distributions', {
-        method: 'PATCH',
-        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
-        prefer: 'return=minimal',
-        body: {
-          status: 'submitted',
-          applied_screenshot: screenshotUrl || null,
-          screenshot_url: screenshotUrl || null,
-          worker_id: workerId || null,
-          updated_at: now,
-        },
-      });
-    }
+    // 1. Update job_distributions with authentic confirmation screenshot proof
+    await request('job_distributions', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
+      prefer: 'return=minimal',
+      body: {
+        status: 'submitted',
+        application_submitted_screenshot_url: screenshotUrl || null,
+        screenshot_url: screenshotUrl || null,
+        worker_id: workerId || null,
+        updated_at: now,
+      },
+    }).catch(async (err) => {
+      console.log(`   ⚠️ [job_distributions] completeSubmittedTask error: ${err?.message?.slice(0, 140)}`);
+    });
 
     // Also update applications table
     await request('applications', {
@@ -1897,6 +2116,14 @@ export async function completeSubmittedTask({
         updated_at: now,
       },
     }).catch(() => {});
+
+    console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions & batch_job_queue | action: FINAL APPLICATION SUBMISSION`);
+    console.log(`   • Candidate:            ${cleanId}`);
+    console.log(`   • Job URL:              ${jobUrl}`);
+    console.log(`   • Worker ID:            ${workerId || 'N/A'}`);
+    console.log(`   • New Status:           submitted`);
+    console.log(`   • Submission Proof Shot:${screenshotUrl || 'None'}`);
+    console.log(`   • Ingestion Time:       ${now}\n`);
 
     return true;
   } catch {
@@ -2025,13 +2252,30 @@ export async function recordJobDistributions({
     const cleanLead = String(leadApplywizzId || '').trim().toUpperCase();
     const cleanCompany = String(company || '').trim();
     const cleanRole = String(roleTitle || '').trim();
-    const questions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
+    let questions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
+
+    // STRICT GATE: Only jobs with valid questions in scanned_jobs may enter job_distributions!
+    let scannedJobRecord = null;
+    try {
+      scannedJobRecord = await getScannedJob(cleanUrl);
+    } catch {}
+
+    const scannedQuestions = Array.isArray(scannedJobRecord?.scraped_questions) ? scannedJobRecord.scraped_questions : [];
+    const directQuestions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
+    const effectiveQuestions = directQuestions.length > 0 ? directQuestions : scannedQuestions;
+
+    if (!scannedJobRecord || effectiveQuestions.length === 0) {
+      console.log(`   ⛔ [Distribution Gate] Blocked distribution for "${cleanUrl}": Job does not exist in scanned_jobs or has 0 scraped questions.`);
+      return false;
+    }
+
+    questions = effectiveQuestions;
     const questionCount = questions.length;
     const unansweredArr = Array.isArray(unansweredQuestions) ? unansweredQuestions : [];
     const countUnanswered = (unansweredCount !== null && unansweredCount !== undefined)
       ? Number(unansweredCount)
       : unansweredArr.length;
-    const finalShot = screenshotUrl || screenshotPath || null;
+    const finalShot = screenshotUrl || screenshotPath || scannedJobRecord?.screenshot_path || null;
     const distStatus = status !== 'distributed'
       ? status
       : (countUnanswered > 0 ? 'needs_answers' : 'ready_for_review');
@@ -2046,10 +2290,10 @@ export async function recordJobDistributions({
         if (queueTasks && queueTasks.length > 0) {
           targetClients = queueTasks.map((t) => ({
             applywizzId: t.applywizz_id,
-            jobId: t.job_id || jobId || null,
+            jobId: t.job_id || jobId || scannedJobRecord?.job_id || null,
             jobUrl: t.job_url || cleanUrl,
-            company: t.company || cleanCompany,
-            roleTitle: t.role_title || cleanRole,
+            company: t.company || cleanCompany || scannedJobRecord?.company,
+            roleTitle: t.role_title || cleanRole || scannedJobRecord?.role_title,
           }));
         }
       } catch {}
@@ -2072,21 +2316,59 @@ export async function recordJobDistributions({
       const specificJobUrl = (typeof c === 'object' && (c.jobUrl || c.job_url)) ? c.jobUrl || c.job_url : cleanUrl;
       const specificCompany = (typeof c === 'object' && c.company) ? c.company : cleanCompany;
       const specificRole = (typeof c === 'object' && c.roleTitle) ? c.roleTitle : cleanRole;
+      const clientResolved = (typeof c === 'object' && Array.isArray(c.resolvedAnswers)) ? c.resolvedAnswers : (Array.isArray(resolvedAnswers) ? resolvedAnswers : []);
+      
+      const rawUnanswered = (typeof c === 'object' && Array.isArray(c.unansweredQuestions))
+        ? c.unansweredQuestions
+        : unansweredArr;
+      const clientUnanswered = rawUnanswered.map((u) => {
+        if (typeof u === 'string') {
+          return {
+            question: u,
+            field_type: 'text',
+            step: 'Application Questions',
+            options: [],
+            is_required: true,
+            reason: 'missing_required_answer',
+          };
+        }
+        return {
+          question: u.question || u.label || '',
+          field_type: u.field_type || u.type || 'text',
+          step: u.step || 'Application Questions',
+          options: Array.isArray(u.options) ? u.options : [],
+          is_required: true,
+          reason: u.reason || 'missing_required_answer',
+        };
+      }).filter((u) => u.question);
+
+      const clientCountUnanswered = (typeof c === 'object' && c.unansweredCount !== null && c.unansweredCount !== undefined)
+        ? Number(c.unansweredCount)
+        : clientUnanswered.length;
+      const clientIsFully = (clientCountUnanswered === 0);
+      let clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
+      if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
+        clientStatus = c.status;
+      }
+      const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : null;
+
       return {
         applywizz_id: String(awlId).trim().toUpperCase(),
         job_id: specificJobId ? String(specificJobId).trim() : null,
         job_url: String(specificJobUrl).trim(),
+        scanned_job_id: scannedJobRecord.id || null,
         company: specificCompany || 'Workday Employer',
         role_title: specificRole || 'Role',
         lead_applywizz_id: cleanLead || null,
         scraped_questions: questions,
         question_count: questionCount,
-        resolved_answers: Array.isArray(resolvedAnswers) ? resolvedAnswers : [],
-        unanswered_questions: unansweredArr,
-        unanswered_count: countUnanswered,
-        is_fully_answered: countUnanswered === 0,
-        screenshot_url: finalShot,
-        status: distStatus,
+        resolved_answers: clientResolved,
+        unanswered_questions: clientCountUnanswered === 0 ? [] : clientUnanswered,
+        unanswered_count: clientCountUnanswered,
+        is_fully_answered: clientIsFully,
+        screenshot_url: clientShot,
+        application_submitted_screenshot_url: null,
+        status: clientStatus,
         created_at: now,
         updated_at: now,
       };
@@ -2096,6 +2378,7 @@ export async function recordJobDistributions({
 
     // Batch upsert into job_distributions in chunks of 50
     const CHUNK_SIZE = 50;
+    let totalIngested = 0;
     for (let i = 0; i < rows.length; i += CHUNK_SIZE) {
       const chunk = rows.slice(i, i + CHUNK_SIZE);
       try {
@@ -2105,29 +2388,90 @@ export async function recordJobDistributions({
           prefer: 'resolution=merge-duplicates,return=minimal',
           body: chunk,
         });
+        totalIngested += chunk.length;
       } catch (err) {
-        if (err?.message?.includes('column') || err?.message?.includes('PGRST204')) {
-          // Graceful fallback if new columns are not yet migrated
-          const stripped = chunk.map(({ unanswered_questions, is_fully_answered, ...rest }) => rest);
-          await request('job_distributions', {
-            method: 'POST',
-            query: '?on_conflict=applywizz_id,job_url',
-            prefer: 'resolution=merge-duplicates,return=minimal',
-            body: stripped,
-          }).catch((subErr) => {
-            trace(`⚠️ Note on fallback inserting job_distributions: ${subErr.message}`);
-          });
-        } else {
-          trace(`⚠️ Note on batch inserting job_distributions: ${err.message}`);
-        }
+        console.log(`   ⚠️ [job_distributions] Upsert batch error: ${err?.message?.slice(0, 140)}`);
+        // Graceful fallback if any non-existent column causes error
+        const stripped = chunk.map(({ applied_screenshot, ...rest }) => rest);
+        await request('job_distributions', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id,job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: stripped,
+        }).then(() => { totalIngested += chunk.length; }).catch((subErr) => {
+          console.log(`   ⚠️ [job_distributions] Fallback batch error: ${subErr.message?.slice(0, 140)}`);
+        });
       }
     }
 
-    console.log(`   📋 [Distribution] Distributed ${questionCount} questions (${countUnanswered} unanswered) to all ${rows.length} clients for "${cleanCompany || cleanUrl}" in job_distributions!`);
+    const readyReviewCount = rows.filter(r => r.status === 'ready_for_review').length;
+    const needsAnswersCount = rows.filter(r => r.status === 'needs_answers').length;
+
+    console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);
+    console.log(`   • Company & Role:       ${cleanCompany} — ${cleanRole}`);
+    console.log(`   • Job URL:              ${jobUrl}`);
+    console.log(`   • Lead Candidate:       ${cleanLead || 'N/A'}`);
+    console.log(`   • Mandatory Questions:  ${questionCount} fields`);
+    console.log(`   • Total Clients:        ${rows.length} candidates`);
+    console.log(`   • Ready for Review:     ${readyReviewCount} candidates (100% mandatory answered)`);
+    console.log(`   • Needs Answers:        ${needsAnswersCount} candidates (awaiting candidate data)`);
+    console.log(`   • Sample Clients:       ${rows.slice(0, 4).map(r => `${r.applywizz_id} (${r.status})`).join(', ')}${rows.length > 4 ? ` + ${rows.length - 4} more` : ''}`);
+    console.log(`   • Screenshot Policy:    null for all followers (authentic post-submission proof only)\n`);
     return true;
   } catch (err) {
-    trace(`⚠️ Failed to record job distributions: ${err.message}`);
+    console.log(`⚠️ Failed to record job distributions: ${err.message}`);
     return false;
+  }
+}
+
+/**
+ * Purge orphaned records in job_distributions that do not correspond to any valid scanned_jobs record with questions.
+ */
+export async function purgeOrphanedJobDistributions() {
+  if (!isSupabaseConfigured()) return { success: false, purged: 0 };
+  try {
+    const validScanned = await request('scanned_jobs', {
+      query: '?select=job_url,question_count&limit=5000',
+    });
+    const validUrlSet = new Set(
+      (validScanned || [])
+        .filter((s) => s.job_url && Number(s.question_count) > 0)
+        .map((s) => String(s.job_url).trim().toLowerCase())
+    );
+
+    const allDists = await request('job_distributions', {
+      query: '?select=id,job_url,question_count&limit=5000',
+    });
+
+    const orphanIds = [];
+    for (const d of (allDists || [])) {
+      const u = String(d.job_url || '').trim().toLowerCase();
+      const qCount = Number(d.question_count) || 0;
+      if (!u || !validUrlSet.has(u) || qCount === 0) {
+        orphanIds.push(d.id);
+      }
+    }
+
+    if (orphanIds.length > 0) {
+      console.log(`🧹 [Purge] Found ${orphanIds.length} orphaned/empty rows in job_distributions. Purging...`);
+      const CHUNK = 50;
+      for (let i = 0; i < orphanIds.length; i += CHUNK) {
+        const chunk = orphanIds.slice(i, i + CHUNK);
+        const idFilter = chunk.map((id) => encodeURIComponent(String(id).trim())).join(',');
+        await request('job_distributions', {
+          method: 'DELETE',
+          query: `?id=in.(${idFilter})`,
+          prefer: 'return=minimal',
+        });
+      }
+      console.log(`✅ [Purge] Successfully purged ${orphanIds.length} orphaned rows from job_distributions.`);
+      return { success: true, purged: orphanIds.length };
+    }
+
+    return { success: true, purged: 0 };
+  } catch (err) {
+    console.error(`⚠️ Error purging orphaned job_distributions: ${err.message}`);
+    return { success: false, error: err.message };
   }
 }
 
@@ -2145,6 +2489,7 @@ export async function recordFailedJob({
   failureReason = '',
   failedAtStep = 'Unknown',
   screenshotPath = '',
+  resolvedAnswers = [],
 } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
   try {
@@ -2153,25 +2498,32 @@ export async function recordFailedJob({
     const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
     const cleanStep = String(failedAtStep || 'Unknown').trim();
     const now = new Date().toISOString();
+    const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
 
-    // 1. Insert into failed_jobs table
-    await request('failed_jobs', {
-      method: 'POST',
-      prefer: 'return=minimal',
-      body: {
-        applywizz_id: cleanId,
-        job_id: jobId ? String(jobId).trim() : null,
-        job_url: cleanUrl,
-        company: company ? String(company).trim() : null,
-        role_title: roleTitle ? String(roleTitle).trim() : null,
-        failure_reason: cleanReason,
-        failed_at_step: cleanStep,
-        screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
-        created_at: now,
-        updated_at: now,
-      },
-    }).catch(async () => {
-      // Fallback if failed_at_step column is not yet present
+    // 1. Insert into failed_jobs table with resolved_answers and screenshot_path
+    let insertOk = false;
+    try {
+      await request('failed_jobs', {
+        method: 'POST',
+        prefer: 'return=minimal',
+        body: {
+          applywizz_id: cleanId,
+          job_id: jobId ? String(jobId).trim() : null,
+          job_url: cleanUrl,
+          company: company ? String(company).trim() : null,
+          role_title: roleTitle ? String(roleTitle).trim() : null,
+          failure_reason: cleanReason,
+          failed_at_step: cleanStep,
+          screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
+          resolved_answers: answersArr,
+          created_at: now,
+          updated_at: now,
+        },
+      });
+      insertOk = true;
+    } catch (err) {
+      console.log(`   ⚠️ [failed_jobs] Initial insert error: ${err.message?.slice(0, 140)}`);
+      // Fallback if resolved_answers or failed_at_step column is not yet present
       await request('failed_jobs', {
         method: 'POST',
         prefer: 'return=minimal',
@@ -2186,8 +2538,22 @@ export async function recordFailedJob({
           created_at: now,
           updated_at: now,
         },
-      }).catch(() => {});
-    });
+      }).then(() => { insertOk = true; }).catch((subErr) => {
+        console.log(`   ⚠️ [failed_jobs] Fallback insert error: ${subErr.message?.slice(0, 140)}`);
+      });
+    }
+
+    if (insertOk) {
+      console.log(`\n📥 [SUPABASE INGESTION] table: failed_jobs | action: INSERT`);
+      console.log(`   • Candidate:            ${cleanId}`);
+      console.log(`   • Company & Role:       ${company || 'Workday'} — ${roleTitle || 'Position'}`);
+      console.log(`   • Job URL:              ${cleanUrl}`);
+      console.log(`   • Failed at Step:       ${cleanStep}`);
+      console.log(`   • Failure Reason:       ${cleanReason}`);
+      console.log(`   • Partial Q&A Saved:    ${answersArr.length} resolved questions preserved`);
+      console.log(`   • Proof Screenshot:     ${screenshotPath || 'None'}`);
+      console.log(`   • Ingestion Time:       ${now}\n`);
+    }
 
     // 2. Also keep application_failures and batch_job_queue updated
     await request('application_failures', {

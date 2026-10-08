@@ -93,19 +93,10 @@ export default function CADashboard() {
         const { data } = await supabase.from('worker_status').select('*');
         if (!isMounted) return;
         if (data && data.length > 0) {
-          const stopFlag = data.find((r) => r.worker_id === 'bot_stop_flag');
-          const controller = data.find((r) => r.worker_id === 'bot_controller');
-          const runningWorker = data.find(
-            (r) => r.worker_id && r.worker_id !== 'bot_stop_flag' && r.worker_id.toLowerCase().startsWith('worker-') && (r.state === 'in_flight' || r.state === 'busy')
+          const anyActive = data.some(
+            (r) => (r.state === 'in_flight' || r.state === 'busy' || r.state === 'running')
           );
-
-          if (stopFlag?.state === 'in_flight') {
-            setWorkerState('stopped');
-          } else if (runningWorker || controller?.state === 'trigger_requested' || controller?.state === 'running' || controller?.state === 'in_flight') {
-            setWorkerState('running');
-          } else {
-            setWorkerState('idle');
-          }
+          setWorkerState(anyActive ? 'running' : 'stopped');
         }
       } catch {}
     }
@@ -135,12 +126,12 @@ export default function CADashboard() {
 
   const handleStartWorkers = async () => {
     setWorkerBusy(true);
-    setWorkerMessage('⚡ Starting 3-worker pool...');
+    setWorkerMessage('⚡ Starting 9-worker pipeline...');
     try {
       const res = await triggerAutonomousBot();
       if (res.success) {
         setWorkerState('running');
-        setWorkerMessage('✓ Autonomous workers activated! Visiting unique links and populating scanned jobs.');
+        setWorkerMessage('✓ Autonomous 9-worker pipeline activated across Scanning, Resolving, and Submitting stages.');
       } else {
         setWorkerMessage('Start error: ' + (res.error || 'Failed'));
       }
@@ -182,6 +173,7 @@ export default function CADashboard() {
             applywizz_id: a.applywizz_id,
             client_name: a.client_name || a.applywizz_id,
             company_email: a.client_email || '',
+            jobs_applied: a.jobs_applied || 0,
             date: a.date,
           }));
           setCandidateList(list);
@@ -219,10 +211,9 @@ export default function CADashboard() {
     setApplyLog([]);
 
     try {
-      const [detailsRes, qaRes, queueRes, distRes, scannedRes] = await Promise.all([
+      const [detailsRes, qaRes, distRes, scannedRes] = await Promise.all([
         fetchClientDetails(id),
         fetchClientQuestions({ applywizzId: id, limit: 50 }),
-        supabase.from('batch_job_queue').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
         supabase.from('job_distributions').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
         supabase.from('scanned_jobs').select('job_url, screenshot_path, scraped_questions, question_count').limit(1000),
       ]);
@@ -246,15 +237,22 @@ export default function CADashboard() {
         }
       }
 
-      // Merge real jobs from job_distributions (primary) and batch_job_queue (fallback)
-      // Strictly only display jobs in the review & submit pipeline; exclude failed/error/skipped jobs
+      // Query ONLY job_distributions: strictly display jobs in the review & submit pipeline
+      // Allowed statuses: ready_for_review, ready_to_review, review_and_submit, applying, submitted
       const jobsMap = new Map();
       if (distRes.data && distRes.data.length > 0) {
         for (const dj of distRes.data) {
           const u = (dj.job_url || '').trim().toLowerCase();
           const sj = scannedMap.get(u);
+          // STRICT GATE: Job must exist in scanned_jobs with question_count > 0
+          if (!sj) continue;
+          const questionsCount = Number(sj.question_count) || (Array.isArray(sj.scraped_questions) ? sj.scraped_questions.length : 0);
+          if (questionsCount === 0) continue;
+
           const st = (dj.status || '').toLowerCase();
-          if (st.includes('fail') || st.includes('err') || st.includes('skip')) continue;
+          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed'].includes(st);
+          if (!isAllowedStatus) continue;
+
           if (u && !jobsMap.has(u)) {
             jobsMap.set(u, {
               id: dj.id,
@@ -262,40 +260,17 @@ export default function CADashboard() {
               job_url: dj.job_url,
               company: dj.company || 'Workday Partner',
               role_title: dj.role_title || 'Workday Application',
-              status: dj.status === 'distributed' ? 'ready_for_review' : dj.status,
+              status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
               is_fully_answered: dj.is_fully_answered,
               resolved_answers: dj.resolved_answers,
               unanswered_count: dj.unanswered_count || 0,
               unanswered_questions: dj.unanswered_questions || [],
-              applied_screenshot: dj.application_submitted_screenshot_url || dj.applied_screenshot || dj.screenshot_url || sj?.screenshot_path || null,
-              application_submitted_screenshot_url: dj.application_submitted_screenshot_url || dj.screenshot_url || null,
-              screenshot_url: dj.application_submitted_screenshot_url || dj.screenshot_url || sj?.screenshot_path || null,
-              blueprint_screenshot: sj?.screenshot_path || null,
+              applied_screenshot: dj.application_submitted_screenshot_url || null,
+              application_submitted_screenshot_url: dj.application_submitted_screenshot_url || null,
+              screenshot_url: dj.application_submitted_screenshot_url || null,
+              blueprint_screenshot: null,
               scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
               source: 'job_distributions',
-            });
-          }
-        }
-      }
-
-      if (queueRes.data && queueRes.data.length > 0) {
-        for (const qj of queueRes.data) {
-          const u = (qj.job_url || '').trim().toLowerCase();
-          const sj = scannedMap.get(u);
-          const st = (qj.status || '').toLowerCase();
-          if (st.includes('fail') || st.includes('err') || st.includes('skip')) continue;
-          if (u && !jobsMap.has(u)) {
-            jobsMap.set(u, {
-              id: qj.id,
-              applywizz_id: qj.applywizz_id,
-              job_url: qj.job_url,
-              company: qj.company || 'Workday Partner',
-              role_title: qj.role_title || 'Workday Application',
-              status: qj.status,
-              applied_screenshot: qj.screenshot_path || sj?.screenshot_path || null,
-              screenshot_url: qj.screenshot_path || sj?.screenshot_path || null,
-              blueprint_screenshot: sj?.screenshot_path || null,
-              source: 'batch_job_queue',
             });
           }
         }
@@ -514,6 +489,17 @@ export default function CADashboard() {
                       &bull; {cname.split(' ')[0]}
                     </span>
                   )}
+                  <span style={{
+                    fontSize: '0.68rem',
+                    padding: '1px 6px',
+                    borderRadius: '8px',
+                    background: (c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(100, 116, 139, 0.25)',
+                    color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8',
+                    fontWeight: 'bold',
+                    marginLeft: '4px',
+                  }}>
+                    {c.jobs_applied || 0} Apps
+                  </span>
                 </button>
               );
             })
@@ -558,11 +544,11 @@ export default function CADashboard() {
               backgroundColor: workerState === 'running' ? '#10b981' : '#ef4444',
               boxShadow: workerState === 'running' ? '0 0 8px #10b981' : '0 0 8px #ef4444',
             }} />
-            {workerState === 'running' ? 'ACTIVE • 3 WORKERS RUNNING' : 'STOPPED • WORKERS PAUSED (TESTING MODE)'}
+            {workerState === 'running' ? 'ACTIVE • 3-WORKER PIPELINE RUNNING' : 'STOPPED • ALL 3 WORKERS IDLE (TESTING MODE)'}
           </span>
           <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
             {workerState === 'running'
-              ? 'Background workers are scanning unique links, populating scanned_jobs & resolving candidate answers.'
+              ? 'Sequential 3-worker pipeline active — Stage 1 (Scanning) → Stage 2 (Resolving) → Stage 3 (Submitting).'
               : 'Background workers are halted so you can observe each application step in testing phase.'}
           </span>
         </div>
@@ -820,7 +806,8 @@ export default function CADashboard() {
                       const isQ = j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission';
                       const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
                       const isSelected = activeTask?.id === j.id;
-                      const cardScreenshot = j.applied_screenshot || j.application_submitted_screenshot_url || j.screenshot_url || j.blueprint_screenshot;
+                      const isSubmitted = j.status === 'submitted';
+                      const cardScreenshot = (isSubmitted && j.application_submitted_screenshot_url) ? j.application_submitted_screenshot_url : null;
 
                       let badgeBg = 'rgba(56, 189, 248, 0.15)';
                       let badgeColor = '#38bdf8';
@@ -891,46 +878,63 @@ export default function CADashboard() {
                                 {badgeText}
                               </span>
 
-                              {/* Prominent View Screenshot Option for EVERY application */}
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (cardScreenshot) {
+                              {/* Authentic Confirmation Screenshot Button: Enabled ONLY after actual submission */}
+                              {cardScreenshot ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
                                     setDashboardScreenshot({
                                       url: cardScreenshot,
                                       company: j.company,
                                       role: j.role_title,
-                                      status: j.status,
+                                      status: 'submitted',
                                     });
-                                  } else {
-                                    setDashboardScreenshot({
-                                      isPlaceholder: true,
-                                      company: j.company,
-                                      role: j.role_title,
-                                      status: j.status,
-                                    });
-                                  }
-                                }}
-                                style={{
-                                  fontSize: '0.68rem',
-                                  fontWeight: 700,
-                                  padding: '2px 8px',
-                                  borderRadius: '4px',
-                                  background: cardScreenshot ? 'rgba(16, 185, 129, 0.18)' : 'rgba(51, 65, 85, 0.5)',
-                                  color: cardScreenshot ? '#34d399' : '#94a3b8',
-                                  border: cardScreenshot ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid #475569',
-                                  cursor: 'pointer',
-                                  display: 'inline-flex',
-                                  alignItems: 'center',
-                                  gap: '4px',
-                                  transition: 'all 0.15s ease',
-                                }}
-                                title={cardScreenshot ? "View verified application proof screenshot" : "Screenshot available upon review/submission"}
-                              >
-                                <Eye size={12} />
-                                <span>{cardScreenshot ? 'View Screenshot' : 'Screenshot (Pending)'}</span>
-                              </button>
+                                  }}
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    background: 'rgba(16, 185, 129, 0.18)',
+                                    color: '#34d399',
+                                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    transition: 'all 0.15s ease',
+                                  }}
+                                  title="View verified application proof screenshot"
+                                >
+                                  <Eye size={12} />
+                                  <span>View Screenshot</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={true}
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    background: 'rgba(51, 65, 85, 0.25)',
+                                    color: '#64748b',
+                                    border: '1px solid #334155',
+                                    cursor: 'not-allowed',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    opacity: 0.7,
+                                  }}
+                                  title="Real submission screenshot will appear here once application is successfully submitted on Workday"
+                                >
+                                  <Clock size={12} />
+                                  <span>Screenshot (Pending)</span>
+                                </button>
+                              )}
                             </div>
 
                             <span style={{ fontSize: '0.78rem', color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -961,19 +965,7 @@ export default function CADashboard() {
                 )}
               </div>
 
-              {/* Live Automation Log Stream */}
-              {applyLog.length > 0 && (
-                <div className="log-terminal">
-                  <div className="log-terminal-header">AUTOMATION EXECUTION TRACE</div>
-                  <div className="log-terminal-body">
-                    {applyLog.map((line, idx) => (
-                      <div key={idx} className="log-line">
-                        {line}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+
             </div>
           </div>
 

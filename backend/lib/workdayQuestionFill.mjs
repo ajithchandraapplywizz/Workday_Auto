@@ -988,7 +988,7 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
  */
 async function resolveDropdownAnswer(page, profile, questionLabel, q, stepName) {
   // Centralized 4-Tier Architecture:
-  // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+  // Tier 1 (Supabase) -> Tier 2 (Resume) -> Tier 3 (ApplyWizz CRM) -> Tier 4 (LLM + live options)
   const direct = await resolveClientAnswer(
     {
       ...q,
@@ -2369,7 +2369,7 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       console.log(`    🔎 Live parse [${q.fieldType}]: "${questionLabel.slice(0, 70)}"${optionPreview.length ? ` | options: ${optionPreview.slice(0, 6).join(', ')}${optionPreview.length > 6 ? ', ...' : ''}` : ' | input field'}`);
 
       // Centralized 4-Tier Architecture:
-      // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+      // Tier 1 (Supabase) -> Tier 2 (Resume) -> Tier 3 (ApplyWizz CRM) -> Tier 4 (LLM + live options)
       const directClient = await resolveClientAnswer(
         {
           ...q,

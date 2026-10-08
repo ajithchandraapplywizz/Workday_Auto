@@ -69,11 +69,11 @@
     "js-yaml": "^4.1.1",
     "p-limit": "^7.3.3",
     "pdf-parse": "^2.4.5",
-    "playwright": "^1.63.0",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "playwright": "^1.63.0",
     "vitest": "^5.0.1"
   }
 }

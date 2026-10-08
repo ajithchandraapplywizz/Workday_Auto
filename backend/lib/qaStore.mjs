@@ -338,26 +338,8 @@ export async function findBestMatch(rawLabel, profile, qaStore = null, threshold
 }
 
 export async function saveAnswerToYaml(rawLabel, answer, profilePath) {
-  if (isApiOnlyAnswerMode()) return;
-  try {
-    const pPath = profilePath || resolve(process.cwd(), 'config', 'profile.yml');
-    let content = '';
-    try {
-      content = await fs.readFile(pPath, 'utf-8');
-    } catch {
-      return;
-    }
-    const doc = yaml.load(content) || {};
-    if (!doc.qa_answers || typeof doc.qa_answers !== 'object') {
-      doc.qa_answers = {};
-    }
-    const norm = normalizeLabel(rawLabel);
-    doc.qa_answers[norm] = answer;
-    await fs.writeFile(pPath, yaml.dump(doc, { indent: 2, lineWidth: -1 }), 'utf-8');
-    console.log(`    💾 Saved answer for "${rawLabel}" permanently to config/profile.yml`);
-  } catch (err) {
-    console.log(`    ⚠️  Could not save answer to profile.yml: ${err.message}`);
-  }
+  // Local profile.yml writing completely disabled in API/DB mode
+  return;
 }
 
 // ─── Local JSON backend (default, single-user) ─────────────────────────────

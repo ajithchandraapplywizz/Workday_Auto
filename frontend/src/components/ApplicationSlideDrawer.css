@@ -583,6 +583,92 @@
   box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
 }
 
+/* Dynamic Controls (Dropdown, Textarea, Radio Pills) */
+.sd-select-answer {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sd-select-answer:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.sd-select-answer.input-missing {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.sd-select-answer option {
+  background: #0f172a;
+  color: #f1f5f9;
+}
+
+.sd-textarea-answer {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.sd-textarea-answer:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.sd-textarea-answer.input-missing {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.sd-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+}
+
+.sd-radio-pill {
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid #334155;
+  background: #090d16;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sd-radio-pill:hover {
+  background: #1e293b;
+  color: #f8fafc;
+  border-color: #475569;
+}
+
+.sd-radio-pill.selected {
+  background: #0284c7;
+  color: #ffffff;
+  border-color: #38bdf8;
+  box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35);
+}
+
 .sd-save-btn {
   display: inline-flex;
   align-items: center;

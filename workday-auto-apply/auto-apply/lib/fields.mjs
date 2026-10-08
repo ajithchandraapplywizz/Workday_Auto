@@ -644,12 +644,30 @@ export async function handleDropdown(page, element, value, label) {
       await element.fill('');
       await page.waitForTimeout(100);
 
-      // Type value -> waitForTimeout(500) -> press('Enter') -> waitForLoadState
+      // Type value -> waitForTimeout(400) -> press('Enter')
       await element.type(value, { delay: 50 });
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(400);
       await page.keyboard.press('Enter');
+      await page.waitForTimeout(200);
+
+      // Auto-click matching popup option if a prompt popup appeared
+      try {
+        const popupPrompt = page.locator('[data-automation-id="promptOption"]:visible, [role="option"]:visible').first();
+        if (await popupPrompt.isVisible({ timeout: 500 }).catch(() => false)) {
+          await popupPrompt.click({ force: true }).catch(() => {});
+          await page.waitForTimeout(200);
+        }
+      } catch {}
+
+      // Dispatch synthetic change and blur to commit value to Workday reactive state
+      await element.evaluate((el) => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }).catch(() => {});
+
       try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(400);
 
       const verified = await verifyDropdownFilled(page, element, value);
       if (verified) {

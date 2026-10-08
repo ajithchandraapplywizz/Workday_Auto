@@ -157,6 +157,32 @@ export const CA_PROVINCES = {
   NL: 'Newfoundland and Labrador', PE: 'Prince Edward Island',
 };
 
+export function isValidCityName(city = '') {
+  const c = String(city || '').trim();
+  if (!c || c.length < 2 || c.length > 35) return false;
+  if (/experience|supporting|demand|planning|inventory|analyst|engineer|developer|management|summary|professional|skills|duties|working|present|fulltime|contract|responsible|project|candidate|applicant|logistics|operations|procurement|supply\s*chain/i.test(c)) {
+    return false;
+  }
+  if (/[0-9•*+~=!@#$%^&*()_{}[\]:;"<>?/\\]/.test(c)) return false;
+  return true;
+}
+
+export function isValidStateName(state = '') {
+  const s = String(state || '').trim();
+  if (!s || s.length < 2 || s.length > 30) return false;
+  if (US_STATES[s.toUpperCase()]) return true;
+  const sLower = s.toLowerCase();
+  for (const name of Object.values(US_STATES)) {
+    if (sLower === name.toLowerCase()) return true;
+  }
+  if (IN_STATES.has(sLower)) return true;
+  if (CA_PROVINCES[s.toUpperCase()]) return true;
+  for (const name of Object.values(CA_PROVINCES)) {
+    if (sLower === name.toLowerCase()) return true;
+  }
+  return false;
+}
+
 /**
  * Given a state or region, determine the country and matching country phone code.
  */
@@ -164,7 +190,7 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
   const s = String(stateOrLoc || '').trim();
   const sUpper = s.toUpperCase();
   const sLower = s.toLowerCase();
-  const cLower = String(city || '').toLowerCase().trim();
+  const validCity = isValidCityName(city) ? city.trim() : '';
   const blobLower = String(contextBlob || '').toLowerCase();
 
   // 1. Check US States by 2-letter abbreviation
@@ -172,7 +198,7 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
     return {
       state: US_STATES[sUpper],
       stateCode: sUpper,
-      city: city || '',
+      city: validCity,
       country: US_COUNTRY_NAME,
       country_phone_code: US_COUNTRY_PHONE_CODE,
     };
@@ -180,11 +206,11 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
 
   // 1b. Check US States by full name
   for (const [code, name] of Object.entries(US_STATES)) {
-    if (sLower === name.toLowerCase() || sLower.includes(name.toLowerCase())) {
+    if (sLower === name.toLowerCase() || (sLower.length >= 4 && name.toLowerCase().includes(sLower))) {
       return {
         state: name,
         stateCode: code,
-        city: city || '',
+        city: validCity,
         country: US_COUNTRY_NAME,
         country_phone_code: US_COUNTRY_PHONE_CODE,
       };
@@ -192,12 +218,12 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
   }
 
   // 2. Check Indian States / Metros (e.g. Telangana, Karnataka, Hyderabad, etc.)
-  if (IN_STATES.has(sLower) || IN_STATES.has(cLower)) {
+  if (IN_STATES.has(sLower) || (validCity && IN_STATES.has(validCity.toLowerCase()))) {
     const capitalizedState = s ? (s.charAt(0).toUpperCase() + s.slice(1)) : '';
     return {
       state: capitalizedState,
       stateCode: sUpper,
-      city: city || '',
+      city: validCity,
       country: IN_COUNTRY_NAME,
       country_phone_code: IN_COUNTRY_PHONE_CODE,
     };
@@ -208,7 +234,7 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
     return {
       state: CA_PROVINCES[sUpper],
       stateCode: sUpper,
-      city: city || '',
+      city: validCity,
       country: 'Canada',
       country_phone_code: 'Canada (+1)',
     };
@@ -218,37 +244,37 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
       return {
         state: name,
         stateCode: code,
-        city: city || '',
+        city: validCity,
         country: 'Canada',
         country_phone_code: 'Canada (+1)',
       };
     }
   }
 
-  // 4. Check context blob hints
+  // 4. Check context blob hints (only if state itself is valid or empty)
   if (/united states|usa|\bu\.s\.\b|\bamerica\b/i.test(blobLower)) {
     return {
-      state: s,
-      stateCode: sUpper,
-      city: city || '',
+      state: isValidStateName(s) ? s : '',
+      stateCode: isValidStateName(s) ? sUpper : '',
+      city: validCity,
       country: US_COUNTRY_NAME,
       country_phone_code: US_COUNTRY_PHONE_CODE,
     };
   }
   if (/india|\b\+91\b/i.test(blobLower)) {
     return {
-      state: s,
-      stateCode: sUpper,
-      city: city || '',
+      state: isValidStateName(s) ? s : '',
+      stateCode: isValidStateName(s) ? sUpper : '',
+      city: validCity,
       country: IN_COUNTRY_NAME,
       country_phone_code: IN_COUNTRY_PHONE_CODE,
     };
   }
 
   return {
-    state: s,
-    stateCode: sUpper,
-    city: city || '',
+    state: isValidStateName(s) ? s : '',
+    stateCode: isValidStateName(s) ? sUpper : '',
+    city: validCity,
     country: US_COUNTRY_NAME,
     country_phone_code: US_COUNTRY_PHONE_CODE,
   };
@@ -321,9 +347,11 @@ export function extractContactFromResumeText(text = '') {
   );
   if (street?.[1]) out.address_line1 = street[1].replace(/\s+/g, ' ').trim().slice(0, 120);
 
-  // 1. Match City, State Zip: e.g. "Austin, TX 78701" or "St. Louis, MO 63108"
-  const cityStateZip = blob.match(/([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Z]{2})[ \t]+(\d{5})(?:-\d{4})?/);
-  if (cityStateZip) {
+  const header = blob.slice(0, 1500);
+
+  // 1. Header Match City, State Zip: e.g. "Austin, TX 78701" or "St. Louis, MO 63108"
+  const cityStateZip = header.match(/([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Z]{2})[ \t]+(\d{5})(?:-\d{4})?/);
+  if (cityStateZip && isValidCityName(cityStateZip[1]) && US_STATES[cityStateZip[2].toUpperCase()]) {
     const resolved = resolveLocationAndCountry(cityStateZip[2], cityStateZip[1].trim(), blob);
     out.city = resolved.city;
     out.state = cityStateZip[2];
@@ -332,9 +360,9 @@ export function extractContactFromResumeText(text = '') {
     out.country_phone_code = resolved.country_phone_code;
     out.postal_code = cityStateZip[3];
   } else {
-    // 2. Match City, 2-letter State: e.g. "Boston, MA" or "St. Louis, MO" or "Toronto, ON"
-    const cityState2 = blob.match(/\b([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Z]{2})\b/);
-    if (cityState2 && (US_STATES[cityState2[2]] || CA_PROVINCES[cityState2[2]])) {
+    // 2. Header Match City, 2-letter State: e.g. "Boston, MA" or "St. Louis, MO" or "Toronto, ON"
+    const cityState2 = header.match(/\b([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Z]{2})\b/);
+    if (cityState2 && isValidCityName(cityState2[1]) && (US_STATES[cityState2[2]] || CA_PROVINCES[cityState2[2]])) {
       const resolved = resolveLocationAndCountry(cityState2[2], cityState2[1].trim(), blob);
       out.city = resolved.city;
       out.state = cityState2[2];
@@ -342,9 +370,9 @@ export function extractContactFromResumeText(text = '') {
       out.country = resolved.country;
       out.country_phone_code = resolved.country_phone_code;
     } else {
-      // 3. Match City, Full State: e.g. "Hyderabad, Telangana" or "St. Louis, Missouri"
-      const cityStateFull = blob.match(/\b([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Za-z][A-Za-z ]{1,25})\b/);
-      if (cityStateFull) {
+      // 3. Header Match City, Full State: e.g. "Hyderabad, Telangana" or "St. Louis, Missouri"
+      const cityStateFull = header.match(/\b([A-Za-z][A-Za-z .'-]{1,40}),[ \t]*([A-Za-z][A-Za-z ]{1,25})\b/);
+      if (cityStateFull && isValidCityName(cityStateFull[1]) && isValidStateName(cityStateFull[2])) {
         const resolved = resolveLocationAndCountry(cityStateFull[2].trim(), cityStateFull[1].trim(), blob);
         out.city = resolved.city;
         out.state = resolved.state;
@@ -355,9 +383,42 @@ export function extractContactFromResumeText(text = '') {
     }
   }
 
-  // Ensure Country & Country Phone Code are filled if still unset (inspect header only)
+  // 4. Experience Fallback: If no city found in header, scan resume experience entries for "Company | City, ST"
+  if (!out.city) {
+    const expLocations = [...blob.matchAll(/(?:\||\bat\b)\s*([A-Za-z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\b/g)];
+    for (const match of expLocations) {
+      const candidateCity = match[1]?.trim();
+      const candidateSt = match[2]?.toUpperCase();
+      if (isValidCityName(candidateCity) && US_STATES[candidateSt]) {
+        out.city = candidateCity;
+        out.state = candidateSt;
+        out.state_full = US_STATES[candidateSt];
+        out.country = US_COUNTRY_NAME;
+        out.country_phone_code = US_COUNTRY_PHONE_CODE;
+        break;
+      }
+    }
+  }
+
+  // 5. General Document Scan: First valid City, ST in document
+  if (!out.city) {
+    const docLocations = [...blob.matchAll(/\b([A-Za-z][A-Za-z .'-]{1,30}),\s*([A-Z]{2})\b/g)];
+    for (const match of docLocations) {
+      const candidateCity = match[1]?.trim();
+      const candidateSt = match[2]?.toUpperCase();
+      if (isValidCityName(candidateCity) && US_STATES[candidateSt]) {
+        out.city = candidateCity;
+        out.state = candidateSt;
+        out.state_full = US_STATES[candidateSt];
+        out.country = US_COUNTRY_NAME;
+        out.country_phone_code = US_COUNTRY_PHONE_CODE;
+        break;
+      }
+    }
+  }
+
+  // Ensure Country & Country Phone Code are filled if still unset
   if (!out.country) {
-    const header = blob.slice(0, 1500);
     if (/\bunited states of america\b|\bunited states\b|\bUSA\b|\bU\.S\.A\b|\bU\.S\.\b/i.test(header)) {
       out.country = US_COUNTRY_NAME;
       out.country_phone_code = US_COUNTRY_PHONE_CODE;
@@ -493,21 +554,8 @@ export function mergeApplyWizzContact(profile = {}, apiPersonal = {}) {
  * @param {string} [profilePath]
  */
 export async function savePersonalFieldsToYaml(partial = {}, profilePath) {
-  if (isApiOnlyAnswerMode()) return;
-  const pPath = profilePath || resolve(process.cwd(), 'config', 'profile.yml');
-  try {
-    let doc = {};
-    try {
-      doc = yaml.load(await fs.readFile(pPath, 'utf-8')) || {};
-    } catch {
-      return;
-    }
-    doc.personal = { ...(doc.personal || {}), ...partial };
-    await fs.writeFile(pPath, yaml.dump(doc, { indent: 2, lineWidth: -1 }), 'utf-8');
-    console.log(`    💾 Saved personal contact fields to config/profile.yml`);
-  } catch (err) {
-    console.log(`    ⚠️  Could not save personal fields: ${err.message}`);
-  }
+  // Local profile.yml writing completely disabled in API/DB mode
+  return;
 }
 
 /**

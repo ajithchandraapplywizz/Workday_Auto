@@ -35,7 +35,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 3, total: 3 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 9, total: 9, scanningActive: 0, resolvingActive: 0, submittingActive: 0, workers: [] });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -46,7 +46,7 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 3 });
+  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9 });
   const [isTriggering, setIsTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
@@ -84,18 +84,21 @@ export default function DeveloperDashboard() {
 
         if (!isMounted) return;
 
+        const activeWorkersCount = workerRes?.success ? (workerRes.inFlight || 0) : 0;
+        if (workerRes?.success) {
+          setWorkerPool(workerRes);
+        }
+
         if (kpiRes.success) {
+          // Double-guard: If 0 workers are in active state, applying is strictly 0
+          const reconciledApplying = activeWorkersCount > 0 ? Math.min(kpiRes.applying, activeWorkersCount) : 0;
           setKpis({
             submitted: kpiRes.submitted,
-            applying: kpiRes.applying,
+            applying: reconciledApplying,
             failed: kpiRes.failed,
             queued: kpiRes.queued,
             total: kpiRes.total,
           });
-        }
-
-        if (workerRes.success) {
-          setWorkerPool(workerRes);
         }
 
         setHealthResults(healthRes);
@@ -366,16 +369,16 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
-  // Handle triggering autonomous 3-worker bot pool
+  // Handle triggering autonomous 9-worker pipeline
   const handleTriggerBot = async () => {
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '⚡ Dispatching 3-Worker Autonomous Bot trigger...' });
+    setTriggerToast({ type: 'info', text: '⚡ Dispatching 9-Worker Pipeline trigger...' });
     try {
       const res = await triggerAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Autonomous 3-Worker Bot Triggered! Workers are visiting unique links, populating scanned_jobs, pre-resolving questions, and distributing answers to all clients.',
+          text: '✓ Autonomous 9-Worker Pipeline Triggered! Workers are actively scanning links, pre-resolving questions, and preparing submissions.',
         });
         setBotStatus((prev) => ({ ...prev, isRunning: true, state: 'running' }));
       } else {
@@ -392,13 +395,13 @@ export default function DeveloperDashboard() {
   // Handle stopping autonomous workers
   const handleStopBot = async () => {
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '🛑 Halting all 3 background workers...' });
+    setTriggerToast({ type: 'info', text: '🛑 Halting all 9 background workers...' });
     try {
       const res = await stopAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ All autonomous background workers have been STOPPED and paused.',
+          text: '✓ All 9 autonomous background workers have been STOPPED and reset to idle.',
         });
         setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
       } else {
@@ -414,7 +417,7 @@ export default function DeveloperDashboard() {
 
   return (
     <div className="dashboard-container">
-      {/* 3-Worker Autonomous Bot Trigger Banner */}
+      {/* 9-Worker Autonomous Pipeline Trigger Banner */}
       <div style={{
         background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
         border: '1px solid #334155',
@@ -446,7 +449,7 @@ export default function DeveloperDashboard() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
-                Autonomous 3-Worker Bot Engine
+                Autonomous 9-Worker Pipeline Engine
               </h3>
               <span style={{
                 fontSize: '0.72rem',
@@ -457,11 +460,11 @@ export default function DeveloperDashboard() {
                 color: botStatus.isRunning ? '#34d399' : '#f87171',
                 border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {botStatus.isRunning ? 'ACTIVE • 3 WORKERS RUNNING' : 'STOPPED • WORKERS PAUSED'}
+                {botStatus.isRunning ? `ACTIVE • ${workerPool.inFlight || 9} WORKERS RUNNING` : 'STOPPED • ALL 9 WORKERS IDLE'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              Scrapes unique job links into <strong>scanned_jobs</strong>, pre-resolves 4-tier answers, and distributes to similar clients in <strong>job_distributions</strong> with status <strong>Ready for Review</strong>.
+              3 Scanning Workers &bull; 3 Resolving Workers &bull; 3 Submitting Workers &mdash; 4-Tier Pre-Resolution &amp; Instant Stop Protection.
             </p>
           </div>
         </div>
@@ -488,7 +491,7 @@ export default function DeveloperDashboard() {
                 transition: 'all 0.15s ease',
               }}
             >
-              <span>🛑 Stop 3-Worker Bot</span>
+              <span>🛑 Stop 9-Worker Pipeline</span>
             </button>
           ) : (
             <button
@@ -511,7 +514,7 @@ export default function DeveloperDashboard() {
                 transition: 'all 0.15s ease',
               }}
             >
-              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start 3-Worker Bot'}</span>
+              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start 9-Worker Pipeline'}</span>
             </button>
           )}
 
@@ -655,16 +658,18 @@ export default function DeveloperDashboard() {
               <span className="isc-speed">24ms</span>
             </div>
 
-            {/* Tile 10: Workers (from worker_status: 1 dedicated worker) */}
+            {/* Tile 10: Workers (from worker_status: strictly 9 canonical workers) */}
             <div className="integration-status-card">
               <div className="isc-header">
-                <span className="isc-title">WORKERS</span>
-                <span className="isc-badge ok">OK</span>
+                <span className="isc-title">WORKERS (9-PIPELINE)</span>
+                <span className={`isc-badge ${workerPool.inFlight > 0 ? 'ok' : 'idle'}`}>
+                  {workerPool.inFlight > 0 ? `${workerPool.inFlight} ACTIVE` : 'ALL IDLE'}
+                </span>
               </div>
               <p className="isc-detail">
-                {workerPool.inFlight} in-flight, {workerPool.idle} idle (pool: {workerPool.total})
+                Scan: {workerPool.scanningActive || 0}/3 &bull; Resolve: {workerPool.resolvingActive || 0}/3 &bull; Submit: {workerPool.submittingActive || 0}/3
               </p>
-              <span className="isc-speed">10ms</span>
+              <span className="isc-speed">{workerPool.idle || 0} idle</span>
             </div>
 
             {/* Tile 11: API (/api/ca/emails roster reachable, count = 59) */}

@@ -39,6 +39,7 @@ export default function ApplicationSlideDrawer({
   onClose,
   application,
   onStatusUpdated,
+  readOnly = false,
 }) {
   const [loading, setLoading] = useState(false);
   const [appDetails, setAppDetails] = useState(null);
@@ -157,12 +158,11 @@ export default function ApplicationSlideDrawer({
         if (data && data.length > 0) {
           const updated = data[0];
           setAppDetails((prev) => {
-            const shot = updated.application_submitted_screenshot_url || updated.screenshot_url || prev?.screenshotUrl;
             return {
               ...prev,
               status: updated.status,
-              screenshotUrl: shot,
-              application_submitted_screenshot_url: updated.application_submitted_screenshot_url || shot,
+              screenshotUrl: updated.application_submitted_screenshot_url || null,
+              application_submitted_screenshot_url: updated.application_submitted_screenshot_url || null,
             };
           });
           if (updated.status === 'submitted') {
@@ -266,17 +266,28 @@ export default function ApplicationSlideDrawer({
   // Handle CA Review & Submit action
   const handleConfirmAndSubmit = async () => {
     if (!applywizzId || (!jobUrl && !distributionId)) return;
+    if (missingFields.length > 0) {
+      setActionMessage(`⚠️ Please answer all ${missingFields.length} missing question(s) before submitting.`);
+      return;
+    }
+    if (submitting) return;
+
     setSubmitting(true);
-    setActionMessage('Autonomous worker active: Submitting application with resolved answers...');
-    
+    setActionMessage('Autonomous worker active: Submitting application on Workday...');
+
     // Set local status immediately so CA sees applying pulse
     setAppDetails((prev) => ({
       ...prev,
       status: 'applying',
     }));
 
+    if (onStatusUpdated) {
+      onStatusUpdated({ ...application, status: 'applying' });
+    }
+
     try {
-      const res = await submitApplicationReview({
+      // Trigger background submission
+      submitApplicationReview({
         applywizzId,
         jobUrl,
         distributionId: appDetails?.id || distributionId,
@@ -284,19 +295,16 @@ export default function ApplicationSlideDrawer({
         roleTitle: appDetails?.roleTitle || application?.role_title || 'Role',
         fields,
         status: 'approved_for_submission',
+      }).catch((err) => {
+        console.error('Submit review error:', err);
       });
 
-      if (res.success) {
-        setActionMessage('✓ Worker applying on Workday in background...');
-        if (onStatusUpdated) {
-          onStatusUpdated({ ...application, status: 'applying' });
-        }
-      } else {
-        setActionMessage('Notice: ' + (res.error || 'Worker queued'));
+      // Immediately close the drawer as requested!
+      if (onClose) {
+        onClose();
       }
     } catch (err) {
       setActionMessage('Submit failed: ' + err.message);
-    } finally {
       setSubmitting(false);
     }
   };
@@ -331,7 +339,11 @@ export default function ApplicationSlideDrawer({
     StatusIcon = Sparkles;
   }
 
-  const proofShot = appDetails?.application_submitted_screenshot_url || appDetails?.screenshotUrl || application?.application_submitted_screenshot_url || application?.screenshot_url || application?.proof_screenshot_url || application?.applied_screenshot;
+  const proofShot = effectiveStatus === 'submitted'
+    ? appDetails?.application_submitted_screenshot_url
+      || application?.application_submitted_screenshot_url
+      || null
+    : null;
 
   return (
     <div className="slide-drawer-overlay" onClick={onClose}>
@@ -346,20 +358,22 @@ export default function ApplicationSlideDrawer({
               </div>
 
               {/* View Screenshot button directly beside status badge */}
-              <button
-                type="button"
-                className="sd-shot-btn-prominent"
-                onClick={() => setSelectedScreenshot(proofShot || { isPlaceholder: true, company: appDetails?.company, status: effectiveStatus })}
-                style={{
-                  background: proofShot ? 'rgba(16, 185, 129, 0.18)' : 'rgba(51, 65, 85, 0.5)',
-                  borderColor: proofShot ? 'rgba(16, 185, 129, 0.4)' : '#475569',
-                  color: proofShot ? '#34d399' : '#cbd5e1',
-                }}
-                title={proofShot ? "View Verified Application Screenshot Proof" : "Screenshot available upon review/submission"}
-              >
-                <Eye size={13} />
-                <span>{proofShot ? 'View Screenshot' : 'Screenshot (Pending)'}</span>
-              </button>
+              {proofShot && (
+                <button
+                  type="button"
+                  className="sd-shot-btn-prominent"
+                  onClick={() => setSelectedScreenshot(proofShot)}
+                  style={{
+                    background: 'rgba(16, 185, 129, 0.18)',
+                    borderColor: 'rgba(16, 185, 129, 0.4)',
+                    color: '#34d399',
+                  }}
+                  title="View verified post-submission confirmation screenshot"
+                >
+                  <Eye size={13} />
+                  <span>View Submission Proof</span>
+                </button>
+              )}
             </div>
 
             <h2 className="sd-company-title">
@@ -432,6 +446,7 @@ export default function ApplicationSlideDrawer({
 
         {/* Filter Toggle: AI Answered Questions Only vs Missing Only vs All */}
         <div className="sd-filter-row">
+          {!readOnly && (
           <div className="sd-pill-toggle">
             <button
               type="button"
@@ -461,7 +476,7 @@ export default function ApplicationSlideDrawer({
               <span>All Non-Personal ({fields.filter((f) => !f.isPersonal).length})</span>
             </button>
           </div>
-
+          )}
           <span className="sd-count-note">
             Personal facts excluded
           </span>
@@ -584,10 +599,46 @@ export default function ApplicationSlideDrawer({
                     <div className="sd-q-header">
                       <span className="sd-q-num">Q{idx + 1}</span>
                       <span className="sd-q-label">{field.label || field.question || 'Application Question'}</span>
-                      <span className={`sd-source-badge ${isMissing ? 'badge-missing' : (isAi ? 'badge-ai' : 'badge-db')}`}>
-                        {isMissing ? <AlertTriangle size={12} /> : (isAi ? <Sparkles size={12} /> : <Database size={12} />)}
-                        <span>{isMissing ? 'Needs CA Answer' : (isAi ? 'AI / LLM Answered' : (isQaBank ? 'QA Bank' : 'Supabase DB'))}</span>
-                      </span>
+                      {(() => {
+                        if (isMissing) {
+                          return (
+                            <span className="sd-source-badge badge-missing">
+                              <AlertTriangle size={12} />
+                              <span>Needs CA Answer</span>
+                            </span>
+                          );
+                        }
+                        if (field.tier === 2 || (field.source || '').includes('resume')) {
+                          return (
+                            <span className="sd-source-badge badge-resume" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                              <FileText size={12} />
+                              <span>Tier 2: Resume Extraction</span>
+                            </span>
+                          );
+                        }
+                        if (field.tier === 3 || (field.source || '').includes('api')) {
+                          return (
+                            <span className="sd-source-badge badge-api" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
+                              <ExternalLink size={12} />
+                              <span>Tier 3: CRM API</span>
+                            </span>
+                          );
+                        }
+                        if (field.tier === 4 || (field.source || '').includes('ai') || (field.source || '').includes('llm')) {
+                          return (
+                            <span className="sd-source-badge badge-ai" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                              <Sparkles size={12} />
+                              <span>Tier 4: AI / LLM</span>
+                            </span>
+                          );
+                        }
+                        return (
+                          <span className="sd-source-badge badge-db" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                            <Database size={12} />
+                            <span>{field.source === 'qa_bank' ? 'Tier 1: QA Bank' : 'Tier 1: Supabase DB'}</span>
+                          </span>
+                        );
+                      })()}
                     </div>
 
                     {/* Interactive Answer Box */}
@@ -604,27 +655,91 @@ export default function ApplicationSlideDrawer({
                       </div>
 
                       <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                        <input
-                          type="text"
-                          value={currentVal}
-                          onChange={(e) => {
-                            const v = e.target.value;
-                            setEditValues((prev) => ({ ...prev, [field.id]: v }));
-                          }}
-                          placeholder="Type answer here (e.g. Yes, 5 years, Authorized)..."
-                          className={`sd-input-answer ${isMissing ? 'input-missing' : ''}`}
-                        />
+                        {(() => {
+                          const hasOptions = Array.isArray(field.options) && field.options.length > 0;
+                          const isShortOptions = hasOptions && field.options.length <= 3 && field.options.every((o) => typeof o === 'string' && o.length < 20);
 
-                        <button
-                          type="button"
-                          className="sd-save-btn"
-                          onClick={() => handleSaveToQaBank(field)}
-                          disabled={isSaving || !currentVal}
-                          title="Save this answer directly to candidate QA Bank in Supabase"
-                        >
-                          <Save size={13} />
-                          <span>{isSaving ? 'Saving...' : 'Save to QA Bank'}</span>
-                        </button>
+                          if (isShortOptions || field.fieldType === 'radio') {
+                            return (
+                              <div className="sd-radio-group">
+                                {hasOptions ? (
+                                  field.options.map((opt) => {
+                                    const optStr = String(opt);
+                                    const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.trim().toLowerCase();
+                                    return (
+                                      <button
+                                        key={optStr}
+                                        type="button"
+                                        className={`sd-radio-pill ${isSelected ? 'selected' : ''}`}
+                                        onClick={() => setEditValues((prev) => ({ ...prev, [field.id]: optStr }))}
+                                        disabled
+                                      >
+                                        {optStr}
+                                      </button>
+                                    );
+                                  })
+                                ) : (
+                                  ['Yes', 'No'].map((optStr) => {
+                                    const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.toLowerCase();
+                                    return (
+                                      <button
+                                        key={optStr}
+                                        type="button"
+                                        className={`sd-radio-pill ${isSelected ? 'selected' : ''}`}
+                                        onClick={() => setEditValues((prev) => ({ ...prev, [field.id]: optStr }))}
+                                      >
+                                        {optStr}
+                                      </button>
+                                    );
+                                  })
+                                )}
+                              </div>
+                            );
+                          }
+
+                          if (hasOptions || field.fieldType === 'dropdown' || field.fieldType === 'select') {
+                            return (
+                              <select
+                                value={currentVal || ''}
+                                disabled
+                                className={`sd-select-answer ${isMissing ? 'input-missing' : ''}`}
+                              >
+                                <option value="">-- Select an Option --</option>
+                                {(field.options || []).map((opt) => {
+                                  const optStr = String(typeof opt === 'string' ? opt : (opt?.text || opt?.value || ''));
+                                  return (
+                                    <option key={optStr} value={optStr}>
+                                      {optStr}
+                                    </option>
+                                  );
+                                })}
+                              </select>
+                            );
+                          }
+
+                          if (field.fieldType === 'textarea') {
+                            return (
+                              <textarea
+                                rows={3}
+                                value={currentVal}
+                                readOnly
+                                placeholder="Type answer details here..."
+                                className={`sd-textarea-answer ${isMissing ? 'input-missing' : ''}`}
+                              />
+                            );
+                          }
+
+                          return (
+                            <input
+                              type="text"
+                              value={currentVal}
+                              readOnly
+                              placeholder="Type answer here (e.g. Yes, 5 years, Authorized)..."
+                              className={`sd-input-answer ${isMissing ? 'input-missing' : ''}`}
+                            />
+                          );
+                        })()}
+
                       </div>
                     </div>
                   </div>
@@ -635,7 +750,7 @@ export default function ApplicationSlideDrawer({
         </div>
 
         {/* Drawer Footer Actions */}
-        <div className="slide-drawer-footer">
+        {!readOnly && <div className="slide-drawer-footer">
           {actionMessage && (
             <div className={`sd-action-toast ${actionMessage.startsWith('✓') ? 'toast-success' : 'toast-error'}`}>
               {actionMessage}
@@ -656,27 +771,37 @@ export default function ApplicationSlideDrawer({
                 type="button"
                 className="sd-btn-primary"
                 onClick={handleConfirmAndSubmit}
-                disabled={submitting || missingFields.length > 0}
+                disabled={submitting || missingFields.length > 0 || effectiveStatus === 'applying'}
                 style={{
-                  background: submitting
+                  background: (submitting || effectiveStatus === 'applying')
                     ? 'linear-gradient(135deg, #a855f7 0%, #7e22ce 100%)'
-                    : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-                  boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
+                    : (missingFields.length > 0
+                      ? 'linear-gradient(135deg, #d97706 0%, #b45309 100%)'
+                      : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)'),
+                  boxShadow: missingFields.length > 0
+                    ? '0 4px 12px rgba(217, 119, 6, 0.35)'
+                    : '0 4px 12px rgba(2, 132, 199, 0.35)',
+                  cursor: (missingFields.length > 0 || submitting || effectiveStatus === 'applying') ? 'not-allowed' : 'pointer',
+                  opacity: (missingFields.length > 0 || submitting || effectiveStatus === 'applying') ? 0.8 : 1,
                 }}
-                title={missingFields.length > 0 ? 'Please fill missing answers before submitting' : 'Review & Submit this application'}
+                title={missingFields.length > 0 ? `Please answer all ${missingFields.length} missing question(s) above before submitting` : 'Review & Submit this application'}
               >
-                <Send size={15} />
+                {missingFields.length > 0 ? (
+                  <AlertTriangle size={15} />
+                ) : (
+                  <Send size={15} />
+                )}
                 <span>
-                  {submitting
-                    ? 'Applying...'
-                    : (missingFields.length > 0 ? `Fill ${missingFields.length} Missing Answers` : 'Review & Submit')}
+                  {(submitting || effectiveStatus === 'applying')
+                    ? 'Applying on Workday...'
+                    : (missingFields.length > 0 ? `Needs Answers (${missingFields.length})` : 'Review & Submit')}
                 </span>
               </button>
-            ) : (
+            ) : proofShot ? (
               <button
                 type="button"
                 className="sd-btn-primary"
-                onClick={() => setSelectedScreenshot(proofShot || { isPlaceholder: true, company: appDetails?.company, status: effectiveStatus })}
+                onClick={() => setSelectedScreenshot(proofShot)}
                 style={{
                   background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                   border: '1px solid #34d399',
@@ -686,9 +811,9 @@ export default function ApplicationSlideDrawer({
                 <ImageIcon size={15} />
                 <span>Submission Screenshot</span>
               </button>
-            )}
+            ) : null}
           </div>
-        </div>
+        </div>}
 
         {/* Modal for full screenshot viewer if opened */}
         {selectedScreenshot && (

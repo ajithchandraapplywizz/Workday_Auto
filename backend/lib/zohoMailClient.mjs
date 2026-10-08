@@ -24,7 +24,7 @@ export async function listZohoUsers({ forceRefresh = false } = {}) {
   }
   try {
     const res = await fetch(`${ZOHO_BASE_URL}/api/zoho/ui/users`, {
-      signal: AbortSignal.timeout(10000),
+      signal: AbortSignal.timeout(35000),
     });
     if (!res.ok) return null;
     const data = await res.json();
@@ -49,6 +49,29 @@ export async function getZohoUser(email) {
 }
 
 /**
+ * Ensure admin login on Zoho Mail Reader so all mailboxes can be accessed.
+ */
+export async function ensureZohoAdminLogin() {
+  const username = process.env.ZOHO_ADMIN_USERNAME || 'Created@123';
+  const password = process.env.ZOHO_ADMIN_PASSWORD || 'Applywizz@2026';
+  try {
+    const res = await fetch(`${ZOHO_BASE_URL}/api/zoho/ui/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username, password }),
+      signal: AbortSignal.timeout(20000),
+    });
+    if (res.ok) {
+      console.log(`   ✓ [ZohoMail] Logged into Zoho Mail Reader as admin (${username})`);
+      return true;
+    }
+  } catch (err) {
+    console.warn(`  ⚠️ [ZohoMail] Admin login notice: ${err.message}`);
+  }
+  return false;
+}
+
+/**
  * Endpoint 2: Get candidate inbox messages.
  * GET https://zoho-mail-reader.onrender.com/api/zoho/ui/inbox?email={CANDIDATE_EMAIL}&limit={LIMIT}&start={START}
  */
@@ -57,7 +80,11 @@ export async function getZohoInbox(email, { limit = 5, start = 1 } = {}) {
   const clean = String(email).trim().toLowerCase();
   try {
     const url = `${ZOHO_BASE_URL}/api/zoho/ui/inbox?email=${encodeURIComponent(clean)}&limit=${limit}&start=${start}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    let res = await fetch(url, { signal: AbortSignal.timeout(25000) });
+    if (res.status === 401 || res.status === 403) {
+      await ensureZohoAdminLogin();
+      res = await fetch(url, { signal: AbortSignal.timeout(25000) });
+    }
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
@@ -81,13 +108,108 @@ export async function getZohoMessage(email, { accountId, folderId, messageId }) 
       messageId: String(messageId),
     });
     const url = `${ZOHO_BASE_URL}/api/zoho/ui/message?${params.toString()}`;
-    const res = await fetch(url, { signal: AbortSignal.timeout(12000) });
+    let res = await fetch(url, { signal: AbortSignal.timeout(25000) });
+    if (res.status === 401 || res.status === 403) {
+      await ensureZohoAdminLogin();
+      res = await fetch(url, { signal: AbortSignal.timeout(25000) });
+    }
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
     console.warn(`  ⚠️ [ZohoMail] Failed to fetch message ${messageId}: ${err.message}`);
     return null;
   }
+}
+
+function unescapeHtml(str) {
+  return String(str || '')
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&#39;/g, "'")
+    .replace(/&quot;/g, '"');
+}
+
+/**
+ * Robust Workday link & OTP code extractor from HTML and plain-text email bodies.
+ */
+export function extractWorkdayAuthDetails(html = '', text = '', subject = '') {
+  const cleanHtml = String(html || '');
+  const cleanText = String(text || '');
+  const combined = `${cleanHtml}\n${cleanText}`;
+  const subjLower = String(subject || '').toLowerCase();
+
+  // 1. Extract href links from HTML (prioritizing primary CTA buttons / links)
+  const hrefMatches = Array.from(cleanHtml.matchAll(/href=["'](https?:\/\/[^"'>]+)["']/gi))
+    .map((m) => unescapeHtml(m[1]).trim());
+
+  // 2. Extract plain text URLs
+  const textMatches = Array.from(combined.matchAll(/https?:\/\/[^\s"'<>]+/gi))
+    .map((m) => unescapeHtml(m[0]).trim());
+
+  const allCandidates = [...new Set([...hrefMatches, ...textMatches])];
+
+  // Check URLs for Workday verification or password reset links
+  for (const rawUrl of allCandidates) {
+    const cleanUrl = sanitizeWorkdayUrl(rawUrl);
+    if (!cleanUrl) continue;
+    const uLower = cleanUrl.toLowerCase();
+
+    // Check for Password Reset link
+    if (
+      uLower.includes('passwordreset') ||
+      uLower.includes('resetpassword') ||
+      (uLower.includes('reset') && (uLower.includes('token=') || uLower.includes('code='))) ||
+      subjLower.includes('reset') ||
+      subjLower.includes('password')
+    ) {
+      if (
+        uLower.includes('myworkday') ||
+        uLower.includes('workday') ||
+        uLower.includes('passwordreset') ||
+        uLower.includes('token=') ||
+        uLower.includes('code=')
+      ) {
+        console.log(`   🎉 [ZohoMail] Found Workday password reset link: ${cleanUrl}`);
+        return {
+          found: true,
+          type: 'reset',
+          verificationLink: cleanUrl,
+        };
+      }
+    }
+
+    // Check for Email Verification / Account Activation link
+    if (
+      uLower.includes('myworkday') ||
+      uLower.includes('workday') ||
+      uLower.includes('verify') ||
+      uLower.includes('activate') ||
+      uLower.includes('token=') ||
+      uLower.includes('code=')
+    ) {
+      console.log(`   🎉 [ZohoMail] Found Workday verification link: ${cleanUrl}`);
+      return {
+        found: true,
+        type: 'link',
+        verificationLink: cleanUrl,
+      };
+    }
+  }
+
+  // 3. Extract 6-digit OTP code if present in body or subject
+  const codeMatch = combined.match(/\b([0-9]{6})\b/);
+  if (codeMatch) {
+    const code = codeMatch[1];
+    console.log(`   🎉 [ZohoMail] Found 6-digit Workday verification code: ${code}`);
+    return {
+      found: true,
+      type: 'code',
+      verificationCode: code,
+    };
+  }
+
+  return { found: false };
 }
 
 /**
@@ -182,47 +304,11 @@ export async function pollZohoWorkdayAuth({
 
         const html = msgDetails.message.htmlContent || '';
         const text = msgDetails.message.textContent || '';
-        const combined = `${html}\n${text}`;
+        const authDetails = extractWorkdayAuthDetails(html, text, msg.subject);
 
-        // 1. Extract Workday links (first from href attributes in HTML)
-        const hrefMatches = Array.from(html.matchAll(/href=["'](https?:\/\/[^"'>]+)["']/gi)).map((m) => m[1]);
-        const textMatches = Array.from(combined.matchAll(/https?:\/\/[^\s"'<>]+/gi)).map((m) => m[0]);
-        const allCandidates = [...hrefMatches, ...textMatches];
-
-        for (const rawUrl of allCandidates) {
-          const cleanUrl = sanitizeWorkdayUrl(rawUrl);
-          if (!cleanUrl) continue;
-          const uLower = cleanUrl.toLowerCase();
-          if (
-            uLower.includes('myworkday') ||
-            uLower.includes('workday') ||
-            uLower.includes('passwordreset') ||
-            uLower.includes('verify') ||
-            uLower.includes('activate') ||
-            uLower.includes('token=') ||
-            uLower.includes('code=')
-          ) {
-            const type = (uLower.includes('passwordreset') || uLower.includes('reset')) ? 'reset' : 'link';
-            console.log(`   🎉 [ZohoMail] Found Workday ${type} link in message "${msg.subject}": ${cleanUrl}`);
-            return {
-              found: true,
-              type,
-              verificationLink: cleanUrl,
-              subject: msg.subject,
-              messageId: msg.messageId,
-            };
-          }
-        }
-
-        // 2. Extract 6-digit verification code if no direct link
-        const codeMatch = combined.match(/\b([0-9]{6})\b/);
-        if (codeMatch) {
-          const code = codeMatch[1];
-          console.log(`   🎉 [ZohoMail] Found 6-digit Workday verification code in message "${msg.subject}": ${code}`);
+        if (authDetails.found) {
           return {
-            found: true,
-            type: 'code',
-            verificationCode: code,
+            ...authDetails,
             subject: msg.subject,
             messageId: msg.messageId,
           };

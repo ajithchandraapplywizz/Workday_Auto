@@ -983,7 +983,7 @@ export function lookupDefaultAnswer(label) {
   if (/please select your gender|please select your sex/i.test(norm) || norm === 'gender' || norm === 'sex') {
     return 'Male';
   }
-  if (/^hispanic or latino$/i.test(norm) || /hispanic\s*or\s*latino/i.test(norm) || /^hispanic$/i.test(norm)) {
+  if (/^hispanic or latino$|hispanic\s*or\s*latino|^hispanic$|are you hispanic or latino/i.test(norm)) {
     return 'No';
   }
   if (
@@ -996,7 +996,7 @@ export function lookupDefaultAnswer(label) {
   if (/^veteran status$/i.test(norm)) {
     return 'I am not a protected veteran';
   }
-  if (/yes i have read and consent to the terms and conditions/i.test(norm)) {
+  if (/yes i have read and consent to the terms and conditions|terms and conditions|agree to.*terms|consent to the terms|privacy policy|terms of use|acknowledge.*terms/i.test(norm)) {
     return 'Yes';
   }
   if (/please select yes if hispanic/i.test(norm)) {

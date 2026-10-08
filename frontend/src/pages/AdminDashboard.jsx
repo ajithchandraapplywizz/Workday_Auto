@@ -53,7 +53,7 @@ export default function AdminDashboard() {
   const [syncToast, setSyncToast] = useState(null);
 
   // Tabs as specified in Master Prompt section 5
-  const tabs = ['Overview', 'Managers', 'Operators', 'Applications', 'Guide'];
+  const tabs = ['Overview', 'Managers', 'Operators', 'Guide'];
 
   // Load all dynamic data with real-time updates
   const loadData = React.useCallback(async (silent = false) => {
@@ -678,125 +678,6 @@ export default function AdminDashboard() {
         </div>
       )}
 
-      {/* 4. APPLICATIONS TAB — Company-wide full applications feed */}
-      {activeTab === 'Applications' && (
-        <div className="tab-body-fade">
-          <div className="video-filter-bar" style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-            <select
-              value={appStatusFilter}
-              onChange={(e) => setAppStatusFilter(e.target.value)}
-              className="video-select-filter"
-            >
-              <option value="All">All Statuses</option>
-              <option value="queued">Queued</option>
-              <option value="in_progress">In Progress</option>
-              <option value="ready_for_review">Ready For Review</option>
-              <option value="submitted">Submitted</option>
-              <option value="failed">Failed</option>
-            </select>
-            <select
-              value={appManagerFilter}
-              onChange={(e) => setAppManagerFilter(e.target.value)}
-              className="video-select-filter"
-            >
-              <option value="All">All Managers</option>
-              {managers.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-            <span style={{ alignSelf: 'center', fontSize: '0.85rem', color: '#94a3b8' }}>
-              Showing {filteredApplications.length} company-wide applications
-            </span>
-          </div>
-
-          <div className="video-table-container">
-            <table className="video-data-table">
-              <thead>
-                <tr>
-                  <th>CLIENT (AWL ID)</th>
-                  <th>JOB TITLE</th>
-                  <th>COMPANY</th>
-                  <th>STATUS</th>
-                  <th>CREATED AT</th>
-                  <th>LAST UPDATED</th>
-                  <th>AI ANSWERS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredApplications.length > 0 ? (
-                  filteredApplications.map((app) => (
-                    <tr key={app.id}>
-                      <td>
-                        <a
-                          href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(app.applywizz_id)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="app-id-tag"
-                          style={{ textDecoration: 'none' }}
-                        >
-                          {app.applywizz_id}
-                        </a>
-                      </td>
-                      <td>
-                        <a
-                          href={app.job_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="table-link-btn"
-                          title="Open Workday Job"
-                        >
-                          {app.job_title || app.role_title || 'Workday Application'}
-                        </a>
-                      </td>
-                      <td>{app.company || 'Workday Tenant'}</td>
-                      <td>
-                        {app.failure_reason === 'zoho_mail_not_connected' || (app.failure_reason && app.failure_reason.includes('zoho_mail_not_connected')) ? (
-                          <span className="video-status-tag" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.35)' }}>
-                            ZOHO NOT CONNECTED
-                          </span>
-                        ) : (
-                          <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
-                            {app.status?.toUpperCase() || 'QUEUED'}
-                          </span>
-                        )}
-                      </td>
-                      <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
-                      <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>
-                      <td>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedAppForDrawer(app)}
-                          style={{
-                            background: 'rgba(56, 189, 248, 0.15)',
-                            color: '#38bdf8',
-                            border: '1px solid rgba(56, 189, 248, 0.3)',
-                            padding: '4px 8px',
-                            borderRadius: '4px',
-                            fontSize: '0.75rem',
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Inspect Answers
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
-                      No applications recorded for the selected filter and period.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
       {/* 5. GUIDE TAB */}
       {activeTab === 'Guide' && (
         <div className="tab-body-fade">
@@ -831,6 +712,7 @@ export default function AdminDashboard() {
         onClose={() => setSelectedAppForDrawer(null)}
         application={selectedAppForDrawer}
         onStatusUpdated={() => loadData(true)}
+        readOnly
       />
     </div>
   );

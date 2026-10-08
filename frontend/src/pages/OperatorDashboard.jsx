@@ -5,7 +5,7 @@ import {
   fetchCABotAutomationStats,
   fetchClientDetails,
   fetchAssignedClientsForCA,
-  fetchApplicationsDynamic,
+  fetchClientApplications,
   fetchAutomationTrace,
   getISTDateBounds,
   syncLiveCAData,
@@ -181,7 +181,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     try {
       const [details, appsRes] = await Promise.all([
         fetchClientDetails(candidate.id),
-        fetchApplicationsDynamic({ applywizzId: candidate.id, limit: 50 }),
+        fetchClientApplications(candidate.id),
       ]);
 
       if (details.success && details.client) {
@@ -231,7 +231,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
     const refreshActiveCandidateApps = async () => {
       try {
-        const appsRes = await fetchApplicationsDynamic({ applywizzId: selectedCandidate.id, limit: 50 });
+        const appsRes = await fetchClientApplications(selectedCandidate.id);
         if (!isMounted) return;
         if (appsRes.success && appsRes.applications) {
           setApplications(appsRes.applications);
@@ -597,9 +597,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                     <div className="cci-name-row">
                       <span className="cci-name">{c.name}</span>
                     </div>
-                    <div className="cci-id-row" style={{ display: 'flex', justifyContent: 'space-between' }}>
+                    <div className="cci-id-row" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                       <span className="cci-awl">{c.id}</span>
-                      <span style={{ fontSize: '0.72rem', color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8', fontWeight: (c.jobs_applied || 0) > 0 ? 'bold' : 'normal' }}>
+                      <span style={{
+                        fontSize: '0.72rem',
+                        color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8',
+                        fontWeight: (c.jobs_applied || 0) > 0 ? 'bold' : 'normal',
+                        background: (c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.15)',
+                        padding: '2px 7px',
+                        borderRadius: '4px',
+                        border: `1px solid ${(c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.3)' : 'rgba(100, 116, 139, 0.25)'}`,
+                      }}>
                         {c.jobs_applied || 0} Apps
                       </span>
                     </div>
@@ -720,143 +728,98 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                       </thead>
                       <tbody>
                         {(() => {
-                          // In 1-worker architecture, at most ONE application can ever be actively filled by the bot.
-                          // Find the single active in-flight application; all other queued/stale apps render as 'queued'.
-                          const activeInFlightAppId = (() => {
-                            const flight = applications.find((app) => {
-                              const rs = (app.status || '').toLowerCase();
-                              const proof = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url;
-                              if ((rs === 'submitted' || rs === 'completed') && proof) return false;
-                              if (['ready_for_review', 'reached_review', 'pre_resolved', 'failed'].includes(rs)) return false;
-                              return ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes(rs);
-                            });
-                            return flight?.id || null;
-                          })();
+                          const displayableApps = applications.filter((app) => {
+                            const raw = (app.status || '').toLowerCase().trim();
+                            return raw === 'ready_for_review' || raw === 'ready_to_review';
+                          });
 
-                          return applications.length > 0 ? (
-                            applications.map((app) => {
-                              const proofShot = app.screenshot_url || app.screenshot_path || app.failure_screenshot_url || (() => {
-                                const r = String(app.failure_reason || app.error_message || '');
-                                const m = r.match(/\[screenshot:\s*([^\s\]]+)\]/i) || r.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
-                                return m ? (m[1] || m[0]) : null;
-                              })();
+                          return displayableApps.length > 0 ? (
+                            displayableApps.map((app) => {
                               const rawStatus = (app.status || '').toLowerCase();
-                              const hasProof = Boolean(proofShot);
-                              const isGenuineSubmitted = (rawStatus === 'submitted' || rawStatus === 'completed') && hasProof;
-                              const isFailed = rawStatus === 'failed';
-                              const isReady = ['ready_for_review', 'reached_review', 'pre_resolved'].includes(rawStatus);
-                              const isInFlight = app.id === activeInFlightAppId;
-                              
-                              // Dynamic real-time status: never show fake submitted without genuine proof!
-                              const s = isGenuineSubmitted
-                                ? 'submitted'
-                                : isReady
-                                  ? 'ready_for_review'
-                                  : isInFlight
-                                    ? 'in_flight'
-                                    : isFailed
-                                      ? 'failed'
-                                      : 'queued';
+                              const proofShot = app.application_submitted_screenshot_url || app.screenshot_url || app.applied_screenshot || app.screenshot_path || null;
+                              const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed';
+                              const isApplying = rawStatus === 'applying' || rawStatus === 'in_flight';
+                              const isReady = !isSubmitted && !isApplying;
 
-                            const jobUrl = app.job_url || app.url || '';
-                            const displayTitle = app.job_title || app.role_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
+                              const jobUrl = app.job_url || app.url || '';
+                              const displayTitle = app.role_title || app.job_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
 
-                            return (
-                            <tr
-                              key={app.id}
-                              style={{ background: selectedApp?.id === app.id ? '#1e293b' : 'transparent', cursor: 'pointer' }}
-                              onClick={() => {
-                                handleSelectApp(app);
-                                if (isReady) {
-                                  handleOpenReview(app);
-                                }
-                              }}
-                            >
-                              <td>
-                                <div>
-                                  <strong>{displayTitle}</strong>
-                                  <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
-                                    {jobUrl && (
-                                      <a
-                                        href={jobUrl}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        onClick={(e) => e.stopPropagation()}
-                                        style={{ color: '#38bdf8', fontSize: '0.74rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
-                                        title={jobUrl}
-                                      >
-                                        🔗 Link ↗
-                                      </a>
-                                    )}
-                                  </div>
-                                </div>
-                              </td>
-                              <td>{app.company || 'Workday Tenant'}</td>
-                              <td>{app.ats || 'Workday'}</td>
-                              <td>
-                                {(() => {
-                                  if (s === 'failed') {
-                                    return (
-                                      <span className="video-status-tag failed" title={app.failure_reason}>
-                                        Failed – {app.error_category || app.failure_reason || 'Execution error'}
+                              return (
+                                <tr
+                                  key={app.id || app.distributionId}
+                                  style={{ background: selectedApp?.id === app.id ? '#1e293b' : 'transparent', cursor: 'pointer' }}
+                                  onClick={() => {
+                                    handleSelectApp(app);
+                                    handleOpenReview(app);
+                                  }}
+                                >
+                                  <td>
+                                    <div>
+                                      <strong style={{ color: '#f1f5f9' }}>{displayTitle}</strong>
+                                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginTop: '4px' }}>
+                                        {jobUrl && (
+                                          <a
+                                            href={jobUrl}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            onClick={(e) => e.stopPropagation()}
+                                            style={{ color: '#38bdf8', fontSize: '0.74rem', textDecoration: 'none', display: 'inline-flex', alignItems: 'center', gap: '2px' }}
+                                            title={jobUrl}
+                                          >
+                                            🔗 Link ↗
+                                          </a>
+                                        )}
+                                      </div>
+                                    </div>
+                                  </td>
+                                  <td style={{ color: '#cbd5e1' }}>{app.company || 'Workday Tenant'}</td>
+                                  <td style={{ color: '#94a3b8' }}>{app.ats || 'Workday'}</td>
+                                  <td>
+                                    {isSubmitted ? (
+                                      <span className="video-status-tag submitted" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                        ✓ SUBMITTED
                                       </span>
-                                    );
-                                  }
-                                  if (s === 'submitted') {
-                                    return <span className="video-status-tag submitted">✓ SUBMITTED</span>;
-                                  }
-                                  if (s === 'ready_for_review') {
-                                    return <span className="video-status-tag ready_for_review">READY TO REVIEW & SUBMIT</span>;
-                                  }
-                                  if (s === 'in_flight') {
-                                    return <span className="video-status-tag in_flight">⚡ BOT FILLING IN BACKGROUND</span>;
-                                  }
-                                  return <span className="video-status-tag queued">⏳ IN QUEUE</span>;
-                                })()}
-                              </td>
-                              <td style={{ textAlign: 'center' }}>
-                                {(() => {
-                                  if (proofShot) {
-                                    return (
+                                    ) : isApplying ? (
+                                      <span className="video-status-tag in_flight" style={{ background: 'rgba(234, 179, 8, 0.15)', color: '#facc15', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
+                                        ⚡ APPLYING...
+                                      </span>
+                                    ) : (
+                                      <span className="video-status-tag ready_for_review" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+                                        READY TO REVIEW
+                                      </span>
+                                    )}
+                                  </td>
+                                  <td style={{ textAlign: 'center' }}>
+                                    {isSubmitted && proofShot ? (
                                       <a
                                         href={proofShot}
                                         target="_blank"
                                         rel="noreferrer"
                                         onClick={(e) => e.stopPropagation()}
                                         style={{
-                                          padding: '3px 8px',
+                                          padding: '4px 9px',
                                           borderRadius: '4px',
                                           fontSize: '0.74rem',
                                           fontWeight: 'bold',
                                           textDecoration: 'none',
-                                          background: isGenuineSubmitted ? 'rgba(16, 185, 129, 0.15)' : isFailed ? 'rgba(239, 68, 68, 0.15)' : 'rgba(56, 189, 248, 0.15)',
-                                          color: isGenuineSubmitted ? '#34d399' : isFailed ? '#fca5a5' : '#38bdf8',
-                                          border: `1px solid ${isGenuineSubmitted ? 'rgba(16, 185, 129, 0.3)' : isFailed ? 'rgba(239, 68, 68, 0.3)' : 'rgba(56, 189, 248, 0.3)'}`,
+                                          background: 'rgba(16, 185, 129, 0.15)',
+                                          color: '#34d399',
+                                          border: '1px solid rgba(16, 185, 129, 0.3)',
                                           display: 'inline-flex',
                                           alignItems: 'center',
                                           gap: '4px',
                                         }}
-                                        title="Click to view genuine Playwright screenshot proof stored in Supabase"
+                                        title="Click to view genuine Playwright submission screenshot"
                                       >
-                                        📸 {isGenuineSubmitted ? 'Submission Proof ↗' : isFailed ? 'Fail Shot ↗' : 'Review Step ↗'}
+                                        📸 View Proof ↗
                                       </a>
-                                    );
-                                  }
-                                  if (s === 'in_flight') {
-                                    return <span style={{ fontSize: '0.74rem', color: '#38bdf8' }}>⚡ In progress...</span>;
-                                  }
-                                  return <span style={{ fontSize: '0.74rem', color: '#475569' }}>—</span>;
-                                })()}
-                              </td>
-                              <td>
-                                {(() => {
-                                  if (isGenuineSubmitted) {
-                                    return (
-                                      <a
-                                        href={proofShot}
-                                        target="_blank"
-                                        rel="noreferrer"
-                                        onClick={(e) => e.stopPropagation()}
+                                    ) : (
+                                      <span style={{ fontSize: '0.8rem', color: '#475569' }}>—</span>
+                                    )}
+                                  </td>
+                                  <td>
+                                    {isSubmitted ? (
+                                      <span
                                         style={{
                                           display: 'inline-flex',
                                           alignItems: 'center',
@@ -868,16 +831,28 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           border: '1px solid rgba(16, 185, 129, 0.3)',
                                           padding: '4px 10px',
                                           borderRadius: '4px',
-                                          textDecoration: 'none',
                                         }}
-                                        title="Verified Playwright submission screenshot stored in Supabase"
                                       >
-                                        ✓ Verified Submitted ↗
-                                      </a>
-                                    );
-                                  }
-                                  if (s === 'ready_for_review') {
-                                    return (
+                                        ✓ Submitted
+                                      </span>
+                                    ) : isApplying ? (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
+                                          fontSize: '0.78rem',
+                                          color: '#facc15',
+                                          fontWeight: 'bold',
+                                          background: 'rgba(234, 179, 8, 0.1)',
+                                          border: '1px solid rgba(234, 179, 8, 0.3)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                        }}
+                                      >
+                                        ⚡ In Progress...
+                                      </span>
+                                    ) : (
                                       <button
                                         type="button"
                                         className="video-btn-start"
@@ -899,133 +874,30 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                       >
                                         📋 Review & Submit
                                       </button>
-                                    );
-                                  }
-                                  if (s === 'in_flight') {
-                                    return (
-                                      <span
-                                        style={{
-                                          display: 'inline-flex',
-                                          alignItems: 'center',
-                                          gap: '6px',
-                                          fontSize: '0.78rem',
-                                          color: '#38bdf8',
-                                          fontWeight: 'bold',
-                                          background: 'rgba(56, 189, 248, 0.1)',
-                                          border: '1px solid rgba(56, 189, 248, 0.25)',
-                                          padding: '4px 10px',
-                                          borderRadius: '4px',
-                                        }}
-                                      >
-                                        ⚡ Bot Filling Form...
-                                      </span>
-                                    );
-                                  }
-                                  if (s === 'failed') {
-                                    return (
-                                      <button
-                                        type="button"
-                                        className="video-btn-start"
-                                        style={{
-                                          padding: '4px 10px',
-                                          fontSize: '0.78rem',
-                                          background: 'rgba(239, 68, 68, 0.15)',
-                                          borderColor: 'rgba(239, 68, 68, 0.4)',
-                                          color: '#fca5a5',
-                                          cursor: 'pointer',
-                                        }}
-                                        onClick={(e) => {
-                                          e.stopPropagation();
-                                          handleSelectApp(app);
-                                          handleOpenReview(app);
-                                        }}
-                                        title={app.failure_reason || app.error_category || 'View failure details'}
-                                      >
-                                        ⚠️ View Error
-                                      </button>
-                                    );
-                                  }
-                                  return (
-                                    <span
-                                      style={{
-                                        display: 'inline-flex',
-                                        alignItems: 'center',
-                                        gap: '4px',
-                                        fontSize: '0.78rem',
-                                        color: '#94a3b8',
-                                        background: 'rgba(100, 116, 139, 0.12)',
-                                        border: '1px solid rgba(100, 116, 139, 0.25)',
-                                        padding: '4px 10px',
-                                        borderRadius: '4px',
-                                      }}
-                                    >
-                                      ⏳ In Queue
-                                    </span>
-                                  );
-                                })()}
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })
+                          ) : (
+                            <tr>
+                              <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
+                                <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
+                                  No applications ready for review in job_distributions for {selectedCandidate?.id || 'this candidate'}.
+                                </div>
+                                <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
+                                  Only applications with pre-resolved answers in job_distributions are assigned to CA queue.
+                                </div>
                               </td>
                             </tr>
                           );
-                        })
-                      ) : (
-                        <tr>
-                          <td colSpan={6} style={{ textAlign: 'center', padding: '2.5rem', color: '#94a3b8' }}>
-                            <div style={{ fontWeight: 'bold', fontSize: '0.95rem', color: '#cbd5e1' }}>
-                              No applications recorded or queued yet for {selectedCandidate.id}.
-                            </div>
-                            <div style={{ fontSize: '0.8rem', color: '#64748b', marginTop: '0.35rem' }}>
-                              Application links will appear here once ingested for processing.
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })()}
-                  </tbody>
+                        })()}
+                      </tbody>
                     </table>
                   </div>
                 </div>
 
-                {/* 3. Automation Execution Trace Panel */}
-                <div style={{ marginTop: '1.5rem', background: '#070b14', border: '1px solid #1e293b', borderRadius: '8px', overflow: 'hidden' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '0.65rem 1rem', background: '#0f172a', borderBottom: '1px solid #1e293b' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ display: 'inline-flex', gap: '5px' }}>
-                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#ef4444' }} />
-                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#f59e0b' }} />
-                        <span style={{ width: '10px', height: '10px', borderRadius: '50%', background: '#10b981' }} />
-                      </span>
-                      <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#38bdf8', marginLeft: '6px' }}>
-                        AUTOMATION EXECUTION TRACE {selectedApp ? `(${selectedApp.company || selectedApp.job_title || selectedCandidate?.id || 'Worker-1'})` : '(Worker-1 Live)'}
-                      </span>
-                    </div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                      <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#10b981', display: 'inline-block' }} />
-                      <span style={{ fontSize: '0.74rem', color: '#94a3b8' }}>
-                        Live Terminal Output (1 Worker Allocated)
-                      </span>
-                    </div>
-                  </div>
 
-                  <div style={{ maxHeight: '200px', overflowY: 'auto', fontFamily: 'Consolas, Monaco, "Courier New", monospace', fontSize: '0.8rem', background: '#020617', padding: '0.85rem 1rem', lineHeight: '1.6' }}>
-                    {traceLogs.length > 0 ? (
-                      traceLogs.map((log) => {
-                        const isErr = /fail|error|invalid|expired/i.test(log.message || '');
-                        const isSuccess = /submit|success|reached.*review/i.test(log.message || '');
-                        return (
-                          <div key={log.id} style={{ marginBottom: '0.35rem', color: isErr ? '#fca5a5' : isSuccess ? '#86efac' : '#cbd5e1' }}>
-                            <span style={{ color: '#64748b', marginRight: '8px' }}>[{new Date(log.ts).toLocaleTimeString()}]</span>
-                            <span style={{ color: '#38bdf8', fontWeight: 'bold', marginRight: '8px' }}>Step {log.step_index}:</span>
-                            <span>{log.message}</span>
-                          </div>
-                        );
-                      })
-                    ) : (
-                      <div style={{ color: '#64748b', fontStyle: 'italic', padding: '0.5rem 0' }}>
-                        Waiting for Worker-1 trace events... When CA logs in and worker fills applications, live terminal steps will stream here in real time.
-                      </div>
-                    )}
-                  </div>
-                </div>
               </div>
             ) : (
               <div style={{ padding: '3rem', textAlign: 'center', color: '#64748b' }}>

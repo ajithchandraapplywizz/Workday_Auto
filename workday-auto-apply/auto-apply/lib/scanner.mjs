@@ -393,11 +393,26 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
   await mkdir(outDir, { recursive: true });
 
   const ownBrowser = !existingBrowser;
-  const browser = existingBrowser || await chromium.launch({ headless });
+  const browser = existingBrowser || await chromium.launch({
+    headless: Boolean(headless),
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--disable-dev-shm-usage',
+      '--window-size=1280,900',
+    ],
+  });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
-    userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
   }));
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  }).catch(() => {});
   const page = existingPage || await context.newPage();
 
   try {

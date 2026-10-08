@@ -1185,18 +1185,16 @@ export async function parseReviewDOM(page) {
         .trim();
     }
 
-    // 1. Definition lists (dt/dd)
+    // 1. Definition lists (dt/dd) - Workday Review page summary format
     document.querySelectorAll('dt').forEach(dt => {
       const dd = dt.nextElementSibling;
       if (dd && dd.tagName === 'DD') {
         const rawLabel = (dt.textContent || '').trim();
         const value = (dd.textContent || '').trim();
-        if (isRequiredOrImportant(dt, dt, rawLabel)) {
-          const lbl = cleanLabel(rawLabel);
-          if (lbl && !seen.has(lbl.toLowerCase())) {
-            seen.add(lbl.toLowerCase());
-            pairs.push({ label: lbl, rawLabel, value, isRequired: true, isImportant: true });
-          }
+        const lbl = cleanLabel(rawLabel);
+        if (lbl && value && value.length < 2000 && !seen.has(lbl.toLowerCase()) && lbl.length >= 2 && lbl.length <= 150) {
+          seen.add(lbl.toLowerCase());
+          pairs.push({ label: lbl, rawLabel, value, isRequired: true, isImportant: true });
         }
       }
     });
@@ -1206,7 +1204,8 @@ export async function parseReviewDOM(page) {
       const labelEl = field.querySelector('label, [data-automation-id*="label"], legend');
       if (!labelEl) return;
       const rawLabel = (labelEl.textContent || '').trim();
-      if (!isRequiredOrImportant(field, labelEl, rawLabel)) return;
+      const lbl = cleanLabel(rawLabel);
+      if (!lbl || seen.has(lbl.toLowerCase()) || lbl.length < 2 || lbl.length > 150) return;
 
       const valueEl = field.querySelector(
         'input, textarea, select, [data-automation-id*="selectedItem"], [data-automation-id*="promptOption"], [data-automation-id*="value"]'
@@ -1214,12 +1213,8 @@ export async function parseReviewDOM(page) {
       let value = '';
       if (valueEl) {
         value = (valueEl.value || valueEl.textContent || '').trim();
-      } else {
-        value = (field.textContent || '').trim();
       }
-
-      const lbl = cleanLabel(rawLabel);
-      if (lbl && !seen.has(lbl.toLowerCase())) {
+      if (value && value.length < 2000) {
         seen.add(lbl.toLowerCase());
         pairs.push({ label: lbl, rawLabel, value, isRequired: true, isImportant: true });
       }

@@ -14,7 +14,7 @@ import { fuzzyScore } from './fields.mjs';
 import { getTodayMMDDYYYY } from './date-utils.mjs';
 import { matchAnswerConcept, lookupConceptInQaMap, resolveByConcept } from './answerConcepts.mjs';
 import { formatHttpError, httpsJsonWithRetry } from './httpClient.mjs';
-import { mergeNonEmpty, workdayPhoneCodeForCountry } from './clientContact.mjs';
+import { mergeNonEmpty, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
 import { splitGivenFamilyName } from './personName.mjs';
 import {
   isSupabaseConfigured,
@@ -676,8 +676,14 @@ export function mapApplyWizzToProfile(client = {}, info = {}) {
     personal_email: personalEmail,
     phone: info.primary_phone && info.primary_phone !== '+' ? String(info.primary_phone).replace(/\D/g, '') : '',
     linkedin: info.linked_in_url || '',
-    city: addr.city || (client.location_preferences || [])[0] || '',
-    state: addr.state || info.state_of_residence || '',
+    city: (() => {
+      const c = addr.city || (client.location_preferences || [])[0] || '';
+      return isValidCityName(c) ? c : '';
+    })(),
+    state: (() => {
+      const s = addr.state || info.state_of_residence || '';
+      return isValidStateName(s) ? s : '';
+    })(),
     postal_code: addr.postal_code || '',
     address_line1: addr.address_line1 || '',
     country: countryName,

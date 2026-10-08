@@ -114,22 +114,8 @@ export function AuthProvider({ children }) {
       return { role: 'dev', name: 'Ajith Chandra Nimmala', manager_id: null };
     }
 
-    // 2. Operational Managers
-    const managerEmails = [
-      'balaji@applywizz.com',
-      'balaji@applywizz.ai',
-      'ramakrishnaa.tejavath@applywizz.ai',
-      'ramakrishna@applywizz.com',
-    ];
-    if (managerEmails.includes(normalizedEmail) || normalizedEmail.includes('balaji') || normalizedEmail.includes('manager')) {
-      return {
-        role: 'manager',
-        name: normalizedEmail.includes('balaji') ? 'Balaji' : (normalizedEmail.includes('ramakrishna') ? 'Ramakrishna Tejavath' : 'Operational Manager'),
-        manager_id: '9dc9376e-fbc5-440b-932f-38da10b89a70',
-      };
-    }
-
-    // 3. Admins (Founders, Co-founders & Platform Admins)
+    // 2. Admins (Founders, Co-founders & Platform Admins)
+    // Strictly Admin - ramakrishna@applywizz.ai is founder/admin
     const adminEmails = [
       'admin@applywizz.ai',
       'admin@applywizz.com',
@@ -139,7 +125,7 @@ export function AuthProvider({ children }) {
       'shyam@applywizz.ai',
       'jagan@applywizz.ai',
     ];
-    if (normalizedEmail.includes('admin') || adminEmails.includes(normalizedEmail)) {
+    if (normalizedEmail === 'ramakrishna@applywizz.ai' || normalizedEmail.includes('admin') || adminEmails.includes(normalizedEmail)) {
       const namePart = normalizedEmail.split('@')[0];
       return {
         role: 'admin',
@@ -147,6 +133,22 @@ export function AuthProvider({ children }) {
           ? 'Super Admin'
           : namePart.charAt(0).toUpperCase() + namePart.slice(1),
         manager_id: null,
+      };
+    }
+
+    // 3. Operational Managers
+    const managerEmails = [
+      'balaji@applywizz.com',
+      'balaji@applywizz.ai',
+      'ramakrishnaa.tejavath@applywizz.ai',
+      'ramakrishna@applywizz.com',
+    ];
+    if (managerEmails.includes(normalizedEmail) || normalizedEmail.includes('balaji') || normalizedEmail.includes('manager')) {
+      const isBalaji = normalizedEmail.includes('balaji');
+      return {
+        role: 'manager',
+        name: isBalaji ? 'Balaji' : 'Ramakrishna Tejavath',
+        manager_id: isBalaji ? '9dc9376e-fbc5-440b-932f-38da10b89a70' : 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744',
       };
     }
 
@@ -217,13 +219,13 @@ export function AuthProvider({ children }) {
 
     // Resolve Role
     const auto = await resolveRoleFromEmail(normalizedEmail);
-    const effectiveRole = (auto.role === 'admin' || auto.role === 'dev') ? auto.role : (authUser?.role || auto.role);
+    const effectiveRole = (auto.role === 'admin' || auto.role === 'dev' || auto.role === 'manager') ? auto.role : (authUser?.role || auto.role);
 
     const resolvedProfile = {
       email: normalizedEmail,
       name: authUser?.name || auto.name,
       role: effectiveRole,
-      manager_id: authUser?.manager_id || auto.manager_id,
+      manager_id: (auto.role === 'manager' && auto.manager_id) ? auto.manager_id : (authUser?.manager_id || auto.manager_id),
     };
 
     const nowIso = new Date().toISOString();

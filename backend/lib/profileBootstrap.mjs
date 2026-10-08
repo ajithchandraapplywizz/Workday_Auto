@@ -64,11 +64,11 @@ export async function bootstrapClientContext(profile = {}, plan = {}) {
   console.log(`  ✓ Work: ${exp.current_title || '—'} @ ${exp.current_company || '—'} | ${exp.years || profile._applyWizzQa?.['years of experience'] || '—'} yrs`);
   console.log(`  ✓ Education: ${edu.university || 'Other'} / ${edu.degree || "Bachelor's"} / ${edu.major || edu.field_of_study_hierarchy?.[0] || 'Computer Science'}`);
   const supabaseKeys = Object.keys(profile._supabaseQa || {}).length;
-  console.log(`  ✓ Answer index: ${supabaseKeys} Supabase keys (Tier 1), ${apiKeys} Apply Wizz keys (Tier 2), resume parsing (Tier 3), LLM fallback (Tier 4)`);
+  console.log(`  ✓ Answer index: ${supabaseKeys} Supabase keys (Tier 1), resume parsing (Tier 2), ${apiKeys} Apply Wizz keys (Tier 3), LLM fallback (Tier 4)`);
   if (profile._resumePath) {
     console.log(`  ✓ Resume: ${profile._resumePath}`);
   }
-  const order = 'Tier 1 (Supabase) → Tier 2 (ApplyWizz API) → Tier 3 (Resume Parsing) → Tier 4 (LLM + DOM live options)';
+  const order = 'Tier 1 (Supabase) → Tier 2 (Resume Parsing) → Tier 3 (ApplyWizz API) → Tier 4 (LLM + DOM live options)';
   console.log(`  ✓ Mandatory resolution: ${order}\n`);
 
   profile._clientBootstrapped = true;
