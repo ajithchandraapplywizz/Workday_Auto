@@ -400,8 +400,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
         <div style={{ display: 'flex', alignItems: 'center', gap: '1.25rem' }}>
           {/* Active Date Tag */}
           <div style={{ display: 'flex', alignItems: 'center', gap: '0.4rem', fontSize: '0.8rem' }}>
-            <span style={{ color: '#94a3b8' }}>DATE:</span>
-            <strong style={{ color: '#f8fafc', fontFamily: 'monospace' }}>{activeWorkDate}</strong>
+            <span style={{ color: '#94a3b8' }}>WORK DATA:</span>
+            <strong style={{ color: '#38bdf8', fontFamily: 'monospace' }}>{activeWorkDate} (Yesterday)</strong>
             {isFallbackDate && (
               <span
                 title="No records found on selected date. Rolled back to nearest active working day."

@@ -112,11 +112,11 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Timeframe Stats: Day, Week, Month */}
+          {/* Timeframe Stats: Only day data enabled for CA (no week or month) */}
           <div className="control-stats-box">
             <span className="control-label-micro">STATS</span>
             <div className="stats-pill-group">
-              {['day', 'week', 'month'].map((t) => (
+              {(user?.role === 'ca' || user?.role === 'operator' ? ['day'] : ['day', 'week', 'month']).map((t) => (
                 <button
                   key={t}
                   type="button"
