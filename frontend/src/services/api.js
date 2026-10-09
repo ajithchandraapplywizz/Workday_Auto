@@ -872,51 +872,7 @@ export async function fetchApplicationsDynamic({
       return item;
     });
 
-    // If zero applications matched the specific date bounds, fall back to the most recent recorded applications
-    if (list.length === 0 && dateStr && timeframe) {
-      let fallbackQuery = supabase.from('applications').select('*').order('updated_at', { ascending: false }).limit(limit);
-      if (status && status !== 'All') {
-        if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
-          fallbackQuery = fallbackQuery.in('status', ['in_progress', 'started', 'applying']);
-        } else {
-          fallbackQuery = fallbackQuery.eq('status', status.toLowerCase());
-        }
-      }
-      if (managerId && managerId !== 'All') {
-        fallbackQuery = fallbackQuery.eq('manager_id', managerId);
-      }
-      if (caEmail && caEmail !== 'All') {
-        fallbackQuery = fallbackQuery.eq('ca_id', caEmail);
-      }
-      if (applywizzId) {
-        fallbackQuery = fallbackQuery.eq('applywizz_id', applywizzId);
-      }
-      const { data: fbData } = await fallbackQuery;
-      if (fbData && fbData.length > 0) {
-        list = fbData.map((item) => {
-          if (item.failure_reason) {
-            if (!item.failure_screenshot_url) {
-              const matchShot = item.failure_reason.match(/\[screenshot:\s*([^\]\s]+)\]/i) || item.failure_reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
-              if (matchShot) {
-                item.failure_screenshot_url = matchShot[1] || matchShot[0];
-                item.screenshot_url = item.failure_screenshot_url;
-              }
-            }
-            if (!item.stopped_at_step) {
-              const matchStep = item.failure_reason.match(/\[step:\s*([^\]]+)\]/i) || item.failure_reason.match(/stopped at\s+([^)\],]+)/i);
-              if (matchStep) {
-                item.stopped_at_step = matchStep[1].trim();
-              }
-            }
-          }
-          const hasProof = Boolean(item.screenshot_url || item.screenshot_path || item.failure_screenshot_url);
-          if ((item.status === 'submitted' || item.status === 'completed') && !hasProof) {
-            item.status = 'queued';
-          }
-          return item;
-        });
-      }
-    }
+    // If zero applications matched the specific date bounds, strictly keep list empty (no legacy data fallback)
 
     // Query job_distributions for pre-resolved answers, queued/applying states, and proof screenshots
     try {
@@ -928,6 +884,10 @@ export async function fetchApplicationsDynamic({
 
       if (applywizzId) {
         distQuery = distQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
+      }
+      if (dateStr && timeframe) {
+        const bounds = getISTDateBounds(dateStr, timeframe);
+        distQuery = distQuery.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
       }
 
       const { data: distTasks } = await distQuery;
@@ -1151,9 +1111,13 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     let distFailed = 0;
     let distQueued = 0;
     try {
-      let dQuery = supabase.from('job_distributions').select('status, application_submitted_screenshot_url');
+      let dQuery = supabase.from('job_distributions').select('status, application_submitted_screenshot_url, created_at');
       if (caEmail && caEmail !== 'All') {
         dQuery = dQuery.eq('ca_email', caEmail);
+      }
+      if (dateStr && timeframe) {
+        const bounds = getISTDateBounds(dateStr, timeframe);
+        dQuery = dQuery.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
       }
       const { data: dRows } = await dQuery;
       if (dRows && Array.isArray(dRows)) {
@@ -1530,8 +1494,16 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
     if (candidateIds.length > 0) {
       const allowedStatuses = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed'];
 
+      const bounds = getISTDateBounds(historyRes.activeDate || atDate, 'day');
+      const distQuery = supabase
+        .from('job_distributions')
+        .select('id, applywizz_id, job_url, status, application_submitted_screenshot_url, created_at')
+        .in('applywizz_id', candidateIds)
+        .gte('created_at', bounds.startIso)
+        .lte('created_at', bounds.endIso);
+
       const [distRes, dbClientsRes, workerRes] = await Promise.all([
-        supabase.from('job_distributions').select('id, applywizz_id, job_url, status').in('applywizz_id', candidateIds),
+        distQuery,
         supabase.from('clients').select('applywizz_id, client_name, company_email').in('applywizz_id', candidateIds),
         supabase.from('worker_status').select('*'),
       ]);
@@ -1562,7 +1534,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           const key = (d.job_url || d.id || '').toLowerCase().trim();
           if (key) candidateJobsSet.get(cid).add(key);
 
-          if (rawStatus === 'submitted' || rawStatus === 'completed') {
+          if ((rawStatus === 'submitted' || rawStatus === 'completed') && Boolean(d.application_submitted_screenshot_url)) {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
 
@@ -1947,64 +1919,36 @@ export async function fetchManagerTeamWorkHistory({ managerId, dateStr = '' }) {
       }
     }
 
-    // 4. Fetch real application and queue metrics dynamically strictly from OUR Workday tables
+    // 4. Fetch real application metrics dynamically strictly from active job_distributions
     const clientIds = Array.from(clientMap.keys());
     if (clientIds.length > 0) {
-      const [appsRes, queueRes, distRes] = await Promise.all([
-        supabase
-          .from('applications')
-          .select('applywizz_id, status, ca_id')
-          .in('applywizz_id', clientIds),
-        supabase
-          .from('batch_job_queue')
-          .select('applywizz_id, status')
-          .in('applywizz_id', clientIds),
-        supabase
-          .from('job_distributions')
-          .select('applywizz_id, status, application_submitted_screenshot_url')
-          .in('applywizz_id', clientIds),
-      ]);
-
-      const clientAppsMap = new Map();
-      (appsRes.data || []).forEach((a) => {
-        const id = (a.applywizz_id || '').trim().toUpperCase();
-        if (!clientAppsMap.has(id)) clientAppsMap.set(id, []);
-        clientAppsMap.get(id).push(a);
-      });
-
-      const clientQueueMap = new Map();
-      (queueRes.data || []).forEach((q) => {
-        const id = (q.applywizz_id || '').trim().toUpperCase();
-        if (!clientQueueMap.has(id)) clientQueueMap.set(id, []);
-        clientQueueMap.get(id).push(q);
-      });
+      const bounds = getISTDateBounds(resolvedDate, 'day');
+      const { data: distData } = await supabase
+        .from('job_distributions')
+        .select('applywizz_id, status, application_submitted_screenshot_url, created_at')
+        .in('applywizz_id', clientIds)
+        .gte('created_at', bounds.startIso)
+        .lte('created_at', bounds.endIso);
 
       const clientDistMap = new Map();
-      (distRes.data || []).forEach((d) => {
+      (distData || []).forEach((d) => {
         const id = (d.applywizz_id || '').trim().toUpperCase();
         if (!clientDistMap.has(id)) clientDistMap.set(id, []);
         clientDistMap.get(id).push(d);
       });
 
-      // Compute dynamic metrics per client strictly from our Workday database
+      // Compute dynamic metrics per client strictly from our Workday pipeline
       for (const [id, c] of clientMap.entries()) {
-        const appList = clientAppsMap.get(id) || [];
-        const queueList = clientQueueMap.get(id) || [];
         const distList = clientDistMap.get(id) || [];
 
-        const submittedCount =
-          appList.filter((a) => (a.status || '').toLowerCase() === 'submitted').length +
-          distList.filter((d) => (d.status || '').toLowerCase() === 'submitted' && Boolean(d.application_submitted_screenshot_url)).length;
-        const failedCount =
-          appList.filter((a) => ['failed', 'error'].includes((a.status || '').toLowerCase())).length +
-          distList.filter((d) => (d.status || '').toLowerCase() === 'failed').length +
-          queueList.filter((q) => (q.status || '').toLowerCase() === 'failed').length;
+        const submittedCount = distList.filter((d) => (d.status === 'submitted') && Boolean(d.application_submitted_screenshot_url)).length;
+        const failedCount = distList.filter((d) => (d.status === 'failed')).length;
 
         c.submitted = submittedCount;
         c.applied = 0;
         c.pending = 0;
         c.failed = failedCount;
-        c.apps = Math.max(appList.length, distList.length, submittedCount + failedCount);
+        c.apps = distList.length;
       }
     }
 
@@ -2149,9 +2093,10 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       };
     }
 
+    const bounds = getISTDateBounds(dateStr || new Date(), 'day');
     const [queueRes, appsRes, workerRes] = await Promise.all([
-      supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds),
-      supabase.from('applications').select('*').in('applywizz_id', clientIds),
+      supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
+      supabase.from('applications').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
       supabase.from('worker_status').select('*'),
     ]);
 
