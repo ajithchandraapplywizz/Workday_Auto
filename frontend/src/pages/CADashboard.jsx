@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useAuth, getYesterdayDateStr } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext';
+import { getYesterdayDateStr } from '../utils/dateUtils';
 import {
   fetchClientDetails,
   fetchClientQuestions,

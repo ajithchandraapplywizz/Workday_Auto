@@ -1823,6 +1823,19 @@ export async function executeSingleTargetedSubmission({
     } else {
       await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
     }
+
+    // Sync to applications table for Admin, Developer, and Manager dashboards
+    const appRow = {
+      applywizz_id: finalApplywizzId,
+      job_url: finalJobUrl,
+      company: company || 'Workday Tenant',
+      role_title: roleTitle || 'Workday Position',
+      status: 'submitted',
+      screenshot_url: finalProofShot,
+      applied_screenshot: finalProofShot,
+      updated_at: completionTimestamp,
+    };
+    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
   } else {
     console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
     const updateBody = {
@@ -1836,6 +1849,18 @@ export async function executeSingleTargetedSubmission({
     } else {
       await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
     }
+
+    // Sync failure to applications table
+    const appRow = {
+      applywizz_id: finalApplywizzId,
+      job_url: finalJobUrl,
+      company: company || 'Workday Tenant',
+      role_title: roleTitle || 'Workday Position',
+      status: 'failed',
+      failure_reason: result?.failureReason || result?.error || 'Submission failed',
+      updated_at: completionTimestamp,
+    };
+    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
   }
 
   // 5. Release worker back to idle

@@ -42,6 +42,7 @@ export default function ManagerDashboard() {
   // Applications Tab states
   const [appSearchQuery, setAppSearchQuery] = useState('');
   const [appStatusFilter, setAppStatusFilter] = useState('All');
+  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
   const tabs = ['Home', 'Applications', 'Operators', 'Reports', 'Guide'];
 
   // Load managers list dynamically and select matching manager

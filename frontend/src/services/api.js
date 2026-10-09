@@ -67,10 +67,26 @@ export async function fetchCAWorkHistory({ from = '2026-09-23', to = '2026-09-23
     const res = await fetch(url);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
+    const rawRecords = data.records || [];
+    const sanitizedRecords = rawRecords.map((r) => ({
+      date: r.date,
+      applywizz_id: r.applywizz_id,
+      client_id: r.client_id,
+      client_name: r.client_name,
+      client_email: r.client_email,
+      ca_id: r.ca_id,
+      ca_name: r.ca_name,
+      ca_email: r.ca_email,
+      // Terminate external fake metrics: our actual Workday data comes from Supabase tables
+      jobs_applied: 0,
+      emails_submitted: 0,
+      emails_required: 0,
+    }));
+
     return {
       success: true,
-      records: data.records || [],
-      total: data.total || (data.records || []).length,
+      records: sanitizedRecords,
+      total: data.total || sanitizedRecords.length,
       filters: data.filters || {},
     };
   } catch (err) {
@@ -1129,7 +1145,25 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 
     const allApps = apps || [];
     const now = Date.now();
-    const submitted = allApps.filter((a) => a.status === 'submitted').length;
+
+    // Reconcile real-time stats directly from job_distributions and applications in Supabase
+    let distSubmitted = 0;
+    let distFailed = 0;
+    let distQueued = 0;
+    try {
+      let dQuery = supabase.from('job_distributions').select('status, application_submitted_screenshot_url');
+      if (caEmail && caEmail !== 'All') {
+        dQuery = dQuery.eq('ca_email', caEmail);
+      }
+      const { data: dRows } = await dQuery;
+      if (dRows && Array.isArray(dRows)) {
+        distSubmitted = dRows.filter((d) => (d.status === 'submitted') && Boolean(d.application_submitted_screenshot_url)).length;
+        distFailed = dRows.filter((d) => d.status === 'failed').length;
+        distQueued = dRows.filter((d) => ['queued', 'distributed', 'ready_for_review'].includes(d.status)).length;
+      }
+    } catch { }
+
+    const submitted = Math.max(allApps.filter((a) => a.status === 'submitted').length, distSubmitted);
 
     // Check live worker_status table: if 0 submitting workers are in_flight, applying is strictly 0!
     let liveWorkersInFlight = 0;
@@ -1158,9 +1192,9 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       ? Math.min(activeApplying.length > 0 ? activeApplying.length : liveWorkersInFlight, liveWorkersInFlight)
       : 0;
 
-    const failed = allApps.filter((a) => a.status === 'failed').length;
+    const failed = Math.max(allApps.filter((a) => a.status === 'failed').length, distFailed);
     const skipped = allApps.filter((a) => a.status === 'skipped').length;
-    const queued = allApps.filter((a) => a.status === 'queued' || a.status === 'pending').length;
+    const queued = Math.max(allApps.filter((a) => a.status === 'queued' || a.status === 'pending').length, distQueued);
 
     // Answer source percentages from qa_bank
     let totalAnswers = 0;

@@ -9,16 +9,8 @@ import {
 
 const AuthContext = createContext(null);
 
-export const getTodayDateStr = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
-
-import { getPreviousWorkdayDateStr, getYesterdayDateStr } from '../utils/dateUtils';
-export { getPreviousWorkdayDateStr, getYesterdayDateStr };
+import { getYesterdayDateStr, getPreviousWorkdayDateStr, getTodayDateStr } from '../utils/dateUtils';
+export { getYesterdayDateStr, getPreviousWorkdayDateStr, getTodayDateStr };
 
 export function AuthProvider({ children }) {
   // Session strictly initialized from verified storage — no automatic default bypass
