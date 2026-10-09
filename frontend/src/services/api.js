@@ -932,7 +932,7 @@ export async function fetchApplicationsDynamic({
               existing.status = 'in_flight';
             }
           } else {
-            list.push({
+            const newItem = {
               id: dt.id,
               applywizz_id: dt.applywizz_id,
               job_url: dt.job_url,
@@ -950,9 +950,20 @@ export async function fetchApplicationsDynamic({
               is_fully_answered: dt.is_fully_answered,
               updated_at: dt.updated_at,
               created_at: dt.created_at,
-            });
+            };
+            list.push(newItem);
+            itemByUrl.set(cleanDtUrl, newItem);
           }
         }
+
+        // Deduplicate final list: strictly 1 row per unique normalized job URL!
+        const uniqueUrls = new Set();
+        list = list.filter((item) => {
+          const norm = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
+          if (!norm || uniqueUrls.has(norm)) return false;
+          uniqueUrls.add(norm);
+          return true;
+        });
       }
     } catch (e) {
       // Non-fatal fallback

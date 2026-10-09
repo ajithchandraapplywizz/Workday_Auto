@@ -730,10 +730,20 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     tenant: cluster.tenant,
   };
 
+  // Deduplicate allTasks strictly: exactly 1 candidate task per unique applywizz_id
+  const uniqueCandidateTasksMap = new Map();
+  for (const t of allTasks) {
+    const awl = String(t.applywizz_id || '').trim().toUpperCase();
+    if (awl && !uniqueCandidateTasksMap.has(awl)) {
+      uniqueCandidateTasksMap.set(awl, t);
+    }
+  }
+  const dedupedAllTasks = Array.from(uniqueCandidateTasksMap.values());
+
   const distributionRows = [];
   const RESOLVE_CHUNK = 8;
-  for (let cIdx = 0; cIdx < allTasks.length; cIdx += RESOLVE_CHUNK) {
-    const chunk = allTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
+  for (let cIdx = 0; cIdx < dedupedAllTasks.length; cIdx += RESOLVE_CHUNK) {
+    const chunk = dedupedAllTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
     const chunkRows = await Promise.all(chunk.map(async (task, offset) => {
       const idx = cIdx + offset;
       const awlId = String(task.applywizz_id || '').trim().toUpperCase();

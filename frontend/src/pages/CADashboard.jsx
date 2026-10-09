@@ -266,33 +266,32 @@ export default function CADashboard() {
       const jobsMap = new Map();
       if (distRes.data && distRes.data.length > 0) {
         for (const dj of distRes.data) {
-          const u = (dj.job_url || '').trim().toLowerCase();
-          const sj = scannedMap.get(u);
+          const u = (dj.job_url || '').split('?')[0].trim().toLowerCase();
+          if (!u || jobsMap.has(u)) continue;
+
+          const sj = scannedMap.get(u) || scannedMap.get((dj.job_url || '').trim().toLowerCase());
           const st = (dj.status || '').toLowerCase();
           const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'needs_answers', 'failed'].includes(st);
           if (!isAllowedStatus) continue;
 
-          const key = dj.id || u;
-          if (key && !jobsMap.has(key)) {
-            jobsMap.set(key, {
-              id: dj.id,
-              applywizz_id: dj.applywizz_id,
-              job_url: dj.job_url,
-              company: dj.company || sj?.company || 'Workday Partner',
-              role_title: dj.role_title || sj?.role_title || 'Workday Application',
-              status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
-              is_fully_answered: dj.is_fully_answered,
-              resolved_answers: dj.resolved_answers || [],
-              unanswered_count: dj.unanswered_count || 0,
-              unanswered_questions: dj.unanswered_questions || [],
-              applied_screenshot: dj.application_submitted_screenshot_url || null,
-              application_submitted_screenshot_url: dj.application_submitted_screenshot_url || null,
-              screenshot_url: dj.application_submitted_screenshot_url || null,
-              blueprint_screenshot: sj?.screenshot_path || null,
-              scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
-              source: 'job_distributions',
-            });
-          }
+          jobsMap.set(u, {
+            id: dj.id,
+            applywizz_id: dj.applywizz_id,
+            job_url: dj.job_url,
+            company: dj.company || sj?.company || 'Workday Partner',
+            role_title: dj.role_title || sj?.role_title || 'Workday Application',
+            status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
+            is_fully_answered: dj.is_fully_answered,
+            resolved_answers: dj.resolved_answers || [],
+            unanswered_count: dj.unanswered_count || 0,
+            unanswered_questions: dj.unanswered_questions || [],
+            applied_screenshot: dj.application_submitted_screenshot_url || null,
+            application_submitted_screenshot_url: dj.application_submitted_screenshot_url || null,
+            screenshot_url: dj.application_submitted_screenshot_url || null,
+            blueprint_screenshot: sj?.screenshot_path || null,
+            scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
+            source: 'job_distributions',
+          });
         }
       }
 

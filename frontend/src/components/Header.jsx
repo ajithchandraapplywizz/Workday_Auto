@@ -1,5 +1,6 @@
 import React from 'react';
-import { useAuth, getPreviousWorkdayDateStr } from '../context/AuthContext';
+import { useAuth } from '../context/AuthContext';
+import { getPreviousWorkdayDateStr } from '../utils/dateUtils';
 
 export default function Header({ activeTab, onTabChange, operatorView, onOperatorViewChange }) {
   const { user, switchRole, logout, date, setDate, timeframe, setTimeframe } = useAuth();

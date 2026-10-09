@@ -2309,7 +2309,17 @@ export async function recordJobDistributions({
       });
     }
 
-    const rows = targetClients.map((c) => {
+    // Deduplicate targetClients strictly: exactly 1 entry per client per unique link!
+    const uniqueClientMap = new Map();
+    for (const c of targetClients) {
+      const awl = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim().toUpperCase();
+      if (awl && !uniqueClientMap.has(awl)) {
+        uniqueClientMap.set(awl, c);
+      }
+    }
+    const dedupedClients = Array.from(uniqueClientMap.values());
+
+    const rows = dedupedClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
       const specificJobUrl = (typeof c === 'object' && (c.jobUrl || c.job_url)) ? c.jobUrl || c.job_url : cleanUrl;
