@@ -35,7 +35,7 @@ import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
 import { isGlobalStopRequested, setGlobalStop } from './browserLifecycle.mjs';
 
-function getCleanSupabaseEnv() {
+export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
   let rawKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
 

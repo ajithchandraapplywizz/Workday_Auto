@@ -152,7 +152,7 @@ export function resolveApplyWizzConfig() {
     : DEFAULT_API_BASE;
 
   if (!id) {
-    return { id: '', fetchUrl: '', configured: false };
+    return { id: '', fetchUrl: DEFAULT_API_BASE, configured: true };
   }
 
   const fetchUrl = base.includes('?')
@@ -753,13 +753,18 @@ export function mapApplyWizzToProfile(client = {}, info = {}) {
 export async function fetchApplyWizzClient(applywizzId = '') {
   const cfg = resolveApplyWizzConfig();
   const id = String(applywizzId || cfg.id).trim();
-  if (!id || !cfg.configured) return null;
+  if (!id) return null;
 
-  const url = applywizzId
-    ? (cfg.fetchUrl.includes('applywizz_id')
-      ? cfg.fetchUrl.replace(/applywizz_id=[^&]+/i, `applywizz_id=${encodeURIComponent(id)}`)
-      : `${cfg.fetchUrl}${cfg.fetchUrl.includes('?') ? '&' : '?'}applywizz_id=${encodeURIComponent(id)}`)
-    : cfg.fetchUrl;
+  let url;
+  if (applywizzId) {
+    const base = (cfg.fetchUrl && !cfg.fetchUrl.includes('applywizz_id'))
+      ? cfg.fetchUrl.replace(/\?+$/, '')
+      : DEFAULT_API_BASE;
+    url = `${base}?applywizz_id=${encodeURIComponent(id)}`;
+  } else {
+    url = cfg.fetchUrl;
+  }
+  if (!url) return null;
 
   const data = await fetchJsonWithRetry(url);
   if (!data?.client) throw new Error('Apply Wizz API: missing client payload');
