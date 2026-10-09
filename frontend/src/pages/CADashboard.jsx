@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, getYesterdayDateStr } from '../context/AuthContext';
 import {
   fetchClientDetails,
   fetchClientQuestions,
@@ -44,6 +44,9 @@ import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function CADashboard() {
   const { user, date } = useAuth();
+
+  // CA work history data is strictly locked to yesterday (T-1)
+  const yesterdayDate = useMemo(() => getYesterdayDateStr(), []);
 
   const [applywizzId, setApplywizzId] = useState('');
   const [loadingClient, setLoadingClient] = useState(false);
@@ -159,7 +162,25 @@ export default function CADashboard() {
     }
   };
 
-  // Dynamically load assigned candidates for this CA on the active date
+  // Record CA's active status in Supabase upon viewing the console
+  useEffect(() => {
+    if (!activeCaEmail) return;
+    const nowIso = new Date().toISOString();
+    supabase
+      .from('operators')
+      .update({ status: 'active', updated_at: nowIso })
+      .ilike('email', activeCaEmail)
+      .then(() => {})
+      .catch(() => {});
+    supabase
+      .from('auth_users')
+      .update({ status: 'active', updated_at: nowIso, last_sign_in: nowIso })
+      .ilike('email', activeCaEmail)
+      .then(() => {})
+      .catch(() => {});
+  }, [activeCaEmail]);
+
+  // Dynamically load assigned candidates for this CA from yesterday's work history
   useEffect(() => {
     let isMounted = true;
     async function loadAssignedCandidates() {
@@ -167,7 +188,7 @@ export default function CADashboard() {
       try {
         const res = await fetchAssignedClientsForCA({
           caEmail: activeCaEmail,
-          atDate: date,
+          atDate: yesterdayDate,
         });
 
         if (!isMounted) return;
@@ -204,7 +225,7 @@ export default function CADashboard() {
 
     loadAssignedCandidates();
     return () => { isMounted = false; };
-  }, [activeCaEmail, date]);
+  }, [activeCaEmail, yesterdayDate]);
 
   // Fetch client details, questions, and real jobs from Supabase
   const loadClientProfile = async (idToLoad) => {
@@ -540,7 +561,7 @@ export default function CADashboard() {
         </div>
         <div className="candidate-quick-pills" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
           <span className="quick-label" style={{ fontWeight: 'bold', color: '#94a3b8' }}>
-            ALLOTTED CLIENTS ({candidateList.length}):
+            ALLOTTED CLIENTS ({candidateList.length}) &bull; YESTERDAY'S WORK DATA ({yesterdayDate}):
           </span>
           {candidateList.length > 0 ? (
             candidateList.map((c) => {

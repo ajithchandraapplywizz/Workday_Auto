@@ -17,6 +17,15 @@ export const getTodayDateStr = () => {
   return `${year}-${month}-${day}`;
 };
 
+export const getYesterdayDateStr = () => {
+  const d = new Date();
+  d.setDate(d.getDate() - 1);
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
+};
+
 export function AuthProvider({ children }) {
   // Session strictly initialized from verified storage — no automatic default bypass
   const [user, setUser] = useState(() => {
@@ -28,7 +37,8 @@ export function AuthProvider({ children }) {
     }
   });
 
-  const [date, setDate] = useState(getTodayDateStr());
+  // Default to yesterday's date for CA work history allotment
+  const [date, setDate] = useState(getYesterdayDateStr());
   const [timeframe, setTimeframe] = useState('day');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
@@ -290,20 +300,21 @@ export function AuthProvider({ children }) {
         console.warn('Operator active sync note:', err);
       }
 
-      // MANDATORY: Hit CA work history endpoint immediately to load today's allotted clients
+      // MANDATORY: Hit CA work history endpoint immediately to load yesterday's allotted clients
       setSmartSyncStatus('syncing');
-      setSmartSyncMessage(`Retrieving daily client allotment from CA work history...`);
+      setSmartSyncMessage(`Retrieving yesterday's client allotment from CA work history...`);
 
       (async () => {
         try {
+          const syncDate = getYesterdayDateStr();
           const syncRes = await syncLiveCAData({
             caEmail: normalizedEmail,
-            dateStr: date || getTodayDateStr(),
+            dateStr: syncDate,
           });
           if (syncRes.success) {
             const fbTag = syncRes.isFallback ? ' (fallback date)' : '';
             setSmartSyncStatus('synced');
-            setSmartSyncMessage(`✅ Allotted clients retrieved: ${syncRes.count} clients for ${syncRes.activeDate}${fbTag}`);
+            setSmartSyncMessage(`✅ Allotted clients retrieved: ${syncRes.count} clients from yesterday (${syncRes.activeDate})${fbTag}`);
           } else {
             setSmartSyncStatus('failed');
             setSmartSyncMessage(syncRes.message || 'Work history retrieved (0 assigned clients).');

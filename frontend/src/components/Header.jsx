@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, getYesterdayDateStr } from '../context/AuthContext';
 
 export default function Header({ activeTab, onTabChange, operatorView, onOperatorViewChange }) {
   const { user, switchRole, logout, date, setDate, timeframe, setTimeframe } = useAuth();
@@ -92,16 +92,25 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Date Picker */}
-          <div className="control-date-box">
-            <span className="control-label-micro">DATE</span>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="header-date-input"
-            />
-          </div>
+          {/* Date Picker: Hidden for CA/Operator, locked to Yesterday's work history data */}
+          {(user?.role === 'ca' || user?.role === 'operator') ? (
+            <div className="control-date-box" title="CA candidate allotment is automatically locked to yesterday's work history data">
+              <span className="control-label-micro">WORK DATA DATE</span>
+              <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#38bdf8', padding: '2px 6px', letterSpacing: '0.02em' }}>
+                {date || getYesterdayDateStr()} (Yesterday)
+              </span>
+            </div>
+          ) : (
+            <div className="control-date-box">
+              <span className="control-label-micro">DATE</span>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="header-date-input"
+              />
+            </div>
+          )}
 
           {/* Timeframe Stats: Day, Week, Month */}
           <div className="control-stats-box">
