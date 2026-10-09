@@ -162,7 +162,7 @@ export function AuthProvider({ children }) {
 
       if (op) {
         return {
-          role: 'operator',
+          role: op.role === 'admin' ? 'admin' : (op.role === 'manager' ? 'manager' : 'ca'),
           name: op.name || normalizedEmail.split('@')[0],
           manager_id: op.manager_id,
         };
@@ -171,9 +171,9 @@ export function AuthProvider({ children }) {
       console.warn('Operator lookup note:', err);
     }
 
-    // 5. Default: Career Associate (Operator)
+    // 5. Default: Career Associate (CA)
     return {
-      role: 'operator',
+      role: 'ca',
       name: normalizedEmail.split('@')[0],
       manager_id: null,
     };
@@ -207,13 +207,11 @@ export function AuthProvider({ children }) {
       .maybeSingle();
 
     const isStoredCodeValid = authUser?.verification_code && authUser.verification_code === cleanCode;
-    // Development / Sandbox testing code allows easy verification of any admin/manager/ca/dummy account
-    const isSandboxBypass = cleanCode === '000000';
 
-    // Must satisfy TOTP code, verified code, or testing sandbox code
-    if (!isTotpValid && !isStoredCodeValid && !isSandboxBypass) {
+    // Strictly enforce real Microsoft Authenticator verification or valid email OTP code
+    if (!isTotpValid && !isStoredCodeValid) {
       throw new Error(
-        'Invalid 6-digit Authenticator code. Please check your Microsoft Authenticator app or use the sandbox test code (000000).'
+        'Invalid 6-digit Authenticator code. Please enter the current 6-digit code from your Microsoft Authenticator app.'
       );
     }
 

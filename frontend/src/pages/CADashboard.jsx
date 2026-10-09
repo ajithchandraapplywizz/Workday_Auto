@@ -237,38 +237,33 @@ export default function CADashboard() {
         }
       }
 
-      // Query ONLY job_distributions: strictly display jobs in the review & submit pipeline
-      // Allowed statuses: ready_for_review, ready_to_review, review_and_submit, applying, submitted
+      // Query job_distributions: display all candidate applications in review & submission pipeline
       const jobsMap = new Map();
       if (distRes.data && distRes.data.length > 0) {
         for (const dj of distRes.data) {
           const u = (dj.job_url || '').trim().toLowerCase();
           const sj = scannedMap.get(u);
-          // STRICT GATE: Job must exist in scanned_jobs with question_count > 0
-          if (!sj) continue;
-          const questionsCount = Number(sj.question_count) || (Array.isArray(sj.scraped_questions) ? sj.scraped_questions.length : 0);
-          if (questionsCount === 0) continue;
-
           const st = (dj.status || '').toLowerCase();
-          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed'].includes(st);
+          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'needs_answers', 'failed'].includes(st);
           if (!isAllowedStatus) continue;
 
-          if (u && !jobsMap.has(u)) {
-            jobsMap.set(u, {
+          const key = dj.id || u;
+          if (key && !jobsMap.has(key)) {
+            jobsMap.set(key, {
               id: dj.id,
               applywizz_id: dj.applywizz_id,
               job_url: dj.job_url,
-              company: dj.company || 'Workday Partner',
-              role_title: dj.role_title || 'Workday Application',
+              company: dj.company || sj?.company || 'Workday Partner',
+              role_title: dj.role_title || sj?.role_title || 'Workday Application',
               status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
               is_fully_answered: dj.is_fully_answered,
-              resolved_answers: dj.resolved_answers,
+              resolved_answers: dj.resolved_answers || [],
               unanswered_count: dj.unanswered_count || 0,
               unanswered_questions: dj.unanswered_questions || [],
               applied_screenshot: dj.application_submitted_screenshot_url || null,
               application_submitted_screenshot_url: dj.application_submitted_screenshot_url || null,
               screenshot_url: dj.application_submitted_screenshot_url || null,
-              blueprint_screenshot: null,
+              blueprint_screenshot: sj?.screenshot_path || null,
               scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
               source: 'job_distributions',
             });
@@ -317,24 +312,59 @@ export default function CADashboard() {
 
 
 
-  // Live polling: automatically reflects background bot progress for selected candidate
+  // Live polling: automatically reflects real-time status in job_distributions and batch_job_queue
   useEffect(() => {
     if (!applywizzId) return;
     let isMounted = true;
 
     const intervalId = setInterval(async () => {
       try {
-        const { data: queueTasks } = await supabase
-          .from('batch_job_queue')
-          .select('*')
-          .eq('applywizz_id', applywizzId)
-          .order('created_at', { ascending: false })
-          .limit(1);
+        const [distRes, queueRes] = await Promise.all([
+          supabase
+            .from('job_distributions')
+            .select('*')
+            .eq('applywizz_id', applywizzId)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('batch_job_queue')
+            .select('*')
+            .eq('applywizz_id', applywizzId)
+            .order('created_at', { ascending: false })
+            .limit(1),
+        ]);
 
         if (!isMounted) return;
-        const task = queueTasks?.[0];
+
+        // 1. Update clientJobs in real-time from job_distributions
+        if (distRes.data && distRes.data.length > 0) {
+          const freshMap = new Map();
+          for (const d of distRes.data) {
+            freshMap.set(d.id || d.job_url, d);
+          }
+
+          setClientJobs((prevJobs) => {
+            let changed = false;
+            const updated = prevJobs.map((j) => {
+              const f = freshMap.get(j.id) || freshMap.get(j.job_url);
+              if (f && (f.status !== j.status || f.application_submitted_screenshot_url !== j.application_submitted_screenshot_url)) {
+                changed = true;
+                return {
+                  ...j,
+                  status: (f.status === 'distributed' || f.status === 'ready_to_review') ? 'ready_for_review' : f.status,
+                  application_submitted_screenshot_url: f.application_submitted_screenshot_url,
+                  applied_screenshot: f.application_submitted_screenshot_url,
+                  screenshot_url: f.application_submitted_screenshot_url,
+                };
+              }
+              return j;
+            });
+            return changed ? updated : prevJobs;
+          });
+        }
+
+        // 2. Reflect latest active task progress
+        const task = queueRes.data?.[0];
         if (task) {
-          setActiveTask(task);
           if (task.status === 'reached_review' || task.status === 'pre_resolved') {
             setApplyStep(3);
           } else if (task.status === 'submitted') {
@@ -346,7 +376,7 @@ export default function CADashboard() {
       } catch (err) {
         // silent polling catch
       }
-    }, 3500);
+    }, 2500);
 
     return () => {
       isMounted = false;

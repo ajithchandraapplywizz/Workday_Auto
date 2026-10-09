@@ -293,11 +293,12 @@ export default function LoginPage() {
                   type="button"
                   className="btn-ghost-sm"
                   style={{ color: '#38bdf8', borderColor: 'rgba(56, 189, 248, 0.3)' }}
-                  onClick={() => setCode('000000')}
-                  title="Testing bypass code for development and role testing"
+                  onClick={handleOpenMfaSetup}
+                  disabled={mfaLoading || !email}
+                  title="Scan QR Code in Microsoft Authenticator app on your phone"
                 >
-                  <Sparkles size={12} style={{ display: 'inline', marginRight: '4px' }} />
-                  Sandbox Test Code (000000)
+                  <QrCode size={12} style={{ display: 'inline', marginRight: '4px' }} />
+                  Setup Microsoft Authenticator
                 </button>
               </div>
             </div>

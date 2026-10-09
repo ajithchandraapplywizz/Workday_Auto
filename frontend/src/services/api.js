@@ -266,7 +266,7 @@ export async function checkAllApiHealth() {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
           }
-        } catch {}
+        } catch { }
 
         // 2. Direct fetch with CORS
         try {
@@ -275,7 +275,7 @@ export async function checkAllApiHealth() {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
           }
-        } catch {}
+        } catch { }
 
         // 3. Fallback: probe via no-cors mode so browser CORS header absences do not mark live service as error
         try {
@@ -299,7 +299,7 @@ export async function checkAllApiHealth() {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
           }
-        } catch {}
+        } catch { }
 
         try {
           const res = await fetch('https://zoho-mail-reader.onrender.com/health', { signal: AbortSignal.timeout(3500) });
@@ -307,7 +307,7 @@ export async function checkAllApiHealth() {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
           }
-        } catch {}
+        } catch { }
 
         try {
           await fetch('https://zoho-mail-reader.onrender.com/health', { mode: 'no-cors', signal: AbortSignal.timeout(4500) });
@@ -1004,55 +1004,55 @@ export async function fetchApplicationsDynamic({
             existing.failure_reason = qt.error_message;
           }
         } else {
-            // Extract company and role from URL if null
-            let parsedCompany = qt.company;
-            let parsedTitle = qt.role_title;
-            if ((!parsedCompany || !parsedTitle) && qt.job_url) {
-              try {
-                const u = new URL(qt.job_url);
-                if (!parsedCompany) {
-                  const hostParts = u.hostname.split('.');
-                  const pathParts = u.pathname.split('/').filter(Boolean);
-                  const tenantSlug = pathParts[0] || hostParts[0];
-                  parsedCompany = tenantSlug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-                }
-                if (!parsedTitle) {
-                  const segments = u.pathname.split('/').filter(Boolean);
-                  const lastSeg = segments[segments.length - 1] || '';
-                  parsedTitle = decodeURIComponent(lastSeg)
-                    .replace(/[-_]+/g, ' ')
-                    .replace(/\b(REQ|JR|R)?\d+(-\d+)?\b/gi, '')
-                    .replace(/\s+/g, ' ')
-                    .trim();
-                }
-              } catch (_) {}
-            }
-
-            const hasProof = Boolean(qt.screenshot_path);
-            let finalStatus = qt.status || 'pending';
-            if ((finalStatus === 'submitted' || finalStatus === 'completed') && !hasProof) {
-              finalStatus = 'pending';
-            }
-
-            const newItem = {
-              id: qt.id,
-              applywizz_id: qt.applywizz_id,
-              job_title: parsedTitle || 'Workday Position',
-              company: parsedCompany || 'Workday Employer',
-              ats: 'Workday',
-              status: finalStatus,
-              job_url: qt.job_url,
-              pre_resolved_answers: qt.pre_resolved_answers,
-              screenshot_url: qt.screenshot_path || null,
-              failure_screenshot_url: qt.screenshot_path || null,
-              failure_reason: qt.error_message || null,
-              created_at: qt.created_at,
-              updated_at: qt.completed_at || qt.created_at,
-            };
-            itemByUrl.set(cleanQtUrl, newItem);
+          // Extract company and role from URL if null
+          let parsedCompany = qt.company;
+          let parsedTitle = qt.role_title;
+          if ((!parsedCompany || !parsedTitle) && qt.job_url) {
+            try {
+              const u = new URL(qt.job_url);
+              if (!parsedCompany) {
+                const hostParts = u.hostname.split('.');
+                const pathParts = u.pathname.split('/').filter(Boolean);
+                const tenantSlug = pathParts[0] || hostParts[0];
+                parsedCompany = tenantSlug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
+              }
+              if (!parsedTitle) {
+                const segments = u.pathname.split('/').filter(Boolean);
+                const lastSeg = segments[segments.length - 1] || '';
+                parsedTitle = decodeURIComponent(lastSeg)
+                  .replace(/[-_]+/g, ' ')
+                  .replace(/\b(REQ|JR|R)?\d+(-\d+)?\b/gi, '')
+                  .replace(/\s+/g, ' ')
+                  .trim();
+              }
+            } catch (_) { }
           }
+
+          const hasProof = Boolean(qt.screenshot_path);
+          let finalStatus = qt.status || 'pending';
+          if ((finalStatus === 'submitted' || finalStatus === 'completed') && !hasProof) {
+            finalStatus = 'pending';
+          }
+
+          const newItem = {
+            id: qt.id,
+            applywizz_id: qt.applywizz_id,
+            job_title: parsedTitle || 'Workday Position',
+            company: parsedCompany || 'Workday Employer',
+            ats: 'Workday',
+            status: finalStatus,
+            job_url: qt.job_url,
+            pre_resolved_answers: qt.pre_resolved_answers,
+            screenshot_url: qt.screenshot_path || null,
+            failure_screenshot_url: qt.screenshot_path || null,
+            failure_reason: qt.error_message || null,
+            created_at: qt.created_at,
+            updated_at: qt.completed_at || qt.created_at,
+          };
+          itemByUrl.set(cleanQtUrl, newItem);
         }
       }
+    }
 
     // In 1-worker mode, at most ONE item can ever be in-flight simultaneously across the client's queue.
     // If multiple stale items have in-flight statuses, preserve at most the most recent 1 and mark the rest as queued.
@@ -1101,7 +1101,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     const allApps = apps || [];
     const now = Date.now();
     const submitted = allApps.filter((a) => a.status === 'submitted').length;
-    
+
     // Check live worker_status table: if 0 submitting workers are in_flight, applying is strictly 0!
     let liveWorkersInFlight = 0;
     try {
@@ -1115,7 +1115,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
           return w.state === 'in_flight' && last && (now - last < 5 * 60 * 1000);
         }).length;
       }
-    } catch {}
+    } catch { }
 
     // Active applying count for the Stage 3 submitting worker execution pool
     const activeApplying = allApps.filter((a) => {
@@ -1150,7 +1150,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
           else if (s.includes('resume')) resumeCount++;
         }
       }
-    } catch {}
+    } catch { }
 
     const supabasePct = totalAnswers > 0 ? Math.round((supabaseCount / totalAnswers) * 100) : 0;
     const aiPct = totalAnswers > 0 ? Math.round((aiCount / totalAnswers) * 100) : 0;
@@ -2130,7 +2130,7 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       const allJobs = Array.from(jobUrlMap.values());
       const isClientActiveInFlight = Boolean(activeWorker && activeClientId === cid);
       const inFlightCount = isClientActiveInFlight ? 1 : 0;
-      
+
       const readyCount = allJobs.filter((j) => ['ready_for_review', 'reached_review'].includes((j.status || '').toLowerCase())).length;
       const submittedCount = allJobs.filter((j) => {
         const s = (j.status || '').toLowerCase();
@@ -2270,7 +2270,7 @@ export async function triggerAutonomousBot() {
           httpMessage = resJson.message || 'Pipeline started';
           break;
         }
-      } catch {}
+      } catch { }
     }
 
     return {
@@ -2310,7 +2310,7 @@ export async function stopAutonomousBot() {
           signal: AbortSignal.timeout(2000),
         })
       )
-    ).catch(() => {});
+    ).catch(() => { });
 
     // 2. Set bot_control stop signal in Supabase
     try {
@@ -2375,7 +2375,7 @@ export async function triggerSubmissionStage() {
         last_action_requested: 'submit_approved',
         updated_at: now,
       }, { onConflict: 'id' });
-  } catch {}
+  } catch { }
 
   const endpoints = [
     '/api/bot/submit',
@@ -2394,7 +2394,7 @@ export async function triggerSubmissionStage() {
       if (resp.ok) {
         return { success: true, message: 'Stage 3 Submissions triggered for approved applications.' };
       }
-    } catch {}
+    } catch { }
   }
   return { success: false, error: 'Could not reach daemon webhook server.' };
 }
@@ -2415,7 +2415,7 @@ export async function fetchBotDaemonStatus() {
         daemonApiRunning = Boolean(json.isRunning);
         daemonApiStage = json.stage || 'idle';
       }
-    } catch {}
+    } catch { }
 
     const [workersRes, controlRes] = await Promise.all([
       supabase
@@ -2657,14 +2657,41 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       if (k) resolvedMap.set(k, r);
     }
 
+    // 1. Process all items directly from resolved_answers in job_distributions
+    for (const r of resolvedList) {
+      const label = r.question || r.label || r.question_raw || '';
+      if (!label || isPersonalInfoField(label)) continue;
+      const norm = r.question_normalized || label.toLowerCase().trim();
+      if (seenQuestions.has(norm)) continue;
+      seenQuestions.add(norm);
+
+      const val = r.answer !== undefined ? r.answer : (r.value || '');
+      const isMissing = !val || val === '' || val === 'null';
+      const isAi = r.tier === 4 || /ai|llm/i.test(r.source || '') || /ai|llm/i.test(r.sourceLabel || '');
+
+      allFields.push({
+        id: `resolved-${norm}`,
+        label,
+        questionNormalized: norm,
+        value: val || '',
+        source: isAi ? 'ai' : (r.source || 'supabase'),
+        sourceLabel: isAi ? 'Tier 4: AI / LLM' : (r.sourceLabel || 'Supabase DB'),
+        tier: isAi ? 4 : (r.tier || 1),
+        isUnanswered: isMissing,
+        isPersonal: false,
+        fieldType: r.field_type || r.fieldType || (Array.isArray(r.options) && r.options.length ? 'dropdown' : 'input'),
+        options: Array.isArray(r.options) ? r.options : [],
+      });
+    }
+
+    // 2. Also check scrapedList for any additional form fields
     for (const f of scrapedList) {
       const label = typeof f === 'string' ? f : (f.label || f.question || f.question_raw || f.name || '');
       if (!label) continue;
       const norm = (typeof f === 'object' && f.question_normalized) ? f.question_normalized : label.toLowerCase().trim();
-      if (seenQuestions.has(norm)) continue;
+      if (seenQuestions.has(norm) || isPersonalInfoField(label)) continue;
       seenQuestions.add(norm);
 
-      const isPersonal = isPersonalInfoField(label);
       const resItem = resolvedMap.get(norm) || resolvedMap.get(label.toLowerCase().trim());
       const qaAns = qaMap.get(norm) || qaMap.get(label.toLowerCase().trim());
 
@@ -2679,10 +2706,10 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
         itemTier = 0;
         itemSource = 'unanswered';
         itemSourceLabel = 'Needs CA Answer';
-      } else if (itemTier === 1 || resItem?.source?.includes('Tier 1') || resItem?.source === 'supabase') {
-        itemTier = 1;
-        itemSource = 'supabase';
-        itemSourceLabel = 'Tier 1: Supabase DB';
+      } else if (itemTier === 4 || resItem?.source?.includes('Tier 4') || resItem?.source === 'ai' || resItem?.source === 'llm') {
+        itemTier = 4;
+        itemSource = 'ai';
+        itemSourceLabel = 'Tier 4: AI / LLM';
       } else if (itemTier === 2 || resItem?.source?.includes('Tier 2') || resItem?.source === 'resume') {
         itemTier = 2;
         itemSource = 'resume';
@@ -2691,10 +2718,6 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
         itemTier = 3;
         itemSource = 'api';
         itemSourceLabel = 'Tier 3: CRM API';
-      } else if (itemTier === 4 || resItem?.source?.includes('Tier 4') || resItem?.source === 'ai' || resItem?.source === 'llm') {
-        itemTier = 4;
-        itemSource = 'ai';
-        itemSourceLabel = 'Tier 4: AI / LLM';
       } else if (qaAns) {
         itemTier = 1;
         itemSource = 'qa_bank';
@@ -2719,7 +2742,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
         sourceLabel: itemSourceLabel,
         tier: itemTier,
         isUnanswered: isMissing,
-        isPersonal,
+        isPersonal: false,
         fieldType: fType,
         options: rawOptions,
       });
@@ -2728,7 +2751,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
     // Separate clean lists
     const nonPersonalFields = allFields.filter((f) => !f.isPersonal);
     const unansweredFields = nonPersonalFields.filter((f) => f.isUnanswered);
-    const aiFields = nonPersonalFields.filter((f) => f.source === 'ai');
+    const aiFields = nonPersonalFields.filter((f) => f.source === 'ai' || f.tier === 4);
 
     const appObj = {
       id: distRow?.id || null,
@@ -2872,7 +2895,7 @@ export async function saveAnswerToQaBank({
         const filteredUnans = unans.filter((u) => {
           const uLabel = typeof u === 'string' ? u : (u.label || u.question || u.question_normalized || '');
           return uLabel.toLowerCase().trim() !== qStr.toLowerCase().trim() &&
-                 uLabel.toLowerCase().trim() !== norm;
+            uLabel.toLowerCase().trim() !== norm;
         });
 
         const newUnansCount = filteredUnans.length;
@@ -2973,7 +2996,7 @@ export async function submitApplicationReview({
           last_action_requested: 'submit_approved',
           updated_at: now,
         }, { onConflict: 'id' });
-    } catch {}
+    } catch { }
 
     // 4. Send targeted HTTP trigger to background daemon to execute single Playwright submission
     const submitEndpoints = [
@@ -2996,7 +3019,7 @@ export async function submitApplicationReview({
           signal: AbortSignal.timeout(3000),
         })
       )
-    ).catch(() => {});
+    ).catch(() => { });
 
     return {
       success: true,

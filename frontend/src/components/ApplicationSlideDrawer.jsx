@@ -24,6 +24,7 @@ import {
   submitApplicationReview,
   isPersonalInfoField
 } from '../services/api';
+import { supabase } from '../config/supabase';
 import './ApplicationSlideDrawer.css';
 
 /**
@@ -203,7 +204,7 @@ export default function ApplicationSlideDrawer({
     });
   }, [fields]);
 
-  // Active list of fields to display: default to AI-answered & missing questions only
+  // Active list of fields to display: default to AI/LLM answered questions only
   const displayedFields = useMemo(() => {
     if (filterMode === 'missing_only') {
       return missingFields;
@@ -211,16 +212,10 @@ export default function ApplicationSlideDrawer({
     if (filterMode === 'all') {
       return fields.filter((f) => !f.isPersonal);
     }
-    // Default 'ai_only': ONLY AI-answered and missing questions for this application!
-    return fields.filter((f) => {
-      if (f.isPersonal) return false;
-      const isMiss = f.isUnanswered || !editValues[f.id];
-      const src = (f.source || '').toLowerCase();
-      const label = (f.sourceLabel || '').toLowerCase();
-      const isAi = src === 'ai' || src === 'llm' || label.includes('ai') || label.includes('llm') || f.tier === 4;
-      return isMiss || isAi;
-    });
-  }, [fields, missingFields, filterMode, editValues]);
+    // Default 'ai_only': STRICTLY AI/LLM answered questions from job_distributions!
+    if (aiFields.length > 0) return aiFields;
+    return fields.filter((f) => !f.isPersonal && (f.source === 'ai' || f.tier === 4 || /ai|llm/i.test(f.sourceLabel || '')));
+  }, [fields, missingFields, aiFields, filterMode]);
 
   // Handle saving an answer directly to qa_bank in Supabase
   const handleSaveToQaBank = async (field) => {
@@ -800,21 +795,26 @@ export default function ApplicationSlideDrawer({
                     : (missingFields.length > 0 ? `Needs Answers (${missingFields.length})` : 'Review & Submit')}
                 </span>
               </button>
-            ) : proofShot ? (
+            ) : (
               <button
                 type="button"
                 className="sd-btn-primary"
-                onClick={() => setSelectedScreenshot(proofShot)}
+                onClick={() => setSelectedScreenshot(proofShot || {
+                  url: appDetails?.screenshotUrl || appDetails?.application_submitted_screenshot_url,
+                  company: appDetails?.company,
+                  status: 'submitted',
+                  isPlaceholder: !proofShot,
+                })}
                 style={{
                   background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
                   border: '1px solid #34d399',
                   boxShadow: '0 4px 14px rgba(16, 185, 129, 0.35)',
                 }}
               >
-                <ImageIcon size={15} />
-                <span>Submission Screenshot</span>
+                <Eye size={15} />
+                <span>View Submission Proof</span>
               </button>
-            ) : null}
+            )}
           </div>
         </div>}
 

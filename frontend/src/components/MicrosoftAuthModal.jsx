@@ -200,16 +200,8 @@ export default function MicrosoftAuthModal({ isOpen, onClose }) {
                 />
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: '6px' }}>
                   <p className="ms-helper" style={{ margin: 0 }}>
-                    Enter 6-digit code from Microsoft Authenticator
+                    Enter current 6-digit rolling code from Microsoft Authenticator app
                   </p>
-                  <button
-                    type="button"
-                    onClick={() => setCode('000000')}
-                    style={{ background: 'none', border: 'none', color: '#38bdf8', fontSize: '0.72rem', cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '3px' }}
-                  >
-                    <Sparkles size={11} />
-                    <span>Test Code (000000)</span>
-                  </button>
                 </div>
               </div>
 
