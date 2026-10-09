@@ -117,8 +117,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
           id: a.applywizz_id,
           name: a.client_name || a.applywizz_id,
           client_email: a.client_email,
-          jobs_applied: a.jobs_applied || 0,
-          emails_submitted: a.emails_submitted || 0,
+          jobs_applied: 0,
+          emails_submitted: 0,
           date: targetDate,
         }));
         setCandidates(mapped);
@@ -288,19 +288,18 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     };
   }, [operatorView, sessionCaEmail, activeWorkDate, date]);
 
-  // Overall counts for this CA in this period (Strictly verified submissions with screenshot proof)
+  // Overall counts for this CA in this period (Strictly verified submissions with screenshot proof from our Workday database)
   const totals = useMemo(() => {
     const hasProof = (a) => Boolean(a.screenshot_url || a.screenshot_path || a.failure_screenshot_url);
     const currentTotal = applications.length;
     const currentSubmitted = applications.filter((a) => (a.status === 'submitted' || a.status === 'completed') && hasProof(a)).length;
     const currentFailed = applications.filter((a) => a.status === 'failed').length;
-    const totalCandidatesApps = candidates.reduce((acc, c) => acc + (Number(c.jobs_applied) || 0), 0);
     return {
-      total: Math.max(totalCandidatesApps, currentTotal),
+      total: currentTotal,
       submitted: currentSubmitted,
       failed: currentFailed,
     };
-  }, [applications, candidates]);
+  }, [applications]);
 
   // Filtered candidate list with safe null checks
   const filteredCandidates = useMemo(() => {
@@ -598,14 +597,14 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                       <span className="cci-awl">{c.id}</span>
                       <span style={{
                         fontSize: '0.72rem',
-                        color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8',
-                        fontWeight: (c.jobs_applied || 0) > 0 ? 'bold' : 'normal',
-                        background: (c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.15)',
+                        color: selectedCandidate?.id === c.id && applications.length > 0 ? '#38bdf8' : '#94a3b8',
+                        fontWeight: selectedCandidate?.id === c.id && applications.length > 0 ? 'bold' : 'normal',
+                        background: selectedCandidate?.id === c.id && applications.length > 0 ? 'rgba(56, 189, 248, 0.15)' : 'rgba(100, 116, 139, 0.15)',
                         padding: '2px 7px',
                         borderRadius: '4px',
-                        border: `1px solid ${(c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.3)' : 'rgba(100, 116, 139, 0.25)'}`,
+                        border: `1px solid ${selectedCandidate?.id === c.id && applications.length > 0 ? 'rgba(56, 189, 248, 0.3)' : 'rgba(100, 116, 139, 0.25)'}`,
                       }}>
-                        {c.jobs_applied || 0} Apps
+                        {selectedCandidate?.id === c.id ? `${applications.length} Apps` : 'Assigned'}
                       </span>
                     </div>
                   </div>

@@ -86,9 +86,9 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Date Picker: Hidden for CA/Operator, locked to Yesterday's work history data */}
-          {(user?.role === 'ca' || user?.role === 'operator') ? (
-            <div className="control-date-box" title="CA candidate allotment is automatically locked to yesterday's work history data">
+          {/* Date Picker: Hidden for CA/Operator and Manager, locked to Yesterday's work history data */}
+          {(user?.role === 'ca' || user?.role === 'operator' || user?.role === 'manager') ? (
+            <div className="control-date-box" title="Candidate and team work data locked to yesterday's work history data">
               <span className="control-label-micro">WORK DATA DATE</span>
               <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#38bdf8', padding: '2px 6px', letterSpacing: '0.02em' }}>
                 {getPreviousWorkdayDateStr()} (Yesterday)
@@ -106,11 +106,11 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Timeframe Stats: Only day data enabled for CA (no week or month) */}
+          {/* Timeframe Stats: Only day data enabled for CA/Operator and Manager (no week or month) */}
           <div className="control-stats-box">
             <span className="control-label-micro">STATS</span>
             <div className="stats-pill-group">
-              {(user?.role === 'ca' || user?.role === 'operator' ? ['day'] : ['day', 'week', 'month']).map((t) => (
+              {(['ca', 'operator', 'manager'].includes(user?.role) ? ['day'] : ['day', 'week', 'month']).map((t) => (
                 <button
                   key={t}
                   type="button"

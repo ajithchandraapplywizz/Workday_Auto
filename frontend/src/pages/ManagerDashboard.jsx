@@ -42,9 +42,7 @@ export default function ManagerDashboard() {
   // Applications Tab states
   const [appSearchQuery, setAppSearchQuery] = useState('');
   const [appStatusFilter, setAppStatusFilter] = useState('All');
-  const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
-
-  const tabs = ['Home', 'Applications', 'Operators', 'Activity', 'Reports', 'Guide'];
+  const tabs = ['Home', 'Applications', 'Operators', 'Reports', 'Guide'];
 
   // Load managers list dynamically and select matching manager
   useEffect(() => {
@@ -342,15 +340,15 @@ export default function ManagerDashboard() {
             </select>
           </div>
 
-          {/* Date Range Selector */}
+          {/* Date Range Selector: Locked to Day */}
           <div className="filter-range-box">
             <span className="control-label-micro">DATE RANGE</span>
             <div className="range-pills">
-              {['Today', 'Day', 'Week', 'Month'].map((r) => (
+              {['Day'].map((r) => (
                 <button
                   key={r}
                   type="button"
-                  className={`range-pill-btn ${dateRange.toLowerCase() === r.toLowerCase() ? 'active' : ''}`}
+                  className="range-pill-btn active"
                   onClick={() => handleDateRangeChange(r)}
                 >
                   {r}
@@ -359,14 +357,7 @@ export default function ManagerDashboard() {
             </div>
           </div>
 
-          {/* Mode & Refresh Buttons */}
-          <button
-            type="button"
-            className={`video-btn-ops ${opsMode ? 'active' : ''}`}
-            onClick={() => setOpsMode(!opsMode)}
-          >
-            {opsMode ? '✓ Ops Active' : 'Ops mode'}
-          </button>
+          {/* Refresh Buttons */}
           <button
             type="button"
             disabled={isSyncing}
@@ -435,22 +426,6 @@ export default function ManagerDashboard() {
       {/* 1. HOME TAB */}
       {activeTab === 'Home' && (
         <div className="tab-body-fade">
-          {/* Top Scoped KPIs */}
-          <div className="video-manager-kpi-row">
-            <div className="video-kpi-box">
-              <span className="vkpi-label">TOTAL APPLICATIONS</span>
-              <span className="vkpi-val">{teamMetrics.total}</span>
-            </div>
-            <div className="video-kpi-box highlighted">
-              <span className="vkpi-label">SUBMITTED (TEAM)</span>
-              <span className="vkpi-val">{teamMetrics.submitted}</span>
-            </div>
-            <div className="video-kpi-box">
-              <span className="vkpi-label">APPLIED (TEAM)</span>
-              <span className="vkpi-val">{teamMetrics.applied}</span>
-            </div>
-          </div>
-
           {/* Scoped Client Allocation Table (Strictly this manager's clients, with exact assigned CA) */}
           <div className="video-table-container">
             <table className="video-data-table">
@@ -460,8 +435,6 @@ export default function ManagerDashboard() {
                   <th>AWL ID</th>
                   <th>APPS</th>
                   <th>SUBMITTED</th>
-                  <th>APPLIED</th>
-                  <th>PENDING</th>
                   <th>FAILED</th>
                   <th>ASSIGNED CA EMAIL</th>
                 </tr>
@@ -495,8 +468,6 @@ export default function ManagerDashboard() {
                           {row.submitted}
                         </span>
                       </td>
-                      <td>{row.applied}</td>
-                      <td>{row.pending}</td>
                       <td>
                         <span style={{ color: row.failed > 0 ? '#ef4444' : '#94a3b8' }}>
                           {row.failed}
@@ -511,7 +482,7 @@ export default function ManagerDashboard() {
                   ))
                 ) : (
                   <tr>
-                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No client applications assigned to {currentManager.name}&apos;s team for {activeWorkDate || date}.
                     </td>
                   </tr>
@@ -736,66 +707,6 @@ export default function ManagerDashboard() {
                   <tr>
                     <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No operators currently assigned under {currentManager.name}.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* 3. ACTIVITY TAB */}
-      {activeTab === 'Activity' && (
-        <div className="tab-body-fade">
-          <div className="video-table-container">
-            <table className="video-data-table">
-              <thead>
-                <tr>
-                  <th>CLIENT NAME</th>
-                  <th>AWL ID</th>
-                  <th>ASSIGNED CA</th>
-                  <th>EMAILS SUBMITTED</th>
-                  <th>JOBS APPLIED</th>
-                  <th>STATUS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredClientRows.length > 0 ? (
-                  filteredClientRows.map((c) => (
-                    <tr key={c.applywizz_id}>
-                      <td><strong>{c.name}</strong></td>
-                      <td><span className="app-id-tag">{c.applywizz_id}</span></td>
-                      <td><span className="assigned-email-link">{c.assigned}</span></td>
-                      <td>{c.submitted}</td>
-                      <td>{c.applied}</td>
-                      <td>
-                        {(() => {
-                          const statusStr = (c.status || '').toLowerCase();
-                          let label = 'QUEUED';
-                          let cls = 'queued';
-                          if (statusStr === 'submitted' || (Number(c.submitted) || 0) > 0) {
-                            label = 'SUBMITTED';
-                            cls = 'submitted';
-                          } else if (statusStr === 'in_flight' || statusStr === 'processing' || statusStr === 'in_progress') {
-                            label = 'IN FLIGHT';
-                            cls = 'in_flight';
-                          } else if (statusStr === 'applying' || (Number(c.applied) || 0) > 0) {
-                            label = 'APPLIED';
-                            cls = 'applying';
-                          } else if (statusStr === 'failed') {
-                            label = 'FAILED';
-                            cls = 'failed';
-                          }
-                          return <span className={`video-status-tag ${cls}`}>{label}</span>;
-                        })()}
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={6} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
-                      No activity recorded for {currentManager.name}&apos;s team.
                     </td>
                   </tr>
                 )}
