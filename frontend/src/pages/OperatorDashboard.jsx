@@ -11,6 +11,7 @@ import {
   getISTDateBounds,
   syncLiveCAData,
   formatClientCompanyEmail,
+  resolveSupabaseStorageUrl,
 } from '../services/api';
 import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
@@ -732,7 +733,8 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                           return displayableApps.length > 0 ? (
                             displayableApps.map((app) => {
                               const rawStatus = (app.status || '').toLowerCase();
-                              const proofShot = app.application_submitted_screenshot_url || app.screenshot_url || app.applied_screenshot || app.screenshot_path || null;
+                              const rawProof = app.application_submitted_screenshot_url || app.screenshot_url || app.applied_screenshot || app.screenshot_path || null;
+                              const proofShot = resolveSupabaseStorageUrl(rawProof);
                               const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed';
                               const isApplying = rawStatus === 'applying' || rawStatus === 'in_flight';
                               const isReady = !isSubmitted && !isApplying;
@@ -786,7 +788,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                     )}
                                   </td>
                                   <td style={{ textAlign: 'center' }}>
-                                    {isSubmitted && proofShot ? (
+                                    {(isSubmitted || Boolean(proofShot)) && proofShot ? (
                                       <a
                                         href={proofShot}
                                         target="_blank"

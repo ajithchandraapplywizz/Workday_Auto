@@ -22,7 +22,9 @@ import {
   fetchApplicationFormReviewData,
   saveAnswerToQaBank,
   submitApplicationReview,
-  isPersonalInfoField
+  isPersonalInfoField,
+  resolveSupabaseStorageUrl,
+  cleanCanonicalJobUrl
 } from '../services/api';
 import { supabase } from '../config/supabase';
 import './ApplicationSlideDrawer.css';
@@ -142,38 +144,77 @@ export default function ApplicationSlideDrawer({
   }, [isOpen, applywizzId, jobUrl, distributionId, currentStatus]);
 
   // Live polling for this specific application in job_distributions
+  // Live polling for this specific application in job_distributions and applications
   useEffect(() => {
     if (!isOpen || (!distributionId && (!applywizzId || !jobUrl))) return;
 
     let isMounted = true;
     const interval = setInterval(async () => {
       try {
-        let q = supabase.from('job_distributions').select('*');
+        let updated = null;
         if (distributionId) {
-          q = q.eq('id', distributionId);
-        } else {
-          q = q.eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+          const { data } = await supabase.from('job_distributions').select('*').eq('id', distributionId).limit(1);
+          if (data && data.length > 0) updated = data[0];
         }
-        const { data } = await q.limit(1);
+        if (!updated && applywizzId && jobUrl) {
+          const { data } = await supabase.from('job_distributions').select('*').eq('applywizz_id', applywizzId).eq('job_url', jobUrl).limit(1);
+          if (data && data.length > 0) updated = data[0];
+          if (!updated) {
+            const canonical = cleanCanonicalJobUrl(jobUrl);
+            if (canonical && canonical !== jobUrl) {
+              const { data: cData } = await supabase.from('job_distributions').select('*').eq('applywizz_id', applywizzId).eq('job_url', canonical).limit(1);
+              if (cData && cData.length > 0) updated = cData[0];
+            }
+          }
+        }
+
+        // Also check applications table
+        let appRow = null;
+        if (applywizzId && jobUrl) {
+          const { data: aData } = await supabase.from('applications').select('*').eq('applywizz_id', applywizzId).eq('job_url', jobUrl).limit(1);
+          if (aData && aData.length > 0) appRow = aData[0];
+          if (!appRow) {
+            const canonical = cleanCanonicalJobUrl(jobUrl);
+            if (canonical && canonical !== jobUrl) {
+              const { data: cData } = await supabase.from('applications').select('*').eq('applywizz_id', applywizzId).eq('job_url', canonical).limit(1);
+              if (cData && cData.length > 0) appRow = cData[0];
+            }
+          }
+        }
+
         if (!isMounted) return;
-        if (data && data.length > 0) {
-          const updated = data[0];
-          setAppDetails((prev) => {
-            return {
-              ...prev,
-              status: updated.status,
-              screenshotUrl: updated.application_submitted_screenshot_url || null,
-              application_submitted_screenshot_url: updated.application_submitted_screenshot_url || null,
-            };
-          });
-          if (updated.status === 'submitted') {
+
+        const rawProof = updated?.application_submitted_screenshot_url
+          || updated?.applied_screenshot
+          || updated?.original_application_screenshot_successful
+          || updated?.final_submission_screenshot_url
+          || updated?.screenshot_url
+          || updated?.screenshot_path
+          || appRow?.screenshot_url
+          || appRow?.applied_screenshot
+          || appRow?.failure_screenshot_url
+          || null;
+
+        const resolvedProof = resolveSupabaseStorageUrl(rawProof);
+        const latestStatus = updated?.status || appRow?.status || null;
+
+        if (resolvedProof || latestStatus) {
+          setAppDetails((prev) => ({
+            ...prev,
+            status: latestStatus || prev?.status,
+            screenshotUrl: resolvedProof || prev?.screenshotUrl,
+            application_submitted_screenshot_url: resolvedProof || prev?.application_submitted_screenshot_url,
+          }));
+
+          if (latestStatus === 'submitted' || resolvedProof) {
             setSubmitting(false);
             setActionMessage('✓ Application successfully submitted on Workday! Mandatory screenshot proof saved.');
             if (onStatusUpdated) {
               onStatusUpdated({
                 ...application,
-                status: 'submitted',
-                application_submitted_screenshot_url: updated.application_submitted_screenshot_url,
+                status: latestStatus || 'submitted',
+                application_submitted_screenshot_url: resolvedProof,
+                screenshot_url: resolvedProof,
               });
             }
           }
@@ -181,7 +222,7 @@ export default function ApplicationSlideDrawer({
       } catch (e) {
         // silent polling catch
       }
-    }, 2000);
+    }, 1500);
 
     return () => {
       isMounted = false;
@@ -337,11 +378,15 @@ export default function ApplicationSlideDrawer({
     StatusIcon = Sparkles;
   }
 
-  const proofShot = effectiveStatus === 'submitted'
-    ? appDetails?.application_submitted_screenshot_url
-      || application?.application_submitted_screenshot_url
-      || null
-    : null;
+  const rawProofShot = appDetails?.application_submitted_screenshot_url
+    || appDetails?.screenshotUrl
+    || appDetails?.applied_screenshot
+    || application?.application_submitted_screenshot_url
+    || application?.screenshot_url
+    || application?.applied_screenshot
+    || null;
+
+  const proofShot = resolveSupabaseStorageUrl(rawProofShot);
 
   return (
     <div className="slide-drawer-overlay" onClick={onClose}>
@@ -483,7 +528,7 @@ export default function ApplicationSlideDrawer({
         {/* Content Body: Questions & Answers List */}
         <div className="slide-drawer-body">
           {/* Authentic Post-Submission Confirmation Proof Banner inside Slide Drawer */}
-          {effectiveStatus === 'submitted' && (
+          {(effectiveStatus === 'submitted' || Boolean(proofShot)) && (
             <div style={{
               background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(5, 150, 105, 0.08) 100%)',
               border: '1px solid rgba(16, 185, 129, 0.45)',
@@ -530,9 +575,13 @@ export default function ApplicationSlideDrawer({
                     borderRadius: '6px',
                     overflow: 'hidden',
                     border: '1px solid #334155',
-                    maxHeight: '260px',
+                    maxHeight: '280px',
                     cursor: 'pointer',
                     position: 'relative',
+                    background: '#020617',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
                   }}
                   onClick={() => setSelectedScreenshot(proofShot)}
                   title="Click to view full high-resolution screenshot proof"
@@ -540,7 +589,7 @@ export default function ApplicationSlideDrawer({
                   <img
                     src={typeof proofShot === 'string' ? proofShot : (proofShot.url || proofShot)}
                     alt="Workday Application Proof"
-                    style={{ width: '100%', height: '100%', objectFit: 'cover' }}
+                    style={{ maxWidth: '100%', maxHeight: '280px', objectFit: 'contain' }}
                   />
                   <div style={{
                     position: 'absolute',
@@ -561,8 +610,20 @@ export default function ApplicationSlideDrawer({
                   </div>
                 </div>
               ) : (
-                <div style={{ fontSize: '0.8rem', color: '#94a3b8', fontStyle: 'italic' }}>
-                  Confirmation recorded in database. Awaiting image upload...
+                <div style={{
+                  padding: '14px',
+                  borderRadius: '6px',
+                  background: 'rgba(15, 23, 42, 0.7)',
+                  border: '1px dashed rgba(52, 211, 153, 0.4)',
+                  textAlign: 'center',
+                  color: '#94a3b8',
+                  fontSize: '0.82rem',
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '8px', marginBottom: '6px', color: '#34d399' }}>
+                    <Sparkles size={16} className="sd-spin" />
+                    <strong>Workday submission confirmed in database!</strong>
+                  </div>
+                  <span>Fetching post-submission screenshot proof from Supabase Storage...</span>
                 </div>
               )}
             </div>

@@ -11,6 +11,7 @@ import {
   fetchClientApplications,
   triggerAutonomousBot,
   stopAutonomousBot,
+  resolveSupabaseStorageUrl,
 } from '../services/api';
 import { supabase } from '../config/supabase';
 import {
@@ -151,13 +152,30 @@ export default function CADashboard() {
     }
   };
 
-  const handleReviewSubmitted = () => {
+  const handleReviewSubmitted = (updatedApp) => {
     setApplyStep(4);
     setApplyLog((prev) => [
       ...prev,
       `[${new Date().toLocaleTimeString()}] Form answers confirmed and submitted by Career Associate!`,
       `[${new Date().toLocaleTimeString()}] Recorded changes in public.applications & job_distributions.`,
     ]);
+    if (updatedApp) {
+      const proof = resolveSupabaseStorageUrl(updatedApp.application_submitted_screenshot_url || updatedApp.screenshot_url);
+      setClientJobs((prev) =>
+        prev.map((j) => {
+          if (j.id === updatedApp.id || j.job_url === updatedApp.job_url) {
+            return {
+              ...j,
+              status: 'submitted',
+              application_submitted_screenshot_url: proof || j.application_submitted_screenshot_url,
+              applied_screenshot: proof || j.applied_screenshot,
+              screenshot_url: proof || j.screenshot_url,
+            };
+          }
+          return j;
+        })
+      );
+    }
     if (applywizzId) {
       loadClientProfile(applywizzId);
     }
@@ -275,24 +293,33 @@ export default function CADashboard() {
           const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'needs_answers', 'failed'].includes(st);
           if (!isAllowedStatus) continue;
 
-          jobsMap.set(u, {
-            id: dj.id,
-            applywizz_id: dj.applywizz_id,
-            job_url: dj.job_url,
-            company: dj.company || sj?.company || 'Workday Partner',
-            role_title: dj.role_title || sj?.role_title || 'Workday Application',
-            status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
-            is_fully_answered: dj.is_fully_answered,
-            resolved_answers: dj.resolved_answers || [],
-            unanswered_count: dj.unanswered_count || 0,
-            unanswered_questions: dj.unanswered_questions || [],
-            applied_screenshot: dj.application_submitted_screenshot_url || null,
-            application_submitted_screenshot_url: dj.application_submitted_screenshot_url || null,
-            screenshot_url: dj.application_submitted_screenshot_url || null,
-            blueprint_screenshot: sj?.screenshot_path || null,
-            scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
-            source: 'job_distributions',
-          });
+            const rawProof = dj.application_submitted_screenshot_url
+              || dj.applied_screenshot
+              || dj.original_application_screenshot_successful
+              || dj.final_submission_screenshot_url
+              || dj.screenshot_url
+              || dj.screenshot_path
+              || null;
+            const proofShot = resolveSupabaseStorageUrl(rawProof);
+
+            jobsMap.set(u, {
+              id: dj.id,
+              applywizz_id: dj.applywizz_id,
+              job_url: dj.job_url,
+              company: dj.company || sj?.company || 'Workday Partner',
+              role_title: dj.role_title || sj?.role_title || 'Workday Application',
+              status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
+              is_fully_answered: dj.is_fully_answered,
+              resolved_answers: dj.resolved_answers || [],
+              unanswered_count: dj.unanswered_count || 0,
+              unanswered_questions: dj.unanswered_questions || [],
+              applied_screenshot: proofShot,
+              application_submitted_screenshot_url: proofShot,
+              screenshot_url: proofShot,
+              blueprint_screenshot: resolveSupabaseStorageUrl(sj?.screenshot_path) || null,
+              scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
+              source: 'job_distributions',
+            });
         }
       }
 
@@ -371,15 +398,26 @@ export default function CADashboard() {
             let changed = false;
             const updated = prevJobs.map((j) => {
               const f = freshMap.get(j.id) || freshMap.get(j.job_url);
-              if (f && (f.status !== j.status || f.application_submitted_screenshot_url !== j.application_submitted_screenshot_url)) {
-                changed = true;
-                return {
-                  ...j,
-                  status: (f.status === 'distributed' || f.status === 'ready_to_review') ? 'ready_for_review' : f.status,
-                  application_submitted_screenshot_url: f.application_submitted_screenshot_url,
-                  applied_screenshot: f.application_submitted_screenshot_url,
-                  screenshot_url: f.application_submitted_screenshot_url,
-                };
+              if (f) {
+                const freshProof = resolveSupabaseStorageUrl(
+                  f.application_submitted_screenshot_url
+                  || f.applied_screenshot
+                  || f.original_application_screenshot_successful
+                  || f.final_submission_screenshot_url
+                  || f.screenshot_url
+                  || f.screenshot_path
+                  || null
+                );
+                if (f.status !== j.status || freshProof !== j.application_submitted_screenshot_url) {
+                  changed = true;
+                  return {
+                    ...j,
+                    status: (f.status === 'distributed' || f.status === 'ready_to_review') ? 'ready_for_review' : f.status,
+                    application_submitted_screenshot_url: freshProof,
+                    applied_screenshot: freshProof,
+                    screenshot_url: freshProof,
+                  };
+                }
               }
               return j;
             });
@@ -917,7 +955,9 @@ export default function CADashboard() {
                       const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
                       const isSelected = activeTask?.id === j.id;
                       const isSubmitted = j.status === 'submitted';
-                      const cardScreenshot = (isSubmitted && j.application_submitted_screenshot_url) ? j.application_submitted_screenshot_url : null;
+                      const cardScreenshot = (isSubmitted || j.application_submitted_screenshot_url || j.applied_screenshot)
+                        ? (j.application_submitted_screenshot_url || j.applied_screenshot || j.screenshot_url || null)
+                        : null;
 
                       let badgeBg = 'rgba(56, 189, 248, 0.15)';
                       let badgeColor = '#38bdf8';

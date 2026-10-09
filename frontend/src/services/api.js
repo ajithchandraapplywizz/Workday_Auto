@@ -35,7 +35,35 @@ export function cleanCanonicalJobUrl(rawUrl) {
 }
 
 import { supabase, SUPABASE_URL } from '../config/supabase.js';
-export { supabase };
+export { supabase, SUPABASE_URL };
+
+/**
+ * Resolves any Supabase storage path or filename to a fully-qualified public URL.
+ * Handles full URLs, bucket/file paths, and raw image filenames.
+ */
+export function resolveSupabaseStorageUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return null;
+  const trimmed = rawUrl.trim();
+  if (!trimmed || trimmed === 'null' || trimmed === 'undefined') return null;
+  if (trimmed.startsWith('http://') || trimmed.startsWith('https://') || trimmed.startsWith('data:')) {
+    return trimmed;
+  }
+  if (trimmed.includes('/')) {
+    const parts = trimmed.split('/');
+    const bucket = parts[0];
+    const filePath = parts.slice(1).join('/');
+    try {
+      const { data } = supabase.storage.from(bucket).getPublicUrl(filePath);
+      if (data?.publicUrl) return data.publicUrl;
+    } catch {}
+    return `${SUPABASE_URL}/storage/v1/object/public/${trimmed}`;
+  }
+  try {
+    const { data } = supabase.storage.from('application-successes').getPublicUrl(trimmed);
+    if (data?.publicUrl) return data.publicUrl;
+  } catch {}
+  return `${SUPABASE_URL}/storage/v1/object/public/application-successes/${trimmed}`;
+}
 
 const CA_MANAGEMENT_BASE = 'https://applywizz-ca-management.vercel.app/api/ca';
 const CLIENT_DETAILS_BASE = 'https://www.apply-wizz.me/api';
@@ -1272,6 +1300,79 @@ export async function fetchAutomationTrace(param = {}) {
     return { success: true, logs, trace: logs };
   } catch (err) {
     return { success: false, logs: [], trace: [], error: err.message };
+  }
+}
+
+/**
+ * 19b. Fetch 3 Separate Logs for 9 Workers by Batch Cluster
+ * - Batch 1: Scanning (scanning_worker_1, 2, 3)
+ * - Batch 2: Resolving (resolving_worker_1, 2, 3)
+ * - Batch 3: Submitting (submitting_worker_1, 2, 3)
+ */
+export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
+  try {
+    const { data, error } = await supabase
+      .from('automation_trace')
+      .select('*')
+      .order('id', { ascending: false })
+      .limit(limit * 3);
+
+    if (error) throw error;
+    const allLogs = (data || []).slice().reverse();
+
+    const scanningLogs = [];
+    const resolvingLogs = [];
+    const submittingLogs = [];
+
+    for (const log of allLogs) {
+      const msg = String(log.message || '');
+      const lower = msg.toLowerCase();
+      const step = Number(log.step_index) || 0;
+
+      // 1. Explicit worker tag classification
+      if (lower.includes('scanning_worker') || lower.includes('scanning') || lower.includes('cluster 1') || lower.includes('batch 1')) {
+        scanningLogs.push(log);
+      } else if (lower.includes('resolving_worker') || lower.includes('pre-resolving') || lower.includes('llm reasoning') || lower.includes('tier') || lower.includes('qa bank') || lower.includes('cluster 2') || lower.includes('batch 2')) {
+        resolvingLogs.push(log);
+      } else if (lower.includes('submitting_worker') || lower.includes('workday wizard') || lower.includes('submitted') || lower.includes('step 5') || lower.includes('proof') || lower.includes('cluster 3') || lower.includes('batch 3')) {
+        submittingLogs.push(log);
+      } else {
+        // 2. Step index fallback routing
+        if (step > 0 && step <= 5) {
+          scanningLogs.push(log);
+        } else if (step === 6 || step === 7) {
+          resolvingLogs.push(log);
+        } else if (step >= 8) {
+          submittingLogs.push(log);
+        } else {
+          if (lower.includes('auth') || lower.includes('gateway') || lower.includes('discovery') || lower.includes('scrape') || lower.includes('blueprint')) {
+            scanningLogs.push(log);
+          } else if (lower.includes('answer') || lower.includes('match') || lower.includes('resume')) {
+            resolvingLogs.push(log);
+          } else {
+            submittingLogs.push(log);
+          }
+        }
+      }
+    }
+
+    return {
+      success: true,
+      batches: {
+        scanning: scanningLogs,
+        resolving: resolvingLogs,
+        submitting: submittingLogs,
+      },
+      allLogs,
+    };
+  } catch (err) {
+    console.error('Failed to fetch batch worker logs:', err);
+    return {
+      success: false,
+      batches: { scanning: [], resolving: [], submitting: [] },
+      allLogs: [],
+      error: err.message,
+    };
   }
 }
 
@@ -2772,6 +2873,31 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
     const unansweredFields = nonPersonalFields.filter((f) => f.isUnanswered);
     const aiFields = nonPersonalFields.filter((f) => f.source === 'ai' || f.tier === 4);
 
+    let shot = distRow?.application_submitted_screenshot_url
+      || distRow?.applied_screenshot
+      || distRow?.original_application_screenshot_successful
+      || distRow?.final_submission_screenshot_url
+      || distRow?.screenshot_url
+      || scannedBlueprint?.screenshot_path
+      || null;
+
+    if (!shot && cleanId && jobUrl) {
+      try {
+        const canonical = cleanCanonicalJobUrl(jobUrl);
+        const { data: appRows } = await supabase
+          .from('applications')
+          .select('screenshot_url, applied_screenshot, failure_screenshot_url')
+          .eq('applywizz_id', cleanId)
+          .or(`job_url.eq.${encodeURIComponent(jobUrl)},job_url.eq.${encodeURIComponent(canonical)}`)
+          .limit(1);
+        if (appRows && appRows.length > 0) {
+          shot = appRows[0].screenshot_url || appRows[0].applied_screenshot || appRows[0].failure_screenshot_url || null;
+        }
+      } catch {}
+    }
+
+    const resolvedShot = resolveSupabaseStorageUrl(shot);
+
     const appObj = {
       id: distRow?.id || null,
       applywizzId: cleanId,
@@ -2779,8 +2905,8 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       company: distRow?.company || scannedBlueprint?.company || 'Workday Employer',
       roleTitle: distRow?.role_title || scannedBlueprint?.role_title || 'Workday Role',
       status: distRow?.status || 'ready_for_review',
-      screenshotUrl: distRow?.application_submitted_screenshot_url || scannedBlueprint?.screenshot_path || null,
-      application_submitted_screenshot_url: distRow?.application_submitted_screenshot_url || null,
+      screenshotUrl: resolvedShot,
+      application_submitted_screenshot_url: resolvedShot,
       unansweredCount: unansweredFields.length,
     };
 

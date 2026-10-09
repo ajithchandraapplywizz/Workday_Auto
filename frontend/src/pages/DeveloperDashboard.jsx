@@ -7,10 +7,12 @@ import {
   checkAllApiHealth,
   fetchBatchQueue,
   fetchAutomationTrace,
+  fetchBatchWorkerLogs,
   fetchAllOperators,
   triggerAutonomousBot,
   stopAutonomousBot,
   fetchBotDaemonStatus,
+  resolveSupabaseStorageUrl,
   supabase,
 } from '../services/api';
 
@@ -26,6 +28,18 @@ export default function DeveloperDashboard() {
   const [debugSearch, setDebugSearch] = useState('');
   const [selectedDebugApp, setSelectedDebugApp] = useState(null);
   const [debugTrace, setDebugTrace] = useState([]);
+
+  // Batch-wise 9-worker logs states
+  const [batchLogs, setBatchLogs] = useState({
+    scanning: [],
+    resolving: [],
+    submitting: [],
+  });
+  const [activeBatchView, setActiveBatchView] = useState('all'); // 'all' | 'scanning' | 'resolving' | 'submitting'
+  const [scanWorkerFilter, setScanWorkerFilter] = useState('all');
+  const [resolveWorkerFilter, setResolveWorkerFilter] = useState('all');
+  const [submitWorkerFilter, setSubmitWorkerFilter] = useState('all');
+  const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   
   // Real dynamic states from Supabase & backend
   const [kpis, setKpis] = useState({
@@ -50,7 +64,7 @@ export default function DeveloperDashboard() {
   const [isTriggering, setIsTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
-  const tabs = ['System', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
+  const tabs = ['System', 'Worker Logs', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
 
   // Dynamic label for period tile
   const periodLabel = useMemo(() => {
@@ -58,6 +72,25 @@ export default function DeveloperDashboard() {
     if (timeframe === 'month') return 'This Month';
     return 'Today';
   }, [timeframe]);
+
+  // Live polling for Batch Worker Logs when Worker Logs tab is active
+  useEffect(() => {
+    if (activeTab !== 'Worker Logs') return;
+    let isMounted = true;
+    async function pollBatchLogs() {
+      const res = await fetchBatchWorkerLogs({ limit: 120 });
+      if (!isMounted) return;
+      if (res.success && res.batches) {
+        setBatchLogs(res.batches);
+      }
+    }
+    pollBatchLogs();
+    const interval = setInterval(pollBatchLogs, 2500);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeTab]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -229,15 +262,19 @@ export default function DeveloperDashboard() {
     }
   };
 
-  // Helper: Extract failure screenshot URL from multiple potential fields
+  // Helper: Extract screenshot URL from multiple potential fields
   const extractFailureScreenshot = (app) => {
     if (!app) return null;
-    if (app.failure_screenshot_url) return app.failure_screenshot_url;
-    if (app.screenshot_url) return app.screenshot_url;
-    if (app.screenshot_path) return app.screenshot_path;
+    const raw = app.application_submitted_screenshot_url
+      || app.applied_screenshot
+      || app.failure_screenshot_url
+      || app.screenshot_url
+      || app.screenshot_path
+      || null;
+    if (raw) return resolveSupabaseStorageUrl(raw);
     const reason = String(app.failure_reason || app.error_message || app.error_category || '');
     const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|svg)/i);
-    if (match) return match[1] || match[0];
+    if (match) return resolveSupabaseStorageUrl(match[1] || match[0]);
     return null;
   };
 
@@ -697,7 +734,458 @@ export default function DeveloperDashboard() {
         </div>
       )}
 
-      {/* 2. CA ROSTER & HEALTH TAB — Inspect and manage all 59 CAs */}
+      {/* 2. WORKER LOGS TAB — 3 Separate Log Consoles for 9 Workers (Batch-Wise) */}
+      {activeTab === 'Worker Logs' && (
+        <div className="tab-body-fade">
+          {/* Top Control Bar for Batch Logs */}
+          <div style={{
+            background: '#0f172a',
+            border: '1px solid #1e293b',
+            borderRadius: '8px',
+            padding: '12px 16px',
+            marginBottom: '1.25rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '10px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#e2e8f0', letterSpacing: '0.04em' }}>
+                BATCH VIEW:
+              </span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[
+                  { id: 'all', label: 'All 3 Batches (Grid View)' },
+                  { id: 'scanning', label: 'Batch 1: Scanning (Workers 1-3)' },
+                  { id: 'resolving', label: 'Batch 2: Resolving (Workers 1-3)' },
+                  { id: 'submitting', label: 'Batch 3: Submitting (Workers 1-3)' },
+                ].map((btn) => (
+                  <button
+                    key={btn.id}
+                    type="button"
+                    onClick={() => setActiveBatchView(btn.id)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '0.78rem',
+                      borderRadius: '4px',
+                      border: '1px solid #334155',
+                      cursor: 'pointer',
+                      background: activeBatchView === btn.id ? '#0284c7' : '#1e293b',
+                      color: '#ffffff',
+                      fontWeight: activeBatchView === btn.id ? 'bold' : 'normal',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#94a3b8', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={autoScrollLogs}
+                  onChange={(e) => setAutoScrollLogs(e.target.checked)}
+                />
+                Auto-scroll live stream
+              </label>
+              <button
+                type="button"
+                className="video-btn-refresh"
+                onClick={async () => {
+                  const res = await fetchBatchWorkerLogs({ limit: 120 });
+                  if (res.success && res.batches) setBatchLogs(res.batches);
+                }}
+                style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+              >
+                🔄 Refresh Logs
+              </button>
+            </div>
+          </div>
+
+          {/* 3 Batch Terminals Container */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: activeBatchView === 'all' ? 'repeat(3, minmax(0, 1fr))' : '1fr',
+            gap: '1rem',
+            alignItems: 'start',
+          }}>
+            {/* ── BATCH 1: SCANNING CLUSTER ───────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'scanning') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(56, 189, 248, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(56, 189, 248, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.scanningActive || 0) > 0 ? '#38bdf8' : '#64748b',
+                        boxShadow: (workerPool.scanningActive || 0) > 0 ? '0 0 8px #38bdf8' : 'none',
+                      }} />
+                      <strong style={{ color: '#38bdf8', fontSize: '0.88rem' }}>
+                        BATCH 1: SCANNING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; Auth &amp; Gateway &bull; Job Questions Discovery
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'scanning_worker_1', label: 'W1' },
+                      { id: 'scanning_worker_2', label: 'W2' },
+                      { id: 'scanning_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setScanWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: scanWorkerFilter === w.id ? '#0284c7' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: scanWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.scanning || []).filter((l) => {
+                      if (scanWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(scanWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>📡 Scanning workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            Live link scan &amp; gateway verification logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#38bdf8',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(56, 189, 248, 0.1)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 1}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* ── BATCH 2: RESOLVING CLUSTER ──────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'resolving') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(168, 85, 247, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(168, 85, 247, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.resolvingActive || 0) > 0 ? '#c084fc' : '#64748b',
+                        boxShadow: (workerPool.resolvingActive || 0) > 0 ? '0 0 8px #c084fc' : 'none',
+                      }} />
+                      <strong style={{ color: '#c084fc', fontSize: '0.88rem' }}>
+                        BATCH 2: RESOLVING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; 4-Tier Engine &bull; QA Bank &amp; LLM Reasoning
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'resolving_worker_1', label: 'W1' },
+                      { id: 'resolving_worker_2', label: 'W2' },
+                      { id: 'resolving_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setResolveWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: resolveWorkerFilter === w.id ? '#7c3aed' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: resolveWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.resolving || []).filter((l) => {
+                      if (resolveWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(resolveWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>🧠 Resolving workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            4-Tier answer generation &amp; candidate QA bank logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#c084fc',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(168, 85, 247, 0.12)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 6}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* ── BATCH 3: SUBMITTING CLUSTER ─────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'submitting') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(16, 185, 129, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.submittingActive || 0) > 0 ? '#34d399' : '#64748b',
+                        boxShadow: (workerPool.submittingActive || 0) > 0 ? '0 0 8px #34d399' : 'none',
+                      }} />
+                      <strong style={{ color: '#34d399', fontSize: '0.88rem' }}>
+                        BATCH 3: SUBMITTING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; Workday Wizard Filling &bull; Proof Capture &amp; Submit
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'submitting_worker_1', label: 'W1' },
+                      { id: 'submitting_worker_2', label: 'W2' },
+                      { id: 'submitting_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setSubmitWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: submitWorkerFilter === w.id ? '#059669' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: submitWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.submitting || []).filter((l) => {
+                      if (submitWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(submitWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>⚡ Submitting workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            Workday wizard steps &amp; screenshot proof confirmation logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#34d399',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(16, 185, 129, 0.12)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 8}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. CA ROSTER & HEALTH TAB — Inspect and manage all 59 CAs */}
       {activeTab === 'CA Roster' && (
         <div className="tab-body-fade">
           {/* Summary KPIs */}
