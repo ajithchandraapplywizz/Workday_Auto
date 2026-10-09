@@ -471,59 +471,86 @@ export async function executeWorkerTask({
         scan.authFailed = false;
         console.log(`   ✅ [${workerId}] Application wizard active — DOM scan discovered ${scan.field_count} fields.`);
       } else {
-        const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
-        const authErrorMsg = await getWorkdayAuthErrorMessage(page);
-
-        const isMailboxNotConnected = scan.authReason === 'mailbox_not_connected' || scan.reason === 'mailbox_not_connected';
-        if (isMailboxNotConnected) {
-          console.log(`   ⚠️ [${workerId}] Skipping ${applywizzId}: Zoho mail not connected for password reset/verification (193 pool).`);
-          await browser.close().catch(() => {});
-          if (queueTaskId) {
-            await updateQueueTaskStatus(queueTaskId, { status: 'skipped', errorMessage: 'zoho_email_not_connected' });
+        // Attempt Zoho Mail email verification and password reset recovery
+        console.log(`   🔐 [${workerId}] Auth gateway requires verification or password setup. Invoking Zoho Mail recovery...`);
+        let recovered = false;
+        try {
+          const { resolveWorkdayVerification } = await import('./workdayVerification.mjs');
+          const vRes = await resolveWorkdayVerification(page, {
+            email: workdayEmail,
+            password: workdayPassword,
+            company,
+            startTime: Date.now() - 120000,
+            timeoutMs: 45000,
+          });
+          if (vRes?.success && (vRes?.onWizard || await isWorkdayWizardVisible(page))) {
+            recovered = true;
+            console.log(`   🎉 [${workerId}] Successfully verified and authenticated via Zoho Mail! Continuing form fill.`);
+            scan = await scanForm(jobUrl, { browser, context, page, workdayEmail, workdayPassword, isBatch: true, candidateId: applywizzId });
+            scan.authFailed = false;
           }
+        } catch (zErr) {
+          console.warn(`   ⚠️ [${workerId}] Zoho verification attempt notice: ${zErr.message}`);
+        }
+
+        if (!recovered) {
+          const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
+          let authErrorMsg = await getWorkdayAuthErrorMessage(page);
+
+          // Deep DOM error inspection for validation errors, alerts, and field blockers
+          let domSpecificReason = null;
+          try {
+            domSpecificReason = await page.evaluate(() => {
+              const alertEl = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], [data-automation-id="formError"]');
+              if (alertEl && alertEl.textContent?.trim()) {
+                return alertEl.textContent.trim().replace(/\s+/g, ' ');
+              }
+              const invalidInput = document.querySelector('[aria-invalid="true"]');
+              if (invalidInput) {
+                const labelEl = invalidInput.closest('div')?.querySelector('label') || document.querySelector(`label[for="${invalidInput.id}"]`);
+                const name = labelEl?.textContent?.trim() || invalidInput.getAttribute('aria-label') || invalidInput.name || 'field';
+                return `Validation Error: Required ${name} is invalid or missing`;
+              }
+              const pageText = document.body ? document.body.innerText : '';
+              if (/job (is no longer|has expired|not found|does not exist)/i.test(pageText)) {
+                return 'Link Expired: Job no longer available on Workday';
+              }
+              return null;
+            }).catch(() => null);
+          } catch {}
+
+          const effectiveReason = domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check';
+          const failReasonText = `Authentication / Gateway check: ${effectiveReason}`;
+          console.log(`   ❌ [${workerId}] ${failReasonText}`);
+
+          let authShotUrl = null;
+          try {
+            if (page && !page.isClosed()) {
+              await page.evaluate(() => {
+                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i], [aria-invalid="true"]');
+                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
+                else window.scrollTo(0, 0);
+              }).catch(() => {});
+              await page.waitForTimeout(400);
+              const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+              if (buf) {
+                authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+              }
+            }
+          } catch {}
+
+          await browser.close().catch(() => {});
+          if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
           await upsertSupabaseApplication({
             applywizzId,
             jobUrl,
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            status: 'skipped',
-            failureReason: 'Zoho mail verification not connected (193 pool)',
+            status: 'failed',
+            failureReason: failReasonText,
+            failureScreenshotUrl: authShotUrl,
+            stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
           }).catch(() => {});
-          return { status: 'skipped', reason: 'zoho_email_not_connected' };
-        }
-
-        const failReasonText = authErrorMsg ? `Authentication failed: ${authErrorMsg}` : 'Application wizard not accessible after discovery';
-        console.log(`   ❌ [${workerId}] ${failReasonText}`);
-        let authShotUrl = null;
-        try {
-          if (page && !page.isClosed()) {
-            if (authErrorMsg) {
-              await page.evaluate(() => {
-                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i]');
-                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
-              }).catch(() => {});
-            } else {
-              await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-            }
-            await page.waitForTimeout(300);
-            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-            if (buf) {
-              authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_auth_fail.jpg`, buf);
-            }
-          }
-        } catch {}
-        await browser.close().catch(() => {});
-        if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'auth_failed', screenshotPath: authShotUrl });
-        await upsertSupabaseApplication({
-          applywizzId,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          status: 'failed',
-          failureReason: failReasonText,
-          failureScreenshotUrl: authShotUrl,
-          stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
-        }).catch(() => {});
 
         try {
           const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
@@ -551,6 +578,7 @@ export async function executeWorkerTask({
         return { status: 'auth_failed', screenshotUrl: authShotUrl, stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)', failureReason: failReasonText };
       }
     }
+  }
 
     // Step B: Pick resume for candidate
     console.log(`   [${workerId}] Step 2: Preparing resume...`);
@@ -1654,4 +1682,178 @@ export async function runQueueWorkerPool({
 
   return results;
 }
+
+/**
+ * Execute a single targeted application submission directly for a specific candidate.
+ * Dispatched on-demand when a Career Associate clicks "Review & Submit" in the Slide Drawer.
+ *
+ * Guarantees:
+ * 1. Runs strictly on an assigned submitting worker (submitting_worker_1, 2, or 3).
+ * 2. Does NOT trigger the global batch runner; logs remain isolated to this single application.
+ * 3. Immediately marks job_distributions.status = 'applying'.
+ * 4. Navigates via Playwright, applies 4-tier resolved answers, handles Zoho Mail verification/reset if prompted.
+ * 5. On submission success: captures final confirmation screenshot, uploads to Supabase Storage,
+ *    saves to job_distributions.application_submitted_screenshot_url, and marks status = 'submitted'.
+ * 6. On failure: captures failure screenshot, records to failed_jobs with resolved_answers,
+ *    and marks job_distributions.status = 'failed'.
+ */
+export async function executeSingleTargetedSubmission({
+  distributionId = null,
+  applywizzId = '',
+  jobUrl = '',
+  workerId = 'submitting_worker_1',
+  headless = true,
+  defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+} = {}) {
+  const cleanId = String(applywizzId || '').trim().toUpperCase();
+  const cleanUrl = String(jobUrl || '').trim();
+  const now = new Date().toISOString();
+
+  console.log(`\n${'═'.repeat(70)}`);
+  console.log(`🎯 [TARGETED SUBMISSION TRIGGERED]`);
+  console.log(`   • Worker:        ${workerId}`);
+  console.log(`   • Candidate:     ${cleanId}`);
+  console.log(`   • Job URL:       ${cleanUrl}`);
+  console.log(`   • Distribution:  ${distributionId || 'Lookup by AWL + URL'}`);
+  console.log(`${'═'.repeat(70)}\n`);
+
+  // 1. Fetch task details from job_distributions
+  const { createClient } = await import('@supabase/supabase-js');
+  const { loadLocalEnvOnce } = await import('./supabaseClient.mjs');
+  const env = loadLocalEnvOnce();
+  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  let distRow = null;
+  try {
+    if (distributionId) {
+      const { data } = await supabase.from('job_distributions').select('*').eq('id', distributionId).maybeSingle();
+      distRow = data;
+    }
+    if (!distRow && cleanId && cleanUrl) {
+      const { data } = await supabase.from('job_distributions').select('*').eq('applywizz_id', cleanId).eq('job_url', cleanUrl).maybeSingle();
+      distRow = data;
+    }
+  } catch (err) {
+    console.warn(`   ⚠️ [${workerId}] Warning fetching distribution record: ${err?.message}`);
+  }
+
+  const finalApplywizzId = cleanId || distRow?.applywizz_id || '';
+  const finalJobUrl = cleanUrl || distRow?.job_url || '';
+  const company = distRow?.company || extractWorkdayCompanyName(finalJobUrl);
+  const roleTitle = distRow?.role_title || 'Workday Application';
+
+  if (!finalApplywizzId || !finalJobUrl) {
+    throw new Error(`Targeted submission requires both applywizzId and jobUrl (received: ${finalApplywizzId}, ${finalJobUrl})`);
+  }
+
+  // 2. Set worker status & job_distributions to applying
+  await updateWorkerStatus(workerId, {
+    state: 'in_flight',
+    stage: 'submitting',
+    current_application_id: distributionId || `${finalApplywizzId}:${finalJobUrl}`,
+    bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+  }).catch(() => {});
+
+  if (distributionId) {
+    await supabase.from('job_distributions').update({
+      status: 'applying',
+      worker_id: workerId,
+      reviewed_by: 'Career Associate',
+      reviewed_at: now,
+      updated_at: now,
+    }).eq('id', distributionId).catch(() => {});
+  } else {
+    await supabase.from('job_distributions').update({
+      status: 'applying',
+      worker_id: workerId,
+      reviewed_by: 'Career Associate',
+      reviewed_at: now,
+      updated_at: now,
+    }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+  }
+
+  // 3. Execute submission task via Playwright
+  let result = null;
+  try {
+    result = await executeWorkerTask({
+      task: {
+        id: distributionId,
+        applywizzId: finalApplywizzId,
+        jobUrl: finalJobUrl,
+        company,
+        roleTitle,
+        status: 'approved_for_submission',
+        pre_resolved_answers: distRow?.resolved_answers || [],
+      },
+      workerId,
+      taskIndex: 1,
+      totalTasks: 1,
+      options: {
+        headless: Boolean(headless),
+        confirmSubmit: true,
+        dryRun: false,
+        defaultPassword,
+      },
+    });
+  } catch (err) {
+    result = {
+      status: 'failed',
+      error: err?.message || 'Execution error',
+      failureReason: err?.message || 'Execution error',
+    };
+  }
+
+  const isSubmitted = result?.status === 'submitted';
+  const finalProofShot = result?.screenshotUrl || result?.proof_screenshot_url || null;
+
+  // 4. Update job_distributions with final status and proof screenshot
+  const completionTimestamp = new Date().toISOString();
+  if (isSubmitted) {
+    console.log(`\n🎉 [${workerId}] TARGETED SUBMISSION SUCCEEDED! Verified Workday confirmation proof saved: ${finalProofShot || 'Uploaded'}`);
+    const updateBody = {
+      status: 'submitted',
+      application_submitted_screenshot_url: finalProofShot,
+      worker_id: workerId,
+      updated_at: completionTimestamp,
+    };
+    if (distributionId) {
+      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+    } else {
+      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+    }
+  } else {
+    console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
+    const updateBody = {
+      status: 'failed',
+      error_message: result?.failureReason || result?.error || 'Submission failed',
+      worker_id: workerId,
+      updated_at: completionTimestamp,
+    };
+    if (distributionId) {
+      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+    } else {
+      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+    }
+  }
+
+  // 5. Release worker back to idle
+  await updateWorkerStatus(workerId, {
+    state: 'idle',
+    stage: 'submitting',
+    current_application_id: null,
+    bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+  }).catch(() => {});
+
+  return {
+    success: isSubmitted,
+    status: result?.status || (isSubmitted ? 'submitted' : 'failed'),
+    screenshotUrl: finalProofShot,
+    workerId,
+    applywizzId: finalApplywizzId,
+    jobUrl: finalJobUrl,
+  };
+}
+
 

@@ -2737,7 +2737,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       company: distRow?.company || scannedBlueprint?.company || 'Workday Employer',
       roleTitle: distRow?.role_title || scannedBlueprint?.role_title || 'Workday Role',
       status: distRow?.status || 'ready_for_review',
-      screenshotUrl: distRow?.application_submitted_screenshot_url || distRow?.screenshot_url || distRow?.proof_screenshot_url || scannedBlueprint?.screenshot_path || null,
+      screenshotUrl: distRow?.application_submitted_screenshot_url || scannedBlueprint?.screenshot_path || null,
       application_submitted_screenshot_url: distRow?.application_submitted_screenshot_url || null,
       unansweredCount: unansweredFields.length,
     };
@@ -2975,21 +2975,32 @@ export async function submitApplicationReview({
         }, { onConflict: 'id' });
     } catch {}
 
-    // 4. Send HTTP trigger to background daemon to execute Playwright submission
-    fetch('http://localhost:3001/api/bot/submit', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        action: 'submit_approved',
-        applywizzId: cleanId,
-        jobUrl,
-        distributionId,
-      }),
-    }).catch(() => {});
+    // 4. Send targeted HTTP trigger to background daemon to execute single Playwright submission
+    const submitEndpoints = [
+      '/api/bot/submit-single',
+      'http://localhost:3001/api/bot/submit-single',
+      '/api/bot/submit',
+      'http://localhost:3001/api/bot/submit',
+    ];
+    Promise.any(
+      submitEndpoints.map((ep) =>
+        fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'submit_single',
+            applywizzId: cleanId,
+            jobUrl,
+            distributionId,
+          }),
+          signal: AbortSignal.timeout(3000),
+        })
+      )
+    ).catch(() => {});
 
     return {
       success: true,
-      message: 'Application approved! Autonomous bot is submitting on Workday...',
+      message: 'Application approved! Dedicated submitting worker is executing Workday submission...',
     };
   } catch (err) {
     return { success: false, error: err.message };

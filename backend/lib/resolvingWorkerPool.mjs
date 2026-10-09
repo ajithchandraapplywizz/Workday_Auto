@@ -120,7 +120,7 @@ export async function runResolvingWorkerPool(options = {}) {
 
             const detailed = await preResolveClientAnswersDetailed({ jobUrl: job.job_url, schema, profile });
             const structuredAnswers = detailed?.structuredAnswers || [];
-            const unanswered = Array.isArray(detailed?.unansweredQuestions)
+            const rawUnanswered = Array.isArray(detailed?.unansweredQuestions)
               ? detailed.unansweredQuestions
               : structuredAnswers.filter(q => !q.is_answered && q.is_required).map(q => ({
                   question: q.question,
@@ -130,9 +130,15 @@ export async function runResolvingWorkerPool(options = {}) {
                   is_required: true,
                   reason: 'missing_required_answer',
                 }));
-            const unansweredCount = (detailed?.unansweredCount !== undefined && detailed?.unansweredCount !== null)
-              ? Number(detailed.unansweredCount)
-              : unanswered.length;
+
+            const unanswered = rawUnanswered.filter((q) => {
+              const lbl = String(q.question || q.label || '').toLowerCase();
+              if (/first name|last name|email|phone|mobile|address|street|city|state|postal|zip|country/i.test(lbl)) return false;
+              if (/voluntary|disclosure|self identify|eeo|veteran|disability|gender|race|ethnicity|hispanic/i.test(lbl)) return false;
+              return true;
+            });
+
+            const unansweredCount = unanswered.length;
             const isFully = (unansweredCount === 0);
             const clientStatus = isFully ? 'ready_for_review' : 'needs_answers';
 

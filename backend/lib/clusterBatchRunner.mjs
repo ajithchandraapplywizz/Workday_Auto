@@ -754,7 +754,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       const structuredAnswers = detailed?.structuredAnswers || [];
       const answersMap = detailed?.answersMap || {};
       const answeredCount = structuredAnswers.filter(q => q.is_answered).length;
-      const unansweredQuestions = Array.isArray(detailed?.unansweredQuestions)
+      const rawUnanswered = Array.isArray(detailed?.unansweredQuestions)
         ? detailed.unansweredQuestions
         : structuredAnswers.filter(q => !q.is_answered && q.is_required).map(q => ({
           question: q.question,
@@ -764,9 +764,16 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           is_required: true,
           reason: 'missing_required_answer',
         }));
-      const unansweredCount = (detailed?.unansweredCount !== undefined && detailed?.unansweredCount !== null)
-        ? Number(detailed.unansweredCount)
-        : unansweredQuestions.length;
+
+      // Filter out standard personal info and voluntary EEO disclosures so unanswered questions are strictly actionable job questions!
+      const unansweredQuestions = rawUnanswered.filter((q) => {
+        const lbl = String(q.question || q.label || '').toLowerCase();
+        if (/first name|last name|email|phone|mobile|address|street|city|state|postal|zip|country/i.test(lbl)) return false;
+        if (/voluntary|disclosure|self identify|eeo|veteran|disability|gender|race|ethnicity|hispanic/i.test(lbl)) return false;
+        return true;
+      });
+
+      const unansweredCount = unansweredQuestions.length;
       const isFullyAnswered = (unansweredCount === 0);
       const clientStatus = isFullyAnswered ? 'ready_for_review' : 'needs_answers';
 

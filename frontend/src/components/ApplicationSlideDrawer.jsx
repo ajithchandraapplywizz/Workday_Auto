@@ -166,7 +166,15 @@ export default function ApplicationSlideDrawer({
             };
           });
           if (updated.status === 'submitted') {
+            setSubmitting(false);
             setActionMessage('✓ Application successfully submitted on Workday! Mandatory screenshot proof saved.');
+            if (onStatusUpdated) {
+              onStatusUpdated({
+                ...application,
+                status: 'submitted',
+                application_submitted_screenshot_url: updated.application_submitted_screenshot_url,
+              });
+            }
           }
         }
       } catch (e) {
@@ -286,8 +294,8 @@ export default function ApplicationSlideDrawer({
     }
 
     try {
-      // Trigger background submission
-      submitApplicationReview({
+      // Trigger targeted single-item background submission
+      await submitApplicationReview({
         applywizzId,
         jobUrl,
         distributionId: appDetails?.id || distributionId,
@@ -295,14 +303,9 @@ export default function ApplicationSlideDrawer({
         roleTitle: appDetails?.roleTitle || application?.role_title || 'Role',
         fields,
         status: 'approved_for_submission',
-      }).catch((err) => {
-        console.error('Submit review error:', err);
       });
 
-      // Immediately close the drawer as requested!
-      if (onClose) {
-        onClose();
-      }
+      setActionMessage('✓ Submission dispatched to submitting worker. Monitoring live Workday progress...');
     } catch (err) {
       setActionMessage('Submit failed: ' + err.message);
       setSubmitting(false);

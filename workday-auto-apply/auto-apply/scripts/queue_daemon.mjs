@@ -367,7 +367,46 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 5. Submit Approved Applications Webhook (Stage 3)
+  // 5a. Targeted Single-Item Submission Webhook (Zero Batch Log Pollution)
+  if (pathname === '/api/bot/submit-single' || (pathname === '/api/bot/submit' && (body.distributionId || body.applywizzId))) {
+    const { distributionId, applywizzId, jobUrl } = body;
+    console.log(`\n⚡ [DAEMON WEBHOOK] Targeted submit received for ${applywizzId || distributionId} at ${jobUrl || 'URL'}`);
+
+    // Pick an available submitting worker (1, 2, or 3)
+    let chosenWorkerId = PIPELINE_CONFIG.submitWorkerIds[0] || 'submitting_worker_1';
+    try {
+      const { getWorkerStatuses } = await import('../lib/supabaseClient.mjs');
+      const activeWorkers = await getWorkerStatuses().catch(() => []);
+      const idleSubmitter = PIPELINE_CONFIG.submitWorkerIds.find((wid) => {
+        const found = activeWorkers.find((w) => w.worker_id === wid);
+        return !found || found.state === 'idle';
+      });
+      if (idleSubmitter) chosenWorkerId = idleSubmitter;
+    } catch {}
+
+    const { executeSingleTargetedSubmission } = await import('../lib/workerPool.mjs');
+    // Dispatch in background so HTTP response returns in <100ms
+    executeSingleTargetedSubmission({
+      distributionId,
+      applywizzId,
+      jobUrl,
+      workerId: chosenWorkerId,
+      headless: HEADLESS,
+    }).catch((err) => {
+      console.error(`❌ [TARGETED SUBMISSION ERROR]:`, err?.message);
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: `Targeted submission launched for ${applywizzId || 'candidate'} on ${chosenWorkerId}`,
+      workerId: chosenWorkerId,
+      distributionId,
+    }));
+    return;
+  }
+
+  // 5b. Batch Submit Approved Applications Webhook (Stage 3 Pool)
   if (pathname === '/api/bot/submit' || (pathname === '/api/bot/webhook' && (body.action === 'submit_approved' || body.action === 'stage_submit'))) {
     if (isPoolRunning) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
