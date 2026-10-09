@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
-import { useAuth } from '../context/AuthContext';
+import { useAuth, getPreviousWorkdayDateStr } from '../context/AuthContext';
 import {
   fetchCAEmails,
   fetchCABotAutomationStats,
@@ -45,7 +45,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     loadRoster();
   }, [user?.role]);
 
-  const [activeWorkDate, setActiveWorkDate] = useState(date);
+  const [activeWorkDate, setActiveWorkDate] = useState(() => getPreviousWorkdayDateStr());
   const [isFallbackDate, setIsFallbackDate] = useState(false);
 
   // Core candidate, application, and history states
@@ -97,23 +97,19 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     }
   };
 
-  // Load candidate directory assigned to this CA on the active date (with holiday rollback)
+  // Load candidate directory assigned to this CA on the active date (strictly yesterday / previous workday)
   const loadAssignedClients = async (overrideDate) => {
     setLoading(true);
-    const targetDate = overrideDate || date;
+    const targetDate = overrideDate || getPreviousWorkdayDateStr();
     try {
       const res = await fetchAssignedClientsForCA({
         caEmail: sessionCaEmail,
         atDate: targetDate,
       });
 
-      if (res.activeDate) {
-        setActiveWorkDate(res.activeDate);
-        setIsFallbackDate(Boolean(res.isFallback));
-        if (res.activeDate !== date && setDate) {
-          setDate(res.activeDate);
-        }
-      }
+      // Keep activeWorkDate strictly locked to yesterday / previous workday
+      setActiveWorkDate(targetDate);
+      setIsFallbackDate(Boolean(res.isFallback));
 
       if (res.success && res.assignments?.length) {
         const mapped = res.assignments.map((a) => ({
@@ -122,7 +118,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
           client_email: a.client_email,
           jobs_applied: a.jobs_applied || 0,
           emails_submitted: a.emails_submitted || 0,
-          date: a.date || res.activeDate,
+          date: targetDate,
         }));
         setCandidates(mapped);
         if (mapped.length > 0) {

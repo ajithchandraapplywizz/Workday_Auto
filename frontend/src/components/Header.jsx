@@ -1,5 +1,5 @@
 import React from 'react';
-import { useAuth, getYesterdayDateStr } from '../context/AuthContext';
+import { useAuth, getPreviousWorkdayDateStr } from '../context/AuthContext';
 
 export default function Header({ activeTab, onTabChange, operatorView, onOperatorViewChange }) {
   const { user, switchRole, logout, date, setDate, timeframe, setTimeframe } = useAuth();
@@ -54,13 +54,6 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 >
                   Stats
                 </button>
-                <button
-                  type="button"
-                  className={`operator-pill-btn ${operatorView === 'review' ? 'active' : ''}`}
-                  onClick={() => onOperatorViewChange('review')}
-                >
-                  Review & Submit
-                </button>
               </div>
             ) : (
               <h1 className="header-main-title">{getMainTitle()}</h1>
@@ -97,7 +90,7 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             <div className="control-date-box" title="CA candidate allotment is automatically locked to yesterday's work history data">
               <span className="control-label-micro">WORK DATA DATE</span>
               <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#38bdf8', padding: '2px 6px', letterSpacing: '0.02em' }}>
-                {date || getYesterdayDateStr()} (Yesterday)
+                {getPreviousWorkdayDateStr()} (Yesterday)
               </span>
             </div>
           ) : (

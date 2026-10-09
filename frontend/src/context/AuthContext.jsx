@@ -17,14 +17,31 @@ export const getTodayDateStr = () => {
   return `${year}-${month}-${day}`;
 };
 
-export const getYesterdayDateStr = () => {
-  const d = new Date();
-  d.setDate(d.getDate() - 1);
+export const getPreviousWorkdayDateStr = (refDate = new Date()) => {
+  const d = new Date(refDate);
+  const dayOfWeek = d.getDay(); // 0: Sun, 1: Mon, ..., 5: Fri, 6: Sat
+
+  if (dayOfWeek === 1) {
+    // Monday -> Previous workday was Friday (-3 days)
+    d.setDate(d.getDate() - 3);
+  } else if (dayOfWeek === 0) {
+    // Sunday -> Previous workday was Friday (-2 days)
+    d.setDate(d.getDate() - 2);
+  } else if (dayOfWeek === 6) {
+    // Saturday -> Previous workday was Friday (-1 day)
+    d.setDate(d.getDate() - 1);
+  } else {
+    // Tuesday through Friday -> Exactly 1 day lesser (-1 day)
+    d.setDate(d.getDate() - 1);
+  }
+
   const year = d.getFullYear();
   const month = String(d.getMonth() + 1).padStart(2, '0');
   const day = String(d.getDate()).padStart(2, '0');
   return `${year}-${month}-${day}`;
 };
+
+export const getYesterdayDateStr = () => getPreviousWorkdayDateStr();
 
 export function AuthProvider({ children }) {
   // Session strictly initialized from verified storage — no automatic default bypass
