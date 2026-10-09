@@ -57,12 +57,16 @@ export default function CADashboard() {
   const [workerBusy, setWorkerBusy] = useState(false);
   const [workerMessage, setWorkerMessage] = useState('');
 
-  // Active CA email from authenticated session
-  const sessionCaEmail = useMemo(() => {
+  // Active CA email from authenticated session, or inspected CA email for developer auditing
+  const [inspectedCaEmail, setInspectedCaEmail] = useState('');
+  const activeCaEmail = useMemo(() => {
+    if (inspectedCaEmail && inspectedCaEmail.includes('@')) {
+      return inspectedCaEmail.toLowerCase().trim();
+    }
     return user?.email && user?.email.includes('@')
       ? user.email.toLowerCase().trim()
       : 'sana@applywizz.com';
-  }, [user?.email]);
+  }, [user?.email, inspectedCaEmail]);
 
   // Workday Auto-Apply Dynamic state
   const [activeTask, setActiveTask] = useState(null);
@@ -162,7 +166,7 @@ export default function CADashboard() {
       setLoadingClient(true);
       try {
         const res = await fetchAssignedClientsForCA({
-          caEmail: sessionCaEmail,
+          caEmail: activeCaEmail,
           atDate: date,
         });
 
@@ -200,7 +204,7 @@ export default function CADashboard() {
 
     loadAssignedCandidates();
     return () => { isMounted = false; };
-  }, [sessionCaEmail, date]);
+  }, [activeCaEmail, date]);
 
   // Fetch client details, questions, and real jobs from Supabase
   const loadClientProfile = async (idToLoad) => {
@@ -474,8 +478,63 @@ export default function CADashboard() {
       {/* Header Banner */}
       <div className="dashboard-header-row">
         <div>
-          <h1 className="page-heading">Career Associate (CA) Operator Console</h1>
-          <p className="page-subheading">
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '4px' }}>
+            <h1 className="page-heading" style={{ margin: 0 }}>Career Associate (CA) Console</h1>
+            <span style={{
+              fontSize: '0.74rem',
+              padding: '2px 9px',
+              borderRadius: '12px',
+              background: 'rgba(56, 189, 248, 0.12)',
+              border: '1px solid rgba(56, 189, 248, 0.35)',
+              color: '#38bdf8',
+              fontWeight: 700,
+            }}>
+              CA: {activeCaEmail}
+            </span>
+
+            {/* Developer Audit Inspection Quick Switcher */}
+            {(user?.baseRole === 'dev' || user?.role === 'dev' || user?.role === 'admin' || user?.email === 'ajithchandranimmala@applywizz.ai') && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '6px' }}>
+                <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Audit:</span>
+                <input
+                  type="text"
+                  placeholder="e.g. sana@applywizz.com"
+                  value={inspectedCaEmail}
+                  onChange={(e) => setInspectedCaEmail(e.target.value)}
+                  style={{
+                    background: '#090d16',
+                    border: '1px solid #334155',
+                    borderRadius: '5px',
+                    color: '#38bdf8',
+                    padding: '2px 7px',
+                    fontSize: '0.72rem',
+                    width: '160px',
+                  }}
+                  title="Type any CA email to inspect their assigned clients dynamically"
+                />
+                {['sana@applywizz.com', 'manasa@applywizz.com'].map((ca) => (
+                  <button
+                    key={ca}
+                    type="button"
+                    onClick={() => setInspectedCaEmail(ca)}
+                    style={{
+                      background: activeCaEmail === ca ? '#0284c7' : '#1e293b',
+                      border: activeCaEmail === ca ? '1px solid #38bdf8' : '1px solid #334155',
+                      borderRadius: '5px',
+                      color: '#f8fafc',
+                      padding: '2px 6px',
+                      fontSize: '0.68rem',
+                      cursor: 'pointer',
+                      fontWeight: activeCaEmail === ca ? 'bold' : 'normal',
+                    }}
+                  >
+                    {ca.split('@')[0]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="page-subheading" style={{ margin: 0 }}>
             Live candidate profile lookup, Workday auto-apply automation engine, and semantic Q&A answer manager.
           </p>
         </div>

