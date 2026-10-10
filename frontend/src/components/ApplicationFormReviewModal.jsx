@@ -354,34 +354,35 @@ export default function ApplicationFormReviewModal({
                       </span>
                     )}
 
-                    {field.source === 'ai' && (
-                      <span className="fr-source-tag ai" title="Answered by AI/LLM model">
-                        <Sparkles size={12} />
-                        <span>AI / LLM 🤖</span>
-                      </span>
-                    )}
-                    {field.source === 'supabase' && (
-                      <span className="fr-source-tag supabase" title="Answered from Supabase DB knowledge">
+                    {field.tier === 1 || field.source === 'supabase' || field.source === 'qa_bank' ? (
+                      <span className="fr-source-tag supabase" title="Answered from Supabase DB knowledge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
                         <Database size={12} />
-                        <span>Supabase DB 💾</span>
+                        <span>Tier 1: Supabase DB 💾</span>
                       </span>
-                    )}
-                    {field.source === 'resume' && (
-                      <span className="fr-source-tag resume" title="Extracted from candidate resume facts">
+                    ) : (field.tier === 2 || field.source === 'resume') ? (
+                      <span className="fr-source-tag resume" title="Extracted from candidate resume facts" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
                         <FileText size={12} />
-                        <span>Resume Facts 📄</span>
+                        <span>Tier 2: Resume Extraction 📄</span>
                       </span>
-                    )}
-                    {field.source === 'identity' && (
-                      <span className="fr-source-tag identity" title="Extracted from ApplyWizz identity profile">
+                    ) : (field.tier === 3 || field.source === 'api' || field.source === 'identity') ? (
+                      <span className="fr-source-tag identity" title="Extracted from ApplyWizz CRM API" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
                         <User size={12} />
-                        <span>Identity Profile 👤</span>
+                        <span>Tier 3: CRM API 🌐</span>
                       </span>
-                    )}
-                    {field.source === 'manual' && (
+                    ) : (field.tier === 4 || field.source === 'ai' || field.source === 'llm') ? (
+                      <span className="fr-source-tag ai" title="Answered by AI/LLM model" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                        <Sparkles size={12} />
+                        <span>Tier 4: AI / LLM 🤖</span>
+                      </span>
+                    ) : field.source === 'manual' ? (
                       <span className="fr-source-tag manual" title="Answered manually by Career Associate">
                         <Edit3 size={12} />
                         <span>Manual CA ✍️</span>
+                      </span>
+                    ) : (
+                      <span className="fr-source-tag ai">
+                        <Sparkles size={12} />
+                        <span>{field.sourceLabel || 'AI / LLM'}</span>
                       </span>
                     )}
                   </div>

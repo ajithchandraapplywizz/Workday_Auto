@@ -219,11 +219,18 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
   await ensureUsWorkdayContact(profile);
   profile._mandatoryOnlyFill = true;
   profile._resumePath = await getResumePathForApply(profile).catch(() => null);
+  if (profile._resumePath) {
+    try {
+      const { parseClientResumeText } = await import('./applyWizzResume.mjs');
+      await parseClientResumeText(profile);
+    } catch {}
+  }
   return profile;
 }
 
 export async function loadProfile(profilePath, { applywizzId = '' } = {}) {
-  if (isApiOnlyAnswerMode()) {
+  const { isSupabaseConfigured } = await import('./supabaseClient.mjs').catch(() => ({ isSupabaseConfigured: () => false }));
+  if (isApiOnlyAnswerMode() || applywizzId || isSupabaseConfigured()) {
     return loadProfileFromApiOnly({ applywizzId });
   }
 
@@ -573,7 +580,7 @@ export async function askHuman(questionText, field = {}, { company, compliance, 
     }
 
     console.log(`DOM id:    ${domCode}`);
-    console.log('Saved to: profile.yml + qa-store + tenant YAML');
+    console.log('Saved to:  Supabase client_questions');
     console.log('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━');
     const answer = await rl.question('> Your answer:\n');
     return resolvePromptAnswer(answer, options, { multiSelect: isMultiSelect });
@@ -714,7 +721,7 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     || fieldObj.required === true;
 
   // Centralized 4-Tier Architecture:
-  // Tier 1 (Supabase) -> Tier 2 (ApplyWizz CRM) -> Tier 3 (Resume) -> Tier 4 (LLM + live options)
+  // Tier 1 (Supabase) -> Tier 2 (Resume) -> Tier 3 (ApplyWizz CRM) -> Tier 4 (LLM + live options)
   const resolved = await resolveClientAnswer({
     ...fieldObj,
     label: rawLabel,

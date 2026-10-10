@@ -189,10 +189,10 @@ async function runProbe() {
 
     if (source.startsWith('supabase_') || source.startsWith('sensitive_safe') || source.startsWith('minimum_age')) {
       tier = 'Tier 1 (Supabase / Safe)';
-    } else if (source.startsWith('applywizz')) {
-      tier = 'Tier 2 (CRM API)';
     } else if (source.startsWith('experience') || source.startsWith('resume')) {
-      tier = 'Tier 3 (Resume)';
+      tier = 'Tier 2 (Resume)';
+    } else if (source.startsWith('applywizz')) {
+      tier = 'Tier 3 (CRM API)';
     } else if (source.startsWith('llm')) {
       tier = 'Tier 4 (LLM)';
     }

@@ -11,7 +11,7 @@
  */
 
 import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured, saveApplyWizzClientAnswer } from './applyWizzClient.mjs';
-import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry } from './clientContact.mjs';
+import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
 import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './openRouterLlm.mjs';
 import {
   resolveExperienceQuestionAnswer,
@@ -106,10 +106,23 @@ function profileFactForLabel(label, profile = {}) {
     return p.country_phone_code || workdayPhoneCodeForCountry(p.country) || null;
   }
   if (/^country$/i.test(n) && !/phone/i.test(n)) return p.country || null;
-  if (/^district$|^county$/i.test(n)) return p.city || p.state || null;
-  if (/^city$|^address--city$/.test(n)) return p.city || null;
+  if (/^district$|^county$/i.test(n)) {
+    const candidate = p.city || p.state || null;
+    return (isValidCityName(candidate) || isValidStateName(candidate)) ? candidate : null;
+  }
+  if (/^city$|^address--city$/.test(n)) {
+    if (isValidCityName(p.city)) return p.city;
+    if (isValidCityName(profile._supabaseQa?.['city'])) return profile._supabaseQa['city'];
+    if (isValidCityName(profile._applyWizzQa?.['city'])) return profile._applyWizzQa['city'];
+    return null;
+  }
   if (/address\s*line\s*1|^address--addressline1$/.test(n)) return p.address_line1 || null;
-  if (/^state$|^address--countryregion$/.test(n)) return p.state || null;
+  if (/^state$|^address--countryregion$/.test(n)) {
+    if (isValidStateName(p.state)) return p.state;
+    if (isValidStateName(profile._supabaseQa?.['state'])) return profile._supabaseQa['state'];
+    if (isValidStateName(profile._applyWizzQa?.['state'])) return profile._applyWizzQa['state'];
+    return null;
+  }
   if (/postal|zip/.test(n)) return p.postal_code || null;
   if (/^country$/.test(n) && !/authorized|eligib|citizen/.test(n)) return p.country || null;
   if (/linkedin/.test(n)) return p.linkedin || null;
@@ -225,6 +238,13 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
   if (/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
     return formatToMMDDYYYY(text) || text;
   }
+  const normLabel = normalizeLabel(label);
+  if (/^city$|^address--city$|\bcity\b/i.test(normLabel) && !/citizenship|capacity/i.test(normLabel)) {
+    if (!isValidCityName(text)) return null;
+  }
+  if (/^state$|^address--countryregion$|\bstate\b/i.test(normLabel) && !/statement|status/i.test(normLabel)) {
+    if (!isValidStateName(text)) return null;
+  }
   return sanitizeExperienceAnswer(label, text, profile, { options, fieldType }) || text;
 }
 
@@ -263,17 +283,18 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const profileOk = acceptClientValue(question, fromProfile, { options, fieldType, profile });
   if (profileOk) return profileOk;
 
+  // ─── TIER 2: Resume Parsing (Primary Source of Truth for Experience & Skills) ───
+  const fromExperience = resolveExperienceQuestionAnswer(question, profile, { options, fieldType });
+  const expOk = acceptClientValue(question, fromExperience?.answer, { options, fieldType, profile });
+  if (expOk) return expOk;
+
+  // ─── TIER 3: CRM API (Apply Wizz Fallback) ──────────────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(question, profile, {
     options,
     fieldType,
     threshold: 0.48,
   });
-  const apiOk = acceptClientValue(question, fromApi?.answer, { options, fieldType, profile });
-  if (apiOk) return apiOk;
-
-  // ─── TIER 2: Resume Parsing ──────────────────────────────────────────────────
-  const fromExperience = resolveExperienceQuestionAnswer(question, profile, { options, fieldType });
-  return acceptClientValue(question, fromExperience?.answer, { options, fieldType, profile });
+  return acceptClientValue(question, fromApi?.answer, { options, fieldType, profile });
 }
 
 /**
@@ -378,52 +399,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '';
   const tenant = opts.tenant || profile?._tenant || '';
 
-  // ─── TIER 2: CRM API (Apply Wizz) ────────────────────────────────────────────
-  const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
-    options,
-    fieldType,
-    threshold: 0.48,
-  });
-  const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
-  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
-    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api');
-    if (apiHit) {
-      trace({
-        stage: 'tier2',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: true,
-        source: fromApi.source,
-        answer: apiHit.answer,
-      });
-      console.log(`    🗄️  [CRM API Tier 2 facts] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 2 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
-      return apiHit;
-    }
-  }
-  trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
-
-  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 1 or Tier 2) ───
-  const sensitive = lookupSensitiveSafeAnswer(label);
-  if (sensitive) {
-    const hit = finish(sensitive, 'sensitive_safe');
-    if (hit) {
-      trace({
-        stage: 'sensitive_safe',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: true,
-        answer: hit.answer,
-      });
-      console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      profile?._onLog?.(currentStep, `[Tier 1 Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
-      return hit;
-    }
-  }
-
-  // ─── TIER 3: Resume Parsing ──────────────────────────────────────────────────
+  // ─── TIER 2: Resume Parsing (Primary Source of Truth for Experience & Skills) ───
   const fromExperience = resolveExperienceQuestionAnswer(label, profile, { options, fieldType });
   let expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`);
   
@@ -446,7 +422,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  // DOB resolution in Tier 3: Resume text extraction -> Required adult derivation
+  // DOB resolution in Tier 2: Resume text extraction -> Required adult derivation
   if (!expHit && /date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
     if (profile._resumeText) {
       const fromResume = extractDobFromResumeText(profile._resumeText);
@@ -492,7 +468,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   if (expHit) {
     trace({
-      stage: 'tier3',
+      stage: 'tier2',
       clientId,
       tenant,
       query: normalizeLabel(label),
@@ -500,11 +476,56 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       source: expHit.source || fromExperience?.source || 'resume',
       answer: expHit.answer,
     });
-    console.log(`    📄 [Resume Tier 3] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
-    profile?._onLog?.(currentStep, `[Tier 3 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
+    console.log(`    📄 [Resume Tier 2 Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
+    profile?._onLog?.(currentStep, `[Tier 2 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
     return expHit;
   }
+  trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── TIER 3: CRM API (Apply Wizz Fallback) ────────────────────────────────────
+  const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
+    options,
+    fieldType,
+    threshold: 0.48,
+  });
+  const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
+  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
+    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api');
+    if (apiHit) {
+      trace({
+        stage: 'tier3',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        source: fromApi.source,
+        answer: apiHit.answer,
+      });
+      console.log(`    🗄️  [CRM API Tier 3 Fallback] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
+      return apiHit;
+    }
+  }
   trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 1, 2, or 3) ───
+  const sensitive = lookupSensitiveSafeAnswer(label);
+  if (sensitive) {
+    const hit = finish(sensitive, 'sensitive_safe');
+    if (hit) {
+      trace({
+        stage: 'sensitive_safe',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        answer: hit.answer,
+      });
+      console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
+      return hit;
+    }
+  }
 
 
   // Only mandatory/required questions proceed to LLM unless forceLlm is set
@@ -612,7 +633,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (CRM API), Tier 3 (Resume), Tier 4 (LLM) for "${label.slice(0, 55)}"`);
+  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), Tier 3 (CRM API), Tier 4 (LLM) for "${label.slice(0, 55)}"`);
   return null;
 }
 

@@ -1256,32 +1256,45 @@ function isFieldOfStudyFilled(current, leaf = '') {
  * @param {string|string[]} [answer]
  * @returns {Promise<boolean>}
  */
-export async function fillEducationFieldOfStudy(page, answer = 'Computer Science') {
+export async function fillEducationFieldOfStudy(page, answer = 'Computer Science', { force = false } = {}) {
   const leaf = Array.isArray(answer) ? String(answer[answer.length - 1] || 'Computer Science') : String(answer || 'Computer Science');
   const tries = [leaf, ...WORKDAY_FIELD_OF_STUDY_ATTEMPTS.map((c) => c[c.length - 1])];
   const unique = [...new Set(tries.filter(Boolean))];
 
-  const marked = await page.evaluate(() => {
+  const totalFields = await page.evaluate(() => {
     document.querySelectorAll('[data-wd-fos]').forEach((el) => el.removeAttribute('data-wd-fos'));
     const labels = document.querySelectorAll('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]');
+    let idx = 0;
     for (const el of labels) {
       const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
       if (!/field\s*of\s*study/i.test(t) || t.length > 80) continue;
       const field = el.closest('[data-automation-id*="formField"], [data-automation-id*="Field"], fieldset, [role="group"]')
         || el.parentElement;
       if (!field) continue;
-      field.setAttribute('data-wd-fos', '1');
-      return true;
+      idx++;
+      field.setAttribute('data-wd-fos', String(idx));
     }
-    return false;
-  }).catch(() => false);
+    return idx;
+  }).catch(() => 0);
 
-  const field = marked
-    ? page.locator('[data-wd-fos="1"]').first()
-    : page.getByLabel(/field\s*of\s*study/i).first();
+  if (totalFields === 0) {
+    const fallback = page.getByLabel(/field\s*of\s*study/i).first();
+    if (await fallback.count() === 0) return false;
+    return await fillSingleFieldOfStudy(page, fallback, unique, leaf, force);
+  }
 
-  const shown = marked ? await readFieldValue(field).catch(() => '') : '';
-  if (isFieldOfStudyFilled(shown, leaf)) {
+  let allOk = true;
+  for (let i = 1; i <= totalFields; i++) {
+    const field = page.locator(`[data-wd-fos="${i}"]`).first();
+    const ok = await fillSingleFieldOfStudy(page, field, unique, leaf, force);
+    if (!ok) allOk = false;
+  }
+  return allOk;
+}
+
+async function fillSingleFieldOfStudy(page, field, unique, leaf, force) {
+  const shown = await readFieldValue(field).catch(() => '');
+  if (!force && isFieldOfStudyFilled(shown, leaf)) {
     console.log(`    ✓ Field of Study already "${shown}"`);
     return true;
   }
@@ -1294,22 +1307,24 @@ export async function fillEducationFieldOfStudy(page, answer = 'Computer Science
   await combo.click({ force: true, timeout: 4000 }).catch(async () => {
     await field.click({ force: true, timeout: 4000 }).catch(() => {});
   });
-  await page.waitForTimeout(250);
+  await page.waitForTimeout(300);
 
   for (const term of unique) {
     const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
     if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
       await search.fill('').catch(() => {});
-      await search.pressSequentially(term, { delay: 35 });
+      await page.waitForTimeout(100);
+      await search.pressSequentially(term, { delay: 45 });
     } else {
-      await page.keyboard.type(term, { delay: 35 });
+      await page.waitForTimeout(100);
+      await page.keyboard.type(term, { delay: 45 });
     }
-    await page.waitForTimeout(350);
+    await page.waitForTimeout(400);
     const picked = await clickVisiblePromptOption(page, [term, 'Computer Science', 'Computer Engineering']);
     if (!picked) await page.keyboard.press('Enter').catch(() => {});
-    await page.waitForTimeout(200);
+    await page.waitForTimeout(250);
     await page.keyboard.press('Escape').catch(() => {});
-    const after = marked ? await readFieldValue(field).catch(() => '') : '';
+    const after = await readFieldValue(field).catch(() => '');
     if (picked || isFieldOfStudyFilled(after, term)) {
       console.log(`    ✅ Field of Study ← "${after || term}"`);
       return true;
@@ -1559,7 +1574,7 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
   }
 
   const before = fieldLoc ? await readFieldValue(fieldLoc) : '';
-  if (!isDateField && valuesMatch(before, Array.isArray(answer) ? answer[answer.length - 1] : answer)) {
+  if (!isDateField && type !== 'fieldofstudy' && valuesMatch(before, Array.isArray(answer) ? answer[answer.length - 1] : answer)) {
     logBlock(sectionName, label, [`already correct: "${before}" — next field`]);
     return true;
   }

@@ -79,17 +79,90 @@ export function cityValueMatches(actual, expected) {
 }
 
 /**
+ * Check if the City field exists and whether it is marked required in the DOM.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<{ exists: boolean, required: boolean }>}
+ */
+export async function getCityFieldStatus(page) {
+  return await page.evaluate(() => {
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+    const selectors = [
+      '#address--city',
+      '[data-automation-id="address--city"]',
+      'input[id*="address--city" i]',
+      'input[data-automation-id*="city" i]',
+      'input[name*="city" i]',
+    ];
+
+    let cityInput = null;
+    for (const sel of selectors) {
+      const el = document.querySelector(sel);
+      if (el && el.tagName === 'INPUT' && !el.disabled && el.type !== 'hidden') {
+        cityInput = el;
+        break;
+      }
+    }
+
+    if (!cityInput) {
+      for (const labelEl of document.querySelectorAll('label, legend, [data-automation-id*="label"]')) {
+        const labelText = norm(labelEl.textContent).replace(/\*+$/, '');
+        if (!/^city$/i.test(labelText)) continue;
+
+        const field = labelEl.closest('[data-automation-id*="formField"]') || labelEl.parentElement;
+        if (!field) continue;
+
+        const input = field.querySelector(
+          'input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea'
+        );
+        if (input) {
+          cityInput = input;
+          break;
+        }
+      }
+    }
+
+    if (!cityInput) {
+      return { exists: false, required: false };
+    }
+
+    // Check if required
+    const container = cityInput.closest('[data-automation-id*="formField"]') || cityInput.parentElement;
+    const isRequired = Boolean(
+      cityInput.required ||
+      cityInput.getAttribute('aria-required') === 'true' ||
+      container?.getAttribute('aria-required') === 'true' ||
+      container?.querySelector?.('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required" i], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]') ||
+      /\*/.test(container?.textContent?.slice(0, 50) || '')
+    );
+
+    return { exists: true, required: isRequired };
+  }).catch(() => ({ exists: false, required: false }));
+}
+
+/**
  * Fill City by DOM label/id — verifies value stuck before returning success.
- * If city contains a gap / multiple words and initial fill fails, automatically retries without the gap ("BocaRaton").
+ * If city is not required and cannot be filled or found, skips cleanly without erroring or looping.
+ * After filling the exact city, presses Enter to commit so Workday does not mark it as unfilled.
  * @param {import('playwright').Page} page
  * @param {object} profile
- * @returns {Promise<{ success: boolean, value?: string, domValue?: string }>}
+ * @returns {Promise<{ success: boolean, value?: string, domValue?: string, skipped?: boolean }>}
  */
 export async function fillCityFromDom(page, profile = {}) {
+  // Check field status in DOM first
+  const status = await getCityFieldStatus(page);
+  if (!status.exists) {
+    console.log('    ℹ️  City field not present on current step/DOM — skipping cleanly.');
+    return { success: true, skipped: true };
+  }
+
   const city = resolveCityValue(profile);
   if (!city) {
-    console.log('    ⚠️  No city value in profile or defaults.');
-    return { success: false };
+    if (!status.required) {
+      console.log('    ℹ️  No city value in profile, but City is optional — skipping cleanly.');
+      return { success: true, skipped: true };
+    }
+    console.log('    ⚠️  City is required but no city value found in profile or defaults.');
+    return { success: false, skipped: false };
   }
 
   const current = await getCityInputValue(page);
@@ -104,6 +177,8 @@ export async function fillCityFromDom(page, profile = {}) {
       const fire = (el) => {
         el.dispatchEvent(new Event('input', { bubbles: true }));
         el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
+        el.dispatchEvent(new KeyboardEvent('keyup', { key: 'Enter', code: 'Enter', keyCode: 13, bubbles: true }));
         el.dispatchEvent(new Event('blur', { bubbles: true }));
       };
 
@@ -152,7 +227,18 @@ export async function fillCityFromDom(page, profile = {}) {
       await input.scrollIntoViewIfNeeded().catch(() => {});
       await input.click({ force: true }).catch(() => {});
       await input.fill(String(val || '').toLowerCase());
-      await input.press('Tab').catch(() => {});
+      
+      // Press Enter to commit the city input and dismiss auto-suggest dropdown
+      await input.press('Enter').catch(() => {});
+      await page.waitForTimeout(200);
+
+      // If Workday opened a suggestion dropdown or popup list, select or dismiss
+      const dropdownOption = page.locator('[role="listbox"] [role="option"], [data-automation-id="menu-item"], ul[role="listbox"] li').first();
+      if (await dropdownOption.isVisible({ timeout: 300 }).catch(() => false)) {
+        await dropdownOption.click({ force: true }).catch(() => {});
+      } else {
+        await input.press('Tab').catch(() => {});
+      }
       return true;
     }
     return false;
@@ -172,14 +258,14 @@ export async function fillCityFromDom(page, profile = {}) {
     if (fillVal === mergedCity && fillVal !== cityLower) {
       console.log(`    🏙️ Fallback: Retrying city in small letters merged without spaces: "${fillVal}"...`);
     } else {
-      console.log(`    🏙️ Setting city in small letters: "${fillVal}"...`);
+      console.log(`    🏙️ Setting city in small letters: "${fillVal}" (and pressing Enter)...`);
     }
-    let filled = await attemptDomFill(fillVal);
-    if (!filled) await attemptPlaywrightFill(fillVal);
+    let filled = await attemptPlaywrightFill(fillVal);
+    if (!filled) filled = await attemptDomFill(fillVal);
     await page.waitForTimeout(400);
     domValue = await getCityInputValue(page);
     if (cityValueMatches(domValue, fillVal) || cityValueMatches(domValue, cityLower)) {
-      console.log(`    ✅ City DOM verified: "${domValue}"`);
+      console.log(`    ✅ City DOM verified and committed: "${domValue}"`);
       profile.personal = profile.personal || {};
       profile.personal.city = domValue.toLowerCase();
       profile.qa_answers = profile.qa_answers || {};
@@ -188,8 +274,13 @@ export async function fillCityFromDom(page, profile = {}) {
     }
   }
 
+  if (!status.required) {
+    console.log(`    ℹ️  City could not be fully verified but is NOT required (DOM: "${domValue || '(empty)'}") — skipping cleanly.`);
+    return { success: true, skipped: true, value: city, domValue };
+  }
+
   console.log(`    ⚠️  City fill failed — DOM shows: "${domValue || '(empty)'}" (wanted "${city}")`);
-  return { success: false, value: city, domValue };
+  return { success: false, value: city, domValue, skipped: false };
 }
 
 export { CITY_LABEL, WORKDAY_DEFAULT_CITY };

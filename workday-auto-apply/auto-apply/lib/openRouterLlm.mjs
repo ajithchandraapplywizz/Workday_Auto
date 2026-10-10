@@ -44,6 +44,7 @@ import { httpsJsonWithRetry } from './httpClient.mjs';
 import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
 import { isSupabaseConfigured, upsertSupabaseAnswer } from './supabaseClient.mjs';
 import { buildLlmDateContext, getTodayISODate } from './date-utils.mjs';
+import { isValidCityName, isValidStateName } from './clientContact.mjs';
 
 /**
  * True for free-text / numeric input controls (not dropdown/radio with options).
@@ -404,7 +405,54 @@ function applicantSnapshot(profile = {}) {
         .slice(0, 40),
     )
     : {};
+
+  // PRIMARY SOURCE OF TRUTH: Resume Facts
+  const resumeProfile = profile._resumeProfile || null;
+  const resumeTextExcerpt = String(profile._resumeText || '').slice(0, 4000);
+  const primaryResumeFacts = {
+    resume_profile: resumeProfile,
+    resume_excerpt: resumeTextExcerpt,
+    highest_degree: resumeProfile?.highestDegree || edu.degree || '',
+    major: resumeProfile?.major || edu.major || '',
+    university: resumeProfile?.university || edu.university || '',
+    skills: Array.isArray(profile.skills) ? profile.skills.filter(Boolean).slice(0, 25) : [],
+    current_title: resumeProfile?.currentTitle || exp.current_title || '',
+    current_company: resumeProfile?.currentCompany || exp.current_company || '',
+    total_years: resumeProfile?.totalExperienceYears || exp.years || awQa[normalizeLabel('years of experience')] || '',
+  };
+
+  // SECONDARY / FALLBACK CONTEXT: CRM API Details (only used if resume is silent)
+  const fallbackApiContext = {
+    alternate_roles: Array.isArray(profile._applyWizzAlternateRoles) ? profile._applyWizzAlternateRoles : [],
+    work_preferences: Array.isArray(profile._applyWizzWorkPreferences) ? profile._applyWizzWorkPreferences : [],
+    apply_wizz_answers: awQa,
+    apply_wizz_client_context: profile._applyWizzClientContext || {},
+    known_qa_answers: qaSample,
+  };
+
   return {
+    // 1. Primary Resume Facts & Experience (Primary Source of Truth)
+    primary_source_of_truth: 'RESUME_FACTS',
+    resume_facts: primaryResumeFacts,
+    resume_excerpt: resumeTextExcerpt,
+    resume_profile: resumeProfile,
+    job_title: primaryResumeFacts.current_title,
+    company: primaryResumeFacts.current_company,
+    years_experience: primaryResumeFacts.total_years,
+    skills: primaryResumeFacts.skills,
+    university: primaryResumeFacts.university,
+    degree: primaryResumeFacts.highest_degree,
+    major: primaryResumeFacts.major,
+    from_date: exp.from_date || '',
+    to_date: exp.to_date || '',
+    location: exp.location || p.city || '',
+    description: exp.description || '',
+    education_from: edu.from_year || '',
+    education_to: edu.to_year || edu.graduation_year || '',
+    graduation_year: edu.graduation_year || edu.to_year || '',
+    gpa: edu.gpa || '',
+
+    // 2. Identity & Legal Compliance (Protected Direct Facts)
     name: `${p.first_name || ''} ${p.last_name || ''}`.trim(),
     email: p.email || '',
     phone: p.phone || '',
@@ -425,28 +473,12 @@ function applicantSnapshot(profile = {}) {
     sponsorship_needed: w.sponsorship_needed || '',
     visa_type: w.visa_type || '',
     willing_to_relocate: w.willing_to_relocate || awQa[normalizeLabel('willing to relocate')] || '',
-    job_title: exp.current_title || '',
-    company: exp.current_company || '',
-    years_experience: exp.years || awQa[normalizeLabel('years of experience')] || '',
-    from_date: exp.from_date || '',
-    to_date: exp.to_date || '',
-    location: exp.location || p.city || '',
-    description: exp.description || '',
-    alternate_roles: Array.isArray(profile._applyWizzAlternateRoles) ? profile._applyWizzAlternateRoles : [],
-    work_preferences: Array.isArray(profile._applyWizzWorkPreferences) ? profile._applyWizzWorkPreferences : [],
-    university: edu.university || '',
-    degree: edu.degree || '',
-    major: edu.major || '',
-    education_from: edu.from_year || '',
-    education_to: edu.to_year || edu.graduation_year || '',
-    graduation_year: edu.graduation_year || edu.to_year || '',
-    gpa: edu.gpa || '',
     compensation: profile.compensation || profile.salary || '',
     compensation_hourly: profile.compensation_hourly || '',
     desired_start_date: profile._desiredStartDate || '',
-    skills: Array.isArray(profile.skills) ? profile.skills.filter(Boolean).slice(0, 20) : [],
-    resume_excerpt: String(profile._resumeText || '').slice(0, 3000),
-    resume_profile: profile._resumeProfile || null,
+
+    // 3. Fallback Context (Only consulted if resume lacks the information)
+    fallback_api_context: fallbackApiContext,
     apply_wizz_answers: awQa,
     apply_wizz_client_context: profile._applyWizzClientContext || {},
     known_qa_answers: qaSample,
@@ -551,22 +583,6 @@ async function persistUnknownToTenant(label, answer, opts = {}, field = {}) {
       console.log(`    ⚠️  Apply Wizz Q&A persist skipped: ${err.message?.slice(0, 80) || err}`);
     }
     return;
-  }
-
-  const tenant = String(opts.tenant || '').trim().toLowerCase();
-  if (!tenant || tenant === 'unknown') return;
-  try {
-    const { saveAnswerToTenantYaml } = await import('./tenantQuestionYaml.mjs');
-    await saveAnswerToTenantYaml(tenant, {
-      label,
-      answer: String(answer),
-      fieldType: field?.fieldType || field?.type || 'input',
-      options: Array.isArray(field?.options) ? field.options : (opts.options || []),
-      step: opts.step || '',
-    });
-    console.log(`    💾 Tenant YAML ← "${String(label).slice(0, 45)}" = "${String(answer).slice(0, 40)}"`);
-  } catch (err) {
-    console.log(`    ⚠️  Tenant YAML save skipped: ${err.message?.slice(0, 80) || err}`);
   }
 }
 
@@ -756,13 +772,20 @@ export async function analyzeClientProfileOnce(profile = {}, opts = {}) {
         {
           role: 'system',
           content: `You analyse a job applicant for Workday form auto-fill.
+SOURCE OF TRUTH HIERARCHY:
+1. RESUME FACTS (PRIMARY TRUTH): Work history, job titles, exact dates, technical skills, tools, programming languages, and degrees MUST be grounded in the Resume Excerpt.
+2. CRM API DETAILS (FALLBACK ONLY): Use API answers/preferences ONLY if the resume excerpt does not contain the information (e.g. general questionnaire or contact details). Never let API assumptions contradict resume facts.
+
 Return a compact plain-text brief (no markdown) with short bullets covering:
-identity/contact, location, work history (role + total years from facts), education, skills,
-work authorization / visa, EEO defaults if present, compensation preference,
-and how to answer experience questions:
-- domain years questions: use total years only when the domain matches role/skills; otherwise 0
-- describe-experience prompts: short fact if matched; otherwise a honest "no experience with X" sentence
-- typical yes/no employer questions (prior employee, relatives, contractor → No unless facts say otherwise).
+- identity/contact & location
+- work history from resume: roles, companies, exact years/dates
+- education: highest completed degree & major from resume
+- technical skills & tools: extracted directly from resume
+- work authorization / visa facts
+- experience answering instructions:
+  * domain years questions: use resume years if candidate worked in domain; else 0
+  * describe-experience prompts: honest sentences reflecting resume projects/roles
+  * standard employer questions: No unless resume/facts explicitly state otherwise.
 Do not invent phone, email, name, salary, degree, or work-auth facts not in the input.`,
         },
         {
@@ -823,18 +846,20 @@ FIELD TYPE CODE (must honour): ${typeDesc}
 - Code 4 CHECKBOX: Yes/check only if true for this applicant; otherwise No.
 - Code 5 MULTI_CHECKBOX: only options that truly apply — never select all by default.
 
-PRIORITY:
-1) Client profile brief + Applicant facts (Apply Wizz + YAML + resume) — be humanic and accurate.
-2) Playwright DOM context (label, type code, live options).
-3) If options are listed, answer using only exact listed option text. Never invent an option.
+SOURCE OF TRUTH HIERARCHY:
+1) RESUME FACTS (PRIMARY SOURCE OF TRUTH):
+   - All work history, roles, skills, tools, technologies, and experience claims MUST be grounded in the applicant's resume.
+2) CRM API DETAILS (FALLBACK CONTEXT):
+   - Use CRM API context ONLY if the resume lacks the information. Do not contradict resume facts with API assumptions.
+3) Playwright DOM context (label, type code, live options). If options are listed, copy one EXACTLY.
 4) Never invent a different name, phone, email, salary, degree, school, or work-auth fact.
-5) NEVER default to Yes for every question. Read the profile. If unsure and options include No, prefer No for prior-employer / relatives / misconduct; for skills not in profile use No or 0 / NA as appropriate.
+5) NEVER default to Yes for every question. If unsure and options include No, prefer No for prior-employer / relatives / misconduct; for skills not in resume/profile use No or 0 / NA as appropriate.
 
 Rules:
 - REQUIRED field — never return UNKNOWN or empty.
 - DATE / AVAILABILITY: ${dateContext}
-- Years of experience in domain X: years if profile supports X, else 0. Never Yes/No for years inputs.
-- Describe / tell-us / why-looking / which-areas essays: 2–4 honest sentences from the profile. If the domain is not in the profile, say so and describe the actual role/skills. Never leave empty and do not answer Yes/No.
+- Years of experience in domain X: years if resume supports X, else 0. Never Yes/No for years inputs.
+- Describe / tell-us / why-looking / which-areas essays: 2–4 honest sentences from the resume. If the domain is not in the resume, state so honestly. Never leave empty and do not answer Yes/No.
 - Salary: compensation from facts or Negotiable.
 - Age 16/18+: Yes. Terms/consent: Yes.`;
 
@@ -859,16 +884,16 @@ ${dateContext}
 
 ${optionBlock}
 
-Experience analysis (from Apply Wizz + profile):
+Primary Experience Analysis (grounded in Resume):
 - Total years: ${expCtx.yearsText}
 - Role: ${expCtx.role || '(none)'}
 - Skills: ${(expCtx.skills || []).join(', ') || '(none)'}
 - Summary: ${expCtx.summary || '(none)'}
 
-Client profile brief (analysed once):
+Client profile brief (analysed once, resume prioritized):
 ${profileBrief || '(use JSON facts below)'}
 
-Complete applicant profile (Apply Wizz + YAML + resume-derived facts):
+Complete applicant profile (RESUME FACTS PRIMARY, CRM API FALLBACK):
 ${JSON.stringify(applicant, null, 2)}`;
 
   const data = await openRouterChat({
@@ -887,7 +912,7 @@ ${JSON.stringify(applicant, null, 2)}`;
 
 /**
  * Analyse an INPUT / textarea question with the LLM against the full client profile
- * (Apply Wizz + YAML brief). Used for years, describe-experience, and other free-text fields.
+ * (Resume primary + Apply Wizz fallback). Used for years, describe-experience, and other free-text fields.
  * @param {object} args
  * @returns {Promise<string|null>}
  */
@@ -917,15 +942,19 @@ Return ONLY valid JSON, with no markdown:
 {"answer":"value to type","confidence":0.0,"grounded":true}
 Set grounded=false when the answer is not supported by the supplied applicant facts.
 
+SOURCE OF TRUTH HIERARCHY:
+1. RESUME FACTS (PRIMARY): All work experience, skills, tools, and technical tenure MUST come from the resume.
+2. CRM API DETAILS (FALLBACK): Only use CRM API context if the resume is silent. Never contradict resume facts.
+
 FIELD TYPE CODE: ${describeFieldTypeCode(fieldTypeToCode(fieldType))}
-Be humanic: read the full profile. Do NOT answer Yes to everything.
+Be humanic: read the resume facts. Do NOT answer Yes to everything.
 
 Rules:
 0) DATE / AVAILABILITY: ${dateContext}
-1) Code 1 / years INPUT: if domain matches role/skills → years (${expCtx.yearsText}); else 0. Never Yes/No.
-2) Describe / tell-us / why-looking / which-areas: 2–4 honest sentences from the profile. If the domain is not in the profile, say so and describe the actual role. Never Yes/No and never empty.
+1) Code 1 / years INPUT: if domain matches resume role/skills → years (${expCtx.yearsText}); else 0. Never Yes/No.
+2) Describe / tell-us / why-looking / which-areas: 2–4 honest sentences from the resume. If the domain is not in the resume, say so and describe the actual role. Never Yes/No and never empty.
 3) Dropdown/radio: exact option text only.
-4) Checkbox/multi: only what is true for this applicant.
+4) Checkbox/multi: only what is true for this applicant from their resume/facts.
 5) Other inputs: matching facts only — never invent identity/salary/work-auth.
 
 Applicant total years: ${expCtx.yearsText}
@@ -963,10 +992,10 @@ ${dateContext}
 Question to analyse and answer:
 ${label}
 
-Client profile brief:
+Client profile brief (Resume prioritized):
 ${brief || '(see JSON)'}
 
-Complete applicant profile JSON:
+Complete applicant profile JSON (RESUME FACTS PRIMARY, API FALLBACK):
 ${JSON.stringify(snap, null, 2)}`,
       },
     ],
@@ -1001,10 +1030,22 @@ function identityAnswerFromApplicant(label, applicant = {}, profile = null) {
     return p.phone || applicant.phone || null;
   }
   if (/country.*phone.*code|phone.*code/.test(n)) return p.country_phone_code || applicant.phone_code || null;
-  if (/^country$/.test(n)) return p.country || null;
-  if (/^city$/.test(n)) return p.city || null;
-  if (/^state$/.test(n)) return p.state || null;
-  if (/postal\s*code|^zip/.test(n)) return p.postal_code || null;
+  if (/^country$/.test(n)) return p.country || applicant.country || null;
+  if (/^city$/.test(n)) {
+    if (isValidCityName(p.city)) return p.city;
+    if (isValidCityName(applicant.city)) return applicant.city;
+    if (isValidCityName(profile?._supabaseQa?.['city'])) return profile._supabaseQa['city'];
+    if (isValidCityName(profile?._applyWizzQa?.['city'])) return profile._applyWizzQa['city'];
+    return null;
+  }
+  if (/^state$/.test(n)) {
+    if (isValidStateName(p.state)) return p.state;
+    if (isValidStateName(applicant.state)) return applicant.state;
+    if (isValidStateName(profile?._supabaseQa?.['state'])) return profile._supabaseQa['state'];
+    if (isValidStateName(profile?._applyWizzQa?.['state'])) return profile._applyWizzQa['state'];
+    return null;
+  }
+  if (/postal\s*code|^zip/.test(n)) return p.postal_code || applicant.postal_code || null;
   return null;
 }
 
@@ -1225,7 +1266,7 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
 
   if (isPersonalIdentityQuestion(label)) {
     const applicant = await loadProfileSnapshot(opts.profile);
-    const fromProfile = identityAnswerFromApplicant(label, {
+    let fromProfile = identityAnswerFromApplicant(label, {
       ...applicant,
       email: opts.profile?.personal?.email,
       phone: opts.profile?.personal?.phone,
@@ -1236,7 +1277,24 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
       console.log(`    👤 Personal details stay on profile: "${label.slice(0, 40)}" ← "${String(fromProfile).slice(0, 30)}"`);
       return fromProfile;
     }
-    return null;
+    // Tier 2 Resume Fallback for missing contact/identity items (City, State, Postal code, etc.)
+    if (opts.profile?._resumeText) {
+      const { extractContactFromResumeText } = await import('./clientContact.mjs');
+      const fromResume = extractContactFromResumeText(opts.profile._resumeText);
+      if (fromResume && Object.keys(fromResume).length > 0) {
+        opts.profile.personal = opts.profile.personal || {};
+        if (fromResume.city && !opts.profile.personal.city) opts.profile.personal.city = fromResume.city;
+        if (fromResume.state && !opts.profile.personal.state) opts.profile.personal.state = fromResume.state;
+        if (fromResume.postal_code && !opts.profile.personal.postal_code) opts.profile.personal.postal_code = fromResume.postal_code;
+        fromProfile = identityAnswerFromApplicant(label, applicant, opts.profile);
+        if (fromProfile) {
+          console.log(`    📄 [Resume extracted identity]: "${label.slice(0, 40)}" ← "${String(fromProfile).slice(0, 30)}"`);
+          return fromProfile;
+        }
+      }
+    }
+    // If optional, return null; if required, allow falling through to LLM rather than failing the whole form
+    if (!field?.required && opts.forceLlm !== true) return null;
   }
 
   // Playwright: identify the live on-screen label, type, and options for this question.
@@ -1502,7 +1560,11 @@ export async function analyzeUnknownQuestionsBatch(questions = [], profile = {},
       messages: [
         {
           role: 'system',
-          content: `You answer Workday job-application questions using ONLY the applicant facts JSON and profile brief.
+          content: `You answer Workday job-application questions using the applicant facts JSON and profile brief.
+SOURCE OF TRUTH HIERARCHY:
+1. RESUME FACTS (PRIMARY TRUTH): Work history, roles, skills, and technical qualifications must come from the resume facts.
+2. CRM API DETAILS (FALLBACK ONLY): Use API details only when resume facts do not contain the answer.
+
 For each question: read the full question text and intent (not keywords alone).
 Field type codes: 1=free text/number, 2=dropdown, 3=radio, 4=checkbox, 5=multi-select.
 When options[] is non-empty, answer MUST be copied exactly from that list (one option, or array for code 5).
@@ -1510,7 +1572,7 @@ Calendar context: ${dateContext}
 For availability timing questions, compare the employee desired start date with today's date: a past/completed date maps to Immediately; a future date maps to the matching interval option such as 1 week. Return the exact live option.
 Required questions must get a best-effort answer from facts — use null only when truly unknown.
 Never invent visa/sponsorship/clearance/license facts; set requiresReview true for those if missing.
-Describe/essay: 2–4 honest sentences from profile. Years inputs: numbers only. Age 16/18+: Yes.
+Describe/essay: 2–4 honest sentences from resume. Years inputs: numbers only. Age 16/18+: Yes.
 Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0.85,"grounded":true,"requiresReview":false,"reason":""}]}`,
         },
         {

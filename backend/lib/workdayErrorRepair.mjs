@@ -407,7 +407,7 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
 
   for (const descriptor of descriptors) {
     if (/field\s*of\s*study/i.test(descriptor.label || descriptor.name || '')) {
-      const fos = await fillEducationFieldOfStudy(page, profile?.education?.major || 'Computer Science').catch(() => false);
+      const fos = await fillEducationFieldOfStudy(page, profile?.education?.major || 'Computer Science', { force: true }).catch(() => false);
       if (fos) {
         filled++;
         continue;

@@ -492,3 +492,219 @@
   max-height: calc(90vh - 45px);
   object-fit: contain;
 }
+
+/* Prominent View Screenshot Button Beside Status Badge */
+.sd-shot-btn-prominent {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(16, 185, 129, 0.15);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+  padding: 3px 9px;
+  border-radius: 6px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sd-shot-btn-prominent:hover {
+  background: rgba(16, 185, 129, 0.25);
+  color: #ffffff;
+  border-color: #34d399;
+  transform: translateY(-1px);
+}
+
+/* Needs Answers Badges */
+.sd-status-tag.badge-needs-answers {
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.35);
+}
+
+.sd-source-badge.badge-missing {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.4);
+}
+
+.sd-unans-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  background: rgba(245, 158, 11, 0.15);
+  color: #fbbf24;
+  border: 1px solid rgba(245, 158, 11, 0.3);
+  padding: 2px 7px;
+  border-radius: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+
+/* Pill Warning */
+.sd-pill.pill-warning.active {
+  background: #d97706;
+  border-color: #f59e0b;
+  color: #ffffff;
+}
+
+/* Unanswered Question Card Alert State */
+.sd-question-card.sd-card-unanswered {
+  border-left: 3px solid #f59e0b;
+  background: linear-gradient(90deg, rgba(245, 158, 11, 0.06) 0%, #1e293b 100%);
+}
+
+/* Answer Inputs & Inline Save */
+.sd-input-answer {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  outline: none;
+  transition: all 0.15s ease;
+}
+
+.sd-input-answer:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.sd-input-answer.input-missing {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.sd-input-answer.input-missing:focus {
+  border-color: #f59e0b;
+  box-shadow: 0 0 0 2px rgba(245, 158, 11, 0.2);
+}
+
+/* Dynamic Controls (Dropdown, Textarea, Radio Pills) */
+.sd-select-answer {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  outline: none;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sd-select-answer:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.sd-select-answer.input-missing {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.sd-select-answer option {
+  background: #0f172a;
+  color: #f1f5f9;
+}
+
+.sd-textarea-answer {
+  flex: 1;
+  background: #090d16;
+  border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 8px 12px;
+  font-size: 0.85rem;
+  color: #f1f5f9;
+  outline: none;
+  resize: vertical;
+  min-height: 60px;
+  font-family: inherit;
+  transition: all 0.15s ease;
+}
+
+.sd-textarea-answer:focus {
+  border-color: #38bdf8;
+  box-shadow: 0 0 0 2px rgba(56, 189, 248, 0.2);
+}
+
+.sd-textarea-answer.input-missing {
+  border-color: rgba(245, 158, 11, 0.5);
+  background: rgba(245, 158, 11, 0.03);
+}
+
+.sd-radio-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  flex: 1;
+}
+
+.sd-radio-pill {
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 0.78rem;
+  font-weight: 600;
+  border: 1px solid #334155;
+  background: #090d16;
+  color: #94a3b8;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.sd-radio-pill:hover {
+  background: #1e293b;
+  color: #f8fafc;
+  border-color: #475569;
+}
+
+.sd-radio-pill.selected {
+  background: #0284c7;
+  color: #ffffff;
+  border-color: #38bdf8;
+  box-shadow: 0 2px 8px rgba(2, 132, 199, 0.35);
+}
+
+.sd-save-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 12px;
+  background: #0284c7;
+  color: #ffffff;
+  border: none;
+  border-radius: 5px;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: all 0.15s ease;
+}
+
+.sd-save-btn:hover:not(:disabled) {
+  background: #0369a1;
+  transform: translateY(-1px);
+}
+
+.sd-save-btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+/* Toast States */
+.sd-action-toast.toast-success {
+  background: rgba(16, 185, 129, 0.18);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.35);
+}
+
+.sd-action-toast.toast-error {
+  background: rgba(239, 68, 68, 0.18);
+  color: #f87171;
+  border: 1px solid rgba(239, 68, 68, 0.35);
+}
+

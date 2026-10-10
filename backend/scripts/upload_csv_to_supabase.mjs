@@ -1,15 +1,3 @@
-/**
- * upload_csv_to_supabase.mjs
- *
- * Fast high-throughput uploader that parses a multi-client CSV and pushes all tasks
- * into the Supabase `batch_job_queue` table in parallel chunked batches.
- *
- * Usage:
- *   node scripts/upload_csv_to_supabase.mjs <path-to-csv> [--min-clients 30]
- *
- * Example:
- *   node scripts/upload_csv_to_supabase.mjs data/clients_jobs.csv --min-clients 30
- */
 
 import { resolve } from 'path';
 import { existsSync } from 'fs';

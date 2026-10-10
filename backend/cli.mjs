@@ -958,7 +958,7 @@ async function cmdStatus() {
 
   console.log(`
 ╔════════════════════════════════════════════════════════╗
-║          auto-apply — Status                          ║
+║          auto-apply — Status                           ║
 ╚════════════════════════════════════════════════════════╝
 
 Overall:

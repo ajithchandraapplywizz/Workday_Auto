@@ -7,10 +7,12 @@ import {
   checkAllApiHealth,
   fetchBatchQueue,
   fetchAutomationTrace,
+  fetchBatchWorkerLogs,
   fetchAllOperators,
-  updateOperatorStatus,
   triggerAutonomousBot,
+  stopAutonomousBot,
   fetchBotDaemonStatus,
+  resolveSupabaseStorageUrl,
   supabase,
 } from '../services/api';
 
@@ -26,6 +28,18 @@ export default function DeveloperDashboard() {
   const [debugSearch, setDebugSearch] = useState('');
   const [selectedDebugApp, setSelectedDebugApp] = useState(null);
   const [debugTrace, setDebugTrace] = useState([]);
+
+  // Batch-wise 9-worker logs states
+  const [batchLogs, setBatchLogs] = useState({
+    scanning: [],
+    resolving: [],
+    submitting: [],
+  });
+  const [activeBatchView, setActiveBatchView] = useState('all'); // 'all' | 'scanning' | 'resolving' | 'submitting'
+  const [scanWorkerFilter, setScanWorkerFilter] = useState('all');
+  const [resolveWorkerFilter, setResolveWorkerFilter] = useState('all');
+  const [submitWorkerFilter, setSubmitWorkerFilter] = useState('all');
+  const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   
   // Real dynamic states from Supabase & backend
   const [kpis, setKpis] = useState({
@@ -35,7 +49,7 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 1, total: 1 });
+  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 9, total: 9, scanningActive: 0, resolvingActive: 0, submittingActive: 0, workers: [] });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -46,11 +60,11 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 3 });
+  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9 });
   const [isTriggering, setIsTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
-  const tabs = ['System', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
+  const tabs = ['System', 'Worker Logs', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
 
   // Dynamic label for period tile
   const periodLabel = useMemo(() => {
@@ -58,6 +72,25 @@ export default function DeveloperDashboard() {
     if (timeframe === 'month') return 'This Month';
     return 'Today';
   }, [timeframe]);
+
+  // Live polling for Batch Worker Logs when Worker Logs tab is active
+  useEffect(() => {
+    if (activeTab !== 'Worker Logs') return;
+    let isMounted = true;
+    async function pollBatchLogs() {
+      const res = await fetchBatchWorkerLogs({ limit: 120 });
+      if (!isMounted) return;
+      if (res.success && res.batches) {
+        setBatchLogs(res.batches);
+      }
+    }
+    pollBatchLogs();
+    const interval = setInterval(pollBatchLogs, 2500);
+    return () => {
+      isMounted = false;
+      clearInterval(interval);
+    };
+  }, [activeTab]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -84,18 +117,21 @@ export default function DeveloperDashboard() {
 
         if (!isMounted) return;
 
+        const activeWorkersCount = workerRes?.success ? (workerRes.inFlight || 0) : 0;
+        if (workerRes?.success) {
+          setWorkerPool(workerRes);
+        }
+
         if (kpiRes.success) {
+          // Double-guard: If 0 workers are in active state, applying is strictly 0
+          const reconciledApplying = activeWorkersCount > 0 ? Math.min(kpiRes.applying, activeWorkersCount) : 0;
           setKpis({
             submitted: kpiRes.submitted,
-            applying: kpiRes.applying,
+            applying: reconciledApplying,
             failed: kpiRes.failed,
             queued: kpiRes.queued,
             total: kpiRes.total,
           });
-        }
-
-        if (workerRes.success) {
-          setWorkerPool(workerRes);
         }
 
         setHealthResults(healthRes);
@@ -226,15 +262,19 @@ export default function DeveloperDashboard() {
     }
   };
 
-  // Helper: Extract failure screenshot URL from multiple potential fields
+  // Helper: Extract screenshot URL from multiple potential fields
   const extractFailureScreenshot = (app) => {
     if (!app) return null;
-    if (app.failure_screenshot_url) return app.failure_screenshot_url;
-    if (app.screenshot_url) return app.screenshot_url;
-    if (app.screenshot_path) return app.screenshot_path;
+    const raw = app.application_submitted_screenshot_url
+      || app.applied_screenshot
+      || app.failure_screenshot_url
+      || app.screenshot_url
+      || app.screenshot_path
+      || null;
+    if (raw) return resolveSupabaseStorageUrl(raw);
     const reason = String(app.failure_reason || app.error_message || app.error_category || '');
     const match = reason.match(/\[screenshot:\s*([^\s\]]+)\]/i) || reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp|svg)/i);
-    if (match) return match[1] || match[0];
+    if (match) return resolveSupabaseStorageUrl(match[1] || match[0]);
     return null;
   };
 
@@ -366,16 +406,16 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
-  // Handle triggering autonomous 3-worker bot pool
+  // Handle triggering autonomous 9-worker pipeline
   const handleTriggerBot = async () => {
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '⚡ Dispatching 3-Worker Autonomous Bot trigger...' });
+    setTriggerToast({ type: 'info', text: '⚡ Dispatching 9-Worker Pipeline trigger...' });
     try {
       const res = await triggerAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Autonomous 3-Worker Bot Triggered! Workers are visiting unique links, populating scanned_jobs, pre-resolving questions, and distributing answers to all clients.',
+          text: '✓ Autonomous 9-Worker Pipeline Triggered! Workers are actively scanning links, pre-resolving questions, and preparing submissions.',
         });
         setBotStatus((prev) => ({ ...prev, isRunning: true, state: 'running' }));
       } else {
@@ -389,9 +429,32 @@ export default function DeveloperDashboard() {
     }
   };
 
+  // Handle stopping autonomous workers
+  const handleStopBot = async () => {
+    setIsTriggering(true);
+    setTriggerToast({ type: 'info', text: '🛑 Halting all 9 background workers...' });
+    try {
+      const res = await stopAutonomousBot();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ All 9 autonomous background workers have been STOPPED and reset to idle.',
+        });
+        setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop workers') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
+    } finally {
+      setIsTriggering(false);
+      setTimeout(() => setTriggerToast(null), 8000);
+    }
+  };
+
   return (
     <div className="dashboard-container">
-      {/* 3-Worker Autonomous Bot Trigger Banner */}
+      {/* 9-Worker Autonomous Pipeline Trigger Banner */}
       <div style={{
         background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
         border: '1px solid #334155',
@@ -423,51 +486,97 @@ export default function DeveloperDashboard() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
-                Autonomous 3-Worker Bot Engine
+                Autonomous 9-Worker Pipeline Engine
               </h3>
               <span style={{
                 fontSize: '0.72rem',
                 fontWeight: 700,
                 padding: '2px 8px',
                 borderRadius: '12px',
-                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
-                color: botStatus.isRunning ? '#34d399' : '#94a3b8',
-                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
+                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.15)',
+                color: botStatus.isRunning ? '#34d399' : '#f87171',
+                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {botStatus.isRunning ? 'ACTIVE • 3 WORKERS RUNNING' : 'STANDBY • READY TO TRIGGER'}
+                {botStatus.isRunning ? `ACTIVE • ${workerPool.inFlight || 9} WORKERS RUNNING` : 'STOPPED • ALL 9 WORKERS IDLE'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              Scrapes unique job links into <strong>scanned_jobs</strong>, pre-resolves 4-tier answers, and distributes to similar clients in <strong>job_distributions</strong> with status <strong>Ready for Review</strong>.
+              3 Scanning Workers &bull; 3 Resolving Workers &bull; 3 Submitting Workers &mdash; 4-Tier Pre-Resolution &amp; Instant Stop Protection.
             </p>
           </div>
         </div>
 
-        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem' }}>
-          <button
-            type="button"
-            onClick={handleTriggerBot}
-            disabled={isTriggering || botStatus.isRunning}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '0.65rem 1.35rem',
-              borderRadius: '6px',
-              border: 'none',
-              background: botStatus.isRunning
-                ? '#334155'
-                : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-              color: '#ffffff',
-              fontSize: '0.9rem',
-              fontWeight: 700,
-              cursor: botStatus.isRunning ? 'not-allowed' : 'pointer',
-              boxShadow: botStatus.isRunning ? 'none' : '0 4px 12px rgba(2, 132, 199, 0.35)',
-              transition: 'all 0.15s ease',
-            }}
-          >
-            <span>{botStatus.isRunning ? '🚀 3 Workers Active & Processing...' : (isTriggering ? '⚡ Dispatching Signal...' : '⚡ Trigger 3-Worker Bot')}</span>
-          </button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {botStatus.isRunning ? (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              disabled={isTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(239, 68, 68, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>🛑 Stop 9-Worker Pipeline</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerBot}
+              disabled={isTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start 9-Worker Pipeline'}</span>
+            </button>
+          )}
+
+          {botStatus.isRunning && (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '0.65rem 1rem',
+                borderRadius: '6px',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                background: 'rgba(239, 68, 68, 0.15)',
+                color: '#f87171',
+                fontSize: '0.85rem',
+                fontWeight: 600,
+                cursor: 'pointer',
+              }}
+              title="Force pause background workers"
+            >
+              Pause
+            </button>
+          )}
         </div>
       </div>
 
@@ -586,16 +695,18 @@ export default function DeveloperDashboard() {
               <span className="isc-speed">24ms</span>
             </div>
 
-            {/* Tile 10: Workers (from worker_status: 1 dedicated worker) */}
+            {/* Tile 10: Workers (from worker_status: strictly 9 canonical workers) */}
             <div className="integration-status-card">
               <div className="isc-header">
-                <span className="isc-title">WORKERS</span>
-                <span className="isc-badge ok">OK</span>
+                <span className="isc-title">WORKERS (9-PIPELINE)</span>
+                <span className={`isc-badge ${workerPool.inFlight > 0 ? 'ok' : 'idle'}`}>
+                  {workerPool.inFlight > 0 ? `${workerPool.inFlight} ACTIVE` : 'ALL IDLE'}
+                </span>
               </div>
               <p className="isc-detail">
-                {workerPool.inFlight} in-flight, {workerPool.idle} idle (pool: {workerPool.total})
+                Scan: {workerPool.scanningActive || 0}/3 &bull; Resolve: {workerPool.resolvingActive || 0}/3 &bull; Submit: {workerPool.submittingActive || 0}/3
               </p>
-              <span className="isc-speed">10ms</span>
+              <span className="isc-speed">{workerPool.idle || 0} idle</span>
             </div>
 
             {/* Tile 11: API (/api/ca/emails roster reachable, count = 59) */}
@@ -623,7 +734,458 @@ export default function DeveloperDashboard() {
         </div>
       )}
 
-      {/* 2. CA ROSTER & HEALTH TAB — Inspect and manage all 59 CAs */}
+      {/* 2. WORKER LOGS TAB — 3 Separate Log Consoles for 9 Workers (Batch-Wise) */}
+      {activeTab === 'Worker Logs' && (
+        <div className="tab-body-fade">
+          {/* Top Control Bar for Batch Logs */}
+          <div style={{
+            background: '#0f172a',
+            border: '1px solid #1e293b',
+            borderRadius: '8px',
+            padding: '12px 16px',
+            marginBottom: '1.25rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '10px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ fontSize: '0.85rem', fontWeight: 'bold', color: '#e2e8f0', letterSpacing: '0.04em' }}>
+                BATCH VIEW:
+              </span>
+              <div style={{ display: 'flex', gap: '6px' }}>
+                {[
+                  { id: 'all', label: 'All 3 Batches (Grid View)' },
+                  { id: 'scanning', label: 'Batch 1: Scanning (Workers 1-3)' },
+                  { id: 'resolving', label: 'Batch 2: Resolving (Workers 1-3)' },
+                  { id: 'submitting', label: 'Batch 3: Submitting (Workers 1-3)' },
+                ].map((btn) => (
+                  <button
+                    key={btn.id}
+                    type="button"
+                    onClick={() => setActiveBatchView(btn.id)}
+                    style={{
+                      padding: '4px 10px',
+                      fontSize: '0.78rem',
+                      borderRadius: '4px',
+                      border: '1px solid #334155',
+                      cursor: 'pointer',
+                      background: activeBatchView === btn.id ? '#0284c7' : '#1e293b',
+                      color: '#ffffff',
+                      fontWeight: activeBatchView === btn.id ? 'bold' : 'normal',
+                      transition: 'all 0.15s ease',
+                    }}
+                  >
+                    {btn.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '0.78rem', color: '#94a3b8', cursor: 'pointer' }}>
+                <input
+                  type="checkbox"
+                  checked={autoScrollLogs}
+                  onChange={(e) => setAutoScrollLogs(e.target.checked)}
+                />
+                Auto-scroll live stream
+              </label>
+              <button
+                type="button"
+                className="video-btn-refresh"
+                onClick={async () => {
+                  const res = await fetchBatchWorkerLogs({ limit: 120 });
+                  if (res.success && res.batches) setBatchLogs(res.batches);
+                }}
+                style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+              >
+                🔄 Refresh Logs
+              </button>
+            </div>
+          </div>
+
+          {/* 3 Batch Terminals Container */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: activeBatchView === 'all' ? 'repeat(3, minmax(0, 1fr))' : '1fr',
+            gap: '1rem',
+            alignItems: 'start',
+          }}>
+            {/* ── BATCH 1: SCANNING CLUSTER ───────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'scanning') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(56, 189, 248, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(56, 189, 248, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(56, 189, 248, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.scanningActive || 0) > 0 ? '#38bdf8' : '#64748b',
+                        boxShadow: (workerPool.scanningActive || 0) > 0 ? '0 0 8px #38bdf8' : 'none',
+                      }} />
+                      <strong style={{ color: '#38bdf8', fontSize: '0.88rem' }}>
+                        BATCH 1: SCANNING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; Auth &amp; Gateway &bull; Job Questions Discovery
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'scanning_worker_1', label: 'W1' },
+                      { id: 'scanning_worker_2', label: 'W2' },
+                      { id: 'scanning_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setScanWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: scanWorkerFilter === w.id ? '#0284c7' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: scanWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.scanning || []).filter((l) => {
+                      if (scanWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(scanWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>📡 Scanning workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            Live link scan &amp; gateway verification logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#38bdf8',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(56, 189, 248, 0.1)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 1}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* ── BATCH 2: RESOLVING CLUSTER ──────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'resolving') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(168, 85, 247, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(168, 85, 247, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(168, 85, 247, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.resolvingActive || 0) > 0 ? '#c084fc' : '#64748b',
+                        boxShadow: (workerPool.resolvingActive || 0) > 0 ? '0 0 8px #c084fc' : 'none',
+                      }} />
+                      <strong style={{ color: '#c084fc', fontSize: '0.88rem' }}>
+                        BATCH 2: RESOLVING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; 4-Tier Engine &bull; QA Bank &amp; LLM Reasoning
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'resolving_worker_1', label: 'W1' },
+                      { id: 'resolving_worker_2', label: 'W2' },
+                      { id: 'resolving_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setResolveWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: resolveWorkerFilter === w.id ? '#7c3aed' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: resolveWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.resolving || []).filter((l) => {
+                      if (resolveWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(resolveWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>🧠 Resolving workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            4-Tier answer generation &amp; candidate QA bank logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#c084fc',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(168, 85, 247, 0.12)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 6}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+
+            {/* ── BATCH 3: SUBMITTING CLUSTER ─────────────────────────── */}
+            {(activeBatchView === 'all' || activeBatchView === 'submitting') && (
+              <div style={{
+                background: '#0b1120',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+                borderRadius: '8px',
+                display: 'flex',
+                flexDirection: 'column',
+                overflow: 'hidden',
+                boxShadow: '0 4px 14px rgba(0, 0, 0, 0.4)',
+              }}>
+                {/* Console Header */}
+                <div style={{
+                  background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(15, 23, 42, 0.9) 100%)',
+                  padding: '10px 14px',
+                  borderBottom: '1px solid rgba(16, 185, 129, 0.25)',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  flexWrap: 'wrap',
+                  gap: '6px',
+                }}>
+                  <div>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <span style={{
+                        width: '8px',
+                        height: '8px',
+                        borderRadius: '50%',
+                        background: (workerPool.submittingActive || 0) > 0 ? '#34d399' : '#64748b',
+                        boxShadow: (workerPool.submittingActive || 0) > 0 ? '0 0 8px #34d399' : 'none',
+                      }} />
+                      <strong style={{ color: '#34d399', fontSize: '0.88rem' }}>
+                        BATCH 3: SUBMITTING CLUSTER
+                      </strong>
+                    </div>
+                    <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
+                      Workers 1–3 &bull; Workday Wizard Filling &bull; Proof Capture &amp; Submit
+                    </div>
+                  </div>
+
+                  {/* Worker Sub-Filter */}
+                  <div style={{ display: 'flex', gap: '3px' }}>
+                    {[
+                      { id: 'all', label: 'All (1-3)' },
+                      { id: 'submitting_worker_1', label: 'W1' },
+                      { id: 'submitting_worker_2', label: 'W2' },
+                      { id: 'submitting_worker_3', label: 'W3' },
+                    ].map((w) => (
+                      <button
+                        key={w.id}
+                        type="button"
+                        onClick={() => setSubmitWorkerFilter(w.id)}
+                        style={{
+                          padding: '2px 6px',
+                          fontSize: '0.7rem',
+                          borderRadius: '3px',
+                          border: '1px solid #334155',
+                          cursor: 'pointer',
+                          background: submitWorkerFilter === w.id ? '#059669' : '#1e293b',
+                          color: '#fff',
+                          fontWeight: submitWorkerFilter === w.id ? 'bold' : 'normal',
+                        }}
+                      >
+                        {w.label}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Terminal Console Output */}
+                <div style={{
+                  padding: '10px 12px',
+                  maxHeight: activeBatchView === 'all' ? '540px' : '720px',
+                  minHeight: '380px',
+                  overflowY: 'auto',
+                  fontFamily: 'JetBrains Mono, Menlo, monospace',
+                  fontSize: '0.76rem',
+                  lineHeight: '1.5',
+                  background: '#020617',
+                  color: '#e2e8f0',
+                }}>
+                  {(() => {
+                    const logs = (batchLogs.submitting || []).filter((l) => {
+                      if (submitWorkerFilter === 'all') return true;
+                      return String(l.message || '').includes(submitWorkerFilter);
+                    });
+
+                    if (logs.length === 0) {
+                      return (
+                        <div style={{ color: '#64748b', textAlign: 'center', padding: '3rem 1rem' }}>
+                          <div>⚡ Submitting workers standby (idle).</div>
+                          <div style={{ fontSize: '0.7rem', marginTop: '4px' }}>
+                            Workday wizard steps &amp; screenshot proof confirmation logs will stream here.
+                          </div>
+                        </div>
+                      );
+                    }
+
+                    return logs.map((log, i) => (
+                      <div key={log.id || i} style={{ marginBottom: '4px', wordBreak: 'break-word' }}>
+                        <span style={{ color: '#475569', marginRight: '6px' }}>
+                          [{log.ts ? new Date(log.ts).toLocaleTimeString() : 'LIVE'}]
+                        </span>
+                        <span style={{
+                          color: '#34d399',
+                          fontWeight: 'bold',
+                          marginRight: '6px',
+                          background: 'rgba(16, 185, 129, 0.12)',
+                          padding: '1px 4px',
+                          borderRadius: '3px',
+                        }}>
+                          Step {log.step_index || 8}
+                        </span>
+                        <span style={{ color: '#cbd5e1' }}>
+                          {log.message}
+                        </span>
+                      </div>
+                    ));
+                  })()}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 3. CA ROSTER & HEALTH TAB — Inspect and manage all 59 CAs */}
       {activeTab === 'CA Roster' && (
         <div className="tab-body-fade">
           {/* Summary KPIs */}

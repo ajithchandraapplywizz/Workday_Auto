@@ -19,9 +19,11 @@ import { scanForm, slugify } from './scanner.mjs';
 import { fillForm } from './engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
+import { inferStandardOptions } from './workdayScanHarvest.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
+import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -50,12 +52,25 @@ function findFilePath(relPath) {
   return candidates[0];
 }
 
+let workerPoolStopRequested = false;
+export function setWorkerPoolStop(val) {
+  workerPoolStopRequested = Boolean(val);
+  setGlobalStop(val);
+}
+export function getWorkerPoolStop() {
+  return workerPoolStopRequested || isGlobalStopRequested();
+}
+
+export async function isWorkerPoolStopRequested() {
+  return workerPoolStopRequested || isGlobalStopRequested();
+}
+
 /**
  * Execute a single job application task within an isolated worker context.
  */
 export async function executeWorkerTask({
   task,
-  workerId = 'Worker-1',
+  workerId = 'submitting_worker_1',
   taskIndex = 1,
   totalTasks = 1,
   options = {},
@@ -82,6 +97,11 @@ export async function executeWorkerTask({
   console.log(`   🏢 Company: ${company || 'Workday'}`);
   console.log(`   🔗 URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
+
+  if (await isWorkerPoolStopRequested()) {
+    console.log(`   🛑 [${workerId}] Stop requested! Aborting task execution.`);
+    return { status: 'stopped', error: 'Stopped by user' };
+  }
 
   // Ensure application record exists in Supabase so trace events are linked to the application ID
   let liveApplicationId = null;
@@ -153,24 +173,40 @@ export async function executeWorkerTask({
     return { status: 'profile_load_failed', error: err.message };
   }
 
-  // 3. Resolve Workday credentials for this candidate
-  const candidateEmail = resolveCompanyEmail(profile.personal || profile, [profile.personal?.first_name, profile.personal?.last_name].filter(Boolean).join(' ') || profile.name || '');
-  const workdayEmail = candidateEmail || profile.personal?.email || '';
-  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || '';
+  // 3. Resolve Workday credentials for this candidate from AWL ID client record in Supabase
+  let candidateDbClient = null;
+  if (applywizzId) {
+    try {
+      const { loadSupabaseClientSnapshot } = await import('./supabaseClient.mjs');
+      const snap = await loadSupabaseClientSnapshot(applywizzId);
+      if (snap?.client) {
+        candidateDbClient = snap.client;
+      }
+    } catch {}
+  }
+
+  const candidateEmail = candidateDbClient?.company_email ||
+    candidateDbClient?.email ||
+    (candidateDbClient ? resolveCompanyEmail(candidateDbClient, candidateDbClient.client_name) : '') ||
+    resolveCompanyEmail(profile.personal || profile, [profile.personal?.first_name, profile.personal?.last_name].filter(Boolean).join(' ') || profile.name || '');
+
+  let workdayEmail = candidateEmail || profile.personal?.company_email || profile.personal?.email || profile.email || '';
+  if (!workdayEmail && applywizzId) {
+    const rawFirst = candidateDbClient?.first_name || profile.personal?.first_name || '';
+    const rawLast = candidateDbClient?.last_name || profile.personal?.last_name || '';
+    const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || applywizzId.toLowerCase().replace(/[^a-z0-9]/g, '');
+    workdayEmail = `${rawName}@applywizard.ai`;
+  }
+  if (!workdayEmail) {
+    workdayEmail = process.env.WORKDAY_DEFAULT_USERNAME || 'Created@123';
+  }
+  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026';
 
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
   const skillsCount = profile.skills?.length || 0;
   appLog(2, `Supabase Profile: Loaded candidate record for ${applywizzId} (${workdayEmail}). Indexed ${expCount} job experiences, ${skillsCount} verified skills.`);
 
-  console.log(`   📧 [${workerId}] Using candidate credentials: ${workdayEmail} for ${applywizzId}`);
-
-  if (!workdayEmail || !workdayPassword) {
-    const err = `Missing credentials for ${applywizzId} (${workdayEmail || 'no-email'})`;
-    console.error(`   ❌ [${workerId}] ${err}`);
-    appLog(2, `Auth Error: Missing Workday login credentials for ${applywizzId}`);
-    if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: err });
-    return { status: 'auth_missing', error: err };
-  }
+  console.log(`   📧 [${workerId}] Using candidate credentials: ${workdayEmail} (Universal Password: ${workdayPassword}) for ${applywizzId}`);
 
   // Immediately notify Supabase & Frontend dashboard of Active / In-Progress status
   await updateWorkerStatus(workerId, { state: 'in_flight' }).catch(() => {});
@@ -225,7 +261,7 @@ export async function executeWorkerTask({
           }
         }
         if (loadedCount > 0) {
-          console.log(`   ⚡ [${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
+          console.log(`   * [Worker ${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
         }
       }
     } catch {}
@@ -246,12 +282,28 @@ export async function executeWorkerTask({
   }
 
   // 5. Launch isolated Playwright browser context
-  appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching headless Chrome.`);
-  const browser = await chromium.launch({ headless });
+  appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
+  const browser = await chromium.launch({
+    headless: Boolean(headless),
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--disable-dev-shm-usage',
+      '--window-size=1280,900',
+    ],
+  });
+  registerActiveBrowser(browser);
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'en-US',
+    timezoneId: 'America/New_York',
   });
+  await context.addInitScript(() => {
+    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+  }).catch(() => {});
   const page = await context.newPage();
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
@@ -353,7 +405,7 @@ export async function executeWorkerTask({
           });
         } catch {}
 
-        return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl };
+        return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
       }
     }
 
@@ -419,59 +471,86 @@ export async function executeWorkerTask({
         scan.authFailed = false;
         console.log(`   ✅ [${workerId}] Application wizard active — DOM scan discovered ${scan.field_count} fields.`);
       } else {
-        const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
-        const authErrorMsg = await getWorkdayAuthErrorMessage(page);
-
-        const isMailboxNotConnected = scan.authReason === 'mailbox_not_connected' || scan.reason === 'mailbox_not_connected';
-        if (isMailboxNotConnected) {
-          console.log(`   ⚠️ [${workerId}] Skipping ${applywizzId}: Zoho mail not connected for password reset/verification (193 pool).`);
-          await browser.close().catch(() => {});
-          if (queueTaskId) {
-            await updateQueueTaskStatus(queueTaskId, { status: 'skipped', errorMessage: 'zoho_email_not_connected' });
+        // Attempt Zoho Mail email verification and password reset recovery
+        console.log(`   🔐 [${workerId}] Auth gateway requires verification or password setup. Invoking Zoho Mail recovery...`);
+        let recovered = false;
+        try {
+          const { resolveWorkdayVerification } = await import('./workdayVerification.mjs');
+          const vRes = await resolveWorkdayVerification(page, {
+            email: workdayEmail,
+            password: workdayPassword,
+            company,
+            startTime: Date.now() - 120000,
+            timeoutMs: 45000,
+          });
+          if (vRes?.success && (vRes?.onWizard || await isWorkdayWizardVisible(page))) {
+            recovered = true;
+            console.log(`   🎉 [${workerId}] Successfully verified and authenticated via Zoho Mail! Continuing form fill.`);
+            scan = await scanForm(jobUrl, { browser, context, page, workdayEmail, workdayPassword, isBatch: true, candidateId: applywizzId });
+            scan.authFailed = false;
           }
+        } catch (zErr) {
+          console.warn(`   ⚠️ [${workerId}] Zoho verification attempt notice: ${zErr.message}`);
+        }
+
+        if (!recovered) {
+          const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
+          let authErrorMsg = await getWorkdayAuthErrorMessage(page);
+
+          // Deep DOM error inspection for validation errors, alerts, and field blockers
+          let domSpecificReason = null;
+          try {
+            domSpecificReason = await page.evaluate(() => {
+              const alertEl = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], [data-automation-id="formError"]');
+              if (alertEl && alertEl.textContent?.trim()) {
+                return alertEl.textContent.trim().replace(/\s+/g, ' ');
+              }
+              const invalidInput = document.querySelector('[aria-invalid="true"]');
+              if (invalidInput) {
+                const labelEl = invalidInput.closest('div')?.querySelector('label') || document.querySelector(`label[for="${invalidInput.id}"]`);
+                const name = labelEl?.textContent?.trim() || invalidInput.getAttribute('aria-label') || invalidInput.name || 'field';
+                return `Validation Error: Required ${name} is invalid or missing`;
+              }
+              const pageText = document.body ? document.body.innerText : '';
+              if (/job (is no longer|has expired|not found|does not exist)/i.test(pageText)) {
+                return 'Link Expired: Job no longer available on Workday';
+              }
+              return null;
+            }).catch(() => null);
+          } catch {}
+
+          const effectiveReason = domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check';
+          const failReasonText = `Authentication / Gateway check: ${effectiveReason}`;
+          console.log(`   ❌ [${workerId}] ${failReasonText}`);
+
+          let authShotUrl = null;
+          try {
+            if (page && !page.isClosed()) {
+              await page.evaluate(() => {
+                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i], [aria-invalid="true"]');
+                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
+                else window.scrollTo(0, 0);
+              }).catch(() => {});
+              await page.waitForTimeout(400);
+              const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+              if (buf) {
+                authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+              }
+            }
+          } catch {}
+
+          await browser.close().catch(() => {});
+          if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
           await upsertSupabaseApplication({
             applywizzId,
             jobUrl,
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            status: 'skipped',
-            failureReason: 'Zoho mail verification not connected (193 pool)',
+            status: 'failed',
+            failureReason: failReasonText,
+            failureScreenshotUrl: authShotUrl,
+            stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
           }).catch(() => {});
-          return { status: 'skipped', reason: 'zoho_email_not_connected' };
-        }
-
-        const failReasonText = authErrorMsg ? `Authentication failed: ${authErrorMsg}` : 'Application wizard not accessible after discovery';
-        console.log(`   ❌ [${workerId}] ${failReasonText}`);
-        let authShotUrl = null;
-        try {
-          if (page && !page.isClosed()) {
-            if (authErrorMsg) {
-              await page.evaluate(() => {
-                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i]');
-                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
-              }).catch(() => {});
-            } else {
-              await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-            }
-            await page.waitForTimeout(300);
-            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-            if (buf) {
-              authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_auth_fail.jpg`, buf);
-            }
-          }
-        } catch {}
-        await browser.close().catch(() => {});
-        if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'auth_failed', screenshotPath: authShotUrl });
-        await upsertSupabaseApplication({
-          applywizzId,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          status: 'failed',
-          failureReason: failReasonText,
-          failureScreenshotUrl: authShotUrl,
-          stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
-        }).catch(() => {});
 
         try {
           const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
@@ -496,9 +575,10 @@ export async function executeWorkerTask({
           });
         } catch {}
 
-        return { status: 'auth_failed', screenshotUrl: authShotUrl };
+        return { status: 'auth_failed', screenshotUrl: authShotUrl, stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)', failureReason: failReasonText };
       }
     }
+  }
 
     // Step B: Pick resume for candidate
     console.log(`   [${workerId}] Step 2: Preparing resume...`);
@@ -606,7 +686,7 @@ export async function executeWorkerTask({
         });
       } catch {}
 
-      return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl };
+      return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
     }
 
     // Step E: Save newly discovered form schema to Supabase if unique link
@@ -631,13 +711,13 @@ export async function executeWorkerTask({
           roleTitle,
         });
 
-        // Immediately bulk-pre-resolve for all other pending clients sharing this URL (scoped to active CAs).
-        if (saved) {
+        // Immediately bulk-pre-resolve for all other pending clients sharing this URL (skipped in cluster mode where Phase 3 resolves in parallel)
+        if (saved && !options.isClusterBlueprint) {
           const { loadJobFormSchema: getSchema } = await import('./supabaseClient.mjs');
           const savedSchema = await getSchema(jobUrl).catch(() => null);
           if (savedSchema?.fields_schema?.length) {
             const profilePath = findFilePath('config/profile.yml');
-            await bulkPreResolveForJobUrl({
+            bulkPreResolveForJobUrl({
               jobUrl,
               schema: savedSchema,
               allowedCandidateIds,
@@ -660,17 +740,23 @@ export async function executeWorkerTask({
     }
 
     // Step F: Record status to Supabase
-    let completionShotUrl = null;
+    let completionShotUrl = profile?._submissionScreenshotUrl || null;
     let detectedStep = null;
     try {
-      if (page && !page.isClosed()) {
-        const { detectWorkdayStep } = await import('./stateDetector.mjs');
-        detectedStep = await detectWorkdayStep(page).catch(() => null);
-        if (status !== 'submitted' && status !== 'reached-review' && status !== 'reached_review') {
-          await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-          await page.waitForTimeout(500).catch(() => {});
+      if (!completionShotUrl) {
+        let buf = profile?._submissionScreenshotBuffer || null;
+        if (!buf && page && !page.isClosed()) {
+          const { detectWorkdayStep } = await import('./stateDetector.mjs');
+          detectedStep = await detectWorkdayStep(page).catch(() => null);
+          if (status !== 'submitted' && status !== 'reached-review' && status !== 'reached_review') {
+            await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+            await page.waitForTimeout(500).catch(() => {});
+          }
+          buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
+          if (!buf) {
+            buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+          }
         }
-        const buf = profile?._submissionScreenshotBuffer || await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true }).catch(() => null);
         if (buf) {
           const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
             ? 'application-successes'
@@ -680,7 +766,15 @@ export async function executeWorkerTask({
       }
     } catch {}
 
-    const isSuccessStatus = (status === 'submitted' || status === 'reached-review' || status === 'reached_review');
+    const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
+    const isSuccessStatus = (
+      status === 'submitted' ||
+      status === 'reached-review' ||
+      status === 'reached_review' ||
+      status === 'ready_for_review' ||
+      (status === 'human-required' && onReviewPage) ||
+      onReviewPage
+    );
     const stoppedBlock = isSuccessStatus
       ? 'Step 5: Review & Submit'
       : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
@@ -697,7 +791,7 @@ export async function executeWorkerTask({
 
     const appStatus = (status === 'submitted')
       ? 'submitted'
-      : (status === 'reached-review' || status === 'reached_review')
+      : (status === 'reached-review' || status === 'reached_review' || isSuccessStatus)
         ? 'ready_for_review'
         : status;
 
@@ -732,6 +826,32 @@ export async function executeWorkerTask({
     }
 
     if (!isSuccessStatus) {
+      const answeredSoFar = [];
+      if (profile?._filledValues) {
+        for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
+          if (qLabel && qVal != null) {
+            answeredSoFar.push({
+              question: qLabel,
+              answer: String(qVal),
+              step: profile?._currentStep || stoppedBlock || 'Application',
+              is_answered: true,
+            });
+          }
+        }
+      }
+      if (profile?._answerCache && answeredSoFar.length === 0) {
+        for (const [qLabel, qVal] of profile._answerCache.entries()) {
+          if (qLabel && qVal != null) {
+            answeredSoFar.push({
+              question: qLabel,
+              answer: String(qVal),
+              step: profile?._currentStep || stoppedBlock || 'Application',
+              is_answered: true,
+            });
+          }
+        }
+      }
+
       try {
         const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
         await recordFailedJob({
@@ -743,6 +863,7 @@ export async function executeWorkerTask({
           failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
           failedAtStep: stoppedBlock,
           screenshotPath: completionShotUrl,
+          resolvedAnswers: answeredSoFar,
         });
         await recordApplicationFailure({
           applywizzId,
@@ -756,6 +877,160 @@ export async function executeWorkerTask({
       } catch {}
     }
 
+    // Helper to infer clean field type and options for JSONB storage and dashboard rendering
+    function inferQuestionTypeAndOptions(label = '', value = '', meta = {}) {
+      const norm = String(label || '').toLowerCase();
+      const valStr = String(value || '').trim();
+      let fieldType = meta.fieldType || meta.field_type || meta.type || '';
+      let options = Array.isArray(meta.options) && meta.options.length ? [...meta.options] : [];
+
+      if (!fieldType || fieldType === 'review_question' || fieldType === 'unknown' || fieldType === 'wizard_question') {
+        if (/^(yes|no)$/i.test(valStr) || /\b(yes\s*\/\s*no|authorized|sponsorship|require|consent|agree|over\s*18|felony)\b/i.test(norm)) {
+          fieldType = 'radio';
+          if (!options.length) options = ['Yes', 'No'];
+        } else if (/\b(date|dob|birth|start\s*date|graduation)\b/i.test(norm) || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(valStr)) {
+          fieldType = 'date';
+        } else if (/\b(phone|mobile|cell)\b/i.test(norm)) {
+          fieldType = 'phone';
+        } else if (/\b(describe|explain|why|tell\s*us|summary|cover\s*letter|comments?|bio)\b/i.test(norm) || valStr.length > 120) {
+          fieldType = 'textarea';
+        } else if (/\b(country|state|province|gender|ethnicity|race|veteran|disability|degree|level\s*of\s*education|hear\s*about|device\s*type)\b/i.test(norm)) {
+          fieldType = 'dropdown';
+          if (valStr && !options.includes(valStr)) options.push(valStr);
+        } else {
+          fieldType = 'text';
+        }
+      }
+
+      return { fieldType, options };
+    }
+
+    // Format all scraped questions across ALL wizard steps and Review & Submit with precise types & options
+    const questionMap = new Map();
+    const getQKey = (label) => String(label || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+
+    // 1. Ingest wizard fields discovered across all pages (My Information, My Experience, Application Questions, Voluntary Disclosures)
+    const allWizardFields = [
+      ...(Array.isArray(profile?._scrapedQuestions) ? profile._scrapedQuestions : []),
+      ...(profile?._scrapedWizardQuestions instanceof Map ? Array.from(profile._scrapedWizardQuestions.values()) : []),
+      ...(Array.isArray(combinedFields) ? combinedFields : []),
+      ...(Array.isArray(profile?._harvestedFields) ? profile._harvestedFields : []),
+      ...(Array.isArray(scan?.fields) ? scan.fields : []),
+      ...(Array.isArray(cacheResult?.schema?.fields_schema) ? cacheResult.schema.fields_schema : []),
+    ];
+
+    for (const f of allWizardFields) {
+      if (!f || !(f.label || f.question)) continue;
+      const lbl = f.label || f.question;
+      const qKey = getQKey(lbl);
+      if (!qKey || qKey.length < 2) continue;
+
+      const { fieldType, options } = inferQuestionTypeAndOptions(lbl, f.value || '', f);
+      const val = (f.value != null && f.value !== '')
+        ? String(f.value)
+        : (profile?._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
+
+      const isReq = Boolean(f.is_required ?? f.required ?? true);
+
+      if (!questionMap.has(qKey)) {
+        questionMap.set(qKey, {
+          label: lbl,
+          question: lbl,
+          question_normalized: qKey,
+          value: val,
+          field_type: fieldType,
+          type: fieldType,
+          options: Array.isArray(options) && options.length ? options : (Array.isArray(f.options) ? f.options : []),
+          required: isReq,
+          is_required: isReq,
+          important: true,
+          step: (f.step && f.step !== 'Application' && f.step !== 'Review & Submit') ? f.step : (f.step || 'Application'),
+        });
+      } else {
+        const existing = questionMap.get(qKey);
+        if (!existing.value && val) existing.value = val;
+        if ((!existing.options || !existing.options.length) && Array.isArray(options) && options.length) {
+          existing.options = options;
+        }
+        if (f.step && (!existing.step || existing.step === 'Application' || existing.step === 'Review & Submit')) {
+          existing.step = f.step;
+        }
+        if (isReq) {
+          existing.required = true;
+          existing.is_required = true;
+        }
+      }
+    }
+
+    // 2. Ingest / merge questions answered during wizard steps (profile._filledValues)
+    if (profile?._filledValues) {
+      for (const [lbl, val] of Object.entries(profile._filledValues)) {
+        if (!lbl || val == null) continue;
+        const qKey = getQKey(lbl);
+        if (!qKey || qKey.length < 2) continue;
+
+        if (questionMap.has(qKey)) {
+          const existing = questionMap.get(qKey);
+          if (!existing.value) existing.value = String(val);
+        } else {
+          const { fieldType, options } = inferQuestionTypeAndOptions(lbl, val);
+          questionMap.set(qKey, {
+            label: lbl,
+            question: lbl,
+            question_normalized: qKey,
+            value: String(val),
+            field_type: fieldType,
+            type: fieldType,
+            options,
+            required: true,
+            is_required: true,
+            important: true,
+            step: profile?._currentStep || 'Application',
+          });
+        }
+      }
+    }
+
+    // 3. Ingest / merge questions from Review & Submit DOM (profile._scrapedReviewMap)
+    if (profile?._scrapedReviewMap) {
+      for (const [lbl, val] of Object.entries(profile._scrapedReviewMap)) {
+        if (!lbl) continue;
+        const qKey = getQKey(lbl);
+        if (!qKey || qKey.length < 2) continue;
+
+        if (questionMap.has(qKey)) {
+          const existing = questionMap.get(qKey);
+          if (!existing.value && val) existing.value = String(val);
+        } else {
+          const { fieldType, options } = inferQuestionTypeAndOptions(lbl, val);
+          questionMap.set(qKey, {
+            label: lbl,
+            question: lbl,
+            question_normalized: qKey,
+            value: String(val || ''),
+            field_type: fieldType,
+            type: fieldType,
+            options,
+            required: true,
+            is_required: true,
+            important: true,
+            step: 'Review & Submit',
+          });
+        }
+      }
+    }
+
+    // Strictly filter to mandatory/required questions only and ensure options are filled
+    const allQuestions = Array.from(questionMap.values());
+    const requiredQuestions = allQuestions.filter((q) => q.is_required || q.required);
+    const finalScrapedQuestions = (requiredQuestions.length > 0 ? requiredQuestions : allQuestions).map((q) => {
+      if ((!q.options || !q.options.length) && /dropdown|select|radio|combobox/i.test(q.field_type)) {
+        const inferred = inferStandardOptions(q.label || q.question, q.field_type);
+        if (inferred.length) q.options = inferred;
+      }
+      return q;
+    });
+
     if (status === 'submitted') {
       try {
         const { completeSubmittedTask } = await import('./supabaseClient.mjs');
@@ -768,121 +1043,101 @@ export async function executeWorkerTask({
       } catch {}
       appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
     } else if (status === 'reached-review' || status === 'reached_review') {
-      try {
-        const { saveResolvedAnswers, saveScannedJob, recordJobDistributions } = await import('./supabaseClient.mjs');
-        
-        // Prepare strictly the required/important questions scraped from Review & Submit
-        const reviewQuestionsFormatted = Object.entries(profile._scrapedReviewMap || {}).map(([label, value]) => ({
-          label,
-          value,
-          required: true,
-          important: true,
-          type: 'review_question'
-        }));
-        
-        const finalScrapedQuestions = reviewQuestionsFormatted.length > 0
-          ? reviewQuestionsFormatted
-          : (combinedFields || []).filter(f => f.required || f.important);
+      const isClusterBlueprint = Boolean(options.isClusterBlueprint || options.skipJobDistribution);
+      if (!isClusterBlueprint) {
+        try {
+          const { saveResolvedAnswers, saveScannedJob, recordJobDistributions } = await import('./supabaseClient.mjs');
 
-        await saveScannedJob({
-          applywizzId,
-          jobId: task.job_id || task.jobId || null,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          scrapedQuestions: finalScrapedQuestions,
-          stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
-          screenshotPath: completionShotUrl,
-          scanStatus: 'completed',
-        });
-        const unansweredQuestions = [];
+          await saveScannedJob({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            scrapedQuestions: finalScrapedQuestions,
+            resolvedAnswers: profile._scrapedReviewFields || [],
+            stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
+            screenshotPath: completionShotUrl,
+            scanStatus: 'completed',
+          });
+          const unansweredQuestions = [];
 
-        // Check review questions that have empty / incomplete answers
-        for (const q of reviewQuestionsFormatted) {
-          const val = String(q.value || '').trim();
-          if (!val || /^(select(\s*one)?|select\.\.\.|choose(\s*one)?|unanswered|please\s*select)$/i.test(val)) {
-            unansweredQuestions.push({
-              question: q.label,
-              field_type: q.type || 'text',
-              step: 'Review & Submit',
-              options: q.options || [],
-            });
+          // Check review questions that have empty / incomplete answers
+          for (const q of reviewQuestionsFormatted) {
+            const val = String(q.value || '').trim();
+            if (!val || /^(select(\s*one)?|select\.\.\.|choose(\s*one)?|unanswered|please\s*select)$/i.test(val)) {
+              unansweredQuestions.push({
+                question: q.label,
+                field_type: q.type || 'text',
+                step: 'Review & Submit',
+                options: q.options || [],
+              });
+            }
           }
-        }
 
-        // Check wizard steps for blocked or unanswered required questions
-        if (profile._stepBlocked) {
-          for (const [step, items] of Object.entries(profile._stepBlocked)) {
-            for (const item of (Array.isArray(items) ? items : [])) {
+          // Check wizard steps for blocked or unanswered required questions
+          if (profile._stepBlocked) {
+            for (const [step, items] of Object.entries(profile._stepBlocked)) {
+              for (const item of (Array.isArray(items) ? items : [])) {
+                const qText = typeof item === 'string' ? item : (item.label || item.id || item.question);
+                if (qText && !unansweredQuestions.some(u => u.question.toLowerCase() === qText.toLowerCase())) {
+                  unansweredQuestions.push({
+                    question: qText,
+                    field_type: item.type || item.controlType || 'unknown',
+                    step,
+                    options: item.options || [],
+                  });
+                }
+              }
+            }
+          }
+
+          if (Array.isArray(profile._unansweredQuestions)) {
+            for (const item of profile._unansweredQuestions) {
               const qText = typeof item === 'string' ? item : (item.label || item.id || item.question);
               if (qText && !unansweredQuestions.some(u => u.question.toLowerCase() === qText.toLowerCase())) {
                 unansweredQuestions.push({
                   question: qText,
                   field_type: item.type || item.controlType || 'unknown',
-                  step,
+                  step: item.step || 'Application',
                   options: item.options || [],
                 });
               }
             }
           }
-        }
 
-        if (Array.isArray(profile._unansweredQuestions)) {
-          for (const item of profile._unansweredQuestions) {
-            const qText = typeof item === 'string' ? item : (item.label || item.id || item.question);
-            if (qText && !unansweredQuestions.some(u => u.question.toLowerCase() === qText.toLowerCase())) {
-              unansweredQuestions.push({
-                question: qText,
-                field_type: item.type || item.controlType || 'unknown',
-                step: item.step || 'Application',
-                options: item.options || [],
-              });
-            }
+          const unansweredCount = unansweredQuestions.length;
+
+          if (finalScrapedQuestions.length > 0) {
+            await recordJobDistributions({
+              leadApplywizzId: applywizzId,
+              jobId: task.job_id || task.jobId || null,
+              jobUrl,
+              company,
+              roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+              scrapedQuestions: finalScrapedQuestions,
+              resolvedAnswers: profile._scrapedReviewFields || [],
+              unansweredQuestions,
+              unansweredCount,
+              screenshotUrl: completionShotUrl,
+              status: unansweredCount > 0 ? 'needs_answers' : 'ready_for_review',
+              clients: [{ applywizzId, jobId: task.job_id || task.jobId || null, jobUrl }],
+            }).catch(() => {});
           }
-        }
 
-        const unansweredCount = unansweredQuestions.length;
-
-        await recordJobDistributions({
-          leadApplywizzId: applywizzId,
-          jobId: task.job_id || task.jobId || null,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          scrapedQuestions: finalScrapedQuestions,
-          resolvedAnswers: profile._scrapedReviewFields || [],
-          unansweredQuestions,
-          unansweredCount,
-          screenshotUrl: completionShotUrl,
-          status: unansweredCount > 0 ? 'needs_answers' : 'ready_for_review',
-          clients: [{ applywizzId, jobId: task.job_id || task.jobId || null, jobUrl }],
-        }).catch(() => {});
-        try {
-          const { saveScannedJob } = await import('./supabaseClient.mjs');
-          await saveScannedJob({
+          await saveResolvedAnswers({
             applywizzId,
             jobUrl,
-            jobId: task.job_id || task.jobId || null,
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            scrapedQuestions: finalScrapedQuestions,
-            screenshotPath: completionShotUrl,
-            clientCount: 1,
-            scanStatus: 'completed',
+            resolvedAnswersJson: profile._scrapedReviewFields || [],
+            isFullyAnswered: unansweredCount === 0,
+            unansweredCount,
+            status: unansweredCount === 0 ? 'ready_for_review' : 'needs_answers',
+            screenshotUrl: completionShotUrl,
           });
         } catch {}
-        await saveResolvedAnswers({
-          applywizzId,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          resolvedAnswersJson: profile._scrapedReviewFields || [],
-          isFullyAnswered: true,
-          unansweredCount: 0,
-          status: 'ready_for_review',
-          screenshotUrl: completionShotUrl,
-        });
-      } catch {}
+      }
       appLog(15, `Playwright: Reached Step 5 (Review & Submit). Form paused for CA review. High-res verification screenshot saved: ${completionShotUrl || 'Supabase'}`);
     }
 
@@ -890,10 +1145,25 @@ export async function executeWorkerTask({
     return {
       status,
       cacheHit,
-      screenshotUrl: completionShotUrl,
-      answersMap: profile._answers || profile._resolvedAnswersMap || {},
-      harvestedFields: combinedFields,
-      scrapedQuestionsCount: combinedFields.length,
+      screenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || null,
+      reviewScreenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || null,
+      stoppedAtStep: stoppedBlock,
+      answersMap: {
+        ...(profile._scrapedReviewMap || {}),
+        ...(profile._filledValues || {}),
+        ...(profile._answers || {}),
+        ...(profile._resolvedAnswersMap || {}),
+      },
+      resolvedAnswers: finalScrapedQuestions.filter(q => q.value).map(q => ({
+        question: q.label || q.question,
+        answer: String(q.value),
+        field_type: q.field_type || q.type || 'text',
+        step: q.step || 'Application',
+        is_answered: true,
+      })),
+      harvestedFields: finalScrapedQuestions,
+      scrapedQuestionsCount: finalScrapedQuestions.length,
+      scrapedQuestions: finalScrapedQuestions,
     };
   } catch (err) {
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
@@ -931,6 +1201,32 @@ export async function executeWorkerTask({
       stoppedAtStep: errStep,
     }).catch(() => {});
 
+    const answeredSoFar = [];
+    if (profile?._filledValues) {
+      for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
+        if (qLabel && qVal != null) {
+          answeredSoFar.push({
+            question: qLabel,
+            answer: String(qVal),
+            step: profile?._currentStep || errStep || 'Application',
+            is_answered: true,
+          });
+        }
+      }
+    }
+    if (profile?._answerCache && answeredSoFar.length === 0) {
+      for (const [qLabel, qVal] of profile._answerCache.entries()) {
+        if (qLabel && qVal != null) {
+          answeredSoFar.push({
+            question: qLabel,
+            answer: String(qVal),
+            step: profile?._currentStep || errStep || 'Application',
+            is_answered: true,
+          });
+        }
+      }
+    }
+
     try {
       const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
       await recordFailedJob({
@@ -942,6 +1238,7 @@ export async function executeWorkerTask({
         failureReason: fullErrReason,
         failedAtStep: errStep,
         screenshotPath: errShotUrl,
+        resolvedAnswers: answeredSoFar,
       });
       await recordApplicationFailure({
         applywizzId,
@@ -954,10 +1251,13 @@ export async function executeWorkerTask({
       });
     } catch {}
 
-    return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl };
+    return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl, stoppedAtStep: errStep };
   } finally {
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
-    try { await browser.close(); } catch {}
+    try {
+      unregisterActiveBrowser(browser);
+      await browser.close();
+    } catch {}
   }
 }
 
@@ -1065,6 +1365,12 @@ export async function runQueueWorkerPool({
   activeCaOnly = false,
   caEmails = null,
 } = {}) {
+  setWorkerPoolStop(false);
+  if (await isWorkerPoolStopRequested()) {
+    console.log('🛑 [WORKER POOL] STOPPED: Active stop flag detected before pool start. Bot will NOT trigger.');
+    return [];
+  }
+
   // ── 1. Resolve active CA candidate scope ───────────────────────────
   let allowedCandidateIds = null;
   let activeEmails = [];
@@ -1225,9 +1531,20 @@ export async function runQueueWorkerPool({
 
   // ── 7. Worker Loop ──────────────────────────────────────────────────
   async function queueWorkerLoop(workerNumber) {
-    const workerId = `Worker-${workerNumber}`;
+    const workerId = `submitting_worker_${workerNumber}`;
 
     while (taskPointer < taskLimit) {
+      if (await isWorkerPoolStopRequested()) {
+        console.log(`   🛑 [${workerId}] Stop requested! Halting worker loop.`);
+        await updateWorkerStatus(workerId, {
+          state: 'idle',
+          current_application_id: null,
+          stage: 'submitting',
+          bot_name: `Submitting Worker ${workerNumber}`,
+        }).catch(() => {});
+        break;
+      }
+
       // ── CA Session Lifecycle Watchdog (Immediate stop on Logout; 2-min grace on browser disconnect) ──
       if (activeCaOnly && caEmails?.length) {
         try {
@@ -1280,6 +1597,12 @@ export async function runQueueWorkerPool({
         continue;
       }
 
+      if (await isWorkerPoolStopRequested()) {
+        console.log(`   🛑 [${workerId}] Stop requested before executing claimed task ${claimedTask.id}. Halting.`);
+        await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }).catch(() => {});
+        break;
+      }
+
       const result = await executeWorkerTask({
         task: {
           ...claimedTask,
@@ -1317,6 +1640,8 @@ export async function runQueueWorkerPool({
         error: result.error,
       });
     }
+
+    await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }).catch(() => {});
   }
 
   // ── 8. Launch Workers ───────────────────────────────────────────────
@@ -1325,6 +1650,15 @@ export async function runQueueWorkerPool({
     workerPromises.push(queueWorkerLoop(w));
   }
   await Promise.all(workerPromises);
+
+  for (let w = 1; w <= concurrency; w++) {
+    await updateWorkerStatus(`submitting_worker_${w}`, {
+      state: 'idle',
+      current_application_id: null,
+      stage: 'submitting',
+      bot_name: `Submitting Worker ${w}`,
+    }).catch(() => {});
+  }
 
   // ── 9. Summary ──────────────────────────────────────────────────────
   console.log(`\n${'═'.repeat(70)}`);
@@ -1348,4 +1682,203 @@ export async function runQueueWorkerPool({
 
   return results;
 }
+
+/**
+ * Execute a single targeted application submission directly for a specific candidate.
+ * Dispatched on-demand when a Career Associate clicks "Review & Submit" in the Slide Drawer.
+ *
+ * Guarantees:
+ * 1. Runs strictly on an assigned submitting worker (submitting_worker_1, 2, or 3).
+ * 2. Does NOT trigger the global batch runner; logs remain isolated to this single application.
+ * 3. Immediately marks job_distributions.status = 'applying'.
+ * 4. Navigates via Playwright, applies 4-tier resolved answers, handles Zoho Mail verification/reset if prompted.
+ * 5. On submission success: captures final confirmation screenshot, uploads to Supabase Storage,
+ *    saves to job_distributions.application_submitted_screenshot_url, and marks status = 'submitted'.
+ * 6. On failure: captures failure screenshot, records to failed_jobs with resolved_answers,
+ *    and marks job_distributions.status = 'failed'.
+ */
+export async function executeSingleTargetedSubmission({
+  distributionId = null,
+  applywizzId = '',
+  jobUrl = '',
+  workerId = 'submitting_worker_1',
+  headless = true,
+  defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+} = {}) {
+  const cleanId = String(applywizzId || '').trim().toUpperCase();
+  const cleanUrl = String(jobUrl || '').trim();
+  const now = new Date().toISOString();
+
+  console.log(`\n${'═'.repeat(70)}`);
+  console.log(`🎯 [TARGETED SUBMISSION TRIGGERED]`);
+  console.log(`   • Worker:        ${workerId}`);
+  console.log(`   • Candidate:     ${cleanId}`);
+  console.log(`   • Job URL:       ${cleanUrl}`);
+  console.log(`   • Distribution:  ${distributionId || 'Lookup by AWL + URL'}`);
+  console.log(`${'═'.repeat(70)}\n`);
+
+  // 1. Fetch task details from job_distributions
+  const { createClient } = await import('@supabase/supabase-js');
+  const { loadLocalEnvOnce } = await import('./supabaseClient.mjs');
+  const env = loadLocalEnvOnce();
+  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false },
+  });
+
+  let distRow = null;
+  try {
+    if (distributionId) {
+      const { data } = await supabase.from('job_distributions').select('*').eq('id', distributionId).maybeSingle();
+      distRow = data;
+    }
+    if (!distRow && cleanId && cleanUrl) {
+      const { data } = await supabase.from('job_distributions').select('*').eq('applywizz_id', cleanId).eq('job_url', cleanUrl).maybeSingle();
+      distRow = data;
+    }
+  } catch (err) {
+    console.warn(`   ⚠️ [${workerId}] Warning fetching distribution record: ${err?.message}`);
+  }
+
+  const finalApplywizzId = cleanId || distRow?.applywizz_id || '';
+  const finalJobUrl = cleanUrl || distRow?.job_url || '';
+  const company = distRow?.company || extractWorkdayCompanyName(finalJobUrl);
+  const roleTitle = distRow?.role_title || 'Workday Application';
+
+  if (!finalApplywizzId || !finalJobUrl) {
+    throw new Error(`Targeted submission requires both applywizzId and jobUrl (received: ${finalApplywizzId}, ${finalJobUrl})`);
+  }
+
+  // 2. Set worker status & job_distributions to applying
+  await updateWorkerStatus(workerId, {
+    state: 'in_flight',
+    stage: 'submitting',
+    current_application_id: distributionId || `${finalApplywizzId}:${finalJobUrl}`,
+    bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+  }).catch(() => {});
+
+  if (distributionId) {
+    await supabase.from('job_distributions').update({
+      status: 'applying',
+      worker_id: workerId,
+      reviewed_by: 'Career Associate',
+      reviewed_at: now,
+      updated_at: now,
+    }).eq('id', distributionId).catch(() => {});
+  } else {
+    await supabase.from('job_distributions').update({
+      status: 'applying',
+      worker_id: workerId,
+      reviewed_by: 'Career Associate',
+      reviewed_at: now,
+      updated_at: now,
+    }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+  }
+
+  // 3. Execute submission task via Playwright
+  let result = null;
+  try {
+    result = await executeWorkerTask({
+      task: {
+        id: distributionId,
+        applywizzId: finalApplywizzId,
+        jobUrl: finalJobUrl,
+        company,
+        roleTitle,
+        status: 'approved_for_submission',
+        pre_resolved_answers: distRow?.resolved_answers || [],
+      },
+      workerId,
+      taskIndex: 1,
+      totalTasks: 1,
+      options: {
+        headless: Boolean(headless),
+        confirmSubmit: true,
+        dryRun: false,
+        defaultPassword,
+      },
+    });
+  } catch (err) {
+    result = {
+      status: 'failed',
+      error: err?.message || 'Execution error',
+      failureReason: err?.message || 'Execution error',
+    };
+  }
+
+  const isSubmitted = result?.status === 'submitted';
+  const finalProofShot = result?.screenshotUrl || result?.proof_screenshot_url || null;
+
+  // 4. Update job_distributions with final status and proof screenshot
+  const completionTimestamp = new Date().toISOString();
+  if (isSubmitted) {
+    console.log(`\n🎉 [${workerId}] TARGETED SUBMISSION SUCCEEDED! Verified Workday confirmation proof saved: ${finalProofShot || 'Uploaded'}`);
+    const updateBody = {
+      status: 'submitted',
+      application_submitted_screenshot_url: finalProofShot,
+      worker_id: workerId,
+      updated_at: completionTimestamp,
+    };
+    if (distributionId) {
+      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+    } else {
+      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+    }
+
+    // Sync to applications table for Admin, Developer, and Manager dashboards
+    const appRow = {
+      applywizz_id: finalApplywizzId,
+      job_url: finalJobUrl,
+      company: company || 'Workday Tenant',
+      role_title: roleTitle || 'Workday Position',
+      status: 'submitted',
+      screenshot_url: finalProofShot,
+      applied_screenshot: finalProofShot,
+      updated_at: completionTimestamp,
+    };
+    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
+  } else {
+    console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
+    const updateBody = {
+      status: 'failed',
+      error_message: result?.failureReason || result?.error || 'Submission failed',
+      worker_id: workerId,
+      updated_at: completionTimestamp,
+    };
+    if (distributionId) {
+      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+    } else {
+      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+    }
+
+    // Sync failure to applications table
+    const appRow = {
+      applywizz_id: finalApplywizzId,
+      job_url: finalJobUrl,
+      company: company || 'Workday Tenant',
+      role_title: roleTitle || 'Workday Position',
+      status: 'failed',
+      failure_reason: result?.failureReason || result?.error || 'Submission failed',
+      updated_at: completionTimestamp,
+    };
+    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
+  }
+
+  // 5. Release worker back to idle
+  await updateWorkerStatus(workerId, {
+    state: 'idle',
+    stage: 'submitting',
+    current_application_id: null,
+    bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+  }).catch(() => {});
+
+  return {
+    success: isSubmitted,
+    status: result?.status || (isSubmitted ? 'submitted' : 'failed'),
+    screenshotUrl: finalProofShot,
+    workerId,
+    applywizzId: finalApplywizzId,
+    jobUrl: finalJobUrl,
+  };
+}
+
 

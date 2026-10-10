@@ -187,7 +187,7 @@ export async function recordDiscoveredJobForm({
         resolvedAnswersJson: detailed.structuredAnswers,
         isFullyAnswered: detailed.isFullyAnswered,
         unansweredCount: detailed.unansweredCount,
-        status: detailed.isFullyAnswered ? 'ready_for_review' : 'incomplete',
+        status: detailed.isFullyAnswered ? 'ready_for_review' : 'needs_answers',
       }).catch(() => {});
     } catch {}
   }
@@ -200,10 +200,11 @@ export async function recordDiscoveredJobForm({
  */
 export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile = {} }) {
   if (!schema?.fields_schema?.length) {
-    return { answersMap: {}, structuredAnswers: [], isFullyAnswered: false, unansweredCount: 0 };
+    return { answersMap: {}, structuredAnswers: [], unansweredQuestions: [], isFullyAnswered: false, unansweredCount: 0, status: 'needs_answers' };
   }
   const answersMap = {};
   const structuredAnswers = [];
+  const unansweredQuestions = [];
   let unansweredCount = 0;
   const awlId = profile?._applyWizzId || profile?.applywizz_id || '';
 
@@ -215,6 +216,7 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
     let ansVal = null;
     let sourceTag = '[API]';
     let rawSource = 'api';
+    let tier = 0;
 
     try {
       const resolved = await resolveClientAnswer({
@@ -231,14 +233,21 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
       if (resolved?.answer != null) {
         ansVal = String(resolved.answer);
         rawSource = String(resolved.source || '').toLowerCase();
-        if (rawSource.includes('supabase') || rawSource.includes('db')) {
-          sourceTag = '[Supabase]';
+        if (rawSource.includes('supabase') || rawSource.includes('sensitive_safe') || rawSource.includes('minimum_age')) {
+          sourceTag = 'Tier 1: Supabase DB';
+          tier = 1;
           rawSource = 'supabase';
         } else if (rawSource.includes('resume') || rawSource.includes('experience')) {
-          sourceTag = '[Resume]';
+          sourceTag = 'Tier 2: Resume Extraction';
+          tier = 2;
           rawSource = 'resume';
+        } else if (rawSource.includes('applywizz') || rawSource.includes('api')) {
+          sourceTag = 'Tier 3: CRM API';
+          tier = 3;
+          rawSource = 'api';
         } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter')) {
-          sourceTag = '[LLM]';
+          sourceTag = 'Tier 4: AI / LLM';
+          tier = 4;
           rawSource = 'llm';
           if (awlId && ansVal) {
             recordNovelQABankAnswer({
@@ -251,15 +260,25 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
             }).catch(() => {});
           }
         } else {
-          sourceTag = '[API]';
+          sourceTag = 'Tier 3: CRM API';
+          tier = 3;
           rawSource = 'api';
         }
       }
     } catch {}
 
+    const isRequired = Boolean(field.is_required || field.required);
     const isAnswered = Boolean(ansVal && ansVal.trim().length > 0);
-    if (!isAnswered && Boolean(field.is_required || field.required)) {
+    if (!isAnswered && isRequired) {
       unansweredCount++;
+      unansweredQuestions.push({
+        question: rawLabel,
+        field_type: field.field_type || 'text',
+        step: field.step || 'Application Questions',
+        options: Array.isArray(field.options) ? field.options : [],
+        is_required: true,
+        reason: 'missing_required_answer',
+      });
     }
 
     if (isAnswered) {
@@ -270,23 +289,27 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
       question: rawLabel,
       question_normalized: norm,
       answer: ansVal || '',
+      tier,
+      source: sourceTag,
+      raw_source: rawSource,
       field_type: field.field_type || 'text',
       options: field.options || [],
       step: field.step || 'Application',
-      source: sourceTag,
-      raw_source: rawSource,
-      is_required: Boolean(field.is_required || field.required),
+      is_required: isRequired,
       is_answered: isAnswered,
     });
   }
 
   const isFullyAnswered = unansweredCount === 0;
+  const status = isFullyAnswered ? 'ready_for_review' : 'needs_answers';
 
   return {
     answersMap,
     structuredAnswers,
+    unansweredQuestions,
     isFullyAnswered,
     unansweredCount,
+    status,
   };
 }
 
@@ -342,7 +365,7 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
         resolvedAnswersJson: detailed.structuredAnswers,
         isFullyAnswered: detailed.isFullyAnswered,
         unansweredCount: detailed.unansweredCount,
-        status: detailed.isFullyAnswered ? 'ready_for_review' : 'incomplete',
+        status: detailed.isFullyAnswered ? 'ready_for_review' : 'needs_answers',
       }).catch(() => {});
 
       // Keep batch_job_queue synchronized

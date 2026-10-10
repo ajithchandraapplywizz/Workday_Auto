@@ -1,28 +1,23 @@
 /**
- * queue_daemon.mjs — Automatic Queue Watcher Daemon & Trigger Server
- * ==================================================================
- * Runs continuously in the background (Railway or local node process).
+ * queue_daemon.mjs — 9-Worker Pipeline Autonomous Webhook Engine & Controller
+ * ===========================================================================
+ * Event-driven webhook controller with instant (<500ms) browser abortion.
  *
- * Architecture:
- *   1. Embedded HTTP Health & Trigger Server:
- *      - GET  /health -> Returns 200 OK (Satisfies Railway health checks).
- *      - POST /api/bot/trigger -> Triggers the 3-worker autonomous pool on demand.
- *      - GET  /api/bot/status -> Returns live pool status and worker metrics.
- *   2. Dual-channel Trigger:
- *      - Instant HTTP API trigger from Developer Dashboard.
- *      - Supabase database signal listener on queue_daemon_state (state = 'trigger_requested').
- *   3. Autonomous 3-Worker Pipeline:
- *      - Clusters unique links from batch_job_queue.
- *      - Worker 1, 2, 3 visit unique links in parallel, scraping questions & review screenshot into scanned_jobs.
- *      - Pre-resolves 4-tier answers (AI/LLM, Supabase QA, profile facts) for all clients sharing each job.
- *      - Distributes records into job_distributions table with status 'ready_for_review'.
- *   4. Executes CA-approved submissions:
- *      - When CA clicks "Review & Submit", tasks marked 'approved_for_submission' are submitted.
- *      - Captures authentic confirmation screenshot and stores in applied_screenshot & original_application_screenshot_successful.
- *   5. Heartbeats to Supabase every 60 seconds.
- *
- * Usage:
- *   node backend/scripts/queue_daemon.mjs [--workers 3] [--dry-run] [--headful]
+ * Pipeline Architecture:
+ *   - Strictly 9 Canonical Workers in worker_status:
+ *       • Scanning (3): scanning_worker_1, scanning_worker_2, scanning_worker_3
+ *       • Resolving (3): resolving_worker_1, resolving_worker_2, resolving_worker_3
+ *       • Submitting (3): submitting_worker_1, submitting_worker_2, submitting_worker_3
+ *   - Global Control: public.bot_control table ('primary' row) tracks pipeline state,
+ *     stop signals, active worker counts, and trigger requests.
+ *   - Stage 1 (Scanning): 3 scanning workers visit unique links, extract schemas,
+ *     scrape questions with field types & options, and save blueprint -> scanned_jobs.
+ *   - Stage 2 (Resolving): 3 resolving workers match candidate facts, resumes, and
+ *     QA bank into structured 4-tier answers -> job_distributions (status: 'ready_for_review').
+ *   - CA Review Pause: Career Associates review answers and inspect proof in UI.
+ *   - Stage 3 (Submissions): 3 submitting workers execute Playwright form filling on Workday,
+ *     commit inputs with Enter/blur, verify DOM, submit, capture authentic confirmation
+ *     screenshot, and update status to 'submitted'.
  */
 
 import http from 'node:http';
@@ -30,13 +25,15 @@ import '../lib/polyfills.mjs';
 import {
   loadLocalEnvOnce,
   isSupabaseConfigured,
-  getActiveOperators,
-  getActiveCaCandidateIds,
-  getTotalApplicationCountForCandidates,
   updateDaemonCaState,
-  fetchPendingTasksForActiveCAs,
+  updateWorkerStatus,
+  getWorkerStatuses,
+  ensureCanonicalWorkers,
+  getBotControl,
+  updateBotControl,
 } from '../lib/supabaseClient.mjs';
-import { runQueueWorkerPool } from '../lib/workerPool.mjs';
+import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
+import { setGlobalStop, isGlobalStopRequested, abortAllActiveBrowsers } from '../lib/browserLifecycle.mjs';
 
 loadLocalEnvOnce();
 
@@ -45,159 +42,243 @@ if (!isSupabaseConfigured()) {
   process.exit(1);
 }
 
-// CLI Args
+// Configuration
 const args = process.argv.slice(2);
-const workersIdx = args.indexOf('--workers');
-const CONCURRENCY = workersIdx !== -1 && args[workersIdx + 1] ? Number(args[workersIdx + 1]) || 3 : 3;
-const DRY_RUN = args.includes('--dry-run');
-const HEADLESS = !args.includes('--headful');
-const FORCE_DISPATCH = args.includes('--force');
-const targetCaIdx = args.indexOf('--ca');
-const TARGET_CA = targetCaIdx !== -1 && args[targetCaIdx + 1] ? args[targetCaIdx + 1].trim().toLowerCase() : null;
-const POLL_INTERVAL_MS = 8_000;
-const HEARTBEAT_MS = 60_000;
-const PORT = process.env.PORT || 3001;
+const HEADLESS = !args.includes('--headful') && !args.includes('--headed');
+const TEST_MODE = args.includes('--test');
+const PORT = process.env.DAEMON_PORT || process.env.PORT || 3001;
 
-// In-Memory Dispatch Tracking
-const dispatchedToday = new Map();
-let daemonDate = new Date().toISOString().slice(0, 10);
+if (TEST_MODE) {
+  console.log('[DAEMON] ⚠️  TEST MODE: Only 1 cluster / 1 client will be processed per Stage 1 run.');
+}
+
 let isPoolRunning = false;
-let lastTriggerTime = null;
+let isPoolPaused = false;
+let currentStage = 'idle';
 
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
-}
+const ALL_9_WORKERS = PIPELINE_CONFIG.allWorkerIds || [
+  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
+  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3',
+  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3',
+];
 
-function resetIfNewDay() {
-  const today = todayStr();
-  if (today !== daemonDate) {
-    console.log(`\n[DAEMON] New day (${today}). Resetting dispatch memory.`);
-    dispatchedToday.clear();
-    daemonDate = today;
-  }
-}
+/**
+ * Reset all 9 workers in worker_status to idle
+ */
+async function resetAllWorkersIdle() {
+  for (const wId of ALL_9_WORKERS) {
+    const meta = PIPELINE_CONFIG.workerNames[wId] || wId;
+    let stage = 'idle';
+    if (wId.includes('scan')) stage = 'scanning';
+    else if (wId.includes('resolve')) stage = 'resolving';
+    else if (wId.includes('submit')) stage = 'submitting';
 
-// Heartbeat
-let heartbeatTimer = setInterval(async () => {
-  resetIfNewDay();
-  try {
-    await updateDaemonCaState('_daemon_', {
-      caName: 'Autonomous 3-Worker Pool',
-      state: isPoolRunning ? 'running' : 'idle',
-      syncedDate: todayStr(),
-      workersAssigned: CONCURRENCY,
-    });
-    console.log(`[DAEMON] Heartbeat @ ${new Date().toISOString()} (pool: ${isPoolRunning ? 'RUNNING' : 'IDLE'})`);
-  } catch {}
-}, HEARTBEAT_MS);
-
-// Autonomous Background Worker Pool Dispatch
-export async function checkAndTriggerAutonomousPool(force = false) {
-  if (isPoolRunning) {
-    console.log('[DAEMON] Pool is already running. Skipping duplicate trigger.');
-    return;
-  }
-
-  try {
-    const pendingTasks = await fetchPendingTasksForActiveCAs(null);
-    if (!force && (!pendingTasks || pendingTasks.length === 0)) {
-      return;
-    }
-
-    const taskCount = pendingTasks ? pendingTasks.length : 0;
-    console.log(`\n${'═'.repeat(70)}`);
-    console.log(`⚡ [DAEMON] TRIGGER ACTIVATED: ${taskCount} task(s) detected in queue.`);
-    console.log(`   • Mode: ${CONCURRENCY} workers | ${HEADLESS ? 'HEADLESS' : 'HEADFUL'}`);
-    console.log(`   • Phase 1: Unique link cluster scan & answers distribution to job_distributions`);
-    console.log(`   • Phase 2: Autonomous fast-fill and CA-approved submission execution`);
-    console.log(`${'═'.repeat(70)}\n`);
-
-    isPoolRunning = true;
-    lastTriggerTime = new Date().toISOString();
-    await updateDaemonCaState('_daemon_', {
-      caName: 'Autonomous 3-Worker Pool',
-      state: 'running',
-      syncedDate: todayStr(),
-      workersAssigned: CONCURRENCY,
-      tasksDispatched: taskCount,
+    await updateWorkerStatus(wId, {
+      state: 'idle',
+      current_application_id: null,
+      stage,
+      bot_name: meta,
     }).catch(() => {});
-
-    // Phase 1: Cluster Batch Runner on unique links -> saves scanned_jobs & distributes to job_distributions
-    try {
-      console.log(`\n🚀 [DAEMON] Launching 3-Worker Cluster Batch Runner on unique links...`);
-      const { runClusterBatchRunner } = await import('../lib/clusterBatchRunner.mjs');
-      await runClusterBatchRunner({
-        topLinks: 50,
-        workers: CONCURRENCY,
-        headless: HEADLESS,
-        confirmSubmit: false,
-      });
-      console.log(`✅ [DAEMON] Cluster scanning & client distribution completed successfully.`);
-    } catch (clusterErr) {
-      console.error(`⚠️ [DAEMON] Cluster batch runner note:`, clusterErr?.message || clusterErr);
-    }
-
-    // Phase 2: Worker pool execution for any approved submissions or queue tasks
-    try {
-      console.log(`\n🚀 [DAEMON] Launching Worker Pool for submissions and queue tasks...`);
-      const results = await runQueueWorkerPool({
-        concurrency: CONCURRENCY,
-        headless: HEADLESS,
-        confirmSubmit: true,
-        dryRun: DRY_RUN,
-        defaultPassword: process.env.WORKDAY_PASSWORD || '',
-        activeCaOnly: false,
-      });
-
-      const submitted = results.filter((r) => r.status === 'submitted').length;
-      const reachedReview = results.filter((r) => r.status === 'reached_review' || r.status === 'ready_for_review').length;
-      const failed = results.filter((r) => r.status === 'failed' || r.status === 'error').length;
-      console.log(`\n[DAEMON] Pool run finished: ${submitted} submitted, ${reachedReview} review-ready, ${failed} failed.`);
-    } catch (err) {
-      console.error(`\n[DAEMON] Worker pool error:`, err?.message || err);
-    } finally {
-      await updateDaemonCaState('_daemon_', {
-        caName: 'Autonomous 3-Worker Pool',
-        state: 'idle',
-        syncedDate: todayStr(),
-      }).catch(() => {});
-      isPoolRunning = false;
-    }
-  } catch (err) {
-    console.error('[DAEMON] checkAndTriggerAutonomousPool error:', err?.message || err);
-    isPoolRunning = false;
   }
 }
 
-// Check for trigger signal in Supabase queue_daemon_state
-async function checkSupabaseTriggerSignal() {
-  if (isPoolRunning) return;
-  try {
-    const { getCleanSupabaseEnv } = await import('../lib/clusterBatchRunner.mjs');
-    const { httpsJsonWithRetry } = await import('../lib/httpClient.mjs');
-    const { url, key, configured } = getCleanSupabaseEnv();
-    if (!configured) return;
-
-    const res = await httpsJsonWithRetry({
-      url: `${url}/rest/v1/queue_daemon_state?ca_email=eq._daemon_&select=state,triggered_at`,
-      headers: { apikey: key, Authorization: `Bearer ${key}` },
-    });
-
-    if (res.ok && res.text) {
-      const data = res.json();
-      if (Array.isArray(data) && data[0]?.state === 'trigger_requested') {
-        console.log(`\n⚡ [DAEMON] Supabase trigger signal received from Developer Dashboard! Starting 3-worker bot...`);
-        checkAndTriggerAutonomousPool(true).catch(console.error);
-      }
-    }
-  } catch {}
+/**
+ * Synchronize global bot_control table state
+ */
+async function syncBotControlState(patch = {}) {
+  await updateBotControl({
+    stage: currentStage,
+    is_running: isPoolRunning,
+    is_paused: isPoolPaused,
+    stop_requested: isGlobalStopRequested(),
+    active_worker_count: isPoolRunning ? 3 : 0,
+    ...patch,
+  }).catch(() => {});
 }
 
-// Embedded Native HTTP Server
+/**
+ * Instantly stop all 9 workers and abort open browsers in <500ms
+ */
+export async function stopAutonomousPool() {
+  console.log(`\n🛑 [DAEMON] STOP SIGNAL RECEIVED: Immediately halting 9-worker pipeline...`);
+  isPoolRunning = false;
+  isPoolPaused = true;
+  currentStage = 'idle';
+
+  setGlobalStop(true);
+
+  // Terminate any active Playwright browser windows in <500ms
+  await abortAllActiveBrowsers().catch(() => {});
+
+  // Set all 9 workers to idle in worker_status
+  await resetAllWorkersIdle().catch(() => {});
+
+  // Update bot_control state
+  await syncBotControlState({
+    stage: 'idle',
+    is_running: false,
+    is_paused: true,
+    stop_requested: true,
+    active_worker_count: 0,
+    current_action: 'Stopped by user',
+  });
+
+  await updateDaemonCaState('_daemon_', {
+    caName: 'Autonomous 9-Worker Pipeline',
+    state: 'idle',
+    syncedDate: new Date().toISOString().slice(0, 10),
+    workersAssigned: 9,
+  }).catch(() => {});
+
+  console.log(`✅ [DAEMON] Stop complete. All 9 workers set to idle and active browsers closed.`);
+  return { success: true, message: 'All 9 workers stopped and reset to idle.' };
+}
+
+/**
+ * Execute Stage 1: Scanning (scanning_worker_1, scanning_worker_2, scanning_worker_3)
+ */
+async function runStage1Scanning() {
+  currentStage = 'scanning';
+  await syncBotControlState({
+    stage: 'scanning',
+    is_running: true,
+    current_action: 'Scanning unique Workday links and harvesting question schemas',
+    active_worker_count: TEST_MODE ? 1 : 3,
+  });
+
+  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with 3 scanning workers (scanning_worker_1..3)...`);
+
+  const { runClusterBatchRunner } = await import('../lib/clusterBatchRunner.mjs');
+  await runClusterBatchRunner({
+    topLinks: TEST_MODE ? 1 : 50,
+    workers: TEST_MODE ? 1 : 3,
+    headless: HEADLESS,
+    confirmSubmit: false,
+    limitPerLink: TEST_MODE ? 1 : null,
+    defaultPassword: process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+  });
+
+  // Ensure scanning workers reset to idle
+  for (const wId of PIPELINE_CONFIG.scanWorkerIds) {
+    await updateWorkerStatus(wId, { state: 'idle', current_application_id: null, stage: 'scanning' }).catch(() => {});
+  }
+}
+
+/**
+ * Execute Stage 2: Resolving Answers (resolving_worker_1, resolving_worker_2, resolving_worker_3)
+ */
+async function runStage2Resolving() {
+  currentStage = 'resolving';
+  await syncBotControlState({
+    stage: 'resolving',
+    is_running: true,
+    current_action: 'Pre-resolving candidate answers across 4 tiers into job_distributions',
+    active_worker_count: 3,
+  });
+
+  console.log(`\n⚡ [DAEMON] Starting Stage 2: Resolving candidate answers with 3 resolving workers (resolving_worker_1..3)...`);
+
+  const { runResolvingWorkerPool } = await import('../lib/resolvingWorkerPool.mjs');
+  await runResolvingWorkerPool();
+
+  // Ensure resolving workers reset to idle
+  for (const wId of PIPELINE_CONFIG.resolveWorkerIds) {
+    await updateWorkerStatus(wId, { state: 'idle', current_application_id: null, stage: 'resolving' }).catch(() => {});
+  }
+}
+
+/**
+ * Execute Stage 3: Submissions (submitting_worker_1, submitting_worker_2, submitting_worker_3)
+ */
+async function runStage3Submissions() {
+  currentStage = 'submitting';
+  await syncBotControlState({
+    stage: 'submitting',
+    is_running: true,
+    current_action: 'Submitting approved applications with Playwright verification',
+    active_worker_count: 3,
+  });
+
+  console.log(`\n🚀 [DAEMON] Starting Stage 3: Submitting approved applications with 3 submitting workers (submitting_worker_1..3)...`);
+
+  const { runQueueWorkerPool } = await import('../lib/workerPool.mjs');
+  await runQueueWorkerPool({
+    concurrency: 3,
+    headless: HEADLESS,
+    confirmSubmit: true,
+    dryRun: false,
+    defaultPassword: process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+    activeCaOnly: false,
+  });
+
+  // Ensure submitting workers reset to idle
+  for (const wId of PIPELINE_CONFIG.submitWorkerIds) {
+    await updateWorkerStatus(wId, { state: 'idle', current_application_id: null, stage: 'submitting' }).catch(() => {});
+  }
+}
+
+/**
+ * Run the Sequential Pipeline: Stage 1 -> Stage 2 -> wait for CA review -> Stage 3
+ */
+export async function runSequentialPipeline() {
+  if (isPoolRunning) {
+    console.log(`[DAEMON] Pipeline is already running.`);
+    return { success: true, message: 'Pipeline already running.' };
+  }
+
+  isPoolRunning = true;
+  isPoolPaused = false;
+  setGlobalStop(false);
+
+  try {
+    // ── STAGE 1: SCANNING (scanning_worker_1..3) ───────────────────────
+    await runStage1Scanning();
+
+    if (isGlobalStopRequested() || isPoolPaused) {
+      console.log(`🛑 [DAEMON] Pipeline stopped during/after Stage 1.`);
+      return { success: true, stopped: true };
+    }
+
+    // ── STAGE 2: RESOLVING (resolving_worker_1..3) ─────────────────────
+    await runStage2Resolving();
+
+    if (isGlobalStopRequested() || isPoolPaused) {
+      console.log(`🛑 [DAEMON] Pipeline stopped during/after Stage 2.`);
+      return { success: true, stopped: true };
+    }
+
+    currentStage = 'ready_for_review';
+    await syncBotControlState({
+      stage: 'ready_for_review',
+      is_running: false,
+      current_action: 'Awaiting Career Associate review in the Dashboard',
+      active_worker_count: 0,
+    });
+
+    console.log(`\n✅ [DAEMON] Stages 1 & 2 complete! Job schemas harvested and answers pre-resolved.`);
+    console.log(`   Waiting for Career Associate review in the Dashboard before submitting.\n`);
+  } catch (err) {
+    console.error(`❌ [DAEMON] Pipeline error:`, err?.message || err);
+  } finally {
+    isPoolRunning = false;
+    currentStage = 'idle';
+    await resetAllWorkersIdle().catch(() => {});
+    await syncBotControlState({
+      stage: 'idle',
+      is_running: false,
+      current_action: 'Idle',
+      active_worker_count: 0,
+    });
+  }
+}
+
+/**
+ * Webhook HTTP Server
+ */
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey');
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -205,53 +286,159 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  const u = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+  const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
+  const pathname = parsedUrl.pathname;
 
-  if (u.pathname === '/' || u.pathname === '/health') {
+  // 1. Health check
+  if (pathname === '/health' || pathname === '/') {
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      status: 'ok',
-      service: 'workday-queue-daemon',
-      poolRunning: isPoolRunning,
-      workers: CONCURRENCY,
-      lastTriggerTime,
-      time: new Date().toISOString(),
-    }));
+    res.end(JSON.stringify({ status: 'healthy', isRunning: isPoolRunning, stage: currentStage, workers: 9 }));
     return;
   }
 
-  if (u.pathname === '/api/bot/status') {
+  // 2. Status
+  if (pathname === '/api/bot/status') {
+    const botControl = await getBotControl().catch(() => null);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
       isRunning: isPoolRunning,
-      workers: CONCURRENCY,
-      lastTriggerTime,
-      time: new Date().toISOString(),
+      stage: currentStage,
+      isPaused: isPoolPaused,
+      workers: 9,
+      stages: {
+        scanning: 3,
+        resolving: 3,
+        submitting: 3,
+      },
+      botControl,
+      timestamp: new Date().toISOString(),
     }));
     return;
   }
 
-  if (u.pathname === '/api/bot/trigger') {
+  // Helper to parse JSON body
+  let body = {};
+  if (req.method === 'POST') {
+    try {
+      const buffers = [];
+      for await (const chunk of req) buffers.push(chunk);
+      const rawText = Buffer.concat(buffers).toString();
+      if (rawText) body = JSON.parse(rawText);
+    } catch {}
+  }
+
+  // 3. Stop Webhook
+  if (pathname === '/api/bot/stop' || (pathname === '/api/bot/webhook' && body.action === 'stop')) {
+    await stopAutonomousPool();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'All 9 workers stopped instantly. Active browser contexts aborted.',
+      isRunning: false,
+    }));
+    return;
+  }
+
+  // 4. Start / Trigger Pipeline Webhook
+  if (pathname === '/api/bot/trigger' || pathname === '/api/bot/start' || (pathname === '/api/bot/webhook' && (body.action === 'start' || body.action === 'start_pipeline'))) {
     if (isPoolRunning) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
         success: true,
-        message: '3-Worker Bot is already executing in the background.',
+        message: 'Pipeline is already active.',
         isRunning: true,
+        stage: currentStage,
       }));
       return;
     }
 
-    console.log(`\n⚡ [DAEMON] HTTP Trigger received from Developer Dashboard! Starting 3 workers...`);
-    // Launch execution asynchronously so HTTP response is instant
-    checkAndTriggerAutonomousPool(true).catch((err) => console.error('[HTTP TRIGGER ERROR]', err));
+    console.log(`\n⚡ [DAEMON WEBHOOK] Start signal received! Launching sequential 9-worker pipeline...`);
+    // Run asynchronously so webhook response is instant (<100ms)
+    runSequentialPipeline().catch(console.error);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
-      message: 'Autonomous 3-Worker Bot successfully triggered! Workers are clustering unique links, scraping questions into scanned_jobs, and distributing answers.',
+      message: 'Sequential 9-Worker Pipeline triggered! Scanning (3) -> Resolving (3).',
       isRunning: true,
+      stage: 'scanning',
+    }));
+    return;
+  }
+
+  // 5a. Targeted Single-Item Submission Webhook (Zero Batch Log Pollution)
+  if (pathname === '/api/bot/submit-single' || (pathname === '/api/bot/submit' && (body.distributionId || body.applywizzId))) {
+    const { distributionId, applywizzId, jobUrl } = body;
+    console.log(`\n⚡ [DAEMON WEBHOOK] Targeted submit received for ${applywizzId || distributionId} at ${jobUrl || 'URL'}`);
+
+    // Pick an available submitting worker (1, 2, or 3)
+    let chosenWorkerId = PIPELINE_CONFIG.submitWorkerIds[0] || 'submitting_worker_1';
+    try {
+      const { getWorkerStatuses } = await import('../lib/supabaseClient.mjs');
+      const activeWorkers = await getWorkerStatuses().catch(() => []);
+      const idleSubmitter = PIPELINE_CONFIG.submitWorkerIds.find((wid) => {
+        const found = activeWorkers.find((w) => w.worker_id === wid);
+        return !found || found.state === 'idle';
+      });
+      if (idleSubmitter) chosenWorkerId = idleSubmitter;
+    } catch {}
+
+    const { executeSingleTargetedSubmission } = await import('../lib/workerPool.mjs');
+    // Dispatch in background so HTTP response returns in <100ms
+    executeSingleTargetedSubmission({
+      distributionId,
+      applywizzId,
+      jobUrl,
+      workerId: chosenWorkerId,
+      headless: HEADLESS,
+    }).catch((err) => {
+      console.error(`❌ [TARGETED SUBMISSION ERROR]:`, err?.message);
+    });
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: `Targeted submission launched for ${applywizzId || 'candidate'} on ${chosenWorkerId}`,
+      workerId: chosenWorkerId,
+      distributionId,
+    }));
+    return;
+  }
+
+  // 5b. Batch Submit Approved Applications Webhook (Stage 3 Pool)
+  if (pathname === '/api/bot/submit' || (pathname === '/api/bot/webhook' && (body.action === 'submit_approved' || body.action === 'stage_submit'))) {
+    if (isPoolRunning) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        success: true,
+        message: 'Pipeline is busy with another stage.',
+        isRunning: true,
+        stage: currentStage,
+      }));
+      return;
+    }
+
+    console.log(`\n⚡ [DAEMON WEBHOOK] Submit signal received! Launching Stage 3 Submissions with 3 submitting workers...`);
+    isPoolRunning = true;
+    setGlobalStop(false);
+    runStage3Submissions().finally(() => {
+      isPoolRunning = false;
+      currentStage = 'idle';
+      resetAllWorkersIdle().catch(() => {});
+      syncBotControlState({
+        stage: 'idle',
+        is_running: false,
+        active_worker_count: 0,
+      });
+    }).catch(console.error);
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'Stage 3 Submissions triggered for approved applications across 3 submitting workers.',
+      isRunning: true,
+      stage: 'submitting',
     }));
     return;
   }
@@ -260,55 +447,46 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Endpoint not found' }));
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-  console.log(`[DAEMON SERVER] HTTP listening on 0.0.0.0:${PORT} (Health & Developer Trigger API active)`);
-});
+// Startup initialization
+async function initOnStartup() {
+  console.log(`\n${'═'.repeat(72)}`);
+  console.log(`  AUTONOMOUS WORKDAY PIPELINE DAEMON — 9-WORKER WEBHOOK ENGINE`);
+  console.log(`  Scanning (3):   scanning_worker_1, scanning_worker_2, scanning_worker_3`);
+  console.log(`  Resolving (3):  resolving_worker_1, resolving_worker_2, resolving_worker_3`);
+  console.log(`  Submitting (3): submitting_worker_1, submitting_worker_2, submitting_worker_3`);
+  console.log(`  Mode: ${HEADLESS ? 'HEADLESS' : 'HEADFUL'} | Webhook Port: ${PORT}`);
+  console.log(`${'═'.repeat(72)}\n`);
 
-// Main Poll Loop
-async function pollLoop() {
-  const sep = '='.repeat(70);
-  console.log(`\n${sep}`);
-  console.log('  QUEUE WATCHER DAEMON — 3-WORKER AUTONOMOUS BACKGROUND ENGINE');
-  console.log(`  Workers: ${CONCURRENCY} | Mode: ${HEADLESS ? 'HEADLESS' : 'HEADFUL'} | Dry-run: ${DRY_RUN}`);
-  console.log(`  Poll Interval: ${POLL_INTERVAL_MS / 1000}s | HTTP Port: ${PORT}`);
-  console.log(`${sep}\n`);
-
-  while (true) {
-    try {
-      resetIfNewDay();
-
-      // 1. Check for on-demand trigger signal from Developer Dashboard in Supabase
-      await checkSupabaseTriggerSignal();
-
-      // 2. Check and trigger autonomous background pool on any uploaded or approved tasks
-      await checkAndTriggerAutonomousPool(false);
-
-      // 3. Track operator presence for dashboard metrics
-      const activeOps = await getActiveOperators().catch(() => []);
-      for (const op of activeOps) {
-        const email = (op.email || '').toLowerCase().trim();
-        if (!email || email === '_daemon_') continue;
-        const lastIn = Math.max(
-          new Date(op.last_sign_in || 0).getTime(),
-          new Date(op.updated_at || 0).getTime()
-        );
-        const ageSec = (Date.now() - lastIn) / 1000;
-        if (ageSec <= 180) {
-          await updateDaemonCaState(email, {
-            caName: op.name || email,
-            state: isPoolRunning ? 'running' : 'idle',
-            syncedDate: todayStr(),
-          }).catch(() => {});
-        }
-      }
-    } catch (err) {
-      console.error('[DAEMON] Poll error:', err?.message || err);
-    }
-    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+  try {
+    await ensureCanonicalWorkers();
+    await resetAllWorkersIdle();
+    await syncBotControlState({ stage: 'idle', is_running: false, active_worker_count: 0 });
+    console.log(`[DAEMON] worker_status table initialized: strictly 9 canonical rows set to idle.`);
+  } catch (err) {
+    console.warn(`[DAEMON] Startup note:`, err.message);
   }
+
+  server.listen(PORT, '0.0.0.0', () => {
+    console.log(`[DAEMON WEBHOOK SERVER] Listening on http://0.0.0.0:${PORT}`);
+    console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) — 9-Worker Pipeline Active.\n`);
+  });
 }
 
-process.on('SIGTERM', () => { clearInterval(heartbeatTimer); server.close(); console.log('[DAEMON] SIGTERM. Shutting down.'); process.exit(0); });
-process.on('SIGINT',  () => { clearInterval(heartbeatTimer); server.close(); console.log('[DAEMON] Interrupted.'); process.exit(0); });
+process.on('SIGTERM', () => {
+  server.close();
+  abortAllActiveBrowsers();
+  console.log('[DAEMON] SIGTERM received. Shutting down.');
+  process.exit(0);
+});
 
-pollLoop().catch((err) => { console.error('[DAEMON] Fatal:', err); process.exit(1); });
+process.on('SIGINT', () => {
+  server.close();
+  abortAllActiveBrowsers();
+  console.log('[DAEMON] Interrupted. Shutting down.');
+  process.exit(0);
+});
+
+initOnStartup().catch((err) => {
+  console.error('[DAEMON FATAL]', err);
+  process.exit(1);
+});

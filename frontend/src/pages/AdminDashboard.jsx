@@ -30,9 +30,9 @@ export default function AdminDashboard() {
 
   // Real dynamic states
   const [reconciliation, setReconciliation] = useState({
-    apiCount: 59,
-    dbCount: 59,
-    matchedCount: 59,
+    apiCount: 0,
+    dbCount: 0,
+    matchedCount: 0,
     hasMismatch: false,
     missingInDb: [],
     missingInApi: [],
@@ -53,7 +53,7 @@ export default function AdminDashboard() {
   const [syncToast, setSyncToast] = useState(null);
 
   // Tabs as specified in Master Prompt section 5
-  const tabs = ['Overview', 'Managers', 'Operators', 'Applications', 'Guide'];
+  const tabs = ['Overview', 'Managers', 'Operators', 'Guide'];
 
   // Load all dynamic data with real-time updates
   const loadData = React.useCallback(async (silent = false) => {
@@ -575,10 +575,6 @@ export default function AdminDashboard() {
                   <th>ROLE</th>
                   <th>STATUS</th>
                   <th>ASSIGNED MANAGER</th>
-                  <th style={{ textAlign: 'center' }}>ASSIGNED CLIENTS</th>
-                  <th style={{ textAlign: 'center' }}>BOT APPS</th>
-                  <th>LAST SIGN-IN</th>
-                  <th style={{ textAlign: 'center' }}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
@@ -615,179 +611,13 @@ export default function AdminDashboard() {
                           })()}
                         </td>
                         <td>{mgr?.name || 'Assigned Manager'}</td>
-                        <td style={{ textAlign: 'center' }}>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenOperatorDetails(op, mgr?.name)}
-                            style={{
-                              background: (op.assigned_clients || 0) > 0 ? 'rgba(56, 189, 248, 0.15)' : 'transparent',
-                              border: `1px solid ${(op.assigned_clients || 0) > 0 ? '#0284c7' : '#334155'}`,
-                              color: (op.assigned_clients || 0) > 0 ? '#38bdf8' : '#94a3b8',
-                              padding: '4px 10px',
-                              borderRadius: '6px',
-                              fontWeight: 'bold',
-                              fontSize: '0.82rem',
-                              cursor: 'pointer',
-                              display: 'inline-flex',
-                              alignItems: 'center',
-                              gap: '4px',
-                            }}
-                            title="Click to view allotted clients & details"
-                          >
-                            <span>{op.assigned_clients || 0} Clients</span>
-                          </button>
-                        </td>
-                        <td style={{ textAlign: 'center' }}>
-                          <span style={{ fontWeight: 'bold', color: (op.applications_count || 0) > 0 ? '#10b981' : '#94a3b8' }}>
-                            {op.applications_count || 0}
-                          </span>
-                        </td>
-                        <td>{op.last_sign_in ? new Date(op.last_sign_in).toLocaleString() : 'Never'}</td>
-                        <td style={{ textAlign: 'center' }}>
-                          <button
-                            type="button"
-                            onClick={() => handleOpenOperatorDetails(op, mgr?.name)}
-                            style={{
-                              background: '#1e293b',
-                              border: '1px solid #334155',
-                              color: '#38bdf8',
-                              padding: '4px 10px',
-                              borderRadius: '4px',
-                              fontSize: '0.78rem',
-                              fontWeight: '600',
-                              cursor: 'pointer',
-                            }}
-                            title="Inspect CA allotted clients & history"
-                          >
-                            View Details
-                          </button>
-                        </td>
                       </tr>
                     );
                   })
                 ) : (
                   <tr>
-                    <td colSpan={9} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
+                    <td colSpan={5} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
                       No operators found matching the criteria.
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {/* 4. APPLICATIONS TAB — Company-wide full applications feed */}
-      {activeTab === 'Applications' && (
-        <div className="tab-body-fade">
-          <div className="video-filter-bar" style={{ display: 'flex', gap: '1rem', marginBottom: '1rem' }}>
-            <select
-              value={appStatusFilter}
-              onChange={(e) => setAppStatusFilter(e.target.value)}
-              className="video-select-filter"
-            >
-              <option value="All">All Statuses</option>
-              <option value="queued">Queued</option>
-              <option value="in_progress">In Progress</option>
-              <option value="ready_for_review">Ready For Review</option>
-              <option value="submitted">Submitted</option>
-              <option value="failed">Failed</option>
-            </select>
-            <select
-              value={appManagerFilter}
-              onChange={(e) => setAppManagerFilter(e.target.value)}
-              className="video-select-filter"
-            >
-              <option value="All">All Managers</option>
-              {managers.map((m) => (
-                <option key={m.id} value={m.id}>
-                  {m.name}
-                </option>
-              ))}
-            </select>
-            <span style={{ alignSelf: 'center', fontSize: '0.85rem', color: '#94a3b8' }}>
-              Showing {filteredApplications.length} company-wide applications
-            </span>
-          </div>
-
-          <div className="video-table-container">
-            <table className="video-data-table">
-              <thead>
-                <tr>
-                  <th>CLIENT (AWL ID)</th>
-                  <th>JOB TITLE</th>
-                  <th>COMPANY</th>
-                  <th>STATUS</th>
-                  <th>CREATED AT</th>
-                  <th>LAST UPDATED</th>
-                  <th>AI ANSWERS</th>
-                </tr>
-              </thead>
-              <tbody>
-                {filteredApplications.length > 0 ? (
-                  filteredApplications.map((app) => (
-                    <tr key={app.id}>
-                      <td>
-                        <a
-                          href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(app.applywizz_id)}`}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="app-id-tag"
-                          style={{ textDecoration: 'none' }}
-                        >
-                          {app.applywizz_id}
-                        </a>
-                      </td>
-                      <td>
-                        <a
-                          href={app.job_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="table-link-btn"
-                          title="Open Workday Job"
-                        >
-                          {app.job_title || app.role_title || 'Workday Application'}
-                        </a>
-                      </td>
-                      <td>{app.company || 'Workday Tenant'}</td>
-                      <td>
-                        {app.failure_reason === 'zoho_mail_not_connected' || (app.failure_reason && app.failure_reason.includes('zoho_mail_not_connected')) ? (
-                          <span className="video-status-tag" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.35)' }}>
-                            ZOHO NOT CONNECTED
-                          </span>
-                        ) : (
-                          <span className={`video-status-tag ${app.status?.toLowerCase() || 'queued'}`}>
-                            {app.status?.toUpperCase() || 'QUEUED'}
-                          </span>
-                        )}
-                      </td>
-                      <td>{app.created_at ? new Date(app.created_at).toLocaleString() : '—'}</td>
-                      <td>{app.updated_at ? new Date(app.updated_at).toLocaleString() : '—'}</td>
-                      <td>
-                        <button
-                          type="button"
-                          onClick={() => setSelectedAppForDrawer(app)}
-                          style={{
-                            background: 'rgba(56, 189, 248, 0.15)',
-                            color: '#38bdf8',
-                            border: '1px solid rgba(56, 189, 248, 0.3)',
-                            padding: '4px 8px',
-                            borderRadius: '4px',
-                            fontSize: '0.75rem',
-                            fontWeight: 600,
-                            cursor: 'pointer',
-                          }}
-                        >
-                          Inspect Answers
-                        </button>
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#64748b' }}>
-                      No applications recorded for the selected filter and period.
                     </td>
                   </tr>
                 )}
@@ -831,6 +661,7 @@ export default function AdminDashboard() {
         onClose={() => setSelectedAppForDrawer(null)}
         application={selectedAppForDrawer}
         onStatusUpdated={() => loadData(true)}
+        readOnly
       />
     </div>
   );

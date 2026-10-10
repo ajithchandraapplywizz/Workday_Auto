@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { getYesterdayDateStr } from '../utils/dateUtils';
 import {
   fetchClientDetails,
   fetchClientQuestions,
@@ -7,6 +8,10 @@ import {
   submitApplicationRecord,
   fetchClients,
   fetchAssignedClientsForCA,
+  fetchClientApplications,
+  triggerAutonomousBot,
+  stopAutonomousBot,
+  resolveSupabaseStorageUrl,
 } from '../services/api';
 import { supabase } from '../config/supabase';
 import {
@@ -28,12 +33,22 @@ import {
   ChevronRight,
   ShieldCheck,
   AlertCircle,
-  FileText
+  FileText,
+  Image as ImageIcon,
+  Eye,
+  X,
+  Square,
+  Clock,
+  Pause,
+  AlertTriangle,
 } from 'lucide-react';
 import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function CADashboard() {
   const { user, date } = useAuth();
+
+  // CA work history data is strictly locked to yesterday (T-1)
+  const yesterdayDate = useMemo(() => getYesterdayDateStr(), []);
 
   const [applywizzId, setApplywizzId] = useState('');
   const [loadingClient, setLoadingClient] = useState(false);
@@ -42,12 +57,21 @@ export default function CADashboard() {
   const [questionSearch, setQuestionSearch] = useState('');
   const [candidateList, setCandidateList] = useState([]);
 
-  // Active CA email from authenticated session
-  const sessionCaEmail = useMemo(() => {
+  // Autonomous Background Worker status & control
+  const [workerState, setWorkerState] = useState('stopped'); // 'stopped' | 'running' | 'idle'
+  const [workerBusy, setWorkerBusy] = useState(false);
+  const [workerMessage, setWorkerMessage] = useState('');
+
+  // Active CA email from authenticated session, or inspected CA email for developer auditing
+  const [inspectedCaEmail, setInspectedCaEmail] = useState('');
+  const activeCaEmail = useMemo(() => {
+    if (inspectedCaEmail && inspectedCaEmail.includes('@')) {
+      return inspectedCaEmail.toLowerCase().trim();
+    }
     return user?.email && user?.email.includes('@')
       ? user.email.toLowerCase().trim()
       : 'sana@applywizz.com';
-  }, [user?.email]);
+  }, [user?.email, inspectedCaEmail]);
 
   // Workday Auto-Apply Dynamic state
   const [activeTask, setActiveTask] = useState(null);
@@ -68,28 +92,122 @@ export default function CADashboard() {
   // Form Review & Confirmation Slide Drawer state
   const [showSlideDrawer, setShowSlideDrawer] = useState(false);
   const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
+  const [dashboardScreenshot, setDashboardScreenshot] = useState(null);
 
-  const handleReviewSubmitted = () => {
+  // Monitor worker_status table live so CA can see real-time execution & stop at will
+  useEffect(() => {
+    let isMounted = true;
+    async function checkWorkerStatus() {
+      try {
+        const { data } = await supabase.from('worker_status').select('*');
+        if (!isMounted) return;
+        if (data && data.length > 0) {
+          const anyActive = data.some(
+            (r) => (r.state === 'in_flight' || r.state === 'busy' || r.state === 'running')
+          );
+          setWorkerState(anyActive ? 'running' : 'stopped');
+        }
+      } catch {}
+    }
+    checkWorkerStatus();
+    const interval = setInterval(checkWorkerStatus, 3000);
+    return () => { isMounted = false; clearInterval(interval); };
+  }, []);
+
+  const handleStopWorkers = async () => {
+    setWorkerBusy(true);
+    setWorkerMessage('🛑 Stopping workers...');
+    try {
+      const res = await stopAutonomousBot();
+      if (res.success) {
+        setWorkerState('stopped');
+        setWorkerMessage('✓ Background workers STOPPED. You can now observe flow without interruption.');
+      } else {
+        setWorkerMessage('Stop error: ' + (res.error || 'Failed'));
+      }
+    } catch (err) {
+      setWorkerMessage('Stop error: ' + err.message);
+    } finally {
+      setWorkerBusy(false);
+      setTimeout(() => setWorkerMessage(''), 7000);
+    }
+  };
+
+  const handleStartWorkers = async () => {
+    setWorkerBusy(true);
+    setWorkerMessage('⚡ Starting 9-worker pipeline...');
+    try {
+      const res = await triggerAutonomousBot();
+      if (res.success) {
+        setWorkerState('running');
+        setWorkerMessage('✓ Autonomous 9-worker pipeline activated across Scanning, Resolving, and Submitting stages.');
+      } else {
+        setWorkerMessage('Start error: ' + (res.error || 'Failed'));
+      }
+    } catch (err) {
+      setWorkerMessage('Start error: ' + err.message);
+    } finally {
+      setWorkerBusy(false);
+      setTimeout(() => setWorkerMessage(''), 7000);
+    }
+  };
+
+  const handleReviewSubmitted = (updatedApp) => {
     setApplyStep(4);
     setApplyLog((prev) => [
       ...prev,
       `[${new Date().toLocaleTimeString()}] Form answers confirmed and submitted by Career Associate!`,
       `[${new Date().toLocaleTimeString()}] Recorded changes in public.applications & job_distributions.`,
     ]);
+    if (updatedApp) {
+      const proof = resolveSupabaseStorageUrl(updatedApp.application_submitted_screenshot_url || updatedApp.screenshot_url);
+      setClientJobs((prev) =>
+        prev.map((j) => {
+          if (j.id === updatedApp.id || j.job_url === updatedApp.job_url) {
+            return {
+              ...j,
+              status: 'submitted',
+              application_submitted_screenshot_url: proof || j.application_submitted_screenshot_url,
+              applied_screenshot: proof || j.applied_screenshot,
+              screenshot_url: proof || j.screenshot_url,
+            };
+          }
+          return j;
+        })
+      );
+    }
     if (applywizzId) {
       loadClientProfile(applywizzId);
     }
   };
 
-  // Dynamically load assigned candidates for this CA on the active date
+  // Record CA's active status in Supabase upon viewing the console
+  useEffect(() => {
+    if (!activeCaEmail) return;
+    const nowIso = new Date().toISOString();
+    supabase
+      .from('operators')
+      .update({ status: 'active', updated_at: nowIso })
+      .ilike('email', activeCaEmail)
+      .then(() => {})
+      .catch(() => {});
+    supabase
+      .from('auth_users')
+      .update({ status: 'active', updated_at: nowIso, last_sign_in: nowIso })
+      .ilike('email', activeCaEmail)
+      .then(() => {})
+      .catch(() => {});
+  }, [activeCaEmail]);
+
+  // Dynamically load assigned candidates for this CA from yesterday's work history
   useEffect(() => {
     let isMounted = true;
     async function loadAssignedCandidates() {
       setLoadingClient(true);
       try {
         const res = await fetchAssignedClientsForCA({
-          caEmail: sessionCaEmail,
-          atDate: date,
+          caEmail: activeCaEmail,
+          atDate: yesterdayDate,
         });
 
         if (!isMounted) return;
@@ -99,6 +217,7 @@ export default function CADashboard() {
             applywizz_id: a.applywizz_id,
             client_name: a.client_name || a.applywizz_id,
             company_email: a.client_email || '',
+            jobs_applied: a.jobs_applied || 0,
             date: a.date,
           }));
           setCandidateList(list);
@@ -125,7 +244,7 @@ export default function CADashboard() {
 
     loadAssignedCandidates();
     return () => { isMounted = false; };
-  }, [sessionCaEmail, date]);
+  }, [activeCaEmail, yesterdayDate]);
 
   // Fetch client details, questions, and real jobs from Supabase
   const loadClientProfile = async (idToLoad) => {
@@ -136,11 +255,11 @@ export default function CADashboard() {
     setApplyLog([]);
 
     try {
-      const [detailsRes, qaRes, queueRes, distRes] = await Promise.all([
+      const [detailsRes, qaRes, distRes, scannedRes] = await Promise.all([
         fetchClientDetails(id),
         fetchClientQuestions({ applywizzId: id, limit: 50 }),
-        supabase.from('batch_job_queue').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
         supabase.from('job_distributions').select('*').eq('applywizz_id', id).order('created_at', { ascending: false }),
+        supabase.from('scanned_jobs').select('job_url, screenshot_path, scraped_questions, question_count').limit(1000),
       ]);
 
       if (detailsRes.success && detailsRes.client) {
@@ -153,45 +272,54 @@ export default function CADashboard() {
         setQuestions(qaRes.questions || []);
       }
 
-      // Merge real jobs from job_distributions (primary) and batch_job_queue (fallback)
+      // Map scanned_jobs by clean URL for instant blueprint screenshot & question lookups
+      const scannedMap = new Map();
+      if (scannedRes.data && Array.isArray(scannedRes.data)) {
+        for (const sj of scannedRes.data) {
+          const u = (sj.job_url || '').trim().toLowerCase();
+          if (u) scannedMap.set(u, sj);
+        }
+      }
+
+      // Query job_distributions: display all candidate applications in review & submission pipeline
       const jobsMap = new Map();
       if (distRes.data && distRes.data.length > 0) {
         for (const dj of distRes.data) {
-          const u = (dj.job_url || '').trim().toLowerCase();
-          if (u && !jobsMap.has(u)) {
+          const u = (dj.job_url || '').split('?')[0].trim().toLowerCase();
+          if (!u || jobsMap.has(u)) continue;
+
+          const sj = scannedMap.get(u) || scannedMap.get((dj.job_url || '').trim().toLowerCase());
+          const st = (dj.status || '').toLowerCase();
+          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'needs_answers', 'failed'].includes(st);
+          if (!isAllowedStatus) continue;
+
+            const rawProof = dj.application_submitted_screenshot_url
+              || dj.applied_screenshot
+              || dj.original_application_screenshot_successful
+              || dj.final_submission_screenshot_url
+              || dj.screenshot_url
+              || dj.screenshot_path
+              || null;
+            const proofShot = resolveSupabaseStorageUrl(rawProof);
+
             jobsMap.set(u, {
               id: dj.id,
               applywizz_id: dj.applywizz_id,
               job_url: dj.job_url,
-              company: dj.company || 'Workday Partner',
-              role_title: dj.role_title || 'Workday Application',
-              status: dj.status === 'distributed' ? 'ready_for_review' : dj.status,
+              company: dj.company || sj?.company || 'Workday Partner',
+              role_title: dj.role_title || sj?.role_title || 'Workday Application',
+              status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
               is_fully_answered: dj.is_fully_answered,
-              resolved_answers: dj.resolved_answers,
+              resolved_answers: dj.resolved_answers || [],
               unanswered_count: dj.unanswered_count || 0,
-              applied_screenshot: dj.applied_screenshot || dj.original_application_screenshot_successful || dj.screenshot_url,
-              screenshot_url: dj.screenshot_url,
+              unanswered_questions: dj.unanswered_questions || [],
+              applied_screenshot: proofShot,
+              application_submitted_screenshot_url: proofShot,
+              screenshot_url: proofShot,
+              blueprint_screenshot: resolveSupabaseStorageUrl(sj?.screenshot_path) || null,
+              scraped_questions: dj.scraped_questions || sj?.scraped_questions || [],
               source: 'job_distributions',
             });
-          }
-        }
-      }
-
-      if (queueRes.data && queueRes.data.length > 0) {
-        for (const qj of queueRes.data) {
-          const u = (qj.job_url || '').trim().toLowerCase();
-          if (u && !jobsMap.has(u)) {
-            jobsMap.set(u, {
-              id: qj.id,
-              applywizz_id: qj.applywizz_id,
-              job_url: qj.job_url,
-              company: qj.company || 'Workday Partner',
-              role_title: qj.role_title || 'Workday Application',
-              status: qj.status,
-              screenshot_url: qj.screenshot_path,
-              source: 'batch_job_queue',
-            });
-          }
         }
       }
 
@@ -234,28 +362,72 @@ export default function CADashboard() {
     }
   };
 
-  useEffect(() => {
-    loadClientProfile('AWL-34133');
-  }, []);
 
-  // Live polling: automatically reflects background bot progress for selected candidate
+
+  // Live polling: automatically reflects real-time status in job_distributions and batch_job_queue
   useEffect(() => {
     if (!applywizzId) return;
     let isMounted = true;
 
     const intervalId = setInterval(async () => {
       try {
-        const { data: queueTasks } = await supabase
-          .from('batch_job_queue')
-          .select('*')
-          .eq('applywizz_id', applywizzId)
-          .order('created_at', { ascending: false })
-          .limit(1);
+        const [distRes, queueRes] = await Promise.all([
+          supabase
+            .from('job_distributions')
+            .select('*')
+            .eq('applywizz_id', applywizzId)
+            .order('created_at', { ascending: false }),
+          supabase
+            .from('batch_job_queue')
+            .select('*')
+            .eq('applywizz_id', applywizzId)
+            .order('created_at', { ascending: false })
+            .limit(1),
+        ]);
 
         if (!isMounted) return;
-        const task = queueTasks?.[0];
+
+        // 1. Update clientJobs in real-time from job_distributions
+        if (distRes.data && distRes.data.length > 0) {
+          const freshMap = new Map();
+          for (const d of distRes.data) {
+            freshMap.set(d.id || d.job_url, d);
+          }
+
+          setClientJobs((prevJobs) => {
+            let changed = false;
+            const updated = prevJobs.map((j) => {
+              const f = freshMap.get(j.id) || freshMap.get(j.job_url);
+              if (f) {
+                const freshProof = resolveSupabaseStorageUrl(
+                  f.application_submitted_screenshot_url
+                  || f.applied_screenshot
+                  || f.original_application_screenshot_successful
+                  || f.final_submission_screenshot_url
+                  || f.screenshot_url
+                  || f.screenshot_path
+                  || null
+                );
+                if (f.status !== j.status || freshProof !== j.application_submitted_screenshot_url) {
+                  changed = true;
+                  return {
+                    ...j,
+                    status: (f.status === 'distributed' || f.status === 'ready_to_review') ? 'ready_for_review' : f.status,
+                    application_submitted_screenshot_url: freshProof,
+                    applied_screenshot: freshProof,
+                    screenshot_url: freshProof,
+                  };
+                }
+              }
+              return j;
+            });
+            return changed ? updated : prevJobs;
+          });
+        }
+
+        // 2. Reflect latest active task progress
+        const task = queueRes.data?.[0];
         if (task) {
-          setActiveTask(task);
           if (task.status === 'reached_review' || task.status === 'pre_resolved') {
             setApplyStep(3);
           } else if (task.status === 'submitted') {
@@ -267,7 +439,7 @@ export default function CADashboard() {
       } catch (err) {
         // silent polling catch
       }
-    }, 3500);
+    }, 2500);
 
     return () => {
       isMounted = false;
@@ -365,14 +537,69 @@ export default function CADashboard() {
       {/* Header Banner */}
       <div className="dashboard-header-row">
         <div>
-          <h1 className="page-heading">Career Associate (CA) Operator Console</h1>
-          <p className="page-subheading">
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px', marginBottom: '4px' }}>
+            <h1 className="page-heading" style={{ margin: 0 }}>Career Associate (CA) Console</h1>
+            <span style={{
+              fontSize: '0.74rem',
+              padding: '2px 9px',
+              borderRadius: '12px',
+              background: 'rgba(56, 189, 248, 0.12)',
+              border: '1px solid rgba(56, 189, 248, 0.35)',
+              color: '#38bdf8',
+              fontWeight: 700,
+            }}>
+              CA: {activeCaEmail}
+            </span>
+
+            {/* Developer Audit Inspection Quick Switcher */}
+            {(user?.baseRole === 'dev' || user?.role === 'dev' || user?.role === 'admin' || user?.email === 'ajithchandranimmala@applywizz.ai') && (
+              <div style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '6px' }}>
+                <span style={{ fontSize: '0.7rem', color: '#94a3b8' }}>Audit:</span>
+                <input
+                  type="text"
+                  placeholder="e.g. sana@applywizz.com"
+                  value={inspectedCaEmail}
+                  onChange={(e) => setInspectedCaEmail(e.target.value)}
+                  style={{
+                    background: '#090d16',
+                    border: '1px solid #334155',
+                    borderRadius: '5px',
+                    color: '#38bdf8',
+                    padding: '2px 7px',
+                    fontSize: '0.72rem',
+                    width: '160px',
+                  }}
+                  title="Type any CA email to inspect their assigned clients dynamically"
+                />
+                {['sana@applywizz.com', 'manasa@applywizz.com'].map((ca) => (
+                  <button
+                    key={ca}
+                    type="button"
+                    onClick={() => setInspectedCaEmail(ca)}
+                    style={{
+                      background: activeCaEmail === ca ? '#0284c7' : '#1e293b',
+                      border: activeCaEmail === ca ? '1px solid #38bdf8' : '1px solid #334155',
+                      borderRadius: '5px',
+                      color: '#f8fafc',
+                      padding: '2px 6px',
+                      fontSize: '0.68rem',
+                      cursor: 'pointer',
+                      fontWeight: activeCaEmail === ca ? 'bold' : 'normal',
+                    }}
+                  >
+                    {ca.split('@')[0]}
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+          <p className="page-subheading" style={{ margin: 0 }}>
             Live candidate profile lookup, Workday auto-apply automation engine, and semantic Q&A answer manager.
           </p>
         </div>
         <div className="candidate-quick-pills" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
           <span className="quick-label" style={{ fontWeight: 'bold', color: '#94a3b8' }}>
-            ALLOTTED CLIENTS ({candidateList.length}):
+            ALLOTTED CLIENTS ({candidateList.length}) &bull; YESTERDAY'S WORK DATA ({yesterdayDate}):
           </span>
           {candidateList.length > 0 ? (
             candidateList.map((c) => {
@@ -410,12 +637,128 @@ export default function CADashboard() {
                       &bull; {cname.split(' ')[0]}
                     </span>
                   )}
+                  <span style={{
+                    fontSize: '0.68rem',
+                    padding: '1px 6px',
+                    borderRadius: '8px',
+                    background: (c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(100, 116, 139, 0.25)',
+                    color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8',
+                    fontWeight: 'bold',
+                    marginLeft: '4px',
+                  }}>
+                    {c.jobs_applied || 0} Apps
+                  </span>
                 </button>
               );
             })
           ) : (
             <span style={{ fontSize: '0.8rem', color: '#64748b' }}>No clients allotted for today</span>
           )}
+        </div>
+      </div>
+
+      {/* Worker Status & Testing Control Widget */}
+      <div style={{
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: '12px',
+        background: '#0b1329',
+        border: workerState === 'running' ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
+        borderRadius: '8px',
+        padding: '10px 16px',
+        marginBottom: '1rem',
+        boxShadow: '0 4px 12px rgba(0, 0, 0, 0.25)',
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+          <span style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: '6px',
+            fontSize: '0.78rem',
+            fontWeight: 800,
+            letterSpacing: '0.05em',
+            padding: '4px 10px',
+            borderRadius: '20px',
+            background: workerState === 'running' ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)',
+            color: workerState === 'running' ? '#34d399' : '#f87171',
+            border: workerState === 'running' ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.4)',
+          }}>
+            <span style={{
+              width: '8px',
+              height: '8px',
+              borderRadius: '50%',
+              backgroundColor: workerState === 'running' ? '#10b981' : '#ef4444',
+              boxShadow: workerState === 'running' ? '0 0 8px #10b981' : '0 0 8px #ef4444',
+            }} />
+            {workerState === 'running' ? 'ACTIVE • 3-WORKER PIPELINE RUNNING' : 'STOPPED • ALL 3 WORKERS IDLE (TESTING MODE)'}
+          </span>
+          <span style={{ fontSize: '0.78rem', color: '#94a3b8' }}>
+            {workerState === 'running'
+              ? 'Sequential 3-worker pipeline active — Stage 1 (Scanning) → Stage 2 (Resolving) → Stage 3 (Submitting).'
+              : 'Background workers are halted so you can observe each application step in testing phase.'}
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {workerMessage && (
+            <span style={{ fontSize: '0.75rem', color: workerMessage.includes('error') ? '#f87171' : '#38bdf8', fontWeight: 600 }}>
+              {workerMessage}
+            </span>
+          )}
+
+          {/* STOP WORKERS BUTTON */}
+          <button
+            type="button"
+            onClick={handleStopWorkers}
+            disabled={workerBusy || workerState === 'stopped'}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              fontWeight: 700,
+              background: workerState === 'stopped' ? '#1e293b' : 'linear-gradient(135deg, #dc2626 0%, #991b1b 100%)',
+              color: workerState === 'stopped' ? '#64748b' : '#ffffff',
+              border: workerState === 'stopped' ? '1px solid #334155' : '1px solid #ef4444',
+              cursor: workerState === 'stopped' ? 'not-allowed' : 'pointer',
+              transition: 'all 0.15s ease',
+              boxShadow: workerState !== 'stopped' ? '0 2px 8px rgba(220, 38, 38, 0.35)' : 'none',
+            }}
+            title="Stop background workers immediately to inspect and test flow"
+          >
+            <Square size={13} fill={workerState === 'stopped' ? '#64748b' : '#ffffff'} />
+            <span>{workerBusy && workerState === 'running' ? 'Stopping...' : 'Stop Workers'}</span>
+          </button>
+
+          {/* START / RESUME WORKERS BUTTON */}
+          <button
+            type="button"
+            onClick={handleStartWorkers}
+            disabled={workerBusy || workerState === 'running'}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              padding: '6px 14px',
+              borderRadius: '6px',
+              fontSize: '0.8rem',
+              fontWeight: 700,
+              background: workerState === 'running' ? '#1e293b' : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+              color: workerState === 'running' ? '#64748b' : '#ffffff',
+              border: workerState === 'running' ? '1px solid #334155' : '1px solid #38bdf8',
+              cursor: workerState === 'running' ? 'not-allowed' : 'pointer',
+              transition: 'all 0.15s ease',
+              boxShadow: workerState !== 'running' ? '0 2px 8px rgba(2, 132, 199, 0.35)' : 'none',
+            }}
+            title="Resume autonomous 3-worker background bot pool"
+          >
+            <Play size={13} fill={workerState === 'running' ? '#64748b' : '#ffffff'} />
+            <span>{workerBusy && workerState !== 'running' ? 'Starting...' : 'Resume Workers'}</span>
+          </button>
         </div>
       </div>
 
@@ -537,19 +880,6 @@ export default function CADashboard() {
                 <h2 className="panel-title">Workday Auto-Apply Automation</h2>
               </div>
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                <button
-                  type="button"
-                  className="btn-icon-label"
-                  style={{ background: '#0284c7', color: '#fff', border: 'none', padding: '4px 10px', fontSize: '0.78rem' }}
-                  onClick={() => {
-                    setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
-                    setShowSlideDrawer(true);
-                  }}
-                  disabled={!clientData}
-                >
-                  <FileText size={14} />
-                  <span>Review AI Form Answers</span>
-                </button>
                 <span className="console-speed-tag">Tier-1 Engine Active</span>
               </div>
             </div>
@@ -599,29 +929,8 @@ export default function CADashboard() {
                 )}
 
                 {applyStep === 3 && (
-                  <div style={{ display: 'flex', gap: '0.75rem', width: '100%', flexWrap: 'wrap' }}>
-                    <button
-                      type="button"
-                      className="btn-accent-run"
-                      style={{ flex: 1.2, background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)' }}
-                      onClick={() => {
-                        setSelectedAppForDrawer(activeTask || { applywizz_id: applywizzId, job_url: jobUrl, company: companyName, role_title: roleTitle, status: activeTask?.status || 'ready_for_review' });
-                        setShowSlideDrawer(true);
-                      }}
-                    >
-                      <FileText size={16} />
-                      <span>Review AI Questions &amp; Answers</span>
-                    </button>
-                    <button
-                      type="button"
-                      className="btn-success-submit"
-                      style={{ flex: 1 }}
-                      onClick={handleFinalSubmit}
-                      disabled={submitting}
-                    >
-                      <CheckCircle2 size={16} />
-                      <span>Quick Submit</span>
-                    </button>
+                  <div style={{ width: '100%', padding: '10px 14px', background: 'rgba(2, 132, 199, 0.1)', border: '1px solid rgba(56, 189, 248, 0.3)', borderRadius: '6px', fontSize: '0.82rem', color: '#7dd3fc', textAlign: 'center' }}>
+                    Application ready for review. Click any application below to slide open unique AI answers and submit.
                   </div>
                 )}
               </div>
@@ -641,8 +950,14 @@ export default function CADashboard() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {clientJobs.map((j, idx) => {
                       const isSub = j.status === 'submitted';
-                      const isQ = j.status === 'queued' || j.status === 'queued_for_submission';
+                      const isApplying = j.status === 'applying' || j.status === 'in_flight' || j.status === 'in_progress';
+                      const isQ = j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission';
+                      const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
                       const isSelected = activeTask?.id === j.id;
+                      const isSubmitted = j.status === 'submitted';
+                      const cardScreenshot = (isSubmitted || j.application_submitted_screenshot_url || j.applied_screenshot)
+                        ? (j.application_submitted_screenshot_url || j.applied_screenshot || j.screenshot_url || null)
+                        : null;
 
                       let badgeBg = 'rgba(56, 189, 248, 0.15)';
                       let badgeColor = '#38bdf8';
@@ -654,11 +969,21 @@ export default function CADashboard() {
                         badgeColor = '#34d399';
                         badgeBorder = 'rgba(16, 185, 129, 0.3)';
                         badgeText = 'SUBMITTED';
+                      } else if (isApplying) {
+                        badgeBg = 'rgba(168, 85, 247, 0.15)';
+                        badgeColor = '#c084fc';
+                        badgeBorder = 'rgba(168, 85, 247, 0.35)';
+                        badgeText = 'APPLYING';
+                      } else if (hasMissing) {
+                        badgeBg = 'rgba(245, 158, 11, 0.15)';
+                        badgeColor = '#fbbf24';
+                        badgeBorder = 'rgba(245, 158, 11, 0.35)';
+                        badgeText = `NEEDS ANSWERS (${j.unanswered_count || 1})`;
                       } else if (isQ) {
                         badgeBg = 'rgba(245, 158, 11, 0.15)';
                         badgeColor = '#f59e0b';
                         badgeBorder = 'rgba(245, 158, 11, 0.3)';
-                        badgeText = 'QUEUED';
+                        badgeText = 'IN QUEUE';
                       }
 
                       return (
@@ -684,11 +1009,13 @@ export default function CADashboard() {
                             transition: 'all 0.15s ease',
                           }}
                         >
-                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', minWidth: 0 }}>
-                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', minWidth: 0 }}>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
                               <strong style={{ fontSize: '0.88rem', color: '#f8fafc', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                                 {j.company || 'Workday Partner'}
                               </strong>
+
+                              {/* Status Badge */}
                               <span style={{
                                 fontSize: '0.68rem',
                                 fontWeight: 700,
@@ -700,7 +1027,66 @@ export default function CADashboard() {
                               }}>
                                 {badgeText}
                               </span>
+
+                              {/* Authentic Confirmation Screenshot Button: Enabled ONLY after actual submission */}
+                              {cardScreenshot ? (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    setDashboardScreenshot({
+                                      url: cardScreenshot,
+                                      company: j.company,
+                                      role: j.role_title,
+                                      status: 'submitted',
+                                    });
+                                  }}
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    background: 'rgba(16, 185, 129, 0.18)',
+                                    color: '#34d399',
+                                    border: '1px solid rgba(16, 185, 129, 0.4)',
+                                    cursor: 'pointer',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    transition: 'all 0.15s ease',
+                                  }}
+                                  title="View verified application proof screenshot"
+                                >
+                                  <Eye size={12} />
+                                  <span>View Screenshot</span>
+                                </button>
+                              ) : (
+                                <button
+                                  type="button"
+                                  disabled={true}
+                                  onClick={(e) => e.stopPropagation()}
+                                  style={{
+                                    fontSize: '0.68rem',
+                                    fontWeight: 700,
+                                    padding: '2px 8px',
+                                    borderRadius: '4px',
+                                    background: 'rgba(51, 65, 85, 0.25)',
+                                    color: '#64748b',
+                                    border: '1px solid #334155',
+                                    cursor: 'not-allowed',
+                                    display: 'inline-flex',
+                                    alignItems: 'center',
+                                    gap: '4px',
+                                    opacity: 0.7,
+                                  }}
+                                  title="Real submission screenshot will appear here once application is successfully submitted on Workday"
+                                >
+                                  <Clock size={12} />
+                                  <span>Screenshot (Pending)</span>
+                                </button>
+                              )}
                             </div>
+
                             <span style={{ fontSize: '0.78rem', color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
                               {j.role_title || 'Application'}
                             </span>
@@ -729,19 +1115,7 @@ export default function CADashboard() {
                 )}
               </div>
 
-              {/* Live Automation Log Stream */}
-              {applyLog.length > 0 && (
-                <div className="log-terminal">
-                  <div className="log-terminal-header">AUTOMATION EXECUTION TRACE</div>
-                  <div className="log-terminal-body">
-                    {applyLog.map((line, idx) => (
-                      <div key={idx} className="log-line">
-                        {line}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+
             </div>
           </div>
 
@@ -886,6 +1260,114 @@ export default function CADashboard() {
         }}
         onStatusUpdated={handleReviewSubmitted}
       />
+
+      {/* Full Screenshot Proof Modal */}
+      {dashboardScreenshot && (
+        <div
+          style={{
+            position: 'fixed',
+            inset: 0,
+            background: 'rgba(0, 0, 0, 0.85)',
+            backdropFilter: 'blur(8px)',
+            zIndex: 10000,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            padding: '2rem',
+          }}
+          onClick={() => setDashboardScreenshot(null)}
+        >
+          <div
+            style={{
+              background: '#1e293b',
+              borderRadius: '8px',
+              overflow: 'hidden',
+              maxWidth: '90vw',
+              maxHeight: '90vh',
+              display: 'flex',
+              flexDirection: 'column',
+              border: '1px solid #334155',
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div
+              style={{
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center',
+                padding: '0.75rem 1rem',
+                background: '#0f172a',
+                color: '#f8fafc',
+                fontWeight: 600,
+                fontSize: '0.88rem',
+                borderBottom: '1px solid #334155',
+                gap: '12px',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <ImageIcon size={16} style={{ color: '#34d399' }} />
+                <span>
+                  Workday Application Proof {dashboardScreenshot.company ? `• ${dashboardScreenshot.company}` : ''} {dashboardScreenshot.role ? `(${dashboardScreenshot.role})` : ''}
+                </span>
+              </div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                {(dashboardScreenshot.url || (typeof dashboardScreenshot === 'string' && dashboardScreenshot.startsWith('http'))) && (
+                  <a
+                    href={dashboardScreenshot.url || dashboardScreenshot}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      fontSize: '0.75rem',
+                      color: '#38bdf8',
+                      textDecoration: 'none',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                    }}
+                  >
+                    <span>Open Full Tab</span>
+                    <ExternalLink size={12} />
+                  </a>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setDashboardScreenshot(null)}
+                  style={{ background: 'transparent', border: 'none', color: '#94a3b8', cursor: 'pointer' }}
+                >
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+
+            {dashboardScreenshot.isPlaceholder ? (
+              <div style={{ padding: '3rem 2rem', textAlign: 'center', color: '#cbd5e1' }}>
+                <Clock size={42} style={{ color: '#f59e0b', marginBottom: '1rem' }} />
+                <h3 style={{ fontSize: '1.1rem', color: '#f8fafc', marginBottom: '0.5rem' }}>
+                  Application Proof Screenshot Pending
+                </h3>
+                <p style={{ fontSize: '0.85rem', color: '#94a3b8', maxWidth: '480px', margin: '0 auto 1.5rem auto' }}>
+                  This application for <strong>{dashboardScreenshot.company || 'the employer'}</strong> is currently in status <strong>{dashboardScreenshot.status || 'ready_for_review'}</strong>.
+                  The verified full-page confirmation screenshot will be automatically saved and displayed here once processed by the autonomous bot pool.
+                </p>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setDashboardScreenshot(null)}
+                  style={{ padding: '6px 16px', fontSize: '0.82rem' }}
+                >
+                  Close
+                </button>
+              </div>
+            ) : (
+              <img
+                src={dashboardScreenshot.url || dashboardScreenshot}
+                alt="Workday Application Proof"
+                style={{ maxWidth: '100%', maxHeight: 'calc(90vh - 50px)', objectFit: 'contain' }}
+              />
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

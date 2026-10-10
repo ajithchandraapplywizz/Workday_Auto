@@ -1,5 +1,6 @@
 import React from 'react';
 import { useAuth } from '../context/AuthContext';
+import { getPreviousWorkdayDateStr } from '../utils/dateUtils';
 
 export default function Header({ activeTab, onTabChange, operatorView, onOperatorViewChange }) {
   const { user, switchRole, logout, date, setDate, timeframe, setTimeframe } = useAuth();
@@ -70,6 +71,7 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 { id: 'dev', label: 'Dev' },
                 { id: 'admin', label: 'Admin' },
                 { id: 'manager', label: 'Manager' },
+                { id: 'ca', label: 'CA' },
                 { id: 'operator', label: 'Operator' },
               ].map((r) => (
                 <button
@@ -84,22 +86,31 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Date Picker */}
-          <div className="control-date-box">
-            <span className="control-label-micro">DATE</span>
-            <input
-              type="date"
-              value={date}
-              onChange={(e) => setDate(e.target.value)}
-              className="header-date-input"
-            />
-          </div>
+          {/* Date Picker: Hidden for CA/Operator and Manager, locked to Yesterday's work history data */}
+          {(user?.role === 'ca' || user?.role === 'operator' || user?.role === 'manager') ? (
+            <div className="control-date-box" title="Candidate and team work data locked to yesterday's work history data">
+              <span className="control-label-micro">WORK DATA DATE</span>
+              <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#38bdf8', padding: '2px 6px', letterSpacing: '0.02em' }}>
+                {getPreviousWorkdayDateStr()} (Yesterday)
+              </span>
+            </div>
+          ) : (
+            <div className="control-date-box">
+              <span className="control-label-micro">DATE</span>
+              <input
+                type="date"
+                value={date}
+                onChange={(e) => setDate(e.target.value)}
+                className="header-date-input"
+              />
+            </div>
+          )}
 
-          {/* Timeframe Stats: Day, Week, Month */}
+          {/* Timeframe Stats: Only day data enabled for CA/Operator and Manager (no week or month) */}
           <div className="control-stats-box">
             <span className="control-label-micro">STATS</span>
             <div className="stats-pill-group">
-              {['day', 'week', 'month'].map((t) => (
+              {(['ca', 'operator', 'manager'].includes(user?.role) ? ['day'] : ['day', 'week', 'month']).map((t) => (
                 <button
                   key={t}
                   type="button"

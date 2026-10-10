@@ -24,6 +24,11 @@ export async function takeScreenshot(page, label) {
 const CSV_HEADER = 'date,company,role,url,status,ats,screenshot,notes\n';
 
 export async function logToCSV(url, company, role, status, screenshotPath, { ats = '', notes = '' } = {}) {
+  const { isSupabaseConfigured } = await import('./supabaseClient.mjs').catch(() => ({ isSupabaseConfigured: () => false }));
+  if (isSupabaseConfigured()) {
+    // Local applied.csv writes completely bypassed in Supabase DB mode
+    return;
+  }
   await mkdir(resolve(process.cwd(), 'data'), { recursive: true });
   const exists = existsSync(CSV_REPORT);
   if (!exists) {
@@ -33,7 +38,6 @@ export async function logToCSV(url, company, role, status, screenshotPath, { ats
   const esc = (s) => `"${(s || '').replace(/"/g, '""')}"`;
   const row = `${date},${esc(company)},${esc(role)},${esc(url)},${esc(status)},${esc(ats)},${esc(screenshotPath)},${esc(notes)}\n`;
   await appendFile(CSV_REPORT, row);
-  console.log(`  📋 Logged to data/applied.csv`);
 
   // Auto-update queue status if this URL is in the queue
   await updateQueueStatus(url, status);
