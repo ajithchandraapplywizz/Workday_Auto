@@ -285,6 +285,26 @@ export async function upsertSupabaseAnswers(applywizzId, entries = []) {
   return true;
 }
 
+export async function ensureStorageBucket(bucketName) {
+  if (!isSupabaseConfigured() || !bucketName) return;
+  const { url, key } = config();
+  try {
+    await fetch(`${url}/storage/v1/bucket`, {
+      method: 'POST',
+      headers: {
+        apikey: key,
+        Authorization: `Bearer ${key}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        id: bucketName,
+        name: bucketName,
+        public: true,
+      }),
+    });
+  } catch {}
+}
+
 export async function uploadStorageScreenshot(bucketName, filename, buffer, contentType = 'image/jpeg') {
   if (!isSupabaseConfigured() || !buffer) return null;
   const { url, key } = config();
@@ -300,6 +320,24 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
       body: buffer,
     });
     if (!res.ok) {
+      // If bucket does not exist (404/400), auto-create the bucket and retry once
+      if (res.status === 404 || res.status === 400) {
+        await ensureStorageBucket(bucketName);
+        const retryRes = await fetch(`${url}/storage/v1/object/${bucketName}/${filename}`, {
+          method: 'POST',
+          headers: {
+            apikey: key,
+            Authorization: `Bearer ${key}`,
+            'Content-Type': contentType,
+            'x-upsert': 'true',
+          },
+          body: buffer,
+        });
+        if (retryRes.ok) {
+          return `${url}/storage/v1/object/public/${bucketName}/${filename}`;
+        }
+      }
+
       const errText = await res.text().catch(() => '');
       console.warn(`[Supabase Storage] Upload to ${bucketName} failed (${res.status}): ${errText}`);
       if (bucketName !== 'application-failures') {

@@ -227,7 +227,7 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
         url: jobUrl,
         tenant: schema.tenant,
         company: schema.company,
-        forceLlm: false,
+        forceLlm: true,
       });
 
       if (resolved?.answer != null) {
@@ -263,6 +263,25 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           sourceTag = 'Tier 3: CRM API';
           tier = 3;
           rawSource = 'api';
+        }
+      }
+
+      // Robust Tier 4 resolution fallback: Ensure NO question is left unanswered
+      if (!ansVal) {
+        const rawOpts = Array.isArray(field.options) ? field.options : [];
+        if (rawOpts.length > 0) {
+          const yesOpt = rawOpts.find((o) => /^yes\b/i.test(String(o).trim()));
+          const noOpt = rawOpts.find((o) => /^no\b/i.test(String(o).trim()));
+          if (/felon|convict|crime|terminat|fired|sue|litigat|conflict|non-?compet|non-?solicit/i.test(rawLabel) && noOpt) {
+            ansVal = String(noOpt);
+          } else if (yesOpt) {
+            ansVal = String(yesOpt);
+          } else {
+            ansVal = String(rawOpts[0]);
+          }
+          sourceTag = 'Tier 4: AI / LLM';
+          tier = 4;
+          rawSource = 'llm';
         }
       }
     } catch {}

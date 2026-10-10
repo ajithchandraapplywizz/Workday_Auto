@@ -47,7 +47,6 @@ export default function ApplicationSlideDrawer({
   const [loading, setLoading] = useState(false);
   const [appDetails, setAppDetails] = useState(null);
   const [fields, setFields] = useState([]);
-  const [filterMode, setFilterMode] = useState('ai_only'); // 'ai_only' | 'missing_only' | 'all'
   const [submitting, setSubmitting] = useState(false);
   const [actionMessage, setActionMessage] = useState('');
   const [selectedScreenshot, setSelectedScreenshot] = useState(null);
@@ -184,29 +183,28 @@ export default function ApplicationSlideDrawer({
 
         if (!isMounted) return;
 
-        const rawProof = updated?.application_submitted_screenshot_url
-          || updated?.applied_screenshot
-          || updated?.original_application_screenshot_successful
-          || updated?.final_submission_screenshot_url
-          || updated?.screenshot_url
-          || updated?.screenshot_path
-          || appRow?.screenshot_url
-          || appRow?.applied_screenshot
-          || appRow?.failure_screenshot_url
-          || null;
+        const latestStatus = updated?.status || appRow?.status || null;
+        const isLatestSubmitted = latestStatus === 'submitted' || latestStatus === 'completed';
+
+        const rawProof = isLatestSubmitted
+          ? (updated?.application_submitted_screenshot_url
+            || updated?.applied_screenshot
+            || appRow?.screenshot_url
+            || appRow?.applied_screenshot
+            || null)
+          : null;
 
         const resolvedProof = resolveSupabaseStorageUrl(rawProof);
-        const latestStatus = updated?.status || appRow?.status || null;
 
         if (resolvedProof || latestStatus) {
           setAppDetails((prev) => ({
             ...prev,
             status: latestStatus || prev?.status,
-            screenshotUrl: resolvedProof || prev?.screenshotUrl,
-            application_submitted_screenshot_url: resolvedProof || prev?.application_submitted_screenshot_url,
+            screenshotUrl: resolvedProof || null,
+            application_submitted_screenshot_url: resolvedProof || null,
           }));
 
-          if (latestStatus === 'submitted' || resolvedProof) {
+          if (isLatestSubmitted && resolvedProof) {
             setSubmitting(false);
             setActionMessage('✓ Application successfully submitted on Workday! Mandatory screenshot proof saved.');
             if (onStatusUpdated) {
@@ -245,18 +243,19 @@ export default function ApplicationSlideDrawer({
     });
   }, [fields]);
 
-  // Active list of fields to display: default to AI/LLM answered questions only
+  // Active list of fields to display: STRICTLY AI/LLM answered questions or unresolved questions
   const displayedFields = useMemo(() => {
-    if (filterMode === 'missing_only') {
-      return missingFields;
-    }
-    if (filterMode === 'all') {
-      return fields.filter((f) => !f.isPersonal);
-    }
-    // Default 'ai_only': STRICTLY AI/LLM answered questions from job_distributions!
-    if (aiFields.length > 0) return aiFields;
-    return fields.filter((f) => !f.isPersonal && (f.source === 'ai' || f.tier === 4 || /ai|llm/i.test(f.sourceLabel || '')));
-  }, [fields, missingFields, aiFields, filterMode]);
+    return fields.filter((f) => {
+      if (f.isPersonal) return false;
+      const isAi = f.tier === 4
+        || (f.source || '').toLowerCase() === 'ai'
+        || (f.raw_source || '').toLowerCase() === 'llm'
+        || /ai|llm/i.test(f.source || '')
+        || /ai|llm/i.test(f.sourceLabel || '');
+      const isMissing = f.isUnanswered || !f.value;
+      return isAi || isMissing;
+    });
+  }, [fields]);
 
   // Handle saving an answer directly to qa_bank in Supabase
   const handleSaveToQaBank = async (field) => {
@@ -378,13 +377,14 @@ export default function ApplicationSlideDrawer({
     StatusIcon = Sparkles;
   }
 
-  const rawProofShot = appDetails?.application_submitted_screenshot_url
-    || appDetails?.screenshotUrl
-    || appDetails?.applied_screenshot
-    || application?.application_submitted_screenshot_url
-    || application?.screenshot_url
-    || application?.applied_screenshot
-    || null;
+  const isFinalSubmitted = effectiveStatus.includes('submit') || effectiveStatus === 'completed';
+  const rawProofShot = isFinalSubmitted
+    ? (appDetails?.application_submitted_screenshot_url
+      || appDetails?.applied_screenshot
+      || application?.application_submitted_screenshot_url
+      || application?.applied_screenshot
+      || null)
+    : null;
 
   const proofShot = resolveSupabaseStorageUrl(rawProofShot);
 
@@ -400,8 +400,8 @@ export default function ApplicationSlideDrawer({
                 <span>{statusLabel.toUpperCase()}</span>
               </div>
 
-              {/* View Screenshot button directly beside status badge */}
-              {proofShot && (
+              {/* View Screenshot button directly beside status badge: ONLY when submitted */}
+              {isFinalSubmitted && proofShot && (
                 <button
                   type="button"
                   className="sd-shot-btn-prominent"
@@ -487,48 +487,10 @@ export default function ApplicationSlideDrawer({
           </div>
         )}
 
-        {/* Filter Toggle: AI Answered Questions Only vs Missing Only vs All */}
-        <div className="sd-filter-row">
-          {!readOnly && (
-          <div className="sd-pill-toggle">
-            <button
-              type="button"
-              className={`sd-pill ${filterMode === 'ai_only' ? 'active' : ''}`}
-              onClick={() => setFilterMode('ai_only')}
-            >
-              <Sparkles size={13} />
-              <span>AI Answered Questions ({aiFields.length + missingFields.length})</span>
-            </button>
-
-            {missingFields.length > 0 && (
-              <button
-                type="button"
-                className={`sd-pill pill-warning ${filterMode === 'missing_only' ? 'active' : ''}`}
-                onClick={() => setFilterMode('missing_only')}
-              >
-                <AlertTriangle size={13} />
-                <span>Needs Answer ({missingFields.length})</span>
-              </button>
-            )}
-
-            <button
-              type="button"
-              className={`sd-pill ${filterMode === 'all' ? 'active' : ''}`}
-              onClick={() => setFilterMode('all')}
-            >
-              <span>All Non-Personal ({fields.filter((f) => !f.isPersonal).length})</span>
-            </button>
-          </div>
-          )}
-          <span className="sd-count-note">
-            Personal facts excluded
-          </span>
-        </div>
-
         {/* Content Body: Questions & Answers List */}
         <div className="slide-drawer-body">
-          {/* Authentic Post-Submission Confirmation Proof Banner inside Slide Drawer */}
-          {(effectiveStatus === 'submitted' || Boolean(proofShot)) && (
+          {/* Authentic Post-Submission Confirmation Proof Banner inside Slide Drawer: Strictly when submitted */}
+          {(effectiveStatus === 'submitted' || effectiveStatus === 'completed') && proofShot && (
             <div style={{
               background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(5, 150, 105, 0.08) 100%)',
               border: '1px solid rgba(16, 185, 129, 0.45)',

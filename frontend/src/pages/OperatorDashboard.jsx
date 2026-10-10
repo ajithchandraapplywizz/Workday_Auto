@@ -727,17 +727,21 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                         {(() => {
                           const displayableApps = applications.filter((app) => {
                             const raw = (app.status || '').toLowerCase().trim();
-                            return raw === 'ready_for_review' || raw === 'ready_to_review';
+                            return ['ready_for_review', 'ready_to_review', 'approved_for_submission', 'queued', 'applying', 'in_flight', 'submitted', 'completed', 'failed'].includes(raw);
                           });
 
                           return displayableApps.length > 0 ? (
                             displayableApps.map((app) => {
                               const rawStatus = (app.status || '').toLowerCase();
-                              const rawProof = app.application_submitted_screenshot_url || app.screenshot_url || app.applied_screenshot || app.screenshot_path || null;
-                              const proofShot = resolveSupabaseStorageUrl(rawProof);
                               const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed';
                               const isApplying = rawStatus === 'applying' || rawStatus === 'in_flight';
-                              const isReady = !isSubmitted && !isApplying;
+                              const isQueued = rawStatus === 'queued' || rawStatus === 'approved_for_submission';
+                              const isFailed = rawStatus === 'failed';
+                              const isReady = !isSubmitted && !isApplying && !isQueued && !isFailed;
+
+                              // STRICT 3-BUCKET DISPLAY: Screenshot rendered ONLY when submitted!
+                              const rawProof = isSubmitted ? (app.application_submitted_screenshot_url || app.screenshot_url || app.applied_screenshot || null) : null;
+                              const proofShot = resolveSupabaseStorageUrl(rawProof);
 
                               const jobUrl = app.job_url || app.url || '';
                               const displayTitle = app.role_title || app.job_title || (app.company ? `${app.company} Workday Application` : 'Workday Application');
@@ -778,8 +782,16 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                         ✓ SUBMITTED
                                       </span>
                                     ) : isApplying ? (
-                                      <span className="video-status-tag in_flight" style={{ background: 'rgba(234, 179, 8, 0.15)', color: '#facc15', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
-                                        ⚡ APPLYING...
+                                      <span className="video-status-tag in_flight" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
+                                        ⚡ APPLYING ON WORKDAY
+                                      </span>
+                                    ) : isQueued ? (
+                                      <span className="video-status-tag queued" style={{ background: 'rgba(234, 179, 8, 0.15)', color: '#facc15', border: '1px solid rgba(234, 179, 8, 0.3)' }}>
+                                        ⏳ QUEUED
+                                      </span>
+                                    ) : isFailed ? (
+                                      <span className="video-status-tag failed" style={{ background: 'rgba(239, 68, 68, 0.15)', color: '#f87171', border: '1px solid rgba(239, 68, 68, 0.3)' }}>
+                                        ✕ FAILED
                                       </span>
                                     ) : (
                                       <span className="video-status-tag ready_for_review" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
@@ -788,7 +800,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                     )}
                                   </td>
                                   <td style={{ textAlign: 'center' }}>
-                                    {(isSubmitted || Boolean(proofShot)) && proofShot ? (
+                                    {isSubmitted && proofShot ? (
                                       <a
                                         href={proofShot}
                                         target="_blank"
@@ -807,7 +819,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           alignItems: 'center',
                                           gap: '4px',
                                         }}
-                                        title="Click to view genuine Playwright submission screenshot"
+                                        title="Click to view verified Playwright submission confirmation screenshot"
                                       >
                                         📸 View Proof ↗
                                       </a>
@@ -840,6 +852,23 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           alignItems: 'center',
                                           gap: '6px',
                                           fontSize: '0.78rem',
+                                          color: '#c084fc',
+                                          fontWeight: 'bold',
+                                          background: 'rgba(168, 85, 247, 0.12)',
+                                          border: '1px solid rgba(168, 85, 247, 0.3)',
+                                          padding: '4px 10px',
+                                          borderRadius: '4px',
+                                        }}
+                                      >
+                                        ⚡ Applying...
+                                      </span>
+                                    ) : isQueued ? (
+                                      <span
+                                        style={{
+                                          display: 'inline-flex',
+                                          alignItems: 'center',
+                                          gap: '6px',
+                                          fontSize: '0.78rem',
                                           color: '#facc15',
                                           fontWeight: 'bold',
                                           background: 'rgba(234, 179, 8, 0.1)',
@@ -848,7 +877,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           borderRadius: '4px',
                                         }}
                                       >
-                                        ⚡ In Progress...
+                                        ⏳ In Queue...
                                       </span>
                                     ) : (
                                       <button
@@ -870,7 +899,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                           handleOpenReview(app);
                                         }}
                                       >
-                                        📋 Review & Submit
+                                        📋 Review &amp; Submit
                                       </button>
                                     )}
                                   </td>

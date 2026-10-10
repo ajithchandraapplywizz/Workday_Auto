@@ -34,6 +34,7 @@ import {
 } from '../lib/supabaseClient.mjs';
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 import { setGlobalStop, isGlobalStopRequested, abortAllActiveBrowsers } from '../lib/browserLifecycle.mjs';
+import { createClient } from '@supabase/supabase-js';
 
 loadLocalEnvOnce();
 
@@ -41,6 +42,10 @@ if (!isSupabaseConfigured()) {
   console.error('[DAEMON FATAL] Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');
   process.exit(1);
 }
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+  auth: { persistSession: false },
+});
 
 // Configuration
 const args = process.argv.slice(2);
@@ -514,6 +519,11 @@ async function initOnStartup() {
         }
       }
 
+      // Heartbeat: keep bot_control active while scanning or submitting
+      if (isPoolRunning) {
+        await syncBotControlState({ is_running: true, stage: currentStage }).catch(() => {});
+      }
+
       // ── Resilient Fallback Bridge via worker_status table ──
       // Triggers if frontend writes directly to worker_status before migration 023 is applied
       const statuses = await getWorkerStatuses().catch(() => []);
@@ -530,6 +540,57 @@ async function initOnStartup() {
           runSequentialPipeline().catch(console.error);
           return;
         }
+      }
+
+      // ── Targeted Submission Bridge for CA Approvals (Continuous 2s Poll) ──
+      try {
+        const { data: approvedApps } = await supabase
+          .from('job_distributions')
+          .select('id, applywizz_id, job_url, status')
+          .in('status', ['approved_for_submission', 'queued'])
+          .order('updated_at', { ascending: true })
+          .limit(3);
+
+        if (approvedApps && approvedApps.length > 0) {
+          const availableSubmitters = PIPELINE_CONFIG.submitWorkerIds.filter((wid) => {
+            const found = statuses.find((w) => w.worker_id === wid);
+            return !found || found.state === 'idle';
+          });
+
+          for (const app of approvedApps) {
+            if (availableSubmitters.length > 0) {
+              const workerId = availableSubmitters.shift();
+              console.log(`\n⚡ [DAEMON AUTO-SUBMIT] Leasing ${workerId} for approved application ${app.applywizz_id} (${app.job_url})`);
+
+              // Mark applying immediately to prevent double lease
+              await supabase
+                .from('job_distributions')
+                .update({ status: 'applying', worker_id: workerId, updated_at: new Date().toISOString() })
+                .eq('id', app.id)
+                .catch(() => {});
+
+              const { executeSingleTargetedSubmission } = await import('../lib/workerPool.mjs');
+              executeSingleTargetedSubmission({
+                distributionId: app.id,
+                applywizzId: app.applywizz_id,
+                jobUrl: app.job_url,
+                workerId,
+                headless: HEADLESS,
+              }).catch((err) => {
+                console.error(`❌ [DAEMON AUTO-SUBMIT ERROR]:`, err?.message);
+              });
+            } else if (app.status === 'approved_for_submission') {
+              // All 3 submitting workers busy: mark queued
+              await supabase
+                .from('job_distributions')
+                .update({ status: 'queued', updated_at: new Date().toISOString() })
+                .eq('id', app.id)
+                .catch(() => {});
+            }
+          }
+        }
+      } catch (subErr) {
+        // Continue silently
       }
     } catch {
       // Continue polling silently

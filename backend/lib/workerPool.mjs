@@ -758,10 +758,18 @@ export async function executeWorkerTask({
           }
         }
         if (buf) {
-          const bucket = (status === 'submitted' || status === 'reached-review' || status === 'reached_review')
-            ? 'application-successes'
-            : 'application-failures';
-          completionShotUrl = await uploadStorageScreenshot(bucket, `${applywizzId}_${Date.now()}_${status}.jpg`, buf);
+          let bucket = 'application-failures';
+          let filename = `${applywizzId}_${Date.now()}_failure.jpg`;
+
+          if (status === 'submitted') {
+            bucket = 'submitted-applications';
+            filename = `${applywizzId}_${task.id || Date.now()}_submitted_confirmation.jpg`;
+          } else if (status === 'reached-review' || status === 'reached_review') {
+            bucket = 'application-successes';
+            filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
+          }
+
+          completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf);
         }
       }
     } catch {}

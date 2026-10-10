@@ -2532,17 +2532,15 @@ export async function fetchBotDaemonStatus() {
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
 
-    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-    if (isLocalhost) {
-      try {
-        const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
-        if (res.ok) {
-          const json = await res.json();
-          daemonApiRunning = Boolean(json.isRunning);
-          daemonApiStage = json.stage || 'idle';
-        }
-      } catch { }
-    }
+    // Universal fetch to daemon status endpoint with fast 1.5s timeout
+    try {
+      const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
+      if (res.ok) {
+        const json = await res.json();
+        daemonApiRunning = Boolean(json.isRunning);
+        daemonApiStage = json.stage || 'idle';
+      }
+    } catch { }
 
     const [workersRes, controlRes] = await Promise.all([
       supabase
@@ -2561,13 +2559,10 @@ export async function fetchBotDaemonStatus() {
     const workers = workersRes.data || [];
     const botControl = controlRes?.data || null;
 
-    const now = Date.now();
-    const hasActiveWorkers = workers.some((w) => {
-      const last = new Date(w.updated_at || 0).getTime();
-      return (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'busy');
-    });
+    // Any worker in_flight or busy indicates active background running
+    const hasActiveWorkers = workers.some((w) => w.state === 'in_flight' || w.state === 'busy');
 
-    const isRunning = daemonApiRunning || (botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
+    const isRunning = daemonApiRunning || Boolean(botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
     const currentStage = daemonApiStage !== 'idle' ? daemonApiStage : (botControl?.stage || (isRunning ? 'running' : 'idle'));
 
     return {
@@ -2626,9 +2621,6 @@ export async function fetchClientApplications(applywizzId) {
     if (distData && Array.isArray(distData)) {
       for (const d of distData) {
         const rawStatus = (d.status || '').toLowerCase().trim();
-        // STRICT OPERATOR FILTER: Only show jobs which have status as "ready_for_review" (or ready_to_review)
-        const isReadyForReview = (rawStatus === 'ready_for_review' || rawStatus === 'ready_to_review');
-        if (!isReadyForReview) continue;
 
         const qArr = Array.isArray(d.scraped_questions) ? d.scraped_questions : [];
         const qCount = Number(d.question_count) || qArr.length;
@@ -2640,7 +2632,11 @@ export async function fetchClientApplications(applywizzId) {
           ? Number(d.unanswered_count)
           : unans.length;
 
-        const proofShot = d.application_submitted_screenshot_url || d.applied_screenshot || d.original_application_screenshot_successful || d.final_submission_screenshot_url || d.screenshot_url || null;
+        const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed';
+        // ONLY genuine confirmation screenshot from submitted-applications bucket when submitted
+        const proofShot = isSubmitted
+          ? (d.application_submitted_screenshot_url || d.applied_screenshot || null)
+          : null;
 
         jobMap.set(key, {
           id: d.id,
@@ -2658,7 +2654,7 @@ export async function fetchClientApplications(applywizzId) {
           unanswered_count: unansCount,
           is_fully_answered: d.is_fully_answered ?? (unansCount === 0),
           screenshot_url: proofShot,
-          application_submitted_screenshot_url: d.application_submitted_screenshot_url || proofShot,
+          application_submitted_screenshot_url: proofShot,
           created_at: d.created_at,
           updated_at: d.updated_at,
           source: 'job_distributions',
