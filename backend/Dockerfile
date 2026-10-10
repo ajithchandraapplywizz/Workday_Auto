@@ -9,7 +9,6 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 COPY . .
 
 RUN npm install
-RUN npx playwright install --with-deps chromium
 
 ENV PORT=8080
 EXPOSE 8080

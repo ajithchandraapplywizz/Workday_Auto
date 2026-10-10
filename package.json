@@ -12,7 +12,7 @@
   ],
   "scripts": {
     "start": "node index.js",
-    "postinstall": "npx playwright install --with-deps chromium 2>/dev/null || npx playwright install chromium 2>/dev/null || true",
+    "postinstall": "true",
     "setup": "node backend/cli.mjs setup",
     "scan": "node backend/cli.mjs scan",
     "fill": "node backend/cli.mjs fill",

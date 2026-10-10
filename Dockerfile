@@ -10,9 +10,8 @@ ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 # Copy project files
 COPY . .
 
-# Install dependencies and ensure Playwright chromium browser & dependencies are ready
+# Install dependencies
 RUN npm install
-RUN npx playwright install --with-deps chromium
 
 # Expose default port
 ENV PORT=8080

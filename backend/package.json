@@ -31,7 +31,7 @@
     "test": "node --test lib/**/*.test.mjs tests/**/*.test.mjs",
     "test:lib": "node --test lib/**/*.test.mjs",
     "test:agent": "node tests/run-report.mjs",
-    "postinstall": "npx playwright install --with-deps chromium 2>/dev/null || npx playwright install chromium 2>/dev/null || true"
+    "postinstall": "true"
   },
   "keywords": [
     "job-application",
