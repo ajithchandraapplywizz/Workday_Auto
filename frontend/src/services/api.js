@@ -2365,32 +2365,21 @@ export async function triggerAutonomousBot() {
       }
     }
 
-    // 3. Webhook call to daemon (POST /api/bot/webhook or /api/bot/start)
-    let httpOk = false;
-    let httpMessage = '';
-    const endpoints = [
-      '/api/bot/start',
-      '/api/bot/trigger',
-      '/api/bot/webhook',
-      'http://localhost:3001/api/bot/start',
-      'http://localhost:3001/api/bot/trigger',
-      'http://localhost:3001/api/bot/webhook',
-    ];
-    for (const ep of endpoints) {
-      try {
-        const resp = await fetch(ep, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
-          signal: AbortSignal.timeout(3000),
-        });
-        if (resp.ok) {
-          const resJson = await resp.json().catch(() => ({}));
-          httpOk = true;
-          httpMessage = resJson.message || 'Pipeline started';
-          break;
-        }
-      } catch { }
+    // 3. Local dev webhook call to daemon (POST /api/bot/start)
+    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    if (isLocalhost) {
+      const endpoints = ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook'];
+      for (const ep of endpoints) {
+        try {
+          const resp = await fetch(ep, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
+            signal: AbortSignal.timeout(2000),
+          });
+          if (resp.ok) break;
+        } catch { }
+      }
     }
 
     return {
@@ -2414,23 +2403,21 @@ export async function stopAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Direct Webhook stop call to daemon (POST /api/bot/stop action: 'stop')
-    const stopEndpoints = [
-      '/api/bot/stop',
-      '/api/bot/webhook',
-      'http://localhost:3001/api/bot/stop',
-      'http://localhost:3001/api/bot/webhook',
-    ];
-    await Promise.any(
-      stopEndpoints.map((u) =>
-        fetch(u, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
-          signal: AbortSignal.timeout(2000),
-        })
-      )
-    ).catch(() => { });
+    // 1. Local dev Webhook stop call to daemon (POST /api/bot/stop action: 'stop')
+    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    if (isLocalhost) {
+      const stopEndpoints = ['/api/bot/stop', '/api/bot/webhook'];
+      await Promise.any(
+        stopEndpoints.map((u) =>
+          fetch(u, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
+            signal: AbortSignal.timeout(1500),
+          })
+        )
+      ).catch(() => { });
+    }
 
     // 2. Set bot_control stop signal in Supabase
     try {
@@ -2528,14 +2515,17 @@ export async function fetchBotDaemonStatus() {
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
 
-    try {
-      const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
-      if (res.ok) {
-        const json = await res.json();
-        daemonApiRunning = Boolean(json.isRunning);
-        daemonApiStage = json.stage || 'idle';
-      }
-    } catch { }
+    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
+    if (isLocalhost) {
+      try {
+        const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
+        if (res.ok) {
+          const json = await res.json();
+          daemonApiRunning = Boolean(json.isRunning);
+          daemonApiStage = json.stage || 'idle';
+        }
+      } catch { }
+    }
 
     const [workersRes, controlRes] = await Promise.all([
       supabase
