@@ -1,5 +1,5 @@
 # Official Microsoft Playwright image with all Linux system dependencies (libglib-2.0, libnss3, etc.) pre-installed
-FROM mcr.microsoft.com/playwright:v1.50.1-noble
+FROM mcr.microsoft.com/playwright:v1.63.0-noble
 
 WORKDIR /app
 
