@@ -2351,7 +2351,7 @@ export async function triggerAutonomousBot() {
     const scanningWorkerIds = ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
     for (const wid of scanningWorkerIds) {
       try {
-        await supabase
+        const { error: wErr } = await supabase
           .from('worker_status')
           .update({
             state: 'in_flight',
@@ -2360,26 +2360,41 @@ export async function triggerAutonomousBot() {
             updated_at: now,
           })
           .eq('worker_id', wid);
+        if (wErr) {
+          // Fallback if stage column does not exist yet
+          await supabase
+            .from('worker_status')
+            .update({
+              state: 'in_flight',
+              current_application_id: 'Stage 1: Scanning unique job links...',
+              updated_at: now,
+            })
+            .eq('worker_id', wid);
+        }
       } catch (wErr) {
         console.warn(`Could not update ${wid} in Supabase:`, wErr?.message);
       }
     }
 
-    // 3. Local dev webhook call to daemon (POST /api/bot/start)
-    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-    if (isLocalhost) {
-      const endpoints = ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook'];
-      for (const ep of endpoints) {
-        try {
-          const resp = await fetch(ep, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
-            signal: AbortSignal.timeout(2000),
-          });
-          if (resp.ok) break;
-        } catch { }
-      }
+    // 3. Webhook call to daemon (POST /api/bot/start / /api/bot/trigger)
+    // Dispatches via relative proxy or direct backend URL if configured
+    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL) ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '') : '';
+    const endpoints = [
+      '/api/bot/start',
+      '/api/bot/trigger',
+      '/api/bot/webhook',
+      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
+    ];
+    for (const ep of endpoints) {
+      try {
+        const resp = await fetch(ep, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
+          signal: AbortSignal.timeout(2000),
+        });
+        if (resp.ok) break;
+      } catch {}
     }
 
     return {
@@ -2403,21 +2418,23 @@ export async function stopAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Local dev Webhook stop call to daemon (POST /api/bot/stop action: 'stop')
-    const isLocalhost = typeof window !== 'undefined' && (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1');
-    if (isLocalhost) {
-      const stopEndpoints = ['/api/bot/stop', '/api/bot/webhook'];
-      await Promise.any(
-        stopEndpoints.map((u) =>
-          fetch(u, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
-            signal: AbortSignal.timeout(1500),
-          })
-        )
-      ).catch(() => { });
-    }
+    // 1. Webhook stop call to daemon (POST /api/bot/stop)
+    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL) ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '') : '';
+    const stopEndpoints = [
+      '/api/bot/stop',
+      '/api/bot/webhook',
+      ...(backendBase ? [`${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+    ];
+    await Promise.any(
+      stopEndpoints.map((u) =>
+        fetch(u, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
+          signal: AbortSignal.timeout(1500),
+        })
+      )
+    ).catch(() => {});
 
     // 2. Set bot_control stop signal in Supabase
     try {

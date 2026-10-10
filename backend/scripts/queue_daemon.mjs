@@ -471,42 +471,69 @@ async function initOnStartup() {
     console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) & Supabase bot_control signals — 9-Worker Pipeline Active.\n`);
   });
 
-  // ── Universal Cloud Bridge: Listen to Supabase bot_control table signals ──
+  // ── Universal Cloud Bridge: Listen to Supabase signals (bot_control + worker_status fallback) ──
+  let warnedMissingBotControl = false;
   setInterval(async () => {
     try {
       const bc = await getBotControl();
-      if (!bc) return;
 
-      // 1. Stop Signal
-      if (bc.stop_requested && isPoolRunning) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'stop_requested' in bot_control table! Stopping workers...`);
-        await stopAutonomousPool();
-        return;
+      if (bc) {
+        // 1. Primary Stop Signal
+        if (bc.stop_requested && isPoolRunning) {
+          console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'stop_requested' in bot_control table! Stopping workers...`);
+          await stopAutonomousPool();
+          return;
+        }
+
+        // 2. Primary Start / Trigger Pipeline Signal
+        if (!isPoolRunning && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_pipeline')) {
+          console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected 'start' signal in bot_control table! Launching 9-worker pipeline...`);
+          await syncBotControlState({ last_action_requested: null, is_running: true });
+          runSequentialPipeline().catch(console.error);
+          return;
+        }
+
+        // 3. Primary Submit Approved Applications Signal
+        if (!isPoolRunning && bc.last_action_requested === 'submit_approved') {
+          console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected 'submit_approved' signal in bot_control table! Launching Stage 3 Submissions...`);
+          await syncBotControlState({ last_action_requested: null, is_running: true });
+          isPoolRunning = true;
+          setGlobalStop(false);
+          runStage3Submissions().finally(() => {
+            isPoolRunning = false;
+            currentStage = 'idle';
+            resetAllWorkersIdle().catch(() => {});
+            syncBotControlState({ stage: 'idle', is_running: false, active_worker_count: 0 });
+          }).catch(console.error);
+          return;
+        }
+      } else {
+        if (!warnedMissingBotControl) {
+          warnedMissingBotControl = true;
+          console.log(`\n[DAEMON] ℹ️ Supabase 'bot_control' table not detected. Active fallback bridge listening directly on 'worker_status' table.`);
+        }
       }
 
-      // 2. Start / Trigger Pipeline Signal
-      if (!isPoolRunning && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_pipeline')) {
-        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected 'start' signal in bot_control table! Launching 9-worker pipeline...`);
-        await syncBotControlState({ last_action_requested: null, is_running: true });
-        runSequentialPipeline().catch(console.error);
-        return;
+      // ── Resilient Fallback Bridge via worker_status table ──
+      // Triggers if frontend writes directly to worker_status before migration 023 is applied
+      const statuses = await getWorkerStatuses().catch(() => []);
+      if (!isPoolRunning) {
+        const hasTrigger = statuses.some((w) =>
+          w.worker_id &&
+          w.worker_id.includes('scan') &&
+          w.state === 'in_flight' &&
+          w.current_application_id &&
+          w.current_application_id.includes('Stage 1')
+        );
+        if (hasTrigger) {
+          console.log(`\n⚡ [DAEMON WORKER_STATUS TRIGGER] Detected 'in_flight' signal in worker_status table! Launching 9-worker pipeline...`);
+          runSequentialPipeline().catch(console.error);
+          return;
+        }
       }
-
-      // 3. Submit Approved Applications Signal
-      if (!isPoolRunning && bc.last_action_requested === 'submit_approved') {
-        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected 'submit_approved' signal in bot_control table! Launching Stage 3 Submissions...`);
-        await syncBotControlState({ last_action_requested: null, is_running: true });
-        isPoolRunning = true;
-        setGlobalStop(false);
-        runStage3Submissions().finally(() => {
-          isPoolRunning = false;
-          currentStage = 'idle';
-          resetAllWorkersIdle().catch(() => {});
-          syncBotControlState({ stage: 'idle', is_running: false, active_worker_count: 0 });
-        }).catch(console.error);
-        return;
-      }
-    } catch {}
+    } catch {
+      // Continue polling silently
+    }
   }, 2000);
 }
 

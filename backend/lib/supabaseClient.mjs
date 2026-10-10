@@ -1312,13 +1312,28 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
       updated_at: new Date().toISOString(),
     };
 
-    await request('worker_status', {
-      method: 'PATCH',
-      query: `?worker_id=eq.${encodeURIComponent(cleanId)}`,
-      prefer: 'return=minimal',
-      body,
-    });
-    return true;
+    try {
+      await request('worker_status', {
+        method: 'PATCH',
+        query: `?worker_id=eq.${encodeURIComponent(cleanId)}`,
+        prefer: 'return=minimal',
+        body,
+      });
+      return true;
+    } catch {
+      // Fallback for older schema without stage/bot_name columns
+      await request('worker_status', {
+        method: 'PATCH',
+        query: `?worker_id=eq.${encodeURIComponent(cleanId)}`,
+        prefer: 'return=minimal',
+        body: {
+          state: validState,
+          current_application_id: current_application_id || null,
+          updated_at: new Date().toISOString(),
+        },
+      });
+      return true;
+    }
   } catch (err) {
     return false;
   }
@@ -1336,7 +1351,20 @@ export async function getWorkerStatuses() {
     });
     return Array.isArray(res) ? res : [];
   } catch {
-    return [];
+    // Fallback if bot_name or stage columns do not exist yet
+    try {
+      const fallback = await request('worker_status', {
+        method: 'GET',
+        query: '?select=worker_id,state,current_application_id,updated_at&order=worker_id',
+      });
+      return Array.isArray(fallback) ? fallback.map((r) => ({
+        ...r,
+        bot_name: WORKER_STAGE_MAP[r.worker_id]?.botName || r.worker_id,
+        stage: WORKER_STAGE_MAP[r.worker_id]?.stage || 'idle',
+      })) : [];
+    } catch {
+      return [];
+    }
   }
 }
 
@@ -1354,18 +1382,31 @@ export async function ensureCanonicalWorkers() {
     for (const id of CANONICAL_9_WORKERS) {
       if (!currentIds.has(id)) {
         const meta = WORKER_STAGE_MAP[id] || {};
-        await request('worker_status', {
-          method: 'POST',
-          prefer: 'resolution=merge-duplicates',
-          body: {
-            worker_id: id,
-            bot_name: meta.botName || id,
-            stage: meta.stage || 'idle',
-            state: 'idle',
-            current_application_id: null,
-            updated_at: now,
-          },
-        }).catch(() => {});
+        try {
+          await request('worker_status', {
+            method: 'POST',
+            prefer: 'resolution=merge-duplicates',
+            body: {
+              worker_id: id,
+              bot_name: meta.botName || id,
+              stage: meta.stage || 'idle',
+              state: 'idle',
+              current_application_id: null,
+              updated_at: now,
+            },
+          });
+        } catch {
+          await request('worker_status', {
+            method: 'POST',
+            prefer: 'resolution=merge-duplicates',
+            body: {
+              worker_id: id,
+              state: 'idle',
+              current_application_id: null,
+              updated_at: now,
+            },
+          }).catch(() => {});
+        }
       }
     }
 
