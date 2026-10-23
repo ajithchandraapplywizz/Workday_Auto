@@ -90,6 +90,7 @@ workday-cascading-dropdown-master-prompt.md
 **/*.yaml
 !**/*.example.yml
 !**/*.example.yaml
+!render.yaml
 
 # Generated reports
 reports/

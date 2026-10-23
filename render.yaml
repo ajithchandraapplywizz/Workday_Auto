@@ -1,0 +1,39 @@
+services:
+  # 1. Automation Backend Service (Playwright Queue Daemon)
+  - type: web
+    name: workday-automation-backend
+    env: docker
+    dockerfilePath: Dockerfile
+    plan: starter # Note: Playwright requires at least Starter / 512MB-1GB RAM
+    healthCheckPath: /
+    envVars:
+      - key: PORT
+        value: "8080"
+      - key: HEADLESS
+        value: "true"
+      - key: NODE_ENV
+        value: "production"
+      - key: WORKER_COUNT
+        value: "2"
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: OPENROUTER_API_KEY
+        sync: false
+
+  # 2. Frontend React Dashboard (Static Site)
+  - type: static
+    name: workday-frontend-dashboard
+    rootDir: frontend
+    buildCommand: npm install && npm run build
+    staticPublishPath: dist
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_SUPABASE_URL
+        sync: false
+      - key: VITE_SUPABASE_ANON_KEY
+        sync: false
