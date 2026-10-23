@@ -1261,9 +1261,9 @@ const server = http.createServer(async (req, res) => {
         updated_at: nowIso,
       };
       if (distributionId) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).catch(() => { });
+        try { await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId); } catch {}
       } else if (cleanId && jobUrl) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).catch(() => { });
+        try { await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl); } catch {}
       }
 
       // 3. Upsert into submission_tasks table with status 'applying'
@@ -1306,22 +1306,24 @@ const server = http.createServer(async (req, res) => {
       console.log(`\n⏳ [DAEMON WEBHOOK] All 3 submitting workers are busy. Queuing application for ${cleanId}...`);
 
       if (distributionId) {
-        await supabase.from('job_distributions').update({
-          status: 'queued',
-          reviewed_by: 'Career Associate',
-          reviewed_at: nowIso,
-          updated_at: nowIso,
-        }).eq('id', distributionId).catch(() => { });
+        try {
+          await supabase.from('job_distributions').update({
+            status: 'queued',
+            reviewed_by: 'Career Associate',
+            reviewed_at: nowIso,
+            updated_at: nowIso,
+          }).eq('id', distributionId);
 
-        await supabase.from('submission_tasks').upsert({
-          distribution_id: distributionId,
-          applywizz_id: cleanId,
-          job_url: jobUrl,
-          status: 'queued',
-          reviewed_by: 'Career Associate',
-          created_at: nowIso,
-          updated_at: nowIso,
-        }, { onConflict: 'distribution_id' }).catch(() => { });
+          await supabase.from('submission_tasks').upsert({
+            distribution_id: distributionId,
+            applywizz_id: cleanId,
+            job_url: jobUrl,
+            status: 'queued',
+            reviewed_by: 'Career Associate',
+            created_at: nowIso,
+            updated_at: nowIso,
+          }, { onConflict: 'distribution_id' });
+        } catch {}
       }
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1571,23 +1573,18 @@ async function initOnStartup() {
       active_worker_count: 0,
       current_action: 'Idle (Awaiting Frontend Dev Dashboard trigger)',
     });
-    await supabase.from('bot_control').update({
-      mode: 'idle',
-      stage: 'idle',
-      scan_status: 'off',
-      scan_enabled: false,
-      submit_status: 'off',
-      submit_enabled: false,
-      last_action_requested: null,
-      trigger_requested: false,
-      stop_requested: false,
-      scan_stop_requested: false,
-      submit_stop_requested: false,
-      is_running: false,
-      active_worker_count: 0,
-      current_action: 'Idle (Awaiting Frontend Dev Dashboard trigger)',
-      updated_at: new Date().toISOString(),
-    }).eq('id', 'primary').catch(() => {});
+    try {
+      await supabase.from('bot_control').update({
+        stage: 'idle',
+        is_running: false,
+        stop_requested: false,
+        trigger_requested: false,
+        last_action_requested: null,
+        active_worker_count: 0,
+        current_action: 'Idle (Awaiting Frontend Dev Dashboard trigger)',
+        updated_at: new Date().toISOString(),
+      }).eq('id', 'primary');
+    } catch {}
     console.log(`[DAEMON] worker_status table initialized: strictly canonical rows set to idle.`);
     await recoverInterruptedSubmissionTasks();
     const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');

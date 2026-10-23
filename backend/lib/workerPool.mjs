@@ -1726,28 +1726,34 @@ export async function executeSingleTargetedSubmission({
   }).catch(() => {});
 
   if (distributionId) {
-    await supabase.from('job_distributions').update({
-      status: 'applying',
-      worker_id: workerId,
-      reviewed_by: 'Career Associate',
-      reviewed_at: now,
-      updated_at: now,
-    }).eq('id', distributionId).catch(() => {});
+    try {
+      await supabase.from('job_distributions').update({
+        status: 'applying',
+        worker_id: workerId,
+        reviewed_by: 'Career Associate',
+        reviewed_at: now,
+        updated_at: now,
+      }).eq('id', distributionId);
+    } catch {}
 
-    await supabase.from('submission_tasks').update({
-      status: 'applying',
-      worker_id: workerId,
-      started_at: now,
-      updated_at: now,
-    }).eq('distribution_id', distributionId).catch(() => {});
+    try {
+      await supabase.from('submission_tasks').update({
+        status: 'applying',
+        worker_id: workerId,
+        started_at: now,
+        updated_at: now,
+      }).eq('distribution_id', distributionId);
+    } catch {}
   } else {
-    await supabase.from('job_distributions').update({
-      status: 'applying',
-      worker_id: workerId,
-      reviewed_by: 'Career Associate',
-      reviewed_at: now,
-      updated_at: now,
-    }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+    try {
+      await supabase.from('job_distributions').update({
+        status: 'applying',
+        worker_id: workerId,
+        reviewed_by: 'Career Associate',
+        reviewed_at: now,
+        updated_at: now,
+      }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl);
+    } catch {}
   }
 
   // 3. Execute submission task via Playwright
@@ -1799,12 +1805,14 @@ export async function executeSingleTargetedSubmission({
       if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
       else console.log(`   ✅ [${workerId}] job_distributions record #${distributionId} updated to 'submitted' with proof: ${finalProofShot || 'saved'}`);
 
-      await supabase.from('submission_tasks').update({
-        status: 'submitted',
-        application_submitted_screenshot_url: finalProofShot,
-        completed_at: completionTimestamp,
-        updated_at: completionTimestamp,
-      }).eq('distribution_id', distributionId).catch(() => {});
+      try {
+        await supabase.from('submission_tasks').update({
+          status: 'submitted',
+          application_submitted_screenshot_url: finalProofShot,
+          completed_at: completionTimestamp,
+          updated_at: completionTimestamp,
+        }).eq('distribution_id', distributionId);
+      } catch {}
     } else {
       const { error: dErr } = await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl);
       if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
@@ -1819,16 +1827,18 @@ export async function executeSingleTargetedSubmission({
       updated_at: completionTimestamp,
     };
     if (distributionId) {
-      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
-      await supabase.from('submission_tasks').update({
-        status: 'failed',
-        error_message: result?.failureReason || result?.error || 'Submission failed',
-        screenshot_path: finalProofShot,
-        completed_at: completionTimestamp,
-        updated_at: completionTimestamp,
-      }).eq('distribution_id', distributionId).catch(() => {});
+      try { await supabase.from('job_distributions').update(updateBody).eq('id', distributionId); } catch {}
+      try {
+        await supabase.from('submission_tasks').update({
+          status: 'failed',
+          error_message: result?.failureReason || result?.error || 'Submission failed',
+          screenshot_path: finalProofShot,
+          completed_at: completionTimestamp,
+          updated_at: completionTimestamp,
+        }).eq('distribution_id', distributionId);
+      } catch {}
     } else {
-      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+      try { await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl); } catch {}
     }
 
     try {
