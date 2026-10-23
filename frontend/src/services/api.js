@@ -1382,19 +1382,28 @@ export async function fetchAutomationTrace(param = {}) {
  * - Batch 2: Resolving (resolving_worker_1, 2, 3)
  * - Batch 3: Submitting (submitting_worker_1, 2, 3)
  */
+export function getBackendBaseUrl() {
+  if (typeof window !== 'undefined') {
+    const custom = window.localStorage.getItem('WORKDAY_BACKEND_URL') || window.localStorage.getItem('VITE_BACKEND_URL');
+    if (custom && custom.trim()) {
+      return custom.trim().replace(/\/+$/, '');
+    }
+  }
+  const envUrl = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_BACKEND_URL || import.meta.env?.VITE_API_URL)) || '';
+  return String(envUrl).trim().replace(/\/+$/, '');
+}
+
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
   try {
-    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
-      ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
-      : '';
+    const backendBase = getBackendBaseUrl();
     const endpoints = [
+      ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
       '/api/bot/logs',
       '/api/developer/logs',
       'http://localhost:3005/api/bot/logs',
       'http://localhost:3005/api/developer/logs',
       'http://localhost:3001/api/bot/logs',
       'http://localhost:3001/api/developer/logs',
-      ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
     ];
 
     let liveLogs = null;
@@ -1449,6 +1458,58 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         allLogs: all.slice(-limit * 2),
       };
     }
+
+    // Supabase Cloud Fallback: Synthesize live logs directly from worker_status and bot_control
+    try {
+      const [{ data: wsData }, { data: bcData }] = await Promise.all([
+        supabase.from('worker_status').select('*').order('updated_at', { ascending: false }).limit(20),
+        supabase.from('bot_control').select('*').eq('id', 'primary').maybeSingle(),
+      ]);
+
+      const scanningLogs = [];
+      const resolvingLogs = [];
+      const submittingLogs = [];
+
+      if (bcData?.current_action) {
+        const bcLog = {
+          id: 'bc-' + (bcData.updated_at || Date.now()),
+          created_at: bcData.updated_at || new Date().toISOString(),
+          message: `[DAEMON] Stage: ${bcData.stage || 'idle'} | State: ${bcData.is_running ? 'RUNNING' : 'IDLE'} | ${bcData.current_action}`,
+          step_index: 1,
+        };
+        if (bcData.stage === 'submitting') submittingLogs.push(bcLog);
+        else if (bcData.stage === 'resolving') resolvingLogs.push(bcLog);
+        else scanningLogs.push(bcLog);
+      }
+
+      if (wsData && wsData.length > 0) {
+        for (const w of wsData) {
+          if (!w.current_application_id && w.state === 'idle') continue;
+          const wLog = {
+            id: 'ws-' + w.worker_id + '-' + (w.updated_at || Date.now()),
+            created_at: w.updated_at || new Date().toISOString(),
+            message: `[${w.bot_name || w.worker_id}] State: ${String(w.state || '').toUpperCase()} | ${w.current_application_id || 'Waiting for tasks...'}`,
+            step_index: 1,
+          };
+          const wid = String(w.worker_id || '').toLowerCase();
+          if (wid.includes('submit')) submittingLogs.push(wLog);
+          else if (wid.includes('resolv')) resolvingLogs.push(wLog);
+          else scanningLogs.push(wLog);
+        }
+      }
+
+      if (scanningLogs.length > 0 || resolvingLogs.length > 0 || submittingLogs.length > 0) {
+        return {
+          success: true,
+          batches: {
+            scanning: scanningLogs,
+            resolving: resolvingLogs,
+            submitting: submittingLogs,
+          },
+          allLogs: [...scanningLogs, ...resolvingLogs, ...submittingLogs],
+        };
+      }
+    } catch {}
 
     // Fallback: Return empty or previously held logs cleanly
     return {
@@ -2423,20 +2484,23 @@ export async function triggerAutonomousBot() {
     }
 
     // 2. Supabase signal: mark scanning workers as in_flight & update bot_control
+    let supabaseSuccess = false;
     try {
-      await supabase
+      const { error: bcErr } = await supabase
         .from('bot_control')
-        .upsert({
-          id: 'primary',
-          is_running: true,
-          stop_requested: false,
-          scan_stop_requested: false,
-          scan_status: 'running',
-          scan_enabled: true,
+        .update({
           stage: 'scanning',
-          last_action_requested: 'start',
+          is_running: true,
+          is_paused: false,
+          stop_requested: false,
+          trigger_requested: true,
+          last_action_requested: 'start_scan',
+          current_action: 'Scanning unique job links...',
           updated_at: now,
-        }, { onConflict: 'id' });
+        })
+        .eq('id', 'primary');
+      if (!bcErr) supabaseSuccess = true;
+      else console.warn('Note on updating bot_control:', bcErr?.message);
     } catch (bcErr) {
       console.warn('Note on updating bot_control:', bcErr?.message);
     }
@@ -2543,17 +2607,15 @@ export async function stopAutonomousBot() {
     try {
       await supabase
         .from('bot_control')
-        .upsert({
-          id: 'primary',
+        .update({
+          stage: 'idle',
           is_running: false,
           stop_requested: true,
-          scan_stop_requested: true,
-          scan_status: 'off',
-          scan_enabled: false,
-          stage: 'idle',
           last_action_requested: 'stop',
+          current_action: 'Pipeline stopped by user.',
           updated_at: now,
-        }, { onConflict: 'id' });
+        })
+        .eq('id', 'primary');
     } catch (bcErr) {
       console.warn('Note on updating bot_control stop state:', bcErr?.message);
     }
@@ -2596,24 +2658,30 @@ export async function stopAutonomousBot() {
  */
 export async function triggerSubmissionStage() {
   const now = new Date().toISOString();
+  let supabaseSuccess = false;
   try {
-    await supabase
+    const { error: sbErr } = await supabase
       .from('bot_control')
-      .upsert({
-        id: 'primary',
-        submit_status: 'running',
-        submit_enabled: true,
-        submit_stop_requested: false,
+      .update({
+        stage: 'submitting',
+        is_running: true,
+        is_paused: false,
+        stop_requested: false,
+        trigger_requested: true,
         last_action_requested: 'submit_approved',
+        current_action: 'Submitting approved applications...',
         updated_at: now,
-      }, { onConflict: 'id' });
-  } catch { }
+      })
+      .eq('id', 'primary');
+    if (!sbErr) supabaseSuccess = true;
+    else console.warn('Supabase bot_control update error:', sbErr);
+  } catch (err) {
+    console.warn('Supabase bot_control error:', err);
+  }
 
-  const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
-    ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
-    : '';
-
+  const backendBase = getBackendBaseUrl();
   const endpoints = [
+    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
     '/api/bot/submit/start',
     '/api/bot/submit',
     '/api/bot/webhook',
@@ -2621,7 +2689,6 @@ export async function triggerSubmissionStage() {
     'http://localhost:3005/api/bot/webhook',
     'http://localhost:3001/api/bot/submit',
     'http://localhost:3001/api/bot/webhook',
-    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
   ];
 
   for (const ep of endpoints) {
@@ -2637,7 +2704,11 @@ export async function triggerSubmissionStage() {
       }
     } catch { }
   }
-  return { success: false, error: 'Could not reach daemon webhook server.' };
+
+  if (supabaseSuccess) {
+    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge!' };
+  }
+  return { success: false, error: 'Could not reach daemon webhook server or cloud bridge.' };
 }
 
 /**
@@ -2645,23 +2716,27 @@ export async function triggerSubmissionStage() {
  */
 export async function stopSubmissionStage() {
   const now = new Date().toISOString();
+  let supabaseSuccess = false;
   try {
-    await supabase
+    const { error: sbErr } = await supabase
       .from('bot_control')
-      .upsert({
-        id: 'primary',
-        submit_status: 'off',
-        submit_stop_requested: true,
+      .update({
+        stage: 'idle',
+        is_running: false,
+        stop_requested: true,
         last_action_requested: 'stop_submit',
+        current_action: 'Submissions stopped by user.',
         updated_at: now,
-      }, { onConflict: 'id' });
-  } catch { }
+      })
+      .eq('id', 'primary');
+    if (!sbErr) supabaseSuccess = true;
+  } catch (err) {
+    console.warn('Supabase stop error:', err);
+  }
 
-  const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
-    ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
-    : '';
-
+  const backendBase = getBackendBaseUrl();
   const endpoints = [
+    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
     '/api/bot/submit/stop',
     '/api/bot/stop',
     '/api/bot/webhook',
@@ -2669,7 +2744,6 @@ export async function stopSubmissionStage() {
     'http://localhost:3005/api/bot/stop',
     'http://localhost:3001/api/bot/submit/stop',
     'http://localhost:3001/api/bot/stop',
-    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
   ];
 
   for (const ep of endpoints) {
@@ -2677,30 +2751,18 @@ export async function stopSubmissionStage() {
       const resp = await fetch(ep, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop_submit', stop: true, timestamp: now }),
+        body: JSON.stringify({ action: 'stop', stage: 'submitting', timestamp: now }),
         signal: AbortSignal.timeout(2000),
       });
       if (resp.ok) {
-        return { success: true, message: 'Submissions stopped and active submission browsers aborted.' };
+        return { success: true, message: 'Stage 3 Submissions hard-stopped across all workers.' };
       }
     } catch { }
   }
 
-  // Ensure submitting workers reset in Supabase
-  try {
-    await supabase
-      .from('worker_status')
-      .update({ state: 'idle', current_application_id: null, updated_at: now })
-      .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'worker_3', 'worker_7', 'worker_8', 'worker_9']);
-  } catch {}
-
-  return { success: true, message: 'Submissions halted.' };
+  return { success: true, message: 'Stop signal dispatched across bot_control.' };
 }
 
-/**
- * Fetch live daemon running status from bot_control and worker_status table.
- * Strictly reads only the 9 canonical workers.
- */
 export async function fetchBotDaemonStatus() {
   try {
     let daemonApiRunning = false;
@@ -2747,7 +2809,7 @@ export async function fetchBotDaemonStatus() {
     const isRunning = daemonApiRunning || Boolean(botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
     const currentStage = daemonApiStage !== 'idle' ? daemonApiStage : (botControl?.stage || (isRunning ? 'running' : 'idle'));
 
-    const isSubmitting = Boolean(botControl?.submit_status === 'running' || botControl?.mode === 'submitting' || workers.some(w => (w.worker_id.includes('submitting') || w.stage === 'submitting') && (w.state === 'in_flight' || w.state === 'busy')));
+    const isSubmitting = Boolean(botControl?.stage === 'submitting' || botControl?.submit_status === 'running' || botControl?.mode === 'submitting' || workers.some(w => (w.worker_id.includes('submitting') || w.stage === 'submitting') && (w.state === 'in_flight' || w.state === 'busy')));
 
     return {
       success: true,

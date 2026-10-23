@@ -1628,49 +1628,47 @@ async function initOnStartup() {
       const submitCtrl = wc?.submit;
 
       // 1. Primary Stop Signal from Supabase
-      const hasScanStopSignal = Boolean(bc?.scan_stop_requested || scanCtrl?.stop_requested);
-      const hasSubmitStopSignal = Boolean(bc?.submit_stop_requested || submitCtrl?.stop_requested);
-      const hasGlobalStopSignal = Boolean(bc?.stop_requested);
+      const hasScanStopSignal = Boolean(bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || scanCtrl?.stop_requested);
+      const hasSubmitStopSignal = Boolean(bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || submitCtrl?.stop_requested);
+      const hasGlobalStopSignal = Boolean(bc?.stop_requested || bc?.last_action_requested === 'stop');
 
       if (hasScanStopSignal && (isPoolRunning || scanStatus === 'running')) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'scan_stop_requested' in Supabase! Stopping scanning workers...`);
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected scan stop signal in Supabase! Stopping scanning workers...`);
         await stopScanPool();
+        await syncBotControlState({ last_action_requested: null, stop_requested: false, is_running: false, stage: 'idle' }).catch(() => {});
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});
         return;
       }
 
       if (hasSubmitStopSignal && (isPoolRunning || submitStatus === 'running')) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'submit_stop_requested' in Supabase! Stopping submission workers...`);
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected submit stop signal in Supabase! Stopping submission workers...`);
         await stopSubmitPool();
+        await syncBotControlState({ last_action_requested: null, stop_requested: false, is_running: false, stage: 'idle' }).catch(() => {});
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => {});
         return;
       }
 
       if (hasGlobalStopSignal && isPoolRunning) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'stop_requested' in Supabase! Stopping all workers...`);
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected stop signal in Supabase! Stopping all workers...`);
         await stopAutonomousPool();
+        await syncBotControlState({ last_action_requested: null, stop_requested: false, is_running: false, stage: 'idle' }).catch(() => {});
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => {});
         return;
       }
 
       // 2. Scan & Resolve Start Signal from Supabase
-      // Gated strictly:
-      // - Must not be running
-      // - No stop signals active
-      // - scan_status cannot be 'off' (or must have explicit start action requested)
-      // - Any trigger request must have arrived AFTER daemon boot time to prevent auto-starting stale cloud signals
       const bcUpdatedTime = bc?.updated_at ? Date.parse(bc.updated_at) : 0;
       const isFreshAction = !bcUpdatedTime || (bcUpdatedTime >= (DAEMON_BOOT_TIME - 3000));
 
       const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && isFreshAction && (
-        (bc && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline')) ||
+        (bc && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.stage === 'scanning' && bc.trigger_requested === true))) ||
         (scanCtrl && scanCtrl.enabled === true && scanCtrl.status !== 'off')
       );
 
       if (isScanStartRequested) {
-        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected start scan signal! Launching 2-worker sequential pipeline (Schedule 1 -> Schedule 2)...`);
-        await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
+        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker sequential pipeline (Schedule 1 -> Schedule 2)...`);
+        await syncBotControlState({ last_action_requested: null, trigger_requested: false, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
         if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false }).catch(() => {});
         runScanAndResolveParallel().catch(console.error);
         return;
@@ -1678,13 +1676,13 @@ async function initOnStartup() {
 
       // 3. Submissions Start Signal from Supabase
       const isSubmitStartRequested = (!isPoolRunning) && isFreshAction && (
-        (bc && (bc.last_action_requested === 'submit_approved' || bc.last_action_requested === 'start_submit')) ||
+        (bc && (bc.last_action_requested === 'submit_approved' || bc.last_action_requested === 'start_submit' || (bc.stage === 'submitting' && bc.trigger_requested === true))) ||
         (submitCtrl && submitCtrl.enabled === true && submitCtrl.status !== 'off')
       );
 
       if (isSubmitStartRequested) {
         console.log(`\n🚀 [DAEMON SUPABASE TRIGGER] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
-        await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'submitting', submit_status: 'running', submit_enabled: true, stop_requested: false, submit_stop_requested: false });
+        await syncBotControlState({ last_action_requested: null, trigger_requested: false, is_running: true, stage: 'submitting', submit_status: 'running', submit_enabled: true, stop_requested: false, submit_stop_requested: false });
         if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false }).catch(() => {});
         isPoolRunning = true;
         currentStage = 'submitting';

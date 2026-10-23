@@ -1537,6 +1537,18 @@ export async function getBotControl() {
   }
 }
 
+const VALID_BOT_CONTROL_COLUMNS = new Set([
+  'stage',
+  'is_running',
+  'is_paused',
+  'stop_requested',
+  'trigger_requested',
+  'last_action_requested',
+  'active_worker_count',
+  'current_action',
+  'updated_at',
+]);
+
 /**
  * Update the global bot_control table state (R3 mode lock & R11 independent toggles).
  */
@@ -1551,44 +1563,26 @@ export async function updateBotControl(patch = {}) {
 
   if (!isSupabaseConfigured()) return true;
 
-  // Try updating with full patch
+  // Build clean body containing only valid columns in the Supabase schema
+  const cleanBody = {};
+  if (patch.mode && !patch.stage) cleanBody.stage = patch.mode;
+  for (const [key, value] of Object.entries(patch)) {
+    if (VALID_BOT_CONTROL_COLUMNS.has(key)) {
+      cleanBody[key] = value;
+    }
+  }
+  cleanBody.updated_at = now;
+
   try {
-    const body = {
-      ...patch,
-      updated_at: now,
-    };
     await request('bot_control', {
       method: 'PATCH',
       query: '?id=eq.primary',
       prefer: 'return=minimal',
-      body,
+      body: cleanBody,
     });
     return true;
   } catch (err) {
-    // If table doesn't have the new columns yet, fallback to patching standard known columns
-    try {
-      const fallbackBody = {
-        mode: patch.mode ?? memoryBotControl.mode ?? 'idle',
-        stage: memoryBotControl.stage || memoryBotControl.mode || 'idle',
-        is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
-        is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
-        stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested ?? memoryBotControl.scan_stop_requested ?? memoryBotControl.submit_stop_requested),
-        last_action_requested: 'last_action_requested' in patch ? patch.last_action_requested : (memoryBotControl.last_action_requested ?? null),
-        trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested ?? false),
-        active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
-        current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
-        updated_at: now,
-      };
-      await request('bot_control', {
-        method: 'PATCH',
-        query: '?id=eq.primary',
-        prefer: 'return=minimal',
-        body: fallbackBody,
-      });
-      return true;
-    } catch {
-      return false;
-    }
+    return false;
   }
 }
 
