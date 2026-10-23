@@ -77,23 +77,33 @@ export default function DeveloperDashboard() {
   }, [timeframe]);
 
   // Live polling for Batch Worker Logs when Worker Logs tab is active
+  const isPipelineActive = Boolean(botStatus.isRunning || botStatus.isSubmitting || workerPool.inFlight > 0);
+
   useEffect(() => {
     if (activeTab !== 'Worker Logs') return;
     let isMounted = true;
     async function pollBatchLogs() {
+      // If pipeline is stopped, do not keep spamming background log requests
+      if (!isPipelineActive) return;
       const res = await fetchBatchWorkerLogs({ limit: 120 });
       if (!isMounted) return;
       if (res.success && res.batches) {
         setBatchLogs(res.batches);
       }
     }
-    pollBatchLogs();
+    // Initial fetch
+    fetchBatchWorkerLogs({ limit: 120 }).then((res) => {
+      if (isMounted && res.success && res.batches) setBatchLogs(res.batches);
+    });
+
+    if (!isPipelineActive) return;
+
     const interval = setInterval(pollBatchLogs, 2500);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activeTab]);
+  }, [activeTab, isPipelineActive]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -506,6 +516,30 @@ export default function DeveloperDashboard() {
   const handleStopBot = async () => {
     setIsTriggering(true);
     setTriggerToast({ type: 'info', text: '🛑 Halting all background scan & resolve workers immediately...' });
+    
+    // Immediately reflect stopped state in UI without waiting
+    setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
+    setWorkerPool((prev) => ({
+      ...prev,
+      inFlight: 0,
+      scanningActive: 0,
+      resolvingActive: 0,
+    }));
+
+    // Inject immediate visual stop banner into both Scanning and Resolving terminals
+    const stopEntry = {
+      id: 'stop-' + Date.now(),
+      ts: new Date().toISOString(),
+      step_index: 0,
+      message: '🛑 [STOPPED] Background worker activity TERMINATED immediately by user. All browser contexts closed and workers set to idle.',
+      level: 'warn',
+    };
+    setBatchLogs((prev) => ({
+      ...prev,
+      scanning: [stopEntry, ...(prev.scanning || [])],
+      resolving: [stopEntry, ...(prev.resolving || [])],
+    }));
+
     try {
       const res = await stopAutonomousBot();
       if (res.success) {
@@ -513,7 +547,6 @@ export default function DeveloperDashboard() {
           type: 'success',
           text: '✓ All background workers and browser contexts STOPPED immediately and set to idle.',
         });
-        setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
       } else {
         setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop workers') });
       }
@@ -552,6 +585,28 @@ export default function DeveloperDashboard() {
   const handleStopSubmissions = async () => {
     setIsSubmitTriggering(true);
     setTriggerToast({ type: 'info', text: '🛑 Halting all submission workers and active browsers immediately...' });
+
+    // Immediately reflect stopped state in UI without waiting
+    setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
+    setWorkerPool((prev) => ({
+      ...prev,
+      inFlight: 0,
+      submittingActive: 0,
+    }));
+
+    // Inject immediate visual stop banner into Submitting terminal
+    const stopEntry = {
+      id: 'stop-submit-' + Date.now(),
+      ts: new Date().toISOString(),
+      step_index: 0,
+      message: '🛑 [STOPPED] Submission pipeline TERMINATED immediately by user. Active browser contexts aborted.',
+      level: 'warn',
+    };
+    setBatchLogs((prev) => ({
+      ...prev,
+      submitting: [stopEntry, ...(prev.submitting || [])],
+    }));
+
     try {
       const res = await stopSubmissionStage();
       if (res.success) {
@@ -559,7 +614,6 @@ export default function DeveloperDashboard() {
           type: 'success',
           text: '✓ All submission workers STOPPED immediately. Active submission browser windows aborted.',
         });
-        setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
       } else {
         setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop submissions') });
       }

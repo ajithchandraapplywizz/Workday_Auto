@@ -1390,6 +1390,10 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
     const endpoints = [
       '/api/bot/logs',
       '/api/developer/logs',
+      'http://localhost:3005/api/bot/logs',
+      'http://localhost:3005/api/developer/logs',
+      'http://localhost:3001/api/bot/logs',
+      'http://localhost:3001/api/developer/logs',
       ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
     ];
 
@@ -2472,6 +2476,12 @@ export async function triggerAutonomousBot() {
       '/api/bot/start',
       '/api/bot/trigger',
       '/api/bot/webhook',
+      'http://localhost:3005/api/bot/start',
+      'http://localhost:3005/api/bot/trigger',
+      'http://localhost:3005/api/bot/webhook',
+      'http://localhost:3001/api/bot/start',
+      'http://localhost:3001/api/bot/trigger',
+      'http://localhost:3001/api/bot/webhook',
       ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
     ];
     for (const ep of endpoints) {
@@ -2512,6 +2522,10 @@ export async function stopAutonomousBot() {
     const stopEndpoints = [
       '/api/bot/stop',
       '/api/bot/webhook',
+      'http://localhost:3005/api/bot/stop',
+      'http://localhost:3005/api/bot/webhook',
+      'http://localhost:3001/api/bot/stop',
+      'http://localhost:3001/api/bot/webhook',
       ...(backendBase ? [`${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
     ];
     await Promise.any(
@@ -2603,6 +2617,10 @@ export async function triggerSubmissionStage() {
     '/api/bot/submit/start',
     '/api/bot/submit',
     '/api/bot/webhook',
+    'http://localhost:3005/api/bot/submit',
+    'http://localhost:3005/api/bot/webhook',
+    'http://localhost:3001/api/bot/submit',
+    'http://localhost:3001/api/bot/webhook',
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
   ];
 
@@ -2647,6 +2665,10 @@ export async function stopSubmissionStage() {
     '/api/bot/submit/stop',
     '/api/bot/stop',
     '/api/bot/webhook',
+    'http://localhost:3005/api/bot/submit/stop',
+    'http://localhost:3005/api/bot/stop',
+    'http://localhost:3001/api/bot/submit/stop',
+    'http://localhost:3001/api/bot/stop',
     ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
   ];
 
@@ -2684,15 +2706,23 @@ export async function fetchBotDaemonStatus() {
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
 
-    // Universal fetch to daemon status endpoint with fast 1.5s timeout
-    try {
-      const res = await fetch('/api/bot/status', { signal: AbortSignal.timeout(1500) });
-      if (res.ok) {
-        const json = await res.json();
-        daemonApiRunning = Boolean(json.isRunning);
-        daemonApiStage = json.stage || 'idle';
-      }
-    } catch { }
+    // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
+    const statusUrls = [
+      '/api/bot/status',
+      'http://localhost:3005/api/bot/status',
+      'http://localhost:3001/api/bot/status',
+    ];
+    for (const u of statusUrls) {
+      try {
+        const res = await fetch(u, { signal: AbortSignal.timeout(1200) });
+        if (res.ok) {
+          const json = await res.json();
+          daemonApiRunning = Boolean(json.isRunning);
+          daemonApiStage = json.stage || 'idle';
+          break;
+        }
+      } catch { }
+    }
 
     const [workersRes, controlRes] = await Promise.all([
       supabase

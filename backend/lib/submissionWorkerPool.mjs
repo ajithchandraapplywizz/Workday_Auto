@@ -273,6 +273,23 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
 export async function processClaimedTask({ task, workerId, headless = true, runnerFn = null, options = {} }) {
   if (!task || !workerId) return { success: false, error: 'Invalid task or workerId' };
 
+  // Hard stop check: Abort immediately before doing any work or launching browsers
+  const { isGlobalStopRequested, isSubmitStopRequested } = await import('./browserLifecycle.mjs');
+  if (isGlobalStopRequested() || isSubmitStopRequested()) {
+    console.log(`🛑 [${workerId}] Stop signal active! Aborting task #${task.id} immediately and reverting to ready_for_review.`);
+    await supabase
+      .from('submission_tasks')
+      .update({ status: 'ready_for_review', worker_id: null, updated_at: new Date().toISOString() })
+      .eq('id', task.id);
+    await updateWorkerStatus(workerId, {
+      state: 'idle',
+      stage: 'idle',
+      current_application_id: null,
+      updated_at: new Date().toISOString(),
+    }).catch(() => {});
+    return { status: 'stopped', error: 'Stopped by user' };
+  }
+
   console.log(`\n🚀 [${workerId}] Processing task #${task.id} (${task.applywizz_id} @ ${task.company || 'Company'})...`);
 
   // Update worker_status table
@@ -421,6 +438,19 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             updated_at: now,
           },
         });
+      }
+    } else if (result?.status === 'stopped' || isGlobalStopRequested() || isSubmitStopRequested()) {
+      // User requested stop: Revert cleanly to ready_for_review so no work is corrupted and it can resume cleanly
+      console.log(`🛑 [${workerId}] Task #${task.id} aborted due to stop request. Reverting status to ready_for_review.`);
+      await supabase
+        .from('submission_tasks')
+        .update({ status: 'ready_for_review', worker_id: null, updated_at: now })
+        .eq('id', task.id);
+      if (task.distribution_id) {
+        await supabase
+          .from('job_distributions')
+          .update({ status: 'ready_for_review', worker_id: null, updated_at: now })
+          .eq('id', task.distribution_id);
       }
     } else {
       const errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;

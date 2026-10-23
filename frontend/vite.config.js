@@ -2,7 +2,7 @@ import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
 const port = process.env.PORT ? parseInt(process.env.PORT, 10) : 5180;
-const backendUrl = process.env.VITE_BACKEND_URL || process.env.BACKEND_URL || 'http://localhost:3001';
+const backendUrl = process.env.VITE_BACKEND_URL || process.env.BACKEND_URL || 'http://localhost:3005';
 
 const handleProxyError = (proxy) => {
   proxy.on('error', (err, req, res) => {

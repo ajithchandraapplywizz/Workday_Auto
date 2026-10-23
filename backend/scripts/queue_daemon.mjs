@@ -261,6 +261,16 @@ export async function stopScanPool() {
     // Terminate browser contexts for scanning
     await abortAllActiveBrowsers().catch(() => {});
 
+    // Push definitive termination log banner to buffer
+    const stopLogEntry = {
+      ts: new Date().toISOString(),
+      message: '🛑 [DAEMON] Scan & Resolve STOPPED. All background worker loops terminated, browser windows closed.',
+      level: 'warn',
+      cluster: 'Scan',
+    };
+    daemonLogs.push(stopLogEntry);
+    scanLogs.push(stopLogEntry);
+
     // Reset scan and resolve workers to idle in parallel (never touches submission_tasks!)
     const workerIds = PIPELINE_CONFIG.scanWorkerIds || ALL_CANONICAL_WORKERS;
     await Promise.allSettled(
@@ -310,6 +320,16 @@ export async function stopSubmitPool() {
     // Terminate browser contexts for submissions
     await abortAllActiveBrowsers().catch(() => {});
     activeSubmittingWorkers.clear();
+
+    // Push definitive termination log banner to buffer
+    const stopSubmitEntry = {
+      ts: new Date().toISOString(),
+      message: '🛑 [DAEMON] Submissions STOPPED. All submission workers halted, active browser windows aborted.',
+      level: 'warn',
+      cluster: 'Submit',
+    };
+    daemonLogs.push(stopSubmitEntry);
+    submitLogs.push(stopSubmitEntry);
 
     // Reset submit workers to idle in parallel (never touches batch_job_queue or scanned_jobs!)
     const workerIds = PIPELINE_CONFIG.submitWorkerIds || ALL_CANONICAL_WORKERS;
