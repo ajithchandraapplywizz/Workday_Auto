@@ -2503,8 +2503,41 @@ export async function recordFailedJob({
   try {
     const cleanId = String(applywizzId).trim().toUpperCase();
     const cleanUrl = String(jobUrl).trim();
-    const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
-    const cleanStep = String(failedAtStep || 'Unknown').trim();
+    let cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
+    let cleanStep = String(failedAtStep || 'Unknown').trim();
+
+    const reasonLower = cleanReason.toLowerCase();
+    const stepLower = cleanStep.toLowerCase();
+
+    // Dynamic & exact status classification for failed_at_step and failure_reason
+    if (
+      reasonLower.includes("doesn't exist") ||
+      reasonLower.includes("does not exist") ||
+      reasonLower.includes("page not found") ||
+      reasonLower.includes("job expired") ||
+      reasonLower.includes("link expired") ||
+      reasonLower.includes("no longer available") ||
+      reasonLower.includes("position has been filled") ||
+      reasonLower.includes("no longer accepting applications") ||
+      stepLower.includes("link expired") ||
+      (stepLower.includes("gateway") && reasonLower.includes("doesn't exist"))
+    ) {
+      cleanStep = 'Job link expired';
+      if (!cleanReason.toLowerCase().startsWith('job link expired')) {
+        cleanReason = `Job link expired: ${cleanReason.replace(/^Authentication \/ Gateway check:\s*/i, '').trim()}`;
+      }
+    } else if (
+      reasonLower.includes("upload a file") ||
+      reasonLower.includes("resume upload") ||
+      reasonLower.includes("resume/cv") ||
+      stepLower.includes("resume upload") ||
+      (stepLower.includes("my experience") && reasonLower.includes("upload a file"))
+    ) {
+      cleanStep = 'Resume upload failed';
+      if (!cleanReason.toLowerCase().startsWith('resume upload failed')) {
+        cleanReason = `Resume upload failed: ${cleanReason.trim()}`;
+      }
+    }
     const now = new Date().toISOString();
     const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
 

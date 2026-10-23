@@ -613,6 +613,14 @@ export async function executeWorkerTask({
           bucket = 'submitted-applications';
           filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
           storagePath = filename;
+        } else if (profile?._failedAtStep === 'Resume upload failed') {
+          bucket = 'application-failures';
+          filename = `${applywizzId}_${Date.now()}_resume_upload_fail.jpg`;
+          storagePath = filename;
+        } else if (status === 'job_not_found') {
+          bucket = 'application-failures';
+          filename = `${applywizzId}_${Date.now()}_job_link_expired.jpg`;
+          storagePath = filename;
         }
 
         if (bucket && filename && buf) {
@@ -633,13 +641,28 @@ export async function executeWorkerTask({
       (status === 'human-required' && onReviewPage) ||
       onReviewPage
     );
-    const stoppedBlock = isSuccessStatus
+    let stoppedBlock = isSuccessStatus
       ? 'Step 5: Review & Submit'
       : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
 
+    // Dynamic error diagnosis: Check for expired link or resume upload failure
+    if (!isSuccessStatus) {
+      if (status === 'job_not_found') {
+        stoppedBlock = 'Job link expired';
+      } else if (profile?._failedAtStep === 'Resume upload failed') {
+        stoppedBlock = 'Resume upload failed';
+      }
+    }
+
     let fullFailureReason = null;
     if (!isSuccessStatus) {
-      fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
+      if (stoppedBlock === 'Job link expired') {
+        fullFailureReason = "Job link expired: The page you are looking for doesn't exist.";
+      } else if (stoppedBlock === 'Resume upload failed') {
+        fullFailureReason = "Resume upload failed: " + (profile?._lastValidationError || "The field Upload a file (5MB max) is required and must have a value.");
+      } else {
+        fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
+      }
       if (completionShotUrl) {
         fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
       }

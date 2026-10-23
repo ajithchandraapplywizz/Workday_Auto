@@ -120,12 +120,13 @@ export async function resolveResumePath(explicitPath) {
  */
 export async function getResumePathForApply(profile = {}, plan = {}) {
   try {
-    const { isApplyWizzConfigured } = await import('./applyWizzClient.mjs');
     const { resolveApplyWizzResumeUrl, ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-    if (isApplyWizzConfigured() && resolveApplyWizzResumeUrl(profile)) {
+    const resumeUrl = resolveApplyWizzResumeUrl(profile) || profile?._resumeUrl || profile?.resume_url;
+    const candidateId = profile?._applyWizzId || profile?.applywizz_id || profile?.applywizzId || process.env.APPLYWIZZ_ID || '';
+    if (resumeUrl || candidateId) {
       const fromApi = await ensureClientResumeFromApplyWizz(profile);
-      if (fromApi) {
-        console.log(`    📎 Resume from Apply Wizz: ${basename(fromApi)}`);
+      if (fromApi && existsSync(fromApi)) {
+        console.log(`    📎 Resume ready for upload: ${basename(fromApi)}`);
         return fromApi;
       }
     }

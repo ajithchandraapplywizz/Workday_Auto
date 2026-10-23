@@ -830,7 +830,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         (document.querySelector('[data-automation-id="jobPostingPage"], [data-automation-id="jobPostingHeader"], main, h1, h2') || text.length > 80) &&
         !/loading\.\.\./i.test(text)
       );
-      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|page not found|404\b/i.test(text);
+      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page (?:you are looking for )?doesn'?t exist|we couldn'?t find the page|page not found|404\b/i.test(text);
 
       return hasApply || hasWizard || hasJobContent || isExpired;
     }, { timeout: 30000 }).catch(() => null);
@@ -856,7 +856,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       const text = (document.body?.innerText || '').trim();
       const lower = text.toLowerCase();
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page not found|404\b/i.test(lower);
-      if (isExpired) return { expired: true, reason: 'job_expired' };
+      if (isExpired) return { expired: true, reason: 'Job link expired' };
       return { expired: false };
     }).catch(() => ({ expired: false }));
 

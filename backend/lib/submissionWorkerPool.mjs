@@ -440,6 +440,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           },
         });
       }
+
+      // Clean up local cached resume immediately after successful submission
+      try {
+        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
+      } catch {}
     } else if (result?.status === 'stopped' || isGlobalStopRequested() || isSubmitStopRequested()) {
       // User requested stop: Revert cleanly to ready_for_review so no work is corrupted and it can resume cleanly
       console.log(`🛑 [${workerId}] Task #${task.id} aborted due to stop request. Reverting status to ready_for_review.`);
@@ -548,6 +554,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
   } finally {
     stopHeartbeat();
     if (watchdogTimer) clearTimeout(watchdogTimer);
+    try {
+      const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+      await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
+    } catch {}
     // Release worker back to idle
     await updateWorkerStatus(workerId, {
       state: 'idle',

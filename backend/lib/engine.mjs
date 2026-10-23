@@ -438,6 +438,40 @@ export async function promptUserInTerminal(label, fieldType, options = [], { com
 }
 
 // ─── Workday Resume Upload (direct setInputFiles — never open OS file picker) ─
+export async function isResumeRequiredAndMissing(page) {
+  return await page.evaluate(() => {
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+    const hasResumeDropzone = /resume\s*\/\s*cv|\bresume\b.*upload|upload a file\s*\(5mb max\)/i.test(text);
+    if (!hasResumeDropzone) return false;
+
+    // Check if uploaded item exists
+    const uploadedItem = document.querySelector('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]');
+    const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+    if (uploadedItem || deleteBtn) return false;
+
+    // Check if required or errored
+    const isRequired = /upload a file.*\*|resume.*\*|error\s*-\s*upload a file|is required and must have a value/i.test(text);
+    return isRequired;
+  }).catch(() => false);
+}
+
+async function uploadResumeViaFileChooser(page, absPath) {
+  try {
+    const selectBtn = page.locator('button:has-text("Select files"), [data-automation-id*="select-files"], label:has-text("Select files"), button:has-text("Upload"), [data-automation-id*="file-upload-drop-zone"]').first();
+    if (await selectBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const [fileChooser] = await Promise.all([
+        page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null),
+        selectBtn.click({ force: true }).catch(() => {}),
+      ]);
+      if (fileChooser) {
+        await fileChooser.setFiles(absPath);
+        return true;
+      }
+    }
+  } catch {}
+  return false;
+}
+
 async function findResumeFileInput(page) {
   const scoreInput = (el) => el.evaluate((node) => {
     let score = 0;
@@ -540,11 +574,22 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
  * Re-resolves absolute path if the given path is stale/missing.
  */
 async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
+  // Wait 1-3 seconds for dropzone and page to hydrate
+  await page.waitForTimeout(2000);
+
   let absPath = findExistingResumeFile(resumePath)
     || (resumePath && existsSync(resumePath) ? resumePath : null);
 
   if (!absPath) {
     absPath = await getResumePathForApply(profile || {}, { resume: resumePath });
+  }
+
+  // Fallback: If still not found, try direct download from profile / Supabase
+  if (!absPath || !existsSync(absPath)) {
+    try {
+      const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+      absPath = await ensureClientResumeFromApplyWizz(profile || {});
+    } catch {}
   }
   if (!absPath || !existsSync(absPath)) {
     console.log(`    ⚠️  Resume file not found (tried: ${resumePath || '(none)'}). Put a PDF in resumes/`);
@@ -595,8 +640,15 @@ async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
 
     try {
       console.log(`    📎 Uploading resume: ${fileName} (attempt ${attempt}/3)...`);
-      await fileInput.setInputFiles(absPath);
-      const ok = await waitForResumeUploadComplete(page, fileName);
+      await fileInput.setInputFiles(absPath).catch(async () => {
+        await uploadResumeViaFileChooser(page, absPath);
+      });
+      let ok = await waitForResumeUploadComplete(page, fileName);
+      if (!ok) {
+        // Try file chooser fallback
+        await uploadResumeViaFileChooser(page, absPath);
+        ok = await waitForResumeUploadComplete(page, fileName);
+      }
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;
@@ -1420,10 +1472,35 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   }
 
   if (stepName === 'My Information') {
+    // 1. Resume check on Step 1 (some Workday tenants place resume upload on Step 1)
+    let resumePath = await getResumePathForApply(profile, plan);
+    const needsResumeOnStep1 = await page.evaluate(() => {
+      const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
+    }).catch(() => false);
+    if (needsResumeOnStep1) {
+      if (!resumePath) {
+        const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+        resumePath = await ensureClientResumeFromApplyWizz(profile);
+      }
+      if (resumePath) {
+        await handleWorkdayResumeUpload(page, resumePath, profile);
+      }
+    }
+
+    // 2. Primary contact handler (Name, Address, Phone, Source, Previous Worker)
     await handleStep1MyInformation(page, profile, plan);
-    const unfilled = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
-    if (unfilled > 0) {
-      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
+
+    // 3. Full DOM sweep: Resolve any custom/unmapped employer questions on My Information
+    await runStepDomPrep(page, stepName, profile);
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
+    await acknowledgeAllPageAgreements(page, profile, stepName);
+
+    // 4. Hard gate: Ensure required resume is not missing
+    if (await isResumeRequiredAndMissing(page)) {
+      console.log('    🛑 Required resume missing on My Information — uploading before advance...');
+      const rPath = resumePath || await getResumePathForApply(profile, plan);
+      if (rPath) await handleWorkdayResumeUpload(page, rPath, profile);
     }
     return;
   }
@@ -1431,29 +1508,43 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   if (stepName === 'My Experience') {
     // Section expansion is owned by handleStep2MyExperience(): it only clicks Add
     // when Workday marks the section required, and never for optional sections.
-    const resumePath = await getResumePathForApply(profile, plan);
+    let resumePath = await getResumePathForApply(profile, plan);
     const needsResume = await page.evaluate(() => {
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
       return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
     }).catch(() => false);
-    if (resumePath && needsResume) {
-      let uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
-      if (!uploaded) {
-        console.log('    ↻ Resume upload retry after short wait...');
-        await page.waitForTimeout(800);
-        uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+    if (needsResume) {
+      if (!resumePath) {
+        console.log('    📥 Resume required on page — ensuring client resume downloaded...');
+        const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+        resumePath = await ensureClientResumeFromApplyWizz(profile);
       }
-      if (!uploaded) {
-        console.log('    ⚠️  Resume still not confirmed — continuing required fields only (check resumes/ PDF)');
+      if (resumePath) {
+        let uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+        if (!uploaded) {
+          console.log('    ↻ Resume upload retry after short wait...');
+          await page.waitForTimeout(1000);
+          uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+        }
+        if (!uploaded) {
+          console.log('    ↻ Resume upload retry 3 (file chooser fallback)...');
+          await page.waitForTimeout(1500);
+          uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+        }
       }
-    } else if (needsResume && !resumePath) {
-      console.log('    ⚠️  Resume required but no PDF found in resumes/ folder');
     }
     await handleStep2MyExperience(page, profile);
     await fillWorkdaySkillsSection(page, profile);
     const unfilledExp = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
     if (unfilledExp > 0) {
       await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
+    }
+
+    // Hard gate: Never advance if required resume is missing
+    if (await isResumeRequiredAndMissing(page)) {
+      console.log('    🛑 Required resume missing on My Experience — re-attempting upload before advance...');
+      const rPath = resumePath || await getResumePathForApply(profile, plan);
+      if (rPath) await handleWorkdayResumeUpload(page, rPath, profile);
     }
     return;
   }
@@ -1666,6 +1757,13 @@ async function advanceWorkdayStep(page, currentStep = '') {
     return { hasSaveButton: false };
   }
 
+  // HARD GATE: Never click Save and Continue / Next if a required resume dropzone is empty!
+  const resumeMissing = await isResumeRequiredAndMissing(page);
+  if (resumeMissing) {
+    console.log(`  🛑 HARD GATE: Cannot advance! Required resume upload is empty on "${previousStep || 'current step'}".`);
+    return { hasSaveButton: false, resumeBlocked: true };
+  }
+
   const btnText = (await saveBtn.textContent().catch(() => '')).trim();
   console.log(`\n  ➡️  Clicking "${btnText || 'Save and Continue'}" to advance...`);
   await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
@@ -1690,6 +1788,11 @@ async function advanceWorkdayStep(page, currentStep = '') {
   });
 
   if (errorMessages.length > 0) {
+    const isResumeErr = errorMessages.some(e => /upload a file|resume|cv|file.*5mb/i.test(e));
+    if (isResumeErr && profile) {
+      profile._failedAtStep = 'Resume upload failed';
+      profile._lastValidationError = errorMessages.find(e => /upload a file|resume|cv|file.*5mb/i.test(e)) || 'The field Upload a file (5MB max) is required and must have a value.';
+    }
     console.log(`  ⚠️  ${errorMessages.length} validation error(s) after Save and Continue:`);
     errorMessages.forEach(e => console.log(`    • ${e}`));
     return { hasSaveButton: true, hasErrors: true, errors: errorMessages, transitioned: false };
@@ -2602,8 +2705,8 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
     // Check if on Step 1 "My Information"
     const stepName = await detectWorkdayStep(page);
     if (stepName === 'My Information') {
-      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler...');
-      await handleStep1MyInformation(page, profile, plan);
+      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler & complete question sweep...');
+      await fillWorkdayStep(page, profile, plan, stepName);
       await advanceWorkdayStepWithVerification(page, stepName);
       continue;
     }
