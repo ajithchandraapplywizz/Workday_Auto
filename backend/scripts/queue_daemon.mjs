@@ -193,7 +193,7 @@ export async function checkStage1Completion() {
     };
   }
 
-  // Check active scan/resolve workers in worker_status
+  // Check if any scan/resolve workers are currently running
   try {
     const { data: activeWorkers } = await supabase
       .from('worker_status')
@@ -204,23 +204,29 @@ export async function checkStage1Completion() {
     if (activeWorkers && activeWorkers.length > 0) {
       return {
         allowed: false,
-        reason: `Submit toggle is refused: ${activeWorkers.length} scan/resolve worker(s) are currently active.`,
+        reason: `Submit toggle is refused: ${activeWorkers.length} scan/resolve worker(s) are actively scanning/resolving. Wait for them to finish or stop scanning.`,
       };
     }
   } catch {}
 
-  // Check pending or processing in batch_job_queue
+  // If there are ready applications in submission_tasks or job_distributions, allow submission
   try {
-    const { count: pendingBatchCount, error: bqErr } = await supabase
-      .from('batch_job_queue')
+    const { count: readyCount } = await supabase
+      .from('submission_tasks')
       .select('*', { count: 'exact', head: true })
-      .in('status', ['pending', 'processing']);
+      .in('status', ['ready_for_review', 'queued']);
 
-    if (!bqErr && typeof pendingBatchCount === 'number' && pendingBatchCount > 0) {
-      return {
-        allowed: false,
-        reason: `Submit toggle is refused: Stage 1 is not fully complete (${pendingBatchCount} pending or in-progress batch items remaining). Scan & Resolve must complete first.`,
-      };
+    if (typeof readyCount === 'number' && readyCount > 0) {
+      return { allowed: true, readyCount };
+    }
+
+    const { count: distReadyCount } = await supabase
+      .from('job_distributions')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['ready_for_review', 'ready_to_review']);
+
+    if (typeof distReadyCount === 'number' && distReadyCount > 0) {
+      return { allowed: true, distReadyCount };
     }
   } catch {}
 
@@ -1627,15 +1633,18 @@ async function initOnStartup() {
 
       if (isSubmitStartRequested) {
         console.log(`\n🚀 [DAEMON SUPABASE TRIGGER] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
-        await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'submitting', stop_requested: false });
+        await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'submitting', submit_status: 'running', submit_enabled: true, stop_requested: false, submit_stop_requested: false });
         if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false }).catch(() => {});
         isPoolRunning = true;
         currentStage = 'submitting';
+        submitStatus = 'running';
+        submitStopRequested = false;
         runStage3Submissions().finally(async () => {
           isPoolRunning = false;
+          submitStatus = 'off';
           currentStage = 'idle';
           await resetAllWorkersIdle().catch(() => {});
-          await syncBotControlState({ stage: 'idle', is_running: false, current_action: 'Idle' }).catch(() => {});
+          await syncBotControlState({ stage: 'idle', is_running: false, submit_status: 'off', current_action: 'Idle' }).catch(() => {});
         }).catch(console.error);
         return;
       }
