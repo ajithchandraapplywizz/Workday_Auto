@@ -532,6 +532,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const maxLeadAttempts = Math.min(3, activeTasks.length);
 
   for (let attemptIdx = 0; attemptIdx < maxLeadAttempts; attemptIdx++) {
+    if (await isClusterStopRequested()) {
+      console.log(`🛑 [${workerId}] Stop signal active! Halting lead candidate attempts immediately.`);
+      break;
+    }
     const candidateTask = activeTasks[attemptIdx];
     console.log(`\n📍 [${workerId}] PHASE 1: Testing Lead Candidate #${attemptIdx + 1} (${candidateTask.applywizz_id}) for Unique Link...`);
     console.log(`   (Strictly 1 browser run per unique link; Followers will NOT run in browsers)`);
@@ -555,6 +559,11 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         isScanOnly: true,
       },
     });
+
+    if (result?.status === 'stopped' || await isClusterStopRequested()) {
+      console.log(`🛑 [${workerId}] Execution stopped by user. Aborting cluster candidate loop.`);
+      break;
+    }
 
     const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
     const success = result && (
@@ -594,6 +603,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     // Candidate-specific failure (e.g. auth_failed, missing credentials, locked account)
     console.log(`\n⚠️ [${workerId}] Lead Candidate ${candidateTask.applywizz_id} stopped (${result?.failureReason || result?.error || result?.status || 'Failed'}).`);
     if (attemptIdx + 1 < maxLeadAttempts) {
+      if (await isClusterStopRequested()) {
+        console.log(`🛑 [${workerId}] Stop signal active! Not attempting next candidate.`);
+        break;
+      }
       console.log(`   🔄 Trying next candidate in cluster (#${attemptIdx + 2}: ${activeTasks[attemptIdx + 1].applywizz_id}) to scan job...`);
     } else {
       leadProofShot = result?.screenshotUrl || null;
@@ -770,6 +783,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const distributionRows = [];
   const RESOLVE_CHUNK = 8;
   for (let cIdx = 0; cIdx < dedupedAllTasks.length; cIdx += RESOLVE_CHUNK) {
+    if (await isClusterStopRequested()) {
+      console.log(`🛑 [${workerId}] Stop signal active! Aborting Phase 3 client distribution loop.`);
+      break;
+    }
     const chunk = dedupedAllTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
     const chunkRows = await Promise.all(chunk.map(async (task, offset) => {
       const idx = cIdx + offset;

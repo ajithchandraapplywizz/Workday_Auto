@@ -1680,8 +1680,8 @@ async function initOnStartup() {
       }
 
       // ── Resilient Fallback Bridge via worker_status table ──
-      // Gated strictly on bot_control.scan_status === 'running' so stale in_flight rows cannot start scanning at boot
-      if (!isPoolRunning && bc?.scan_status === 'running') {
+      // Gated strictly on bot_control.scan_status === 'running' and NO stop signals active
+      if (!isPoolRunning && bc?.scan_status === 'running' && !hasScanStopSignal && !hasGlobalStopSignal) {
         const statuses = await getWorkerStatuses().catch(() => []);
         const hasTrigger = statuses.some((w) =>
           w.worker_id &&
@@ -1737,7 +1737,9 @@ process.on('SIGINT', () => {
 
 import { fileURLToPath } from 'node:url';
 
-const isMainModule = process.argv[1] && fileURLToPath(import.meta.url).replace(/\\/g, '/') === process.argv[1].replace(/\\/g, '/');
+const currentFile = fileURLToPath(import.meta.url).replace(/\\/g, '/');
+const entryArg = (process.argv[1] || '').replace(/\\/g, '/');
+const isMainModule = entryArg === currentFile || entryArg.endsWith('/index.js') || entryArg.endsWith('\\index.js');
 
 if (isMainModule) {
   const cliArg = (process.argv[2] || '').toLowerCase().trim();

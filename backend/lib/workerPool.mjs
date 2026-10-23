@@ -1242,6 +1242,18 @@ export async function executeWorkerTask({
       scrapedQuestions: finalScrapedQuestions,
     };
   } catch (err) {
+    const isStopInterrupted = (
+      isGlobalStopRequested() ||
+      workerPoolStopRequested ||
+      String(err?.message || '').includes('Target page, context or browser has been closed') ||
+      String(err?.message || '').includes('Browser has been closed')
+    );
+
+    if (isStopInterrupted) {
+      console.log(`🛑 [${workerId}] Task aborted cleanly due to stop request.`);
+      return { status: 'stopped', reason: 'stopped_by_user' };
+    }
+
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
     // Failed job: skipped saving schema to scanned_jobs
     let errShotUrl = null;
