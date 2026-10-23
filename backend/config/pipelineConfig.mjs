@@ -1,14 +1,65 @@
 /**
- * pipelineConfig.mjs — 9-Worker Autonomous Pipeline Configuration
+ * pipelineConfig.mjs — Dynamic Parallel Autonomous Pipeline Configuration
  *
- * Configures strictly 9 canonical workers across 3 dedicated pipeline stages:
- * - Stage 1 (Scanning): 3 parallel workers ('scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3')
- * - Stage 2 (Resolving): 3 parallel workers ('resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3')
- * - Human Review Pause: Career Associates review answers in Dashboard
- * - Stage 3 (Submissions): 3 parallel workers ('submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3')
+ * Configures workers dynamically from .env:
+ * - WORKER_COUNT / WORKERS_COUNT: Global worker count (default: 2)
+ * - SCAN_WORKER_COUNT: Optional override for scanning workers
+ * - RESOLVE_WORKER_COUNT: Optional override for resolving workers
+ * - SUBMIT_WORKER_COUNT: Optional override for submitting workers
  *
- * Database worker_status table maintains strictly these 9 rows.
+ * Database worker_status table dynamically syncs with these worker IDs.
  */
+
+import { existsSync, readFileSync } from 'fs';
+import { resolve } from 'path';
+
+// Quick env loader for standalone imports
+function loadLocalEnvQuick() {
+  if (process.env.WORKER_COUNT || process.env.WORKERS_COUNT) return;
+  const envCandidates = [
+    resolve(process.cwd(), '.env'),
+    resolve(process.cwd(), 'backend', '.env'),
+  ];
+  for (const p of envCandidates) {
+    if (existsSync(p)) {
+      try {
+        const text = readFileSync(p, 'utf-8');
+        for (const line of text.split('\n')) {
+          const trimmed = line.trim();
+          if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
+            const idx = trimmed.indexOf('=');
+            const key = trimmed.slice(0, idx).trim();
+            const val = trimmed.slice(idx + 1).trim().replace(/^["']|["']$/g, '');
+            if (!process.env[key]) process.env[key] = val;
+          }
+        }
+      } catch {}
+      break;
+    }
+  }
+}
+loadLocalEnvQuick();
+
+const envWorkers = parseInt(
+  process.env.WORKER_COUNT ||
+  process.env.WORKERS_COUNT ||
+  process.env.PIPELINE_WORKER_COUNT ||
+  '2',
+  10
+) || 2;
+
+const scanCount = parseInt(process.env.SCAN_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
+const resolveCount = parseInt(process.env.RESOLVE_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
+const submitCount = parseInt(process.env.SUBMIT_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
+
+const scanWorkerIds = Array.from({ length: scanCount }, (_, i) => `scanning_worker_${i + 1}`);
+const resolveWorkerIds = Array.from({ length: resolveCount }, (_, i) => `resolving_worker_${i + 1}`);
+const submitWorkerIds = Array.from({ length: submitCount }, (_, i) => `submitting_worker_${i + 1}`);
+
+const workerNames = {};
+scanWorkerIds.forEach((id, i) => { workerNames[id] = `Scanning Worker ${i + 1}`; });
+resolveWorkerIds.forEach((id, i) => { workerNames[id] = `Resolving Worker ${i + 1}`; });
+submitWorkerIds.forEach((id, i) => { workerNames[id] = `Submitting Worker ${i + 1}`; });
 
 export const PIPELINE_CONFIG = {
   stages: {
@@ -19,30 +70,20 @@ export const PIPELINE_CONFIG = {
     IDLE: 'idle',
   },
 
-  workersCount: 2,
+  workersCount: envWorkers,
+  scanCount,
+  resolveCount,
+  submitCount,
 
-  scanWorkerIds: ['scanning_worker_1', 'scanning_worker_2'],
-  resolveWorkerIds: ['resolving_worker_1', 'resolving_worker_2'],
-  submitWorkerIds: ['submitting_worker_1', 'submitting_worker_2'],
+  scanWorkerIds,
+  resolveWorkerIds,
+  submitWorkerIds,
+  workerNames,
 
-  workerNames: {
-    scanning_worker_1: 'Scanning Worker 1',
-    scanning_worker_2: 'Scanning Worker 2',
-    resolving_worker_1: 'Resolving Worker 1',
-    resolving_worker_2: 'Resolving Worker 2',
-    submitting_worker_1: 'Submitting Worker 1',
-    submitting_worker_2: 'Submitting Worker 2',
-  },
-
-  allWorkerIds: [
-    'scanning_worker_1', 'scanning_worker_2',
-    'resolving_worker_1', 'resolving_worker_2',
-    'submitting_worker_1', 'submitting_worker_2',
-  ],
+  allWorkerIds: [...new Set([...scanWorkerIds, ...resolveWorkerIds, ...submitWorkerIds])],
 
   webhookPort: Number(process.env.DAEMON_PORT) || 3001,
   headless: process.env.HEADLESS !== 'false',
 };
 
 export const WORKER_COUNT = PIPELINE_CONFIG.workersCount;
-

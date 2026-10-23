@@ -1843,13 +1843,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
   }
 
-  console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
-  await page.waitForLoadState('networkidle').catch(() => {});
+  console.log('  ⏳ Parsing Review page DOM...');
+  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
   await page.waitForFunction(
     () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
-    { timeout: 12000 }
+    { timeout: 8000 }
   ).catch(() => {});
-  await page.waitForTimeout(2500);
+  await page.waitForTimeout(400);
 
   await takeScreenshot(page, 'workday-review-step');
   await attachFormMutationObserver(page);
@@ -1976,10 +1976,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       console.log(`  ⚠️ Review screenshot capture error: ${ssErr.message}`);
     }
 
-    // Stay for 5 seconds at Review & Submit before advancing to next unique link
-    console.log('  ⏳ Reached Review & Submit! Staying on page for 5 seconds before advancing to next unique link...');
-    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 5 seconds, then advancing to next unique link.');
-    await page.waitForTimeout(5000).catch(() => {});
+    console.log('  🎯 Reached Review & Submit! Questions and screenshot captured. Advancing immediately...');
+    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Questions and screenshot captured. Moving to candidate resolution.');
+    await page.waitForTimeout(300).catch(() => {});
 
     return 'reached-review';
   }
@@ -2005,25 +2004,20 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log('🚀 Clicking final "Submit" button...');
   profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
   await clickSubmitButton(page, { allowSubmit: true });
-  await waitForDomSettled(page);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  await waitForDomSettled(page, { timeout: 1500 }).catch(() => {});
 
-  // Explicitly wait for Workday confirmation screen / popup to render
-  try {
-    await page.waitForFunction(() => {
+  // Responsive polling for Workday confirmation screen / popup
+  let confirmationFound = false;
+  const pollStart = Date.now();
+  while (Date.now() - pollStart < 12000) {
+    confirmationFound = await page.evaluate(() => {
       const text = document.body?.innerText || '';
       return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|you.*have.*successfully.*submitted/i.test(text) ||
              !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="submit-confirmation-dialog"]');
-    }, { timeout: 12000 });
-  } catch {}
-  // Rule: wait after submit for popup/modal to appear cleanly
-  await page.waitForTimeout(2000);
-
-  const confirmationFound = await page.evaluate(() => {
-    const text = document.body?.innerText || '';
-    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|you.*have.*successfully.*submitted/i.test(text) ||
-           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="submit-confirmation-dialog"]');
-  });
+    }).catch(() => false);
+    if (confirmationFound) break;
+    await page.waitForTimeout(400);
+  }
 
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');

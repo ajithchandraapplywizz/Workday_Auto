@@ -11,11 +11,12 @@ import { loadLocalEnvOnce } from './supabaseClient.mjs';
 import { createClient } from '@supabase/supabase-js';
 import { updateWorkerStatus } from './supabaseClient.mjs';
 import { getWorkerContext } from './browserLifecycle.mjs';
+import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
 loadLocalEnvOnce();
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
-export const SUBMISSION_WORKER_IDS = [
+export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG?.submitWorkerIds || [
   'submitting_worker_1',
   'submitting_worker_2',
 ];

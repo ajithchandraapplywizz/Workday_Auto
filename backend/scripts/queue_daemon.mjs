@@ -99,6 +99,7 @@ let submitStopRequested = false;
 let scanCompleteMessage = null; // "Scan complete: ready for Submit."
 let submitRefusalReason = null;
 let scanRefusalReason = null;
+const DAEMON_BOOT_TIME = Date.now();
 
 // In-memory ring buffers for streaming live logs to dashboard (R11 Separate Logs)
 export const daemonLogs = [];
@@ -541,11 +542,11 @@ async function runStage3Submissions() {
     submit_enabled: true,
     submit_status: 'running',
     is_running: true,
-    current_action: `Submitting ${tasksCount} task(s) across 2 parallel workers on Railway`,
-    active_worker_count: 2,
+    current_action: `Submitting ${tasksCount} task(s) across ${SUBMIT_WORKER_IDS.length} parallel workers on Railway`,
+    active_worker_count: SUBMIT_WORKER_IDS.length,
   });
 
-  console.log(`\n🚀 [DAEMON] Submitting ${tasksCount} application(s) across 2 submitting workers continuously until finished...`);
+  console.log(`\n🚀 [DAEMON] Submitting ${tasksCount} application(s) across ${SUBMIT_WORKER_IDS.length} submitting workers continuously until finished...`);
 
   while (!isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused && submitStatus === 'running') {
     await dispatchQueuedSubmissions();
@@ -624,16 +625,11 @@ export async function runScanAndResolveParallel() {
         active_worker_count: PIPELINE_CONFIG.workersCount || 2,
       });
 
-      // Run Scanning (Stage 1) and Resolving (Stage 2) in PARALLEL
-      console.log(`\n⚡ [DAEMON] Launching Stage 1 Scanning & Stage 2 Resolving in PARALLEL...`);
-      await Promise.all([
-        runStage1Scanning().catch((err) => {
-          console.error(`❌ [DAEMON] Stage 1 Scanning error:`, err?.message || err);
-        }),
-        runStage2Resolving().catch((err) => {
-          console.error(`❌ [DAEMON] Stage 2 Resolving error:`, err?.message || err);
-        }),
-      ]);
+      // Workers run in parallel; each worker handles Scan -> Resolve sequentially per application
+      console.log(`\n⚡ [DAEMON] Launching ${PIPELINE_CONFIG.workersCount} parallel workers — Scanning & Resolving in sequence per application...`);
+      await runStage1Scanning().catch((err) => {
+        console.error(`❌ [DAEMON] Stage 1 Scanning & Resolving error:`, err?.message || err);
+      });
 
       if (isGlobalStopRequested() || isScanStopRequested() || isPoolPaused || scanStatus !== 'running') {
         console.log(`🛑 [DAEMON] Pipeline stopped.`);
@@ -652,7 +648,7 @@ export async function runScanAndResolveParallel() {
         is_running: true,
         scan_message: scanCompleteMessage,
         current_action: `Applications reached ready_for_review across 20+ clients. Looping for more links...`,
-        active_worker_count: 2,
+        active_worker_count: PIPELINE_CONFIG.workersCount || 2,
       });
 
       // Brief pause between loops, checking stop signal every second
@@ -1573,8 +1569,25 @@ async function initOnStartup() {
       submit_enabled: false,
       last_action_requested: null,
       active_worker_count: 0,
-      current_action: 'Idle',
+      current_action: 'Idle (Awaiting Frontend Dev Dashboard trigger)',
     });
+    await supabase.from('bot_control').update({
+      mode: 'idle',
+      stage: 'idle',
+      scan_status: 'off',
+      scan_enabled: false,
+      submit_status: 'off',
+      submit_enabled: false,
+      last_action_requested: null,
+      trigger_requested: false,
+      stop_requested: false,
+      scan_stop_requested: false,
+      submit_stop_requested: false,
+      is_running: false,
+      active_worker_count: 0,
+      current_action: 'Idle (Awaiting Frontend Dev Dashboard trigger)',
+      updated_at: new Date().toISOString(),
+    }).eq('id', 'primary').catch(() => {});
     console.log(`[DAEMON] worker_status table initialized: strictly canonical rows set to idle.`);
     await recoverInterruptedSubmissionTasks();
     const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');
@@ -1642,10 +1655,17 @@ async function initOnStartup() {
       }
 
       // 2. Scan & Resolve Start Signal from Supabase
-      // Gated strictly: never trigger if scan_stop_requested, scan_status is 'off', or stop is active
-      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && (bc?.scan_status !== 'off') && (
+      // Gated strictly:
+      // - Must not be running
+      // - No stop signals active
+      // - scan_status cannot be 'off' (or must have explicit start action requested)
+      // - Any trigger request must have arrived AFTER daemon boot time to prevent auto-starting stale cloud signals
+      const bcUpdatedTime = bc?.updated_at ? Date.parse(bc.updated_at) : 0;
+      const isFreshAction = !bcUpdatedTime || (bcUpdatedTime >= (DAEMON_BOOT_TIME - 3000));
+
+      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && isFreshAction && (
         (bc && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline')) ||
-        (scanCtrl && scanCtrl.enabled === true)
+        (scanCtrl && scanCtrl.enabled === true && scanCtrl.status !== 'off')
       );
 
       if (isScanStartRequested) {
@@ -1657,9 +1677,9 @@ async function initOnStartup() {
       }
 
       // 3. Submissions Start Signal from Supabase
-      const isSubmitStartRequested = (!isPoolRunning) && (
+      const isSubmitStartRequested = (!isPoolRunning) && isFreshAction && (
         (bc && (bc.last_action_requested === 'submit_approved' || bc.last_action_requested === 'start_submit')) ||
-        (submitCtrl && submitCtrl.enabled === true)
+        (submitCtrl && submitCtrl.enabled === true && submitCtrl.status !== 'off')
       );
 
       if (isSubmitStartRequested) {
@@ -1691,8 +1711,8 @@ async function initOnStartup() {
       }
 
       // ── Resilient Fallback Bridge via worker_status table ──
-      // Gated strictly on bot_control.scan_status === 'running' and NO stop signals active
-      if (!isPoolRunning && bc?.scan_status === 'running' && !hasScanStopSignal && !hasGlobalStopSignal) {
+      // Gated strictly: only trigger if daemon is not running, scan_status is 'running', AND signal is fresh
+      if (!isPoolRunning && bc?.scan_status === 'running' && isFreshAction && !hasScanStopSignal && !hasGlobalStopSignal) {
         const statuses = await getWorkerStatuses().catch(() => []);
         const hasTrigger = statuses.some((w) =>
           w.worker_id &&

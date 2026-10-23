@@ -33,6 +33,7 @@ import { resolve } from 'path';
 import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
+import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
 
 export function getCleanSupabaseEnv() {
@@ -849,7 +850,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         unansweredQuestions,
         unansweredCount,
         isFullyAnswered,
-        screenshotUrl: null,
+        screenshotUrl: reviewShotUrl,
         status: clientStatus,
         answersMap,
       };
@@ -867,7 +868,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       company,
       roleTitle: role,
       scrapedQuestions: harvestedQuestions,
-      screenshotUrl: null,
+      screenshotUrl: reviewShotUrl,
+      screenshotPath: reviewShotUrl,
       status: 'distributed',
       clients: distributionRows,
     });
@@ -1045,7 +1047,7 @@ export function print10BatchMilestoneReport({
  */
 export async function runClusterBatchRunner({
   topLinks = 10,
-  workers = Number(process.env.WORKER_COUNT) || 2,
+  workers = PIPELINE_CONFIG?.workersCount || Number(process.env.WORKER_COUNT) || 2,
   headless = process.env.HEADLESS !== 'false',
   confirmSubmit = false,
   limitPerLink = null,
@@ -1130,7 +1132,7 @@ export async function runClusterBatchRunner({
   const clusterResults = [];
 
   async function workerLoop(slot) {
-    const workerId = `worker_${slot}`;
+    const workerId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `worker_${slot}`;
     while (clusterIndex < topClusters.length) {
       if (await isClusterStopRequested()) {
         console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);

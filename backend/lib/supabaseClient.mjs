@@ -1315,11 +1315,12 @@ export const CANONICAL_9_WORKERS = CANONICAL_10_WORKERS; // Backward compatibili
 
 const WORKER_STAGE_MAP = {};
 CANONICAL_IDS.forEach((id, i) => {
-  WORKER_STAGE_MAP[id] = { stage: 'idle', botName: `Worker ${i + 1}` };
+  const stage = id.startsWith('scan') ? 'scanning' : (id.startsWith('resolve') ? 'resolving' : (id.startsWith('submit') ? 'submitting' : 'idle'));
+  WORKER_STAGE_MAP[id] = { stage, botName: PIPELINE_CONFIG?.workerNames?.[id] || `Worker ${i + 1}` };
 });
 
 /**
- * Normalizes any worker ID alias to one of the canonical database worker IDs (worker_1 .. worker_N).
+ * Normalizes any worker ID alias to one of the canonical database worker IDs.
  */
 export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
   if (!workerId) return null;
@@ -1327,9 +1328,15 @@ export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
 
   if (CANONICAL_10_WORKERS.has(cleanId)) return cleanId;
 
+  if (defaultStage === 'scanning' && CANONICAL_10_WORKERS.has(`scanning_${cleanId}`)) return `scanning_${cleanId}`;
+  if (defaultStage === 'submitting' && CANONICAL_10_WORKERS.has(`submitting_${cleanId}`)) return `submitting_${cleanId}`;
+
   const numMatch = cleanId.match(/\d+/);
-  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), CANONICAL_IDS.length) : 1;
-  return `worker_${num}`;
+  const num = numMatch ? parseInt(numMatch[0], 10) : 1;
+  const directMatch = Array.from(CANONICAL_10_WORKERS).find(id => id.endsWith(`_${num}`));
+  if (directMatch) return directMatch;
+
+  return Array.from(CANONICAL_10_WORKERS)[0] || cleanId;
 }
 
 /**
@@ -1561,10 +1568,13 @@ export async function updateBotControl(patch = {}) {
     // If table doesn't have the new columns yet, fallback to patching standard known columns
     try {
       const fallbackBody = {
+        mode: patch.mode ?? memoryBotControl.mode ?? 'idle',
         stage: memoryBotControl.stage || memoryBotControl.mode || 'idle',
         is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
         is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
         stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested ?? memoryBotControl.scan_stop_requested ?? memoryBotControl.submit_stop_requested),
+        last_action_requested: 'last_action_requested' in patch ? patch.last_action_requested : (memoryBotControl.last_action_requested ?? null),
+        trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested ?? false),
         active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
         current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
         updated_at: now,
@@ -2595,7 +2605,7 @@ export async function recordJobDistributions({
         unanswered_questions: clientCountUnanswered === 0 ? [] : clientUnanswered,
         unanswered_count: clientCountUnanswered,
         is_fully_answered: clientIsFully,
-        application_submitted_screenshot_url: null,
+        application_submitted_screenshot_url: clientShot || finalShot || null,
         status: clientStatus,
         created_at: now,
         updated_at: now,
@@ -2639,6 +2649,25 @@ export async function recordJobDistributions({
     // with their respective distribution_id linked via Postgres trigger `trg_job_distributions_insert_submission_task`
     if (readyReviewCount > 0) {
       console.log(`   📋 [submission_tasks] Trigger mirrored ${readyReviewCount} application(s) into submission_tasks as 'ready_for_review'.`);
+    }
+
+    // Sync review screenshot to submission_tasks as well
+    if (finalShot) {
+      try {
+        const { createClient } = await import('@supabase/supabase-js');
+        const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
+        const { data: dRows } = await sb.from('job_distributions').select('id').eq('job_url', cleanUrl);
+        if (dRows && dRows.length > 0) {
+          const dIds = dRows.map(r => r.id).filter(Boolean);
+          await sb.from('submission_tasks').update({
+            screenshot_path: finalShot,
+            application_submitted_screenshot_url: finalShot,
+            updated_at: now,
+          }).in('distribution_id', dIds);
+        }
+      } catch (syncErr) {
+        console.log('   ⚠️ [submission_tasks] Screenshot sync notice:', syncErr.message);
+      }
     }
 
     console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);

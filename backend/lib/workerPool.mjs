@@ -327,315 +327,138 @@ export async function executeWorkerTask({
   }
 
   try {
-    // Step A: Scan Form
-    appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
-    console.log(`   [${workerId}] Step 1: Scanning form fields...`);
-    const scan = await scanForm(jobUrl, {
-      browser,
-      context,
-      page,
-      keepOpen: true,
-      workdayEmail,
-      workdayPassword,
-      mode: 'signin',
-      profile,
-    });
+    const isSubmissionTask = (effectiveConfirmSubmit === true && !options.isClusterBlueprint) || options.isSubmissionOnly === true;
+    const isBlueprintScan = Boolean(options.isClusterBlueprint || options.isScanOnly);
+    const isFastPath = isSubmissionTask || isBlueprintScan;
 
-    if (scan.jobMissing || scan.jobExpired || scan.reason === 'job_expired_or_not_found' || scan.reason === 'no_apply_button' || scan.reason === 'job_expired' || scan.reason === 'empty_page') {
-      // Patiently verify if the page actually displays an Apply button or is still loading!
-      try {
-        await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 10000 });
-      } catch {}
+    let scan = { fields: [], field_count: 0 };
+    let plan = null;
 
-      const hasApplyNow = await page.evaluate(() => {
-        return Boolean(
-          document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
-          Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
-        );
-      }).catch(() => false);
-
-      if (hasApplyNow) {
-        console.log(`   🔎 [${workerId}] Page actually displays Apply button — NOT expired! Entering application wizard...`);
-        const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
-        await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
-        scan.jobMissing = false;
-        scan.jobExpired = false;
-        delete scan.reason;
+    if (isFastPath) {
+      if (isSubmissionTask) {
+        console.log(`   ⚡ [${workerId}] QUICK SUBMISSION: Direct fast-fill from pre-resolved answers (skipping redundant scan & LLM planning)...`);
+        appLog(5, `Quick Submission: Loaded pre-resolved answers. Starting direct application submit.`);
       } else {
-        const genuineExpired = await page.evaluate(() => {
-          const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-          return /the page you are looking for doesn'?t exist|job (?:posting )?has (?:been )?(?:filled|closed|expired)|no longer accepting applications|\berror 404\b/i.test(text);
-        }).catch(() => false);
-
-        console.log(`   ❌ [${workerId}] Dead / expired job posting confirmed in DOM ("The page you are looking for doesn't exist" / "Job Expired").`);
-        let expiredShotUrl = null;
-        try {
-          if (page && !page.isClosed()) {
-            // Scroll to the error message so the screenshot captures exact proof of problem
-            await page.evaluate(() => {
-              const headings = Array.from(document.querySelectorAll('h1, h2, h3, p, [role="alert"], [data-automation-id*="error" i]'));
-              const match = headings.find(h => /doesn'?t exist|expired|closed|filled|404/i.test(h.textContent || ''));
-              if (match) match.scrollIntoView({ behavior: 'instant', block: 'center' });
-            }).catch(() => {});
-            await page.waitForTimeout(300);
-            const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-            if (buf) {
-              expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
-            }
-          }
-        } catch {}
-
-        await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
-
-        await browser.close().catch(() => {});
-        if (queueTaskId) {
-          await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
-        }
-        await upsertSupabaseApplication({
-          applywizzId,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          status: 'failed',
-          failureReason: 'Job page does not exist (dead/expired URL)',
-          failureScreenshotUrl: expiredShotUrl,
-        }).catch(() => {});
-
-        try {
-          const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
-          await recordFailedJob({
-            applywizzId,
-            jobId: task.job_id || task.jobId || null,
-            jobUrl,
-            company,
-            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            failureReason: 'Job page does not exist (dead/expired URL or no Apply button)',
-            failedAtStep: 'Job Discovery / Link Expired',
-            screenshotPath: expiredShotUrl,
-          });
-          await recordApplicationFailure({
-            applywizzId,
-            jobId: task.job_id || task.jobId || null,
-            jobUrl,
-            company,
-            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            failureReason: 'Job page does not exist (dead/expired URL or no Apply button)',
-            screenshotPath: expiredShotUrl,
-          });
-        } catch {}
-
-        return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
-      }
-    }
-
-    const extractedRole = await extractJobRoleFromDom(page, jobUrl);
-    if (extractedRole) {
-      roleTitle = extractedRole;
-      profile._jobTitle = roleTitle;
-      profile._roleTitle = roleTitle;
-      console.log(`   [${workerId}] 💼 Role: ${roleTitle}`);
-    }
-
-    if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
-      let wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
-
-      // Check if the page is still displaying an Apply button before jumping to auth failed!
-      if (!wizardNow) {
-        const stillHasApply = await page.$([
-          'a[data-automation-id="adventureButton"]:visible',
-          'button[data-automation-id="adventureButton"]:visible',
-          'a[data-automation-id="applyButton"]:visible',
-          'button[data-automation-id="applyButton"]:visible',
-          '[data-automation-id="jobPostingApplyButton"]:visible',
-          'button:has-text("Apply"):visible',
-          'a:has-text("Apply"):visible',
-        ].join(', ')).catch(() => null);
-
-        if (stillHasApply) {
-          console.log(`   🔎 [${workerId}] Page still displays Apply button — clicking Apply to enter application wizard...`);
-          const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
-          await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
-          await page.waitForTimeout(1500);
-          wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
-        }
+        console.log(`   ⚡ [${workerId}] QUICK BLUEPRINT SCAN: Traversing Workday wizard directly to Review to harvest questions...`);
+        appLog(5, `Quick Blueprint Scan: Traversing wizard to Review to harvest questions.`);
       }
 
-      // Check if on login form or modal
-      if (!wizardNow) {
-        const isAuthScreen = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
-        if (isAuthScreen) {
-          console.log(`   🔑 [${workerId}] Login screen detected — submitting credentials for ${workdayEmail}...`);
-          const { handleWorkday } = await import('./workday.mjs');
-          await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
-          await page.waitForTimeout(1500);
-          wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
-        }
-      }
+      profile._onStepChange = (iteration, stepName) => {
+        appLog(5 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Processing fields...`);
+      };
 
-      // Check if still loading
-      if (!wizardNow) {
+      plan = {
+        company,
+        role: roleTitle,
+        url: jobUrl,
+        answers: {
+          ...(profile._supabaseQa || {}),
+          ...(profile._answerCache ? Object.fromEntries(profile._answerCache) : {}),
+        },
+      };
+    } else {
+      // Step A: Scan Form
+      appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
+      console.log(`   [${workerId}] Step 1: Scanning form fields...`);
+      const fullScan = await scanForm(jobUrl, {
+        browser,
+        context,
+        page,
+        keepOpen: true,
+        workdayEmail,
+        workdayPassword,
+        mode: 'signin',
+        profile,
+      });
+      scan = fullScan;
+
+      if (scan.jobMissing || scan.jobExpired || scan.reason === 'job_expired_or_not_found' || scan.reason === 'no_apply_button' || scan.reason === 'job_expired' || scan.reason === 'empty_page') {
         try {
           await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 10000 });
         } catch {}
-        await page.waitForTimeout(1000);
-        wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
-      }
 
-      if (wizardNow) {
-        // Application wizard reached! Refresh fields so we don't treat this as 0 fields
-        const { discoverFields } = await import('./scanner.mjs');
-        const freshFields = await discoverFields(page);
-        scan.fields = freshFields;
-        scan.field_count = freshFields.length;
-        scan.authFailed = false;
-        console.log(`   ✅ [${workerId}] Application wizard active — DOM scan discovered ${scan.field_count} fields.`);
-      } else {
-        // Attempt Zoho Mail email verification and password reset recovery
-        console.log(`   🔐 [${workerId}] Auth gateway requires verification or password setup. Invoking Zoho Mail recovery...`);
-        let recovered = false;
-        try {
-          const { resolveWorkdayVerification } = await import('./workdayVerification.mjs');
-          const vRes = await resolveWorkdayVerification(page, {
-            email: workdayEmail,
-            password: workdayPassword,
-            company,
-            startTime: Date.now() - 120000,
-            timeoutMs: 45000,
-          });
-          if (vRes?.success && (vRes?.onWizard || await isWorkdayWizardVisible(page))) {
-            recovered = true;
-            console.log(`   🎉 [${workerId}] Successfully verified and authenticated via Zoho Mail! Continuing form fill.`);
-            scan = await scanForm(jobUrl, { browser, context, page, workdayEmail, workdayPassword, isBatch: true, candidateId: applywizzId });
-            scan.authFailed = false;
-          }
-        } catch (zErr) {
-          console.warn(`   ⚠️ [${workerId}] Zoho verification attempt notice: ${zErr.message}`);
-        }
+        const hasApplyNow = await page.evaluate(() => {
+          return Boolean(
+            document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
+            Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
+          );
+        }).catch(() => false);
 
-        if (!recovered) {
-          const { getWorkdayAuthErrorMessage } = await import('./discovery.mjs');
-          let authErrorMsg = await getWorkdayAuthErrorMessage(page);
-
-          // Deep DOM error inspection for validation errors, alerts, and field blockers
-          let domSpecificReason = null;
-          try {
-            domSpecificReason = await page.evaluate(() => {
-              const alertEl = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], [data-automation-id="formError"]');
-              if (alertEl && alertEl.textContent?.trim()) {
-                return alertEl.textContent.trim().replace(/\s+/g, ' ');
-              }
-              const invalidInput = document.querySelector('[aria-invalid="true"]');
-              if (invalidInput) {
-                const labelEl = invalidInput.closest('div')?.querySelector('label') || document.querySelector(`label[for="${invalidInput.id}"]`);
-                const name = labelEl?.textContent?.trim() || invalidInput.getAttribute('aria-label') || invalidInput.name || 'field';
-                return `Validation Error: Required ${name} is invalid or missing`;
-              }
-              const pageText = document.body ? document.body.innerText : '';
-              if (/job (is no longer|has expired|not found|does not exist)/i.test(pageText)) {
-                return 'Link Expired: Job no longer available on Workday';
-              }
-              return null;
-            }).catch(() => null);
-          } catch {}
-
-          const effectiveReason = domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check';
-          const failReasonText = `Authentication / Gateway check: ${effectiveReason}`;
-          console.log(`   ❌ [${workerId}] ${failReasonText}`);
-
-          let authShotUrl = null;
+        if (hasApplyNow) {
+          console.log(`   🔎 [${workerId}] Page actually displays Apply button — NOT expired! Entering application wizard...`);
+          const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
+          await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
+          scan.jobMissing = false;
+          scan.jobExpired = false;
+          delete scan.reason;
+        } else {
+          console.log(`   ❌ [${workerId}] Dead / expired job posting confirmed in DOM ("The page you are looking for doesn't exist" / "Job Expired").`);
+          let expiredShotUrl = null;
           try {
             if (page && !page.isClosed()) {
               await page.evaluate(() => {
-                const err = document.querySelector('[data-automation-id="errorMessage"], [role="alert"], .error-message, div[class*="error" i], [aria-invalid="true"]');
-                if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
-                else window.scrollTo(0, 0);
+                const headings = Array.from(document.querySelectorAll('h1, h2, h3, p, [role="alert"], [data-automation-id*="error" i]'));
+                const match = headings.find(h => /doesn'?t exist|expired|closed|filled|404/i.test(h.textContent || ''));
+                if (match) match.scrollIntoView({ behavior: 'instant', block: 'center' });
               }).catch(() => {});
-              await page.waitForTimeout(400);
+              await page.waitForTimeout(300);
               const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
               if (buf) {
-                authShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+                expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
               }
             }
           } catch {}
 
+          await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
           await browser.close().catch(() => {});
-          if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
+          if (queueTaskId) {
+            await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
+          }
           await upsertSupabaseApplication({
             applywizzId,
             jobUrl,
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
             status: 'failed',
-            failureReason: failReasonText,
-            failureScreenshotUrl: authShotUrl,
-            stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)',
+            failureReason: 'Job page does not exist (dead/expired URL)',
+            failureScreenshotUrl: expiredShotUrl,
           }).catch(() => {});
-
-        try {
-          const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
-          await recordFailedJob({
-            applywizzId,
-            jobId: task.job_id || task.jobId || null,
-            jobUrl,
-            company,
-            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            failureReason: failReasonText,
-            failedAtStep: 'Auth Gateway (Sign In / Sign Up)',
-            screenshotPath: authShotUrl,
-          });
-          await recordApplicationFailure({
-            applywizzId,
-            jobId: task.job_id || task.jobId || null,
-            jobUrl,
-            company,
-            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-            failureReason: failReasonText,
-            screenshotPath: authShotUrl,
-          });
-        } catch {}
-
-        return { status: 'auth_failed', screenshotUrl: authShotUrl, stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)', failureReason: failReasonText };
+          return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
+        }
       }
+
+      const extractedRole = await extractJobRoleFromDom(page, jobUrl);
+      if (extractedRole) {
+        roleTitle = extractedRole;
+        profile._jobTitle = roleTitle;
+        profile._roleTitle = roleTitle;
+      }
+
+      // Step B: Pick resume for candidate
+      console.log(`   [${workerId}] Step 2: Preparing resume...`);
+      let jdText = '';
+      try { jdText = await extractJDText(page); } catch {}
+      const resumesYml = findFilePath('config/resumes.yml');
+      let resumePath = null;
+      if (existsSync(resumesYml)) {
+        resumePath = await pickResume(jdText, resumesYml);
+      }
+      if (resumePath) profile._resumePath = resumePath;
+
+      // Step C: Generate fill plan
+      console.log(`   [${workerId}] Step 3: Generating plan...`);
+      plan = await generatePlan(scan, profile, { resumePath, jdText, url: jobUrl });
+      if (company) plan.company = company;
+      if (roleTitle) plan.role = roleTitle;
+
+      profile._onStepChange = (iteration, stepName) => {
+        appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
+      };
     }
-  }
 
-    // Step B: Pick resume for candidate
-    console.log(`   [${workerId}] Step 2: Preparing resume...`);
-    let jdText = '';
-    try { jdText = await extractJDText(page); } catch {}
-    const jdWords = jdText ? jdText.split(/\s+/).filter(Boolean).length : 0;
-    const resumesYml = findFilePath('config/resumes.yml');
-    let resumePath = null;
-    if (existsSync(resumesYml)) {
-      resumePath = await pickResume(jdText, resumesYml);
-    }
-    if (resumePath) profile._resumePath = resumePath;
-    const resumeFile = resumePath ? basename(resumePath) : 'Candidate_ATS_Resume.pdf';
-    appLog(6, `Job Description: Parsed ${jdText.length} characters (~${jdWords} words). Selected resume: "${resumeFile}" tailored to JD.`);
-
-    // Step C: Generate fill plan
-    console.log(`   [${workerId}] Step 3: Generating plan...`);
-    const plan = await generatePlan(scan, profile, { resumePath, jdText, url: jobUrl });
-    if (company) plan.company = company;
-    if (roleTitle) plan.role = roleTitle;
-    const questionsCount = plan.answers ? Object.keys(plan.answers).length : (scan.field_count || 12);
-    appLog(7, `LLM Reasoning: Generating structured answers for ${questionsCount} form fields using candidate knowledge and JD context.`);
-
-    // Hook wizard step changes for live frontend execution trace
-    profile._onStepChange = (iteration, stepName) => {
-      appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
-    };
-
-    // Save local plan backup
-    try {
-      const slug = slugify(jobUrl);
-      const planOut = resolve(process.cwd(), 'forms', `${slug}-${applywizzId}-plan.json`);
-      await writeFile(planOut, JSON.stringify(plan, null, 2));
-    } catch {}
-
-    // Step D: Fill & Submit
-    appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
-    console.log(`   [${workerId}] Step 4: Filling application...`);
+    // Step D: Fill & Submit (or Traverse Wizard to Review for Blueprint)
+    appLog(8, `Workday Wizard: Traversing application form steps 1–4 (${company || 'Workday'})...`);
+    console.log(`   [${workerId}] ${isSubmissionTask ? 'Executing Quick Submission' : (isBlueprintScan ? 'Executing Quick Blueprint Scan' : 'Filling application')}...`);
     const status = await fillForm(jobUrl, plan, {
       browser,
       context,
@@ -645,7 +468,7 @@ export async function executeWorkerTask({
       workdayPassword,
       mode: 'signin',
       confirmSubmit: effectiveConfirmSubmit,
-      dryRun,
+      dryRun: isBlueprintScan ? true : dryRun,
       isBatch: true,
     });
 

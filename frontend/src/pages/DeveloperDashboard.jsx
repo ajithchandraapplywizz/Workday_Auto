@@ -207,9 +207,13 @@ export default function DeveloperDashboard() {
     // Supabase Realtime channel for instant push updates
     const channel = supabase
       .channel('dev-dashboard-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'applications' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_distributions' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'submission_tasks' }, () => loadData(true))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'worker_status' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_control' }, () => loadData(true))
       .on('postgres_changes', { event: '*', schema: 'public', table: 'batch_job_queue' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'scanned_jobs' }, () => loadData(true))
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'failed_jobs' }, () => loadData(true))
       .subscribe();
 
     return () => {
