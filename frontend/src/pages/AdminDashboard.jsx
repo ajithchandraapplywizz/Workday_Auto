@@ -3,6 +3,7 @@ import { useAuth } from '../context/AuthContext';
 import {
   fetchCAEmails,
   fetchOperators,
+  fetchAllOperators,
   fetchManagers,
   reconcileOperatorsWithAPI,
   fetchDynamicKPIMetrics,
@@ -62,7 +63,7 @@ export default function AdminDashboard() {
       const [reconRes, mgrsRes, opsRes, kpiRes, appsRes] = await Promise.all([
         reconcileOperatorsWithAPI(),
         fetchManagers(),
-        fetchOperators({ dateStr: date }),
+        fetchAllOperators(),
         fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
         fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
       ]);
@@ -337,11 +338,10 @@ export default function AdminDashboard() {
       {/* 1. OVERVIEW TAB */}
       {activeTab === 'Overview' && (
         <div className="tab-body-fade">
-          {/* 59-CA Reconciliation Banner */}
+          {/* Live Operators Reconciliation Banner */}
           <div className="video-run-status-bar" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span className="vrs-text">
-              <strong>59-CA Live Reconciliation:</strong> {reconciliation.apiCount} CAs in live roster API &bull;{' '}
-              {reconciliation.dbCount} in operators DB &bull;{' '}
+              <strong>Live Operators Roster:</strong> {operators.length} Active Operators in DB &bull;{' '}
               {reconciliation.hasMismatch ? (
                 <span style={{ color: '#ef4444', fontWeight: 'bold' }}>
                   ⚠ Mismatch Detected ({reconciliation.missingInDb.length} missing in DB, {reconciliation.missingInApi.length} missing in API)
@@ -495,10 +495,17 @@ export default function AdminDashboard() {
               </thead>
               <tbody>
                 {managers.map((mgr) => {
-                  const mgrOps = operators.filter((o) => o.manager_id === mgr.id);
+                  const mgrNameLower = (mgr.name || '').toLowerCase();
+                  const mgrOps = operators.filter((o) => {
+                    if (o.manager_id === mgr.id) return true;
+                    if (o.manager_name && o.manager_name.toLowerCase().includes(mgrNameLower)) return true;
+                    if (mgrNameLower.includes('balaji') && o.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70') return true;
+                    if (mgrNameLower.includes('ramakrishna') && o.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744') return true;
+                    return false;
+                  });
                   const activeCount = mgrOps.filter((o) => (o.status || 'inactive').toLowerCase() === 'active').length;
                   const inactiveCount = mgrOps.length - activeCount;
-                  const mgrApps = applications.filter((a) => a.manager_id === mgr.id).length;
+                  const mgrApps = applications.filter((a) => a.manager_id === mgr.id || (a.manager_name && a.manager_name.toLowerCase().includes(mgrNameLower))).length;
 
                   return (
                     <tr key={mgr.id}>
@@ -610,7 +617,7 @@ export default function AdminDashboard() {
                             );
                           })()}
                         </td>
-                        <td>{mgr?.name || 'Assigned Manager'}</td>
+                        <td>{mgr?.name || (op.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : (op.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' ? 'Ramakrishna' : 'Unassigned'))}</td>
                       </tr>
                     );
                   })

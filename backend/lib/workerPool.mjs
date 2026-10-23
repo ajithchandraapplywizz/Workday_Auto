@@ -23,9 +23,15 @@ import { inferStandardOptions } from './workdayScanHarvest.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext } from './browserLifecycle.mjs';
+import { createClient } from '@supabase/supabase-js';
+import { loadLocalEnvOnce } from './supabaseClient.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
+loadLocalEnvOnce();
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
 const DEAD_JOB_URLS = new Set();
 
@@ -89,6 +95,7 @@ export async function executeWorkerTask({
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
   const rawJobUrl = task.jobUrl || task.job_url || task.url || '';
   const jobUrl = String(rawJobUrl).replace(/\s+/g, '').trim();
+  const taskId = task.taskId || task.task_id || options.taskId || '';
   const queueTaskId = task.queueTaskId || task.queue_task_id || task.id || '';
   const company = task.company || extractWorkdayCompanyName(jobUrl);
 
@@ -161,6 +168,9 @@ export async function executeWorkerTask({
     const profilePath = findFilePath('config/profile.yml');
     profile = await loadProfile(existsSync(profilePath) ? profilePath : null, { applywizzId });
     profile._applyWizzId = applywizzId;
+    if (typeof globalThis !== 'undefined') {
+      globalThis.__activeWorkerProfile = profile;
+    }
     profile._canonicalJobUrl = jobUrl;
     profile._jobUrl = jobUrl;
     profile._applicationId = liveApplicationId;
@@ -305,7 +315,16 @@ export async function executeWorkerTask({
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   }).catch(() => {});
   const page = await context.newPage();
+  registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
+
+  if (isGlobalStopRequested() || workerPoolStopRequested) {
+    console.log(`🛑 [${workerId}] Global stop active before navigation. Aborting task #${taskId || 'N/A'}`);
+    await page.close().catch(() => {});
+    await browser.close().catch(() => {});
+    unregisterWorkerContext(workerId);
+    return { status: 'stopped', reason: 'stopped_by_user' };
+  }
 
   try {
     // Step A: Scan Form
@@ -361,7 +380,7 @@ export async function executeWorkerTask({
             await page.waitForTimeout(300);
             const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
             if (buf) {
-              expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
+              expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
             }
           }
         } catch {}
@@ -534,7 +553,7 @@ export async function executeWorkerTask({
               await page.waitForTimeout(400);
               const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
               if (buf) {
-                authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+                authShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
               }
             }
           } catch {}
@@ -637,7 +656,7 @@ export async function executeWorkerTask({
         if (page && !page.isClosed()) {
           const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
           if (buf) {
-            expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
+            expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
           }
         }
       } catch {}
@@ -757,19 +776,27 @@ export async function executeWorkerTask({
             buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
           }
         }
-        if (buf) {
-          let bucket = 'application-failures';
-          let filename = `${applywizzId}_${Date.now()}_failure.jpg`;
 
-          if (status === 'submitted') {
-            bucket = 'submitted-applications';
-            filename = `${applywizzId}_${task.id || Date.now()}_submitted_confirmation.jpg`;
-          } else if (status === 'reached-review' || status === 'reached_review') {
-            bucket = 'application-successes';
-            filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
-          }
+        let bucket = null;
+        let filename = null;
+        let storagePath = null;
+        if (status === 'submitted') {
+          bucket = 'submitted-applications';
+          filename = taskId
+            ? `${applywizzId}_${taskId}.png`
+            : `${applywizzId}_${task.id || Date.now()}_submitted_confirmation.jpg`;
+          storagePath = filename;
+        } else if (status === 'reached-review' || status === 'reached_review') {
+          bucket = 'submitted-applications';
+          filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
+          storagePath = filename;
+        }
 
+        if (bucket && filename && buf) {
           completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf);
+          if (completionShotUrl) {
+            console.log(`[${workerId}] screenshot uploaded: ${filename}`);
+          }
         }
       }
     } catch {}
@@ -1041,14 +1068,53 @@ export async function executeWorkerTask({
 
     if (status === 'submitted') {
       try {
-        const { completeSubmittedTask } = await import('./supabaseClient.mjs');
-        await completeSubmittedTask({
-          applywizzId,
-          jobUrl,
-          screenshotUrl: completionShotUrl,
-          workerId,
-        });
-      } catch {}
+        const completionTimestamp = new Date().toISOString();
+        const distUpdate = {
+          status: 'submitted',
+          application_submitted_screenshot_url: completionShotUrl,
+          worker_id: workerId,
+          updated_at: completionTimestamp,
+        };
+        if (task.id || task.distributionId) {
+          const targetDistId = task.distributionId || task.id;
+          try {
+            const { updateJobDistributionWithCheck } = await import('./submissionWorkerPool.mjs');
+            await updateJobDistributionWithCheck({
+              distributionId: targetDistId,
+              workerId,
+              patch: distUpdate,
+            });
+          } catch {
+            const { error: dErr } = await supabase.from('job_distributions').update(distUpdate).eq('id', targetDistId);
+            if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions by id:`, dErr.message);
+          }
+          try {
+            await supabase.from('submission_tasks').update({
+              status: 'submitted',
+              screenshot_path: completionShotUrl,
+              application_submitted_screenshot_url: completionShotUrl,
+              completed_at: completionTimestamp,
+              updated_at: completionTimestamp,
+            }).eq('distribution_id', targetDistId);
+          } catch {}
+        } else {
+          const { error: dErr } = await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+          if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions by applywizz_id/url:`, dErr.message);
+
+          try {
+            await supabase.from('submission_tasks').update({
+              status: 'submitted',
+              screenshot_path: completionShotUrl,
+              application_submitted_screenshot_url: completionShotUrl,
+              completed_at: completionTimestamp,
+              updated_at: completionTimestamp,
+            }).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+          } catch {}
+        }
+        console.log(`   ✅ [${workerId}] job_distributions record updated to 'submitted' with proof screenshot: ${completionShotUrl || 'saved'}`);
+      } catch (err) {
+        console.warn(`   ⚠️ [${workerId}] Error writing submitted status to job_distributions:`, err.message);
+      }
       appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
     } else if (status === 'reached-review' || status === 'reached_review') {
       const isClusterBlueprint = Boolean(options.isClusterBlueprint || options.skipJobDistribution);
@@ -1071,13 +1137,13 @@ export async function executeWorkerTask({
           const unansweredQuestions = [];
 
           // Check review questions that have empty / incomplete answers
-          for (const q of reviewQuestionsFormatted) {
+          for (const q of finalScrapedQuestions) {
             const val = String(q.value || '').trim();
             if (!val || /^(select(\s*one)?|select\.\.\.|choose(\s*one)?|unanswered|please\s*select)$/i.test(val)) {
               unansweredQuestions.push({
-                question: q.label,
-                field_type: q.type || 'text',
-                step: 'Review & Submit',
+                question: q.label || q.question,
+                field_type: q.field_type || q.type || 'text',
+                step: q.step || 'Review & Submit',
                 options: q.options || [],
               });
             }
@@ -1144,7 +1210,9 @@ export async function executeWorkerTask({
             status: unansweredCount === 0 ? 'ready_for_review' : 'needs_answers',
             screenshotUrl: completionShotUrl,
           });
-        } catch {}
+        } catch (reviewSaveErr) {
+          console.warn(`   ⚠️ [${workerId}] Error persisting review reached job schema / distributions:`, reviewSaveErr.message);
+        }
       }
       appLog(15, `Playwright: Reached Step 5 (Review & Submit). Form paused for CA review. High-res verification screenshot saved: ${completionShotUrl || 'Supabase'}`);
     }
@@ -1183,9 +1251,18 @@ export async function executeWorkerTask({
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         const liveStep = await detectWorkdayStep(page).catch(() => null);
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
-        const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+        const buf = await page.screenshot({ type: 'png' }).catch(() => null);
         if (buf) {
-          errShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_error.jpg`, buf);
+          const timestamp = Date.now();
+          const effectiveTaskId = taskId || task.id || timestamp;
+          const failStoragePath = `${applywizzId}_${effectiveTaskId}_failed_${timestamp}.png`;
+          errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf);
+          if (!errShotUrl) {
+            errShotUrl = await uploadStorageScreenshot('submitted-applications', failStoragePath, buf);
+          }
+          if (errShotUrl) {
+            console.log(`[${workerId}] screenshot uploaded: ${failStoragePath}`);
+          }
         }
       }
     } catch {}
@@ -1247,6 +1324,7 @@ export async function executeWorkerTask({
         failedAtStep: errStep,
         screenshotPath: errShotUrl,
         resolvedAnswers: answeredSoFar,
+        clientCount: task.client_count || task.clientCount || 1,
       });
       await recordApplicationFailure({
         applywizzId,
@@ -1261,6 +1339,31 @@ export async function executeWorkerTask({
 
     return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl, stoppedAtStep: errStep };
   } finally {
+    try {
+      const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+      await cleanupClientResume(profile).catch(() => {});
+    } catch {}
+
+    try {
+      const { recordApplicationTokenUsage } = await import('./tokenUsage.mjs');
+      const tokenAcc = profile?._tokenUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+      await recordApplicationTokenUsage({
+        applywizz_id: applywizzId,
+        job_url: jobUrl,
+        role: roleTitle || profile?._roleTitle || 'Workday Application',
+        application_id: taskId || queueTaskId || null,
+        model: profile?._llmModel || process.env.OPENROUTER_MODEL || 'meta-llama/llama-3.3-70b-instruct:free',
+        prompt_tokens: tokenAcc.prompt_tokens || 0,
+        completion_tokens: tokenAcc.completion_tokens || 0,
+        metadata: {
+          status: status || 'failed',
+          worker_id: workerId,
+          company: company || '',
+        },
+      }).catch(() => {});
+    } catch {}
+
+    try { unregisterWorkerContext(workerId); } catch {}
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
     try {
       unregisterActiveBrowser(browser);
@@ -1728,8 +1831,8 @@ export async function executeSingleTargetedSubmission({
   // 1. Fetch task details from job_distributions
   const { createClient } = await import('@supabase/supabase-js');
   const { loadLocalEnvOnce } = await import('./supabaseClient.mjs');
-  const env = loadLocalEnvOnce();
-  const supabase = createClient(env.SUPABASE_URL, env.SUPABASE_SERVICE_ROLE_KEY, {
+  loadLocalEnvOnce();
+  const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
     auth: { persistSession: false },
   });
 
@@ -1772,6 +1875,13 @@ export async function executeSingleTargetedSubmission({
       reviewed_at: now,
       updated_at: now,
     }).eq('id', distributionId).catch(() => {});
+
+    await supabase.from('submission_tasks').update({
+      status: 'applying',
+      worker_id: workerId,
+      started_at: now,
+      updated_at: now,
+    }).eq('distribution_id', distributionId).catch(() => {});
   } else {
     await supabase.from('job_distributions').update({
       status: 'applying',
@@ -1827,23 +1937,21 @@ export async function executeSingleTargetedSubmission({
       updated_at: completionTimestamp,
     };
     if (distributionId) {
-      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
-    } else {
-      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
-    }
+      const { error: dErr } = await supabase.from('job_distributions').update(updateBody).eq('id', distributionId);
+      if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
+      else console.log(`   ✅ [${workerId}] job_distributions record #${distributionId} updated to 'submitted' with proof: ${finalProofShot || 'saved'}`);
 
-    // Sync to applications table for Admin, Developer, and Manager dashboards
-    const appRow = {
-      applywizz_id: finalApplywizzId,
-      job_url: finalJobUrl,
-      company: company || 'Workday Tenant',
-      role_title: roleTitle || 'Workday Position',
-      status: 'submitted',
-      screenshot_url: finalProofShot,
-      applied_screenshot: finalProofShot,
-      updated_at: completionTimestamp,
-    };
-    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
+      await supabase.from('submission_tasks').update({
+        status: 'submitted',
+        application_submitted_screenshot_url: finalProofShot,
+        completed_at: completionTimestamp,
+        updated_at: completionTimestamp,
+      }).eq('distribution_id', distributionId).catch(() => {});
+    } else {
+      const { error: dErr } = await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl);
+      if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
+      else console.log(`   ✅ [${workerId}] job_distributions record updated to 'submitted' with proof: ${finalProofShot || 'saved'}`);
+    }
   } else {
     console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
     const updateBody = {
@@ -1854,21 +1962,31 @@ export async function executeSingleTargetedSubmission({
     };
     if (distributionId) {
       await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+      await supabase.from('submission_tasks').update({
+        status: 'failed',
+        error_message: result?.failureReason || result?.error || 'Submission failed',
+        screenshot_path: finalProofShot,
+        completed_at: completionTimestamp,
+        updated_at: completionTimestamp,
+      }).eq('distribution_id', distributionId).catch(() => {});
     } else {
       await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
     }
 
-    // Sync failure to applications table
-    const appRow = {
-      applywizz_id: finalApplywizzId,
-      job_url: finalJobUrl,
-      company: company || 'Workday Tenant',
-      role_title: roleTitle || 'Workday Position',
-      status: 'failed',
-      failure_reason: result?.failureReason || result?.error || 'Submission failed',
-      updated_at: completionTimestamp,
-    };
-    await supabase.from('applications').upsert(appRow, { onConflict: 'applywizz_id,job_url' }).catch(() => {});
+    try {
+      const { recordFailedJob } = await import('./supabaseClient.mjs');
+      await recordFailedJob({
+        applywizzId: finalApplywizzId,
+        jobUrl: finalJobUrl,
+        company,
+        roleTitle,
+        failureReason: result?.failureReason || result?.error || 'Targeted submission failed',
+        failedAtStep: result?.failedAtStep || 'Review & Submit',
+        screenshotPath: finalProofShot,
+        resolvedAnswers: distRow?.resolved_answers || [],
+        clientCount: 1,
+      });
+    } catch {}
   }
 
   // 5. Release worker back to idle
@@ -1878,6 +1996,30 @@ export async function executeSingleTargetedSubmission({
     current_application_id: null,
     bot_name: `Submitting Worker ${workerId.slice(-1)}`,
   }).catch(() => {});
+
+  // 6. FIFO Next-in-Queue Auto Dispatcher: Pick next queued task
+  try {
+    const { data: nextQueue } = await supabase
+      .from('submission_tasks')
+      .select('*')
+      .eq('status', 'queued')
+      .order('created_at', { ascending: true })
+      .limit(1);
+
+    if (nextQueue && nextQueue.length > 0) {
+      const nextItem = nextQueue[0];
+      console.log(`\n⚡ [FIFO QUEUE] Next queued application #${nextItem.distribution_id} found! Triggering ${workerId}...`);
+      executeSingleTargetedSubmission({
+        distributionId: nextItem.distribution_id,
+        applywizzId: nextItem.applywizz_id,
+        jobUrl: nextItem.job_url,
+        workerId,
+        headless,
+      }).catch((qErr) => {
+        console.error(`❌ [FIFO QUEUE ERROR]:`, qErr?.message);
+      });
+    }
+  } catch {}
 
   return {
     success: isSubmitted,

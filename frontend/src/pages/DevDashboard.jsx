@@ -59,13 +59,13 @@ export default function DevDashboard() {
       } else if (selectedEndpoint === 'client_details') {
         url = `https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(apiParam || 'AWL-34133')}`;
       } else if (selectedEndpoint === 'supabase_schema') {
-        url = 'https://rltnrnqqmufeeqaodsif.supabase.co/rest/v1/job_form_schemas?select=*&limit=3';
+        url = 'https://yuppxmwrztbirsnzgfjh.supabase.co/rest/v1/job_form_schemas?select=*&limit=3';
       }
 
       const headers = selectedEndpoint === 'supabase_schema'
         ? {
-            apikey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdG5ybnFxbXVmZWVxYW9kc2lmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODMyOTU1NSwiZXhwIjoyMTAzOTA1NTU1fQ.eNtTpBT0xWtZzySiR_9OnHZVRxSmHgEZJL_pzvyfGwg',
-            Authorization: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdG5ybnFxbXVmZWVxYW9kc2lmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODMyOTU1NSwiZXhwIjoyMTAzOTA1NTU1fQ.eNtTpBT0xWtZzySiR_9OnHZVRxSmHgEZJL_pzvyfGwg',
+            apikey: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1cHB4bXdyenRiaXJzbnpnZmpoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjY2MDY5MSwiZXhwIjoyMTA4MjM2NjkxfQ.rzyqJKwuMW81IFAEtGsKOPSyjlxuQTXNsUYHrC6wUGg',
+            Authorization: 'Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1cHB4bXdyenRiaXJzbnpnZmpoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjY2MDY5MSwiZXhwIjoyMTA4MjM2NjkxfQ.rzyqJKwuMW81IFAEtGsKOPSyjlxuQTXNsUYHrC6wUGg',
           }
         : {};
 

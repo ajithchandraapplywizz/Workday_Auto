@@ -167,30 +167,14 @@ export default function ApplicationSlideDrawer({
           }
         }
 
-        // Also check applications table
-        let appRow = null;
-        if (applywizzId && jobUrl) {
-          const { data: aData } = await supabase.from('applications').select('*').eq('applywizz_id', applywizzId).eq('job_url', jobUrl).limit(1);
-          if (aData && aData.length > 0) appRow = aData[0];
-          if (!appRow) {
-            const canonical = cleanCanonicalJobUrl(jobUrl);
-            if (canonical && canonical !== jobUrl) {
-              const { data: cData } = await supabase.from('applications').select('*').eq('applywizz_id', applywizzId).eq('job_url', canonical).limit(1);
-              if (cData && cData.length > 0) appRow = cData[0];
-            }
-          }
-        }
-
         if (!isMounted) return;
 
-        const latestStatus = updated?.status || appRow?.status || null;
+        const latestStatus = updated?.status || null;
         const isLatestSubmitted = latestStatus === 'submitted' || latestStatus === 'completed';
 
         const rawProof = isLatestSubmitted
           ? (updated?.application_submitted_screenshot_url
             || updated?.applied_screenshot
-            || appRow?.screenshot_url
-            || appRow?.applied_screenshot
             || null)
           : null;
 

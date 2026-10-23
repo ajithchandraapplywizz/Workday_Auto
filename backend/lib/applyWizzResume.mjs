@@ -133,11 +133,24 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   }
 }
 
-/** Retain cached client resume in data/client-resumes/ so concurrent workers never unlink an active PDF. */
+/**
+ * Clean up client resume: unlink PDF from data/client-resumes/ when application succeeds or fails.
+ */
 export async function cleanupClientResume(profile = {}) {
-  const path = String(profile._resumePath || '');
-  if (!path) return false;
-  return true;
+  const p = String(profile._resumePath || '').trim();
+  if (!p) return false;
+  try {
+    const { unlinkSync } = await import('fs');
+    if (existsSync(p)) {
+      unlinkSync(p);
+      console.log(`  🗑️  Cleaned up local cached resume: ${basename(p)}`);
+      profile._resumePath = null;
+      return true;
+    }
+  } catch (err) {
+    console.log(`  ⚠️ Resume file cleanup notice: ${err.message}`);
+  }
+  return false;
 }
 
 /**

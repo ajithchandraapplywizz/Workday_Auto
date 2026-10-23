@@ -8,11 +8,13 @@ import {
   fetchBatchQueue,
   fetchAutomationTrace,
   fetchBatchWorkerLogs,
-  fetchAllOperators,
   triggerAutonomousBot,
   stopAutonomousBot,
+  triggerSubmissionStage,
+  stopSubmissionStage,
   fetchBotDaemonStatus,
   resolveSupabaseStorageUrl,
+  cleanCanonicalJobUrl,
   supabase,
 } from '../services/api';
 
@@ -60,8 +62,9 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9 });
+  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false });
   const [isTriggering, setIsTriggering] = useState(false);
+  const [isSubmitTriggering, setIsSubmitTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
   const tabs = ['System', 'Worker Logs', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
@@ -329,23 +332,92 @@ export default function DeveloperDashboard() {
     return applications.filter((app) => (app.status || '').toLowerCase() === 'failed');
   }, [applications]);
 
+  // Group failed applications by canonical job URL: 1 row per unique job, showing failed client count & client IDs
+  const groupedFailedJobs = useMemo(() => {
+    const jobGroups = new Map();
+
+    for (const app of failedApps) {
+      const rawUrl = app.job_url || '';
+      const canonicalUrl = cleanCanonicalJobUrl(rawUrl) || rawUrl.trim().toLowerCase();
+      if (!canonicalUrl) continue;
+
+      const normId = (app.applywizz_id || '').toUpperCase().trim();
+      const stoppedBlock = resolveStoppedBlock(app);
+      const shot = extractFailureScreenshot(app);
+
+      // Collect client IDs (handles both single applywizz_id or an array/json of client_ids)
+      const rawCids = Array.isArray(app.client_ids)
+        ? app.client_ids
+        : (typeof app.client_ids === 'string'
+            ? (() => { try { const p = JSON.parse(app.client_ids); return Array.isArray(p) ? p : [app.client_ids]; } catch { return [app.client_ids]; } })()
+            : []);
+      const allAppCids = new Set(rawCids.map((c) => String(c || '').toUpperCase().trim()).filter(Boolean));
+      if (normId) allAppCids.add(normId);
+
+      if (!jobGroups.has(canonicalUrl)) {
+        jobGroups.set(canonicalUrl, {
+          id: app.id,
+          canonical_job_url: canonicalUrl,
+          job_url: app.job_url,
+          company: app.company || 'Workday Tenant',
+          role_title: app.role_title || app.job_title || 'Workday Application',
+          stopped_at_step: stoppedBlock,
+          failure_reason: app.failure_reason || app.error_message || 'wizard_did_not_reach_review',
+          screenshot_url: shot,
+          client_ids: Array.from(allAppCids),
+          ca_emails: new Set(),
+          manager_names: new Set(),
+          sample_app: app,
+        });
+      } else {
+        const existing = jobGroups.get(canonicalUrl);
+        for (const cid of allAppCids) {
+          if (!existing.client_ids.includes(cid)) {
+            existing.client_ids.push(cid);
+          }
+        }
+        if (!existing.screenshot_url && shot) {
+          existing.screenshot_url = shot;
+        }
+      }
+
+      const grp = jobGroups.get(canonicalUrl);
+      const clientMeta = clientToCaMap.get(normId);
+      const caEmail = (app.ca_id || clientMeta?.caEmail || '').toLowerCase().trim();
+      if (caEmail) {
+        grp.ca_emails.add(caEmail);
+        const op = operatorMap.get(caEmail);
+        const mgr = op?.manager_name || (op?.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : 'Ramakrishna');
+        if (mgr) grp.manager_names.add(mgr);
+      }
+    }
+
+    return Array.from(jobGroups.values()).map((g) => ({
+      ...g,
+      failed_client_count: g.client_ids.length,
+      client_ids_json: JSON.stringify(g.client_ids),
+      ca_display: Array.from(g.ca_emails).slice(0, 3).join(', ') + (g.ca_emails.size > 3 ? ` +${g.ca_emails.size - 3}` : ''),
+      manager_display: Array.from(g.manager_names).join(', ') || 'Unassigned',
+    }));
+  }, [failedApps, clientToCaMap, operatorMap]);
+
   // Filtered failed applications for individual audit
   const filteredFailedApps = useMemo(() => {
-    return failedApps.filter((app) => {
-      const stoppedBlock = resolveStoppedBlock(app);
-      const matchesBlock = stoppedBlockFilter === 'All' || stoppedBlock.toLowerCase().includes(stoppedBlockFilter.toLowerCase());
+    return groupedFailedJobs.filter((job) => {
+      const matchesBlock = stoppedBlockFilter === 'All' || job.stopped_at_step.toLowerCase().includes(stoppedBlockFilter.toLowerCase());
       
       const q = errorSearchQuery.toLowerCase().trim();
       if (!q) return matchesBlock;
 
-      const awlId = (app.applywizz_id || '').toLowerCase();
-      const company = (app.company || '').toLowerCase();
-      const reason = (app.failure_reason || '').toLowerCase();
-      const ca = (app.ca_id || clientToCaMap.get((app.applywizz_id || '').toUpperCase())?.caEmail || '').toLowerCase();
+      const clientMatch = job.client_ids.some((cid) => cid.toLowerCase().includes(q));
+      const companyMatch = (job.company || '').toLowerCase().includes(q);
+      const roleMatch = (job.role_title || '').toLowerCase().includes(q);
+      const reasonMatch = (job.failure_reason || '').toLowerCase().includes(q);
+      const caMatch = (job.ca_display || '').toLowerCase().includes(q);
 
-      return matchesBlock && (awlId.includes(q) || company.includes(q) || reason.includes(q) || ca.includes(q));
+      return matchesBlock && (clientMatch || companyMatch || roleMatch || reasonMatch || caMatch);
     });
-  }, [failedApps, stoppedBlockFilter, errorSearchQuery, clientToCaMap]);
+  }, [groupedFailedJobs, stoppedBlockFilter, errorSearchQuery]);
 
   // Handle open in debugger
   const handleOpenDebugger = async (appId) => {
@@ -394,9 +466,10 @@ export default function DeveloperDashboard() {
         !operatorSearch ||
         op.name.toLowerCase().includes(q) ||
         op.email.toLowerCase().includes(q);
+      const mName = (op.manager_name || (op.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : (op.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' ? 'Ramakrishna' : ''))).toLowerCase();
       const matchesManager =
         managerFilter === 'All' ||
-        op.manager_name.toLowerCase().includes(managerFilter.toLowerCase());
+        mName.includes(managerFilter.toLowerCase());
       return matchesSearch && matchesManager;
     });
   }, [operators, operatorSearch, managerFilter]);
@@ -432,13 +505,13 @@ export default function DeveloperDashboard() {
   // Handle stopping autonomous workers
   const handleStopBot = async () => {
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '🛑 Halting all 9 background workers...' });
+    setTriggerToast({ type: 'info', text: '🛑 Halting all background scan & resolve workers immediately...' });
     try {
       const res = await stopAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ All 9 autonomous background workers have been STOPPED and reset to idle.',
+          text: '✓ All background workers and browser contexts STOPPED immediately and set to idle.',
         });
         setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
       } else {
@@ -448,6 +521,52 @@ export default function DeveloperDashboard() {
       setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
     } finally {
       setIsTriggering(false);
+      setTimeout(() => setTriggerToast(null), 8000);
+    }
+  };
+
+  // Handle triggering submission pipeline for all approved applications
+  const handleTriggerSubmissions = async () => {
+    setIsSubmitTriggering(true);
+    setTriggerToast({ type: 'info', text: '🚀 Launching Submissions for all approved applications...' });
+    try {
+      const res = await triggerSubmissionStage();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across workers.',
+        });
+        setBotStatus((prev) => ({ ...prev, isSubmitting: true }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Submission trigger error: ' + (res.error || 'Failed to launch submissions') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Submission trigger error: ' + err.message });
+    } finally {
+      setIsSubmitTriggering(false);
+      setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
+  // Handle hard stopping submission pipeline
+  const handleStopSubmissions = async () => {
+    setIsSubmitTriggering(true);
+    setTriggerToast({ type: 'info', text: '🛑 Halting all submission workers and active browsers immediately...' });
+    try {
+      const res = await stopSubmissionStage();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ All submission workers STOPPED immediately. Active submission browser windows aborted.',
+        });
+        setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop submissions') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
+    } finally {
+      setIsSubmitTriggering(false);
       setTimeout(() => setTriggerToast(null), 8000);
     }
   };
@@ -575,6 +694,109 @@ export default function DeveloperDashboard() {
               title="Force pause background workers"
             >
               Pause
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Stage 3 Submissions Trigger Banner (Placed directly below Scanning Trigger) */}
+      <div style={{
+        background: 'linear-gradient(135deg, #1e1b4b 0%, #0f172a 100%)',
+        border: '1px solid #4338ca',
+        borderRadius: '8px',
+        padding: '1rem 1.5rem',
+        marginBottom: '1.25rem',
+        display: 'flex',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        flexWrap: 'wrap',
+        gap: '1rem',
+        boxShadow: '0 4px 12px rgba(67, 56, 202, 0.2)'
+      }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+          <div style={{
+            width: '42px',
+            height: '42px',
+            borderRadius: '8px',
+            background: botStatus.isSubmitting ? 'rgba(16, 185, 129, 0.15)' : 'rgba(129, 140, 248, 0.15)',
+            border: botStatus.isSubmitting ? '1px solid #10b981' : '1px solid #6366f1',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: botStatus.isSubmitting ? '#34d399' : '#a5b4fc',
+            fontSize: '1.25rem'
+          }}>
+            {botStatus.isSubmitting ? '📤' : '📋'}
+          </div>
+          <div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
+                Autonomous Batch Submissions Engine (Stage 3)
+              </h3>
+              <span style={{
+                fontSize: '0.72rem',
+                fontWeight: 700,
+                padding: '2px 8px',
+                borderRadius: '12px',
+                background: botStatus.isSubmitting ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
+                color: botStatus.isSubmitting ? '#34d399' : '#94a3b8',
+                border: botStatus.isSubmitting ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
+              }}>
+                {botStatus.isSubmitting ? `SUBMITTING • WORKERS ACTIVE` : 'SUBMIT IDLE • WAITING FOR TRIGGER'}
+              </span>
+            </div>
+            <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
+              Submits all applications that reached approved / ready_for_review. Instantly halts browser wizards and freezes terminal logs on stop.
+            </p>
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {botStatus.isSubmitting ? (
+            <button
+              type="button"
+              onClick={handleStopSubmissions}
+              disabled={isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(239, 68, 68, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>🛑 Stop Submissions</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerSubmissions}
+              disabled={isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.35rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
+                color: '#ffffff',
+                fontSize: '0.9rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+            >
+              <span>{isSubmitTriggering ? '🚀 Dispatching Submissions...' : '🚀 Submit All Approved Applications'}</span>
             </button>
           )}
         </div>
@@ -1209,13 +1431,13 @@ export default function DeveloperDashboard() {
             <div className="video-kpi-box highlighted">
               <span className="vkpi-label">BALAJI'S ROSTER</span>
               <span className="vkpi-val">
-                {operators.filter((o) => o.manager_name.toLowerCase().includes('balaji')).length}
+                {operators.filter((o) => (o.manager_name && o.manager_name.toLowerCase().includes('balaji')) || o.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70').length}
               </span>
             </div>
             <div className="video-kpi-box highlighted">
               <span className="vkpi-label">RAMAKRISHNA'S ROSTER</span>
               <span className="vkpi-val">
-                {operators.filter((o) => o.manager_name.toLowerCase().includes('ramakrishna')).length}
+                {operators.filter((o) => (o.manager_name && o.manager_name.toLowerCase().includes('ramakrishna')) || o.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744').length}
               </span>
             </div>
           </div>
@@ -1234,9 +1456,9 @@ export default function DeveloperDashboard() {
               onChange={(e) => setManagerFilter(e.target.value)}
               className="video-select-filter"
             >
-              <option value="All">All Ops Managers</option>
-              <option value="Balaji">Balaji's Team (29 CAs)</option>
-              <option value="Ramakrishna">Ramakrishna's Team (30 CAs)</option>
+              <option value="All">All Ops Managers ({operators.length} CAs)</option>
+              <option value="Balaji">Balaji's Team ({operators.filter((o) => (o.manager_name && o.manager_name.toLowerCase().includes('balaji')) || o.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70').length} CAs)</option>
+              <option value="Ramakrishna">Ramakrishna's Team ({operators.filter((o) => (o.manager_name && o.manager_name.toLowerCase().includes('ramakrishna')) || o.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744').length} CAs)</option>
             </select>
             <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
               Showing {filteredOperators.length} of {operators.length} Career Associates
@@ -1570,112 +1792,124 @@ export default function DeveloperDashboard() {
           </div>
 
           <div className="video-table-container" style={{ overflowX: 'auto', width: '100%' }}>
-            <table className="video-data-table" style={{ tableLayout: 'fixed', width: '100%', minWidth: '980px', borderCollapse: 'collapse' }}>
+            <table className="video-data-table" style={{ tableLayout: 'fixed', width: '100%', minWidth: '1080px', borderCollapse: 'collapse' }}>
               <thead>
                 <tr>
-                  <th style={{ width: '15%' }}>CLIENT AWL-ID</th>
-                  <th style={{ width: '17%' }}>CA &amp; MANAGER</th>
-                  <th style={{ width: '13%' }}>JOB POSTING</th>
-                  <th style={{ width: '16%' }}>STOPPED AT</th>
-                  <th style={{ width: '23%' }}>FAILURE REASON</th>
-                  <th style={{ width: '11%' }}>SCREENSHOT</th>
-                  <th style={{ width: '8%' }}>ACTION</th>
+                  <th style={{ width: '15%' }}>JOB POSTING</th>
+                  <th style={{ width: '9%' }}>FAILED CLIENTS</th>
+                  <th style={{ width: '15%' }}>CLIENT ID (JSON)</th>
+                  <th style={{ width: '14%' }}>CA &amp; MANAGER</th>
+                  <th style={{ width: '13%' }}>STOPPED AT</th>
+                  <th style={{ width: '18%' }}>FAILURE REASON</th>
+                  <th style={{ width: '10%' }}>SCREENSHOT</th>
+                  <th style={{ width: '6%' }}>ACTION</th>
                 </tr>
               </thead>
               <tbody>
                 {filteredFailedApps.length > 0 ? (
-                  filteredFailedApps.map((app) => {
-                    const normId = (app.applywizz_id || '').toUpperCase();
-                    const clientMeta = clientToCaMap.get(normId);
-                    const caEmail = (app.ca_id || clientMeta?.caEmail || 'sana@applywizz.com').toLowerCase().trim();
-                    const op = operatorMap.get(caEmail);
-                    const caName = op?.name || caEmail.split('@')[0];
-                    const mgrName = op?.manager_name || (op?.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : 'Ramakrishna Tejavath');
-                    const stoppedBlock = resolveStoppedBlock(app);
-                    const screenshotUrl = extractFailureScreenshot(app);
+                  filteredFailedApps.map((job) => {
+                    const stoppedBlock = job.stopped_at_step;
+                    const screenshotUrl = job.screenshot_url;
 
                     return (
-                      <tr key={app.id}>
-                        {/* 1. Client AWL-ID & Name */}
+                      <tr key={job.canonical_job_url || job.id}>
+                        {/* 1. Job Posting */}
                         <td>
-                          <div style={{ display: 'flex', flexDirection: 'column' }}>
-                            <a
-                              href={`https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(app.applywizz_id)}`}
-                              target="_blank"
-                              rel="noreferrer"
-                              className="app-id-tag"
-                              style={{ textDecoration: 'none', display: 'inline-block', width: 'fit-content' }}
-                              title="Open client in CRM"
-                            >
-                              {app.applywizz_id || 'UNKNOWN-ID'}
-                            </a>
-                            <span style={{ fontSize: '0.78rem', fontWeight: 'bold', color: '#f8fafc', marginTop: '2px', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {clientMeta?.clientName || app.company || 'Client Profile'}
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                            <span style={{ fontWeight: 'bold', color: '#f8fafc', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={job.role_title}>
+                              {job.role_title}
                             </span>
+                            <span style={{ fontSize: '0.72rem', color: '#94a3b8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={job.company}>
+                              🏢 {job.company}
+                            </span>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '4px', marginTop: '2px' }}>
+                              <a
+                                href={job.job_url}
+                                target="_blank"
+                                rel="noreferrer"
+                                style={{
+                                  background: 'rgba(56, 189, 248, 0.1)',
+                                  border: '1px solid rgba(56, 189, 248, 0.3)',
+                                  color: '#38bdf8',
+                                  padding: '2px 6px',
+                                  borderRadius: '3px',
+                                  fontSize: '0.68rem',
+                                  fontWeight: 'bold',
+                                  textDecoration: 'none',
+                                }}
+                                title={job.job_url}
+                              >
+                                🔗 Open Link ↗
+                              </a>
+                            </div>
                           </div>
                         </td>
 
-                        {/* 2. CA & Manager */}
+                        {/* 2. Failed Client Count */}
+                        <td style={{ textAlign: 'center' }}>
+                          <span
+                            style={{
+                              display: 'inline-flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              minWidth: '38px',
+                              padding: '4px 10px',
+                              borderRadius: '12px',
+                              background: 'rgba(239, 68, 68, 0.15)',
+                              border: '1px solid rgba(239, 68, 68, 0.4)',
+                              color: '#ef4444',
+                              fontWeight: 'bold',
+                              fontSize: '0.85rem',
+                            }}
+                            title={`${job.failed_client_count} client(s) failed on this job posting`}
+                          >
+                            {job.failed_client_count}
+                          </span>
+                        </td>
+
+                        {/* 3. Client IDs in JSON format */}
+                        <td>
+                          <div
+                            style={{
+                              fontFamily: 'JetBrains Mono, monospace',
+                              fontSize: '0.72rem',
+                              color: '#38bdf8',
+                              background: 'rgba(15, 23, 42, 0.6)',
+                              padding: '4px 8px',
+                              borderRadius: '4px',
+                              border: '1px solid rgba(56, 189, 248, 0.2)',
+                              maxHeight: '48px',
+                              overflowY: 'auto',
+                              wordBreak: 'break-all',
+                            }}
+                            title={job.client_ids_json}
+                          >
+                            {job.client_ids_json}
+                          </div>
+                        </td>
+
+                        {/* 4. CA & Manager */}
                         <td>
                           <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
-                            <span style={{ fontWeight: 'bold', color: '#f1f5f9', fontSize: '0.8rem', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {caName}
-                            </span>
-                            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.72rem', color: '#38bdf8', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                              {caEmail}
+                            <span style={{ fontFamily: 'JetBrains Mono, monospace', fontSize: '0.72rem', color: '#cbd5e1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }} title={job.ca_display}>
+                              {job.ca_display || 'Multiple CAs'}
                             </span>
                             <span style={{
                               padding: '1px 6px',
                               borderRadius: '3px',
-                              fontSize: '0.7rem',
+                              fontSize: '0.68rem',
                               fontWeight: 'bold',
                               width: 'fit-content',
-                              background: mgrName.toLowerCase().includes('balaji') ? 'rgba(245, 158, 11, 0.15)' : 'rgba(16, 185, 129, 0.15)',
-                              color: mgrName.toLowerCase().includes('balaji') ? '#f59e0b' : '#10b981',
-                              border: mgrName.toLowerCase().includes('balaji') ? '1px solid rgba(245, 158, 11, 0.3)' : '1px solid rgba(16, 185, 129, 0.3)',
+                              background: 'rgba(245, 158, 11, 0.15)',
+                              color: '#f59e0b',
+                              border: '1px solid rgba(245, 158, 11, 0.3)',
                             }}>
-                              {mgrName}
+                              {job.manager_display}
                             </span>
                           </div>
                         </td>
 
-                        {/* 3. Compact Clickable Job Link */}
-                        <td>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                            <a
-                              href={app.job_url}
-                              target="_blank"
-                              rel="noreferrer"
-                              style={{
-                                background: 'rgba(56, 189, 248, 0.1)',
-                                border: '1px solid rgba(56, 189, 248, 0.3)',
-                                color: '#38bdf8',
-                                padding: '3px 8px',
-                                borderRadius: '4px',
-                                fontSize: '0.72rem',
-                                fontWeight: 'bold',
-                                textDecoration: 'none',
-                                display: 'inline-flex',
-                                alignItems: 'center',
-                                gap: '3px',
-                                whiteSpace: 'nowrap',
-                              }}
-                              title={app.job_url}
-                            >
-                              🔗 Open Job ↗
-                            </a>
-                            <button
-                              type="button"
-                              onClick={() => navigator.clipboard.writeText(app.job_url)}
-                              style={{ background: 'transparent', border: 'none', color: '#64748b', cursor: 'pointer', fontSize: '0.75rem', padding: '2px' }}
-                              title="Copy full job URL"
-                            >
-                              📋
-                            </button>
-                          </div>
-                        </td>
-
-                        {/* 4. Stopped At Block */}
+                        {/* 5. Stopped At Block */}
                         <td>
                           <span style={{
                             padding: '3px 6px',
@@ -1695,10 +1929,10 @@ export default function DeveloperDashboard() {
                           </span>
                         </td>
 
-                        {/* 5. Failure Reason */}
+                        {/* 6. Failure Reason */}
                         <td>
                           <span style={{
-                            fontSize: '0.76rem',
+                            fontSize: '0.74rem',
                             color: '#cbd5e1',
                             display: '-webkit-box',
                             WebkitLineClamp: 2,
@@ -1706,18 +1940,18 @@ export default function DeveloperDashboard() {
                             overflow: 'hidden',
                             fontFamily: 'monospace',
                             lineHeight: '1.25',
-                          }} title={app.failure_reason || 'wizard_did_not_reach_review'}>
-                            {app.failure_reason || 'wizard_did_not_reach_review'}
+                          }} title={job.failure_reason}>
+                            {job.failure_reason}
                           </span>
                         </td>
 
-                        {/* 6. Failure Screenshot URL */}
+                        {/* 7. Failure Screenshot URL */}
                         <td>
                           {screenshotUrl ? (
                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                               <button
                                 type="button"
-                                onClick={() => setSelectedErrorLog(app)}
+                                onClick={() => setSelectedErrorLog(job.sample_app || job)}
                                 style={{
                                   background: 'rgba(16, 185, 129, 0.15)',
                                   border: '1px solid rgba(16, 185, 129, 0.4)',
@@ -1759,11 +1993,11 @@ export default function DeveloperDashboard() {
                           )}
                         </td>
 
-                        {/* 7. Action: Inspect Log */}
+                        {/* 8. Action: Inspect Log */}
                         <td>
                           <button
                             type="button"
-                            onClick={() => setSelectedErrorLog(app)}
+                            onClick={() => setSelectedErrorLog(job.sample_app || job)}
                             style={{
                               background: 'rgba(59, 130, 246, 0.15)',
                               border: '1px solid rgba(59, 130, 246, 0.4)',
@@ -1785,7 +2019,7 @@ export default function DeveloperDashboard() {
                   })
                 ) : (
                   <tr>
-                    <td colSpan={7} style={{ textAlign: 'center', padding: '2rem', color: '#10b981' }}>
+                    <td colSpan={8} style={{ textAlign: 'center', padding: '2rem', color: '#10b981' }}>
                       {failedApps.length === 0 ? '✓ No failed applications recorded in this period.' : 'No errors match the current search or block filter.'}
                     </td>
                   </tr>

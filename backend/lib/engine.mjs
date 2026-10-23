@@ -1957,13 +1957,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
             const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
             const cleanAwl = String(profile._applyWizzId || profile?.applywizz_id || 'AWL').trim().toUpperCase();
             const shotUrl = await uploadStorageScreenshot(
-              'application-successes',
+              'submitted-applications',
               `${cleanAwl}_${Date.now()}_review_and_submit.jpg`,
               reviewBuf
             );
             if (shotUrl) {
               profile._submissionScreenshotUrl = shotUrl;
-              console.log(`  📸 Review & Submit screenshot uploaded to Supabase Storage: ${shotUrl}`);
+              console.log(`  📸 Review screenshot uploaded to submitted-applications: ${shotUrl}`);
             }
           } catch (uploadErr) {
             console.log(`  ⚠️ Note uploading review screenshot: ${uploadErr.message}`);
@@ -2008,39 +2008,50 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-  // Explicitly wait for Workday confirmation screen to render
+  // Explicitly wait for Workday confirmation screen / popup to render
   try {
     await page.waitForFunction(() => {
       const text = document.body?.innerText || '';
-      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
-             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
-    }, { timeout: 10000 });
+      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|you.*have.*successfully.*submitted/i.test(text) ||
+             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="submit-confirmation-dialog"]');
+    }, { timeout: 12000 });
   } catch {}
-  await page.waitForTimeout(1500);
+  // Rule: wait after submit for popup/modal to appear cleanly
+  await page.waitForTimeout(2000);
 
   const confirmationFound = await page.evaluate(() => {
     const text = document.body?.innerText || '';
-    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
-           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
+    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|you.*have.*successfully.*submitted/i.test(text) ||
+           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="submit-confirmation-dialog"]');
   });
 
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
   }
 
-  // Capture real browser screenshot of the confirmation page
+  // Capture authentic browser screenshot of the confirmation page/modal & upload directly to bucket
   try {
     if (page && !page.isClosed()) {
-      const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+      const buf = await page.screenshot({ type: 'png', timeout: 8000 }).catch(() => null);
       if (buf) {
         profile._submissionScreenshotBuffer = buf;
+        const cleanId = String(profile?.applywizz_id || profile?.id || 'CLIENT').trim().toUpperCase();
+        const taskId = profile?._taskId || profile?._distributionId || Date.now();
+        const filename = `${cleanId}_${taskId}_submitted_${Date.now()}.png`;
+        const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+        const uploadedUrl = await uploadStorageScreenshot('submitted-applications', filename, buf, 'image/png');
+        if (uploadedUrl) {
+          profile._submissionScreenshotUrl = uploadedUrl;
+          console.log(`  ☁️ Confirmation proof uploaded to submitted-applications: ${uploadedUrl}`);
+        }
       }
     }
-  } catch {}
+  } catch (shotErr) {
+    console.warn('  ⚠️ Confirmation screenshot upload error:', shotErr?.message);
+  }
 
   if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');
-    await takeScreenshot(page, 'workday-submitted');
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';

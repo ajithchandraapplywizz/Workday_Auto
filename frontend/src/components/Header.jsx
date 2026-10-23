@@ -72,7 +72,6 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
                 { id: 'admin', label: 'Admin' },
                 { id: 'manager', label: 'Manager' },
                 { id: 'ca', label: 'CA' },
-                { id: 'operator', label: 'Operator' },
               ].map((r) => (
                 <button
                   key={r.id}

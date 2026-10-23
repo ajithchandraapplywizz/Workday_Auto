@@ -907,6 +907,13 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
                   mergeClientField('location_preferences', ac.location_preferences);
                   mergeClientField('job_role_preferences', ac.job_role_preferences);
                   mergeClientField('work_auth_details', ac.work_auth_details);
+                  // Always prefer live Apply Wizz API resume URL over any stale DB cache
+                  const liveResumeUrl = String(ai.resume_url || ai.resume_path || ac.resume_url || ac.resume_path || '').trim();
+                  if (liveResumeUrl) {
+                    data.additional_information.resume_url = liveResumeUrl;
+                    data.additional_information.resume_path = liveResumeUrl;
+                    data.client.resume_url = liveResumeUrl;
+                  }
                   // Use API callable_phone only if Supabase mobile_number was empty
                   if (!stored.mobile_number && ac.callable_phone && ac.callable_phone !== '+') {
                     data.additional_information.primary_phone = ac.callable_phone;

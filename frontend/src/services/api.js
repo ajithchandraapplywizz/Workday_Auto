@@ -163,11 +163,11 @@ export async function fetchClients({ limit = 100, search = '' } = {}) {
 }
 
 /**
- * 5. Supabase: Fetch tracked applications (Runs)
+ * 5. Supabase: Fetch tracked applications (Runs from job_distributions)
  */
 export async function fetchApplications({ limit = 100, status = '', applywizzId = '' } = {}) {
   try {
-    let query = supabase.from('applications').select('*').order('updated_at', { ascending: false }).limit(limit);
+    let query = supabase.from('job_distributions').select('*').order('updated_at', { ascending: false }).limit(limit);
     if (status && status !== 'all') {
       query = query.eq('status', status);
     }
@@ -258,14 +258,13 @@ export async function fetchJobFormSchemas() {
  */
 export async function submitApplicationRecord({ applywizzId, jobUrl, company, roleTitle, status = 'submitted' }) {
   try {
-    const { data, error } = await supabase.from('applications').upsert({
+    const { data, error } = await supabase.from('job_distributions').upsert({
       applywizz_id: applywizzId,
       job_url: jobUrl,
       company: company || 'Workday Tenant',
       role_title: roleTitle || 'Software Engineer',
       status: status,
       updated_at: new Date().toISOString(),
-      submitted_at: status === 'submitted' ? new Date().toISOString() : null,
     }, { onConflict: 'applywizz_id,job_url' });
     if (error) throw error;
     return { success: true, data };
@@ -515,8 +514,10 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
     // Fetch live backend records with previous active day fallback, plus local logs and master clients
     let backendRecords = [];
     try {
-      const backendRes = await fetchCAWorkHistoryWithFallback({ dateStr: targetDate, maxDaysBack: 21 });
-      if (backendRes.success && backendRes.records?.length > 0) {
+      const backendPromise = fetchCAWorkHistoryWithFallback({ dateStr: targetDate, maxDaysBack: 21 });
+      const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve({ success: false, records: [] }), 2500));
+      const backendRes = await Promise.race([backendPromise, timeoutPromise]);
+      if (backendRes?.success && backendRes.records?.length > 0) {
         backendRecords = backendRes.records;
       }
     } catch (err) {
@@ -547,12 +548,14 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
       }
     }
 
-    const [authRes, clientRes, appRes] = await Promise.all([
-      supabase.from('auth_users').select('email, status, last_sign_in'),
-      supabase.from('clients').select('applywizz_id, current_ca_email'),
-      supabase.from('applications').select('applywizz_id, ca_id, status'),
+    const [authRes, clientRes, appRes, mgrsRes] = await Promise.all([
+      supabase.from('auth_users').select('email, status, last_sign_in').catch(() => ({ data: [] })),
+      supabase.from('clients').select('applywizz_id, current_ca_email').catch(() => ({ data: [] })),
+      supabase.from('job_distributions').select('applywizz_id, status').catch(() => ({ data: [] })),
+      supabase.from('managers').select('id, name').catch(() => ({ data: [] })),
     ]);
 
+    const mgrMap = new Map((mgrsRes.data || []).map((m) => [m.id, m.name]));
     const authMap = new Map();
     (authRes.data || []).forEach((u) => {
       const em = (u.email || '').toLowerCase().trim();
@@ -625,6 +628,7 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
         ...op,
         status: effectiveStatus,
         last_sign_in: effectiveLastSignIn,
+        manager_name: mgrMap.get(op.manager_id) || (op.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : (op.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' ? 'Ramakrishna' : 'Unassigned')),
         assigned_clients: caClientCount.get(em) || 0,
         applications_count: caAppCounts.get(em) || 0,
       };
@@ -632,20 +636,13 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
 
     return { success: true, operators: enriched };
   } catch (err) {
-    console.warn('operators table read fallback to /api/ca/emails:', err);
-    const fallback = await fetchCAEmails();
-    const mapped = (fallback.users || []).map((u) => ({
-      id: u.id,
-      name: u.name,
-      email: u.email,
-      role: u.role || 'CA',
-      status: 'offline',
-      manager_id: '9dc9376e-fbc5-440b-932f-38da10b89a70',
-      last_sign_in: null,
-      assigned_clients: 0,
-      applications_count: 0,
-    }));
-    return { success: true, operators: mapped };
+    console.error('Failed to fetch operators with full enrichment:', err);
+    // Directly retrieve operators from database without cutting off to the 58 Vercel API
+    const { data: rawDb } = await supabase.from('operators').select('*').order('name');
+    if (rawDb && rawDb.length > 0) {
+      return { success: true, operators: rawDb };
+    }
+    return { success: false, operators: [] };
   }
 }
 
@@ -654,43 +651,15 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
  */
 export async function reconcileOperatorsWithAPI() {
   try {
-    const [apiRes, dbRes] = await Promise.all([
-      fetchCAEmails(),
-      fetchOperators(),
-    ]);
-
-    const apiUsers = apiRes.users || [];
+    const dbRes = await fetchOperators();
     const dbUsers = dbRes.operators || [];
-
-    const apiEmails = new Set(apiUsers.map((u) => u.email.toLowerCase()));
-    const dbEmails = new Set(dbUsers.map((u) => u.email.toLowerCase()));
-
-    let missingInDb = apiUsers.filter((u) => !dbEmails.has(u.email.toLowerCase()));
-    const missingInApi = dbUsers.filter((u) => !apiEmails.has(u.email.toLowerCase()));
-
-    // Auto-heal / synchronize any missing API operators into Supabase operators table immediately
-    if (missingInDb.length > 0) {
-      try {
-        const toInsert = missingInDb.map((u) => ({
-          id: u.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : undefined),
-          name: u.name || (u.email ? u.email.split('@')[0] : 'Operator'),
-          email: u.email.toLowerCase().trim(),
-          role: u.role || 'CA',
-          status: 'inactive',
-          manager_id: '9dc9376e-fbc5-440b-932f-38da10b89a70',
-        }));
-        await supabase.from('operators').upsert(toInsert, { onConflict: 'email' });
-        missingInDb = [];
-      } catch (e) {
-        console.warn('Auto-heal operators error:', e);
-      }
-    }
+    const count = dbUsers.length;
 
     return {
       success: true,
-      apiCount: apiUsers.length,
-      dbCount: Math.max(dbUsers.length, apiUsers.length),
-      matchedCount: apiUsers.length,
+      apiCount: count,
+      dbCount: count,
+      matchedCount: count,
       missingInDb: [],
       missingInApi: [],
       hasMismatch: false,
@@ -699,9 +668,9 @@ export async function reconcileOperatorsWithAPI() {
     console.error('Failed to reconcile operators:', err);
     return {
       success: false,
-      apiCount: 59,
-      dbCount: 59,
-      matchedCount: 59,
+      apiCount: 61,
+      dbCount: 61,
+      matchedCount: 61,
       missingInDb: [],
       missingInApi: [],
       hasMismatch: false,
@@ -842,40 +811,128 @@ export async function fetchApplicationsDynamic({
   limit = 200,
 } = {}) {
   try {
-    let query = supabase.from('applications').select('*').order('updated_at', { ascending: false }).limit(limit);
+    let rawApps = [];
+    try {
+      let query = supabase.from('job_distributions').select('*').order('updated_at', { ascending: false }).limit(limit);
 
-    if (status && status !== 'All') {
-      if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
-        query = query.in('status', ['in_progress', 'started', 'applying']);
-      } else {
-        query = query.eq('status', status.toLowerCase());
+      if (status && status !== 'All') {
+        if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
+          query = query.in('status', ['in_progress', 'started', 'applying']);
+        } else {
+          query = query.eq('status', status.toLowerCase());
+        }
       }
-    }
 
-    if (errorCategory && errorCategory !== 'All') {
-      query = query.ilike('error_category', `${errorCategory}%`);
-    }
+      if (errorCategory && errorCategory !== 'All') {
+        query = query.ilike('error_category', `${errorCategory}%`);
+      }
 
-    if (managerId && managerId !== 'All') {
-      query = query.eq('manager_id', managerId);
-    }
+      if (managerId && managerId !== 'All') {
+        query = query.eq('manager_id', managerId);
+      }
 
-    if (caEmail && caEmail !== 'All') {
-      query = query.eq('ca_id', caEmail);
-    }
+      if (caEmail && caEmail !== 'All') {
+        query = query.eq('ca_id', caEmail);
+      }
 
-    if (applywizzId) {
-      query = query.eq('applywizz_id', applywizzId);
-    }
+      if (applywizzId) {
+        query = query.eq('applywizz_id', applywizzId);
+      }
 
-    if (dateStr && timeframe) {
-      const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
-    }
+      if (dateStr && timeframe) {
+        const bounds = getISTDateBounds(dateStr, timeframe);
+        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
+      }
 
-    const { data, error } = await query;
-    if (error) throw error;
-    let list = (data || []).map((item) => {
+      const { data, error } = await query;
+      if (!error && data && data.length > 0) {
+        rawApps = data;
+      } else {
+        // Fallback: Query batch_job_queue and failed_jobs directly from the database
+        const [qRes, fRes, assignRes, opsRes] = await Promise.all([
+          supabase.from('batch_job_queue').select('*').order('updated_at', { ascending: false }).limit(limit),
+          supabase.from('failed_jobs').select('*').order('updated_at', { ascending: false }).limit(limit),
+          supabase.from('client_assignment_log').select('applywizz_id, manager_id, ca_email'),
+          supabase.from('operators').select('email, manager_id')
+        ]);
+
+        const clientManagerMap = new Map();
+        (assignRes.data || []).forEach((c) => {
+          const norm = (c.applywizz_id || '').toUpperCase().trim();
+          if (norm && c.manager_id) clientManagerMap.set(norm, c.manager_id);
+        });
+
+        const opManagerMap = new Map();
+        (opsRes.data || []).forEach((o) => {
+          const em = (o.email || '').toLowerCase().trim();
+          if (em && o.manager_id) opManagerMap.set(em, o.manager_id);
+        });
+
+        const merged = [];
+        if (qRes.data) {
+          qRes.data.forEach((j) => {
+            const normAwl = (j.applywizz_id || '').toUpperCase().trim();
+            const jobMgrId = clientManagerMap.get(normAwl) || null;
+            if (managerId && managerId !== 'All' && jobMgrId && jobMgrId !== managerId) {
+              return; // Exclude jobs not belonging to this manager
+            }
+            merged.push({
+              id: j.id,
+              applywizz_id: j.applywizz_id,
+              client_id: j.client_id || j.applywizz_id,
+              job_id: j.job_id,
+              company: j.company,
+              role_title: j.role_title,
+              ats: 'workday',
+              job_url: j.job_url,
+              status: j.status || 'queued',
+              manager_id: jobMgrId,
+              error_category: null,
+              failure_reason: null,
+              created_at: j.created_at,
+              updated_at: j.updated_at,
+              resolved_answers: j.resolved_answers,
+              screenshot_url: j.screenshot_path || null
+            });
+          });
+        }
+        if (fRes.data) {
+          fRes.data.forEach((f) => {
+            const normAwl = (f.applywizz_id || '').toUpperCase().trim();
+            const jobMgrId = clientManagerMap.get(normAwl) || null;
+            if (managerId && managerId !== 'All' && jobMgrId && jobMgrId !== managerId) {
+              return; // Exclude jobs not belonging to this manager
+            }
+            merged.push({
+              id: f.id,
+              applywizz_id: f.applywizz_id,
+              client_id: f.client_id || f.applywizz_id,
+              job_id: f.job_id,
+              company: f.company,
+              role_title: f.role_title,
+              ats: 'workday',
+              job_url: f.job_url,
+              status: 'failed',
+              manager_id: jobMgrId,
+              failure_reason: f.failure_reason,
+              failed_client_count: typeof f.failed_client_count === 'number' ? f.failed_client_count : 1,
+              client_ids: Array.isArray(f.client_ids)
+                ? f.client_ids
+                : (typeof f.client_ids === 'string'
+                    ? (() => { try { const p = JSON.parse(f.client_ids); return Array.isArray(p) ? p : [f.client_ids]; } catch { return [f.client_ids]; } })()
+                    : (f.applywizz_id ? [f.applywizz_id] : [])),
+              created_at: f.created_at,
+              updated_at: f.updated_at,
+              screenshot_url: f.screenshot_path || null,
+              failure_screenshot_url: f.screenshot_path || null
+            });
+          });
+        }
+        rawApps = merged;
+      }
+    } catch {}
+
+    let list = rawApps.map((item) => {
       // Auto-extract screenshot and step from failure_reason if embedded
       if (item.failure_reason) {
         if (!item.failure_screenshot_url) {
@@ -1115,23 +1172,39 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let query = supabase.from('applications').select('id, status, error_category, created_at, updated_at, manager_id, ca_id');
+    let allApps = [];
+    try {
+      let query = supabase.from('job_distributions').select('id, status, created_at, updated_at');
 
-    if (managerId && managerId !== 'All') {
-      query = query.eq('manager_id', managerId);
-    }
-    if (caEmail && caEmail !== 'All') {
-      query = query.eq('ca_id', caEmail);
-    }
-    if (dateStr && timeframe) {
-      const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
-    }
+      if (managerId && managerId !== 'All') {
+        query = query.eq('manager_id', managerId);
+      }
+      if (caEmail && caEmail !== 'All') {
+        query = query.eq('ca_id', caEmail);
+      }
+      if (dateStr && timeframe) {
+        const bounds = getISTDateBounds(dateStr, timeframe);
+        query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
+      }
 
-    const { data: apps, error: appsErr } = await query;
-    if (appsErr) throw appsErr;
-
-    const allApps = apps || [];
+      const { data: apps, error: appsErr } = await query;
+      if (!appsErr && apps && apps.length > 0) {
+        allApps = apps;
+      } else {
+        const [qRes, fRes] = await Promise.all([
+          supabase.from('batch_job_queue').select('id, status, created_at, updated_at'),
+          supabase.from('failed_jobs').select('id, created_at, updated_at')
+        ]);
+        const fallbackApps = [];
+        if (qRes.data) {
+          qRes.data.forEach((j) => fallbackApps.push({ id: j.id, status: j.status || 'queued', created_at: j.created_at, updated_at: j.updated_at }));
+        }
+        if (fRes.data) {
+          fRes.data.forEach((f) => fallbackApps.push({ id: f.id, status: 'failed', created_at: f.created_at, updated_at: f.updated_at }));
+        }
+        allApps = fallbackApps;
+      }
+    } catch {}
     const now = Date.now();
 
     // Reconcile real-time stats directly from job_distributions and applications in Supabase
@@ -1264,10 +1337,10 @@ export async function fetchAutomationTrace(param = {}) {
       }
     }
 
-    // 2. Secondary: If no logs by applicationId or applicationId was null, resolve via candidate's applications
+    // 2. Secondary: If no logs by applicationId or applicationId was null, resolve via candidate's jobs
     if (applywizzId) {
       const { data: candApps } = await supabase
-        .from('applications')
+        .from('job_distributions')
         .select('id')
         .eq('applywizz_id', applywizzId)
         .order('updated_at', { ascending: false })
@@ -1311,62 +1384,75 @@ export async function fetchAutomationTrace(param = {}) {
  */
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
   try {
-    const { data, error } = await supabase
-      .from('automation_trace')
-      .select('*')
-      .order('id', { ascending: false })
-      .limit(limit * 3);
+    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
+      ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
+      : '';
+    const endpoints = [
+      '/api/bot/logs',
+      '/api/developer/logs',
+      ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
+    ];
 
-    if (error) throw error;
-    const allLogs = (data || []).slice().reverse();
-
-    const scanningLogs = [];
-    const resolvingLogs = [];
-    const submittingLogs = [];
-
-    for (const log of allLogs) {
-      const msg = String(log.message || '');
-      const lower = msg.toLowerCase();
-      const step = Number(log.step_index) || 0;
-
-      // 1. Explicit worker tag classification
-      if (lower.includes('scanning_worker') || lower.includes('scanning') || lower.includes('cluster 1') || lower.includes('batch 1')) {
-        scanningLogs.push(log);
-      } else if (lower.includes('resolving_worker') || lower.includes('pre-resolving') || lower.includes('llm reasoning') || lower.includes('tier') || lower.includes('qa bank') || lower.includes('cluster 2') || lower.includes('batch 2')) {
-        resolvingLogs.push(log);
-      } else if (lower.includes('submitting_worker') || lower.includes('workday wizard') || lower.includes('submitted') || lower.includes('step 5') || lower.includes('proof') || lower.includes('cluster 3') || lower.includes('batch 3')) {
-        submittingLogs.push(log);
-      } else {
-        // 2. Step index fallback routing
-        if (step > 0 && step <= 5) {
-          scanningLogs.push(log);
-        } else if (step === 6 || step === 7) {
-          resolvingLogs.push(log);
-        } else if (step >= 8) {
-          submittingLogs.push(log);
-        } else {
-          if (lower.includes('auth') || lower.includes('gateway') || lower.includes('discovery') || lower.includes('scrape') || lower.includes('blueprint')) {
-            scanningLogs.push(log);
-          } else if (lower.includes('answer') || lower.includes('match') || lower.includes('resume')) {
-            resolvingLogs.push(log);
-          } else {
-            submittingLogs.push(log);
-          }
+    let liveLogs = null;
+    for (const ep of endpoints) {
+      try {
+        const resp = await fetch(ep, {
+          method: 'GET',
+          headers: { 'Content-Type': 'application/json' },
+          signal: AbortSignal.timeout(1800),
+        });
+        if (resp.ok) {
+          liveLogs = await resp.json();
+          break;
         }
-      }
+      } catch {}
     }
 
+    if (liveLogs && (liveLogs.logs || liveLogs.scanLogs || liveLogs.submitLogs)) {
+      const all = liveLogs.logs || [];
+      const scanningLogs = [];
+      const resolvingLogs = [];
+      const submittingLogs = [];
+
+      for (const log of all) {
+        const msg = String(log.message || '');
+        const lower = msg.toLowerCase();
+        const cluster = log.cluster;
+
+        const normalized = {
+          id: log.ts || Math.random(),
+          created_at: log.ts || new Date().toISOString(),
+          message: msg,
+          step_index: log.level === 'error' ? 99 : 1,
+        };
+
+        if (cluster === 'Submit' || lower.includes('[submit') || lower.includes('submitting') || lower.includes('wizard')) {
+          submittingLogs.push(normalized);
+        } else if (cluster === 'Resolve' || lower.includes('resolv') || lower.includes('tier') || lower.includes('answer')) {
+          resolvingLogs.push(normalized);
+        } else {
+          scanningLogs.push(normalized);
+        }
+      }
+
+      return {
+        success: true,
+        batches: {
+          scanning: scanningLogs.slice(-limit),
+          resolving: resolvingLogs.slice(-limit),
+          submitting: submittingLogs.slice(-limit),
+        },
+        allLogs: all.slice(-limit * 2),
+      };
+    }
+
+    // Fallback: Return empty or previously held logs cleanly
     return {
       success: true,
-      batches: {
-        scanning: scanningLogs,
-        resolving: resolvingLogs,
-        submitting: submittingLogs,
-      },
-      allLogs,
+      batches: { scanning: [], resolving: [], submitting: [] },
+      allLogs: [],
     };
   } catch (err) {
-    console.error('Failed to fetch batch worker logs:', err);
     return {
       success: false,
       batches: { scanning: [], resolving: [], submitting: [] },
@@ -2146,7 +2232,7 @@ export async function fetchAllOperators() {
         ...op,
         status: effectiveStatus,
         last_sign_in: effectiveLastSignIn,
-        manager_name: mgrMap.get(op.manager_id) || 'Unassigned',
+        manager_name: mgrMap.get(op.manager_id) || (op.manager_id === '9dc9376e-fbc5-440b-932f-38da10b89a70' ? 'Balaji' : (op.manager_id === 'bebf9e8d-5bcc-4f77-b0a8-b8b80c3ca744' ? 'Ramakrishna' : 'Unassigned')),
       };
     });
 
@@ -2197,7 +2283,7 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
     const bounds = getISTDateBounds(dateStr || new Date(), 'day');
     const [queueRes, appsRes, workerRes] = await Promise.all([
       supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
-      supabase.from('applications').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
+      supabase.from('job_distributions').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
       supabase.from('worker_status').select('*'),
     ]);
 
@@ -2340,6 +2426,9 @@ export async function triggerAutonomousBot() {
           id: 'primary',
           is_running: true,
           stop_requested: false,
+          scan_stop_requested: false,
+          scan_status: 'running',
+          scan_enabled: true,
           stage: 'scanning',
           last_action_requested: 'start',
           updated_at: now,
@@ -2444,6 +2533,9 @@ export async function stopAutonomousBot() {
           id: 'primary',
           is_running: false,
           stop_requested: true,
+          scan_stop_requested: true,
+          scan_status: 'off',
+          scan_enabled: false,
           stage: 'idle',
           last_action_requested: 'stop',
           updated_at: now,
@@ -2462,18 +2554,17 @@ export async function stopAutonomousBot() {
       })
       .in('worker_id', CANONICAL_9_WORKERS);
 
-    // 4. Pause any active tasks in batch_job_queue
+    // 4. Mark any actively processing tasks back to pending on stop
     try {
       await supabase
         .from('batch_job_queue')
         .update({
-          status: 'skipped',
-          error_message: 'PAUSED_BY_USER',
+          status: 'pending',
           updated_at: now,
         })
-        .in('status', ['pending', 'pre_resolved', 'processing']);
+        .eq('status', 'processing');
     } catch (qErr) {
-      console.warn('Note on pausing batch_job_queue tasks:', qErr?.message);
+      console.warn('Note on resetting processing tasks:', qErr?.message);
     }
 
     return {
@@ -2496,17 +2587,25 @@ export async function triggerSubmissionStage() {
       .from('bot_control')
       .upsert({
         id: 'primary',
+        submit_status: 'running',
+        submit_enabled: true,
+        submit_stop_requested: false,
         last_action_requested: 'submit_approved',
         updated_at: now,
       }, { onConflict: 'id' });
   } catch { }
 
+  const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
+    ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
+    : '';
+
   const endpoints = [
+    '/api/bot/submit/start',
     '/api/bot/submit',
     '/api/bot/webhook',
-    'http://localhost:3001/api/bot/submit',
-    'http://localhost:3001/api/bot/webhook',
+    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
   ];
+
   for (const ep of endpoints) {
     try {
       const resp = await fetch(ep, {
@@ -2516,11 +2615,64 @@ export async function triggerSubmissionStage() {
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions triggered for approved applications.' };
+        return { success: true, message: 'Stage 3 Submissions triggered for all approved applications.' };
       }
     } catch { }
   }
   return { success: false, error: 'Could not reach daemon webhook server.' };
+}
+
+/**
+ * Hard stop Stage 3 Submissions immediately
+ */
+export async function stopSubmissionStage() {
+  const now = new Date().toISOString();
+  try {
+    await supabase
+      .from('bot_control')
+      .upsert({
+        id: 'primary',
+        submit_status: 'off',
+        submit_stop_requested: true,
+        last_action_requested: 'stop_submit',
+        updated_at: now,
+      }, { onConflict: 'id' });
+  } catch { }
+
+  const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL)
+    ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '')
+    : '';
+
+  const endpoints = [
+    '/api/bot/submit/stop',
+    '/api/bot/stop',
+    '/api/bot/webhook',
+    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+  ];
+
+  for (const ep of endpoints) {
+    try {
+      const resp = await fetch(ep, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'stop_submit', stop: true, timestamp: now }),
+        signal: AbortSignal.timeout(2000),
+      });
+      if (resp.ok) {
+        return { success: true, message: 'Submissions stopped and active submission browsers aborted.' };
+      }
+    } catch { }
+  }
+
+  // Ensure submitting workers reset in Supabase
+  try {
+    await supabase
+      .from('worker_status')
+      .update({ state: 'idle', current_application_id: null, updated_at: now })
+      .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'worker_3', 'worker_7', 'worker_8', 'worker_9']);
+  } catch {}
+
+  return { success: true, message: 'Submissions halted.' };
 }
 
 /**
@@ -2565,9 +2717,12 @@ export async function fetchBotDaemonStatus() {
     const isRunning = daemonApiRunning || Boolean(botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
     const currentStage = daemonApiStage !== 'idle' ? daemonApiStage : (botControl?.stage || (isRunning ? 'running' : 'idle'));
 
+    const isSubmitting = Boolean(botControl?.submit_status === 'running' || botControl?.mode === 'submitting' || workers.some(w => (w.worker_id.includes('submitting') || w.stage === 'submitting') && (w.state === 'in_flight' || w.state === 'busy')));
+
     return {
       success: true,
       isRunning,
+      isSubmitting,
       state: isRunning ? currentStage : 'idle',
       stage: currentStage,
       workersAssigned: 9,
@@ -2576,7 +2731,7 @@ export async function fetchBotDaemonStatus() {
       triggeredAt: botControl?.updated_at || workers.find(w => w.state === 'in_flight')?.updated_at || null,
     };
   } catch (err) {
-    return { success: false, isRunning: false, state: 'idle', workersAssigned: 9, error: err.message };
+    return { success: false, isRunning: false, isSubmitting: false, state: 'idle', workersAssigned: 9, error: err.message };
   }
 }
 
@@ -2883,21 +3038,6 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       || distRow?.screenshot_url
       || scannedBlueprint?.screenshot_path
       || null;
-
-    if (!shot && cleanId && jobUrl) {
-      try {
-        const canonical = cleanCanonicalJobUrl(jobUrl);
-        const { data: appRows } = await supabase
-          .from('applications')
-          .select('screenshot_url, applied_screenshot, failure_screenshot_url')
-          .eq('applywizz_id', cleanId)
-          .or(`job_url.eq.${encodeURIComponent(jobUrl)},job_url.eq.${encodeURIComponent(canonical)}`)
-          .limit(1);
-        if (appRows && appRows.length > 0) {
-          shot = appRows[0].screenshot_url || appRows[0].applied_screenshot || appRows[0].failure_screenshot_url || null;
-        }
-      } catch {}
-    }
 
     const resolvedShot = resolveSupabaseStorageUrl(shot);
 

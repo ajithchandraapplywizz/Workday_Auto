@@ -8,6 +8,7 @@ import { normalizeLabel } from './qaStore.mjs';
 import { fuzzyScore, tokenSetRatio } from './fields.mjs';
 import { alignAnswerToWorkdayOptions, stripWorkdayQuestionLabel, resolveCompanyEmail } from './applyWizzClient.mjs';
 import { trace } from './trace.mjs';
+import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
 
 let envLoaded = false;
 
@@ -17,11 +18,36 @@ export function loadLocalEnvOnce() {
   const moduleDir = dirname(fileURLToPath(import.meta.url));
   const candidates = [resolve(process.cwd(), '.env'), resolve(moduleDir, '..', '.env')];
   const envPath = candidates.find((path) => existsSync(path));
-  if (!envPath) return;
-  for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-    const match = line.trim().match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/);
-    if (!match || process.env[match[1]]) continue;
-    process.env[match[1]] = match[2].trim().replace(/^['"](.*)['"]$/, '$1');
+  if (envPath) {
+    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+      const match = line.trim().match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/);
+      if (!match || process.env[match[1]]) continue;
+      process.env[match[1]] = match[2].trim().replace(/^['"](.*)['"]$/, '$1');
+    }
+  }
+
+  // Cloud Container Fallback Defaults (prevents crash on Railway/Docker if .env is missing)
+  if (!process.env.SUPABASE_URL) {
+    process.env.SUPABASE_URL = 'https://yuppxmwrztbirsnzgfjh.supabase.co';
+  }
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1cHB4bXdyenRiaXJzbnpnZmpoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjY2MDY5MSwiZXhwIjoyMTA4MjM2NjkxfQ.rzyqJKwuMW81IFAEtGsKOPSyjlxuQTXNsUYHrC6wUGg';
+  }
+  if (!process.env.DEFAULT_LOGIN_CODE) {
+    process.env.DEFAULT_LOGIN_CODE = '000000';
+  }
+  if (!process.env.AUTH_SECRET_ENC_KEY) {
+    process.env.AUTH_SECRET_ENC_KEY = 'f6943eaa285bc8acd8fe5cf9bf1e11217f3be5ccb81a757c8feaabf4a4dfdc1c';
+  }
+  if (!process.env.AUTH_JWT_SECRET) {
+    process.env.AUTH_JWT_SECRET = 'efeb54b23e09bdc28d146051407a23c82e3fe24caaed19779a3315eca8c1e380';
+  }
+
+  if (!process.env.OPENROUTER_MODEL) {
+    process.env.OPENROUTER_MODEL = 'openai/gpt-4o-mini';
+  }
+  if (!process.env.ZOHO_MAIL_READER_HOST) {
+    process.env.ZOHO_MAIL_READER_HOST = 'https://zoho-mail-reader.onrender.com';
   }
 }
 
@@ -340,19 +366,12 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
 
       const errText = await res.text().catch(() => '');
       console.warn(`[Supabase Storage] Upload to ${bucketName} failed (${res.status}): ${errText}`);
-      if (bucketName !== 'application-failures') {
-        console.log(`[Supabase Storage] Retrying upload to application-failures fallback bucket...`);
-        return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
-      }
       return null;
     }
     const publicUrl = `${url}/storage/v1/object/public/${bucketName}/${filename}`;
     return publicUrl;
   } catch (err) {
     console.warn(`[Supabase Storage] Upload exception: ${err.message}`);
-    if (bucketName !== 'application-failures') {
-      return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
-    }
     return null;
   }
 }
@@ -467,7 +486,7 @@ export async function getApplicationForTask(applywizzId, jobUrl = '') {
     let q = `?applywizz_id=eq.${encode(applywizzId)}`;
     if (cleanUrl) q += `&job_url=eq.${encode(cleanUrl)}`;
     q += '&select=id,status,job_url,company,role_title&order=updated_at.desc&limit=1';
-    const rows = await request('applications', { query: q });
+    const rows = await request('job_distributions', { query: q });
     return rows?.[0] || null;
   } catch {
     return null;
@@ -484,7 +503,7 @@ export async function hasClientAppliedToCompany(applywizzId, companyName) {
   if (!isSupabaseConfigured() || !applywizzId || !companyName) return false;
   try {
     const cleanCompany = String(companyName).trim();
-    const res = await request('applications', {
+    const res = await request('job_distributions', {
       query: `?applywizz_id=eq.${encode(applywizzId)}&company=ilike.${encode(cleanCompany)}&select=id,status&limit=10`,
     });
     if (Array.isArray(res) && res.length > 0) {
@@ -830,7 +849,7 @@ export function canonicalJobPostingUrl(rawUrl = '') {
  * @param {string} jobUrl
  * @returns {Promise<object|null>}
  */
-export async function loadJobFormSchema(jobUrl, { maxAgeHours = 24 } = {}) {
+export async function loadJobFormSchema(jobUrl, { maxAgeHours = 24, runStartedAt = null } = {}) {
   if (!isSupabaseConfigured() || !jobUrl) return null;
   const canonical = canonicalJobPostingUrl(jobUrl);
   try {
@@ -839,6 +858,22 @@ export async function loadJobFormSchema(jobUrl, { maxAgeHours = 24 } = {}) {
     });
     const schema = rows?.[0] || null;
     if (!schema) return null;
+
+    // Rescan scoping check: schemas older than current run must not be reused
+    if (!runStartedAt) {
+      try {
+        const bcRows = await request('bot_control', { query: '?id=eq.primary&select=scan_run_started_at&limit=1' });
+        runStartedAt = bcRows?.[0]?.scan_run_started_at || null;
+      } catch { }
+    }
+    if (runStartedAt && schema.created_at) {
+      const schemaTime = new Date(schema.created_at).getTime();
+      const runTime = new Date(runStartedAt).getTime();
+      if (schemaTime < runTime) {
+        console.log(`  ℹ️  Cached form schema for ${canonical} was created before current run (${schema.created_at} < ${new Date(runTime).toISOString()}). Expiring cache for rescan.`);
+        return null;
+      }
+    }
     // 24-hour TTL check: if schema was created more than 24h ago, expire it
     if (schema.created_at) {
       const ageHours = (Date.now() - new Date(schema.created_at).getTime()) / (1000 * 60 * 60);
@@ -1029,7 +1064,7 @@ export async function getTotalApplicationCountForCandidates(candidateIds = []) {
   if (!isSupabaseConfigured() || !Array.isArray(candidateIds) || candidateIds.length === 0) return 0;
   try {
     const [apps, queueTasks] = await Promise.all([
-      request('applications', {
+      request('job_distributions', {
         query: `?applywizz_id=in.(${candidateIds.map(encodeURIComponent).join(',')})&select=id,applywizz_id,job_url`,
       }),
       request('batch_job_queue', {
@@ -1271,82 +1306,52 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
 
 /**
  * Update worker state in Supabase worker_status table.
- * State can be 'idle', 'in_flight', 'applying'.
+ * Strictly 10 shared canonical workers (worker_1 through worker_10).
  */
-export const CANONICAL_9_WORKERS = new Set([
-  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
-  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3',
-  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3',
-]);
+const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || Array.from({ length: WORKER_COUNT || 2 }, (_, i) => `worker_${i + 1}`);
 
-const WORKER_STAGE_MAP = {
-  scanning_worker_1: { stage: 'scanning', botName: 'Scanning Worker 1' },
-  scanning_worker_2: { stage: 'scanning', botName: 'Scanning Worker 2' },
-  scanning_worker_3: { stage: 'scanning', botName: 'Scanning Worker 3' },
-  resolving_worker_1: { stage: 'resolving', botName: 'Resolving Worker 1' },
-  resolving_worker_2: { stage: 'resolving', botName: 'Resolving Worker 2' },
-  resolving_worker_3: { stage: 'resolving', botName: 'Resolving Worker 3' },
-  submitting_worker_1: { stage: 'submitting', botName: 'Submitting Worker 1' },
-  submitting_worker_2: { stage: 'submitting', botName: 'Submitting Worker 2' },
-  submitting_worker_3: { stage: 'submitting', botName: 'Submitting Worker 3' },
-};
+export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
+export const CANONICAL_9_WORKERS = CANONICAL_10_WORKERS; // Backward compatibility alias
+
+const WORKER_STAGE_MAP = {};
+CANONICAL_IDS.forEach((id, i) => {
+  WORKER_STAGE_MAP[id] = { stage: 'idle', botName: `Worker ${i + 1}` };
+});
 
 /**
- * Normalizes any worker ID alias to one of the 9 canonical database worker IDs.
+ * Normalizes any worker ID alias to one of the canonical database worker IDs (worker_1 .. worker_N).
  */
 export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
   if (!workerId) return null;
   let cleanId = String(workerId).trim().toLowerCase();
 
-  if (CANONICAL_9_WORKERS.has(cleanId)) return cleanId;
+  if (CANONICAL_10_WORKERS.has(cleanId)) return cleanId;
 
-  // Handle explicit stage aliases
-  if (cleanId.includes('scan')) {
-    if (cleanId.endsWith('1')) return 'scanning_worker_1';
-    if (cleanId.endsWith('2')) return 'scanning_worker_2';
-    if (cleanId.endsWith('3')) return 'scanning_worker_3';
-    return 'scanning_worker_1';
-  }
-  if (cleanId.includes('resolve')) {
-    if (cleanId.endsWith('1')) return 'resolving_worker_1';
-    if (cleanId.endsWith('2')) return 'resolving_worker_2';
-    if (cleanId.endsWith('3')) return 'resolving_worker_3';
-    return 'resolving_worker_1';
-  }
-  if (cleanId.includes('submit')) {
-    if (cleanId.endsWith('1')) return 'submitting_worker_1';
-    if (cleanId.endsWith('2')) return 'submitting_worker_2';
-    if (cleanId.endsWith('3')) return 'submitting_worker_3';
-    return 'submitting_worker_1';
-  }
-
-  // Handle generic worker-1..3 using defaultStage context
-  const numMatch = cleanId.match(/[123]/);
-  const num = numMatch ? numMatch[0] : '1';
-  if (defaultStage === 'resolving') return `resolving_worker_${num}`;
-  if (defaultStage === 'submitting') return `submitting_worker_${num}`;
-  return `scanning_worker_${num}`;
+  const numMatch = cleanId.match(/\d+/);
+  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), CANONICAL_IDS.length) : 1;
+  return `worker_${num}`;
 }
 
 /**
- * Update worker state in Supabase worker_status table across the 9 canonical rows.
+ * Update worker state in Supabase worker_status table across the 10 canonical rows.
  */
 export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null, stage = null, bot_name = null } = {}) {
   if (!isSupabaseConfigured() || !workerId) return false;
   try {
     const cleanId = normalizeCanonicalWorkerId(workerId, stage);
-    if (!cleanId || !CANONICAL_9_WORKERS.has(cleanId)) {
+    if (!cleanId || !CANONICAL_10_WORKERS.has(cleanId)) {
       return false;
     }
 
-    const validState = (state === 'in_flight' || state === 'busy' || state === 'running') ? 'in_flight' : 'idle';
+    const validState = (state === 'in_flight' || state === 'busy' || state === 'running' || state === 'applying') ? 'in_flight' : 'idle';
+    const num = cleanId.replace('worker_', '');
     const meta = WORKER_STAGE_MAP[cleanId] || {};
 
     const body = {
       state: validState,
       current_application_id: current_application_id || null,
       stage: stage || meta.stage || 'idle',
-      bot_name: bot_name || meta.botName || cleanId,
+      bot_name: bot_name || meta.botName || `Worker ${num}`,
       updated_at: new Date().toISOString(),
     };
 
@@ -1378,7 +1383,7 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
 }
 
 /**
- * Fetch all 9 worker rows from worker_status table.
+ * Fetch all 10 worker rows from worker_status table.
  */
 export async function getWorkerStatuses() {
   if (!isSupabaseConfigured()) return [];
@@ -1407,7 +1412,7 @@ export async function getWorkerStatuses() {
 }
 
 /**
- * Ensures strictly the 9 canonical worker rows exist in worker_status.
+ * Ensures strictly the 10 canonical worker rows exist in worker_status.
  * Prunes any obsolete/polluting rows.
  */
 export async function ensureCanonicalWorkers() {
@@ -1417,7 +1422,7 @@ export async function ensureCanonicalWorkers() {
     const currentIds = new Set(current.map(r => r.worker_id));
     const now = new Date().toISOString();
 
-    for (const id of CANONICAL_9_WORKERS) {
+    for (const id of CANONICAL_10_WORKERS) {
       if (!currentIds.has(id)) {
         const meta = WORKER_STAGE_MAP[id] || {};
         try {
@@ -1450,7 +1455,7 @@ export async function ensureCanonicalWorkers() {
 
     // Delete any non-canonical rows
     for (const r of current) {
-      if (!CANONICAL_9_WORKERS.has(r.worker_id)) {
+      if (!CANONICAL_10_WORKERS.has(r.worker_id)) {
         await request('worker_status', {
           method: 'DELETE',
           query: `?worker_id=eq.${encodeURIComponent(r.worker_id)}`,
@@ -1460,31 +1465,90 @@ export async function ensureCanonicalWorkers() {
   } catch {}
 }
 
+const memoryBotControl = {
+  id: 'primary',
+  mode: 'idle',
+  stage: 'idle',
+  scan_enabled: false,
+  scan_status: 'off',
+  scan_stop_requested: false,
+  submit_enabled: false,
+  submit_status: 'off',
+  submit_stop_requested: false,
+  scan_message: null,
+  refusal_reason: null,
+  is_running: false,
+  is_paused: false,
+  stop_requested: false,
+  trigger_requested: false,
+  active_worker_count: 0,
+  current_action: 'Idle',
+  updated_at: new Date().toISOString(),
+};
+
 /**
- * Fetch the global bot_control primary row.
+ * Fetch the global bot_control primary row (supports R3 mode lock & R11 toggle columns).
  */
 export async function getBotControl() {
-  if (!isSupabaseConfigured()) return null;
+  if (!isSupabaseConfigured()) return { ...memoryBotControl };
   try {
     const rows = await request('bot_control', {
       method: 'GET',
       query: '?id=eq.primary&limit=1',
     });
-    return rows?.[0] || null;
+    const dbRow = rows?.[0] || null;
+    if (dbRow) {
+      Object.assign(memoryBotControl, dbRow);
+      // Synchronize mode and stage
+      if (dbRow.mode) {
+        memoryBotControl.mode = dbRow.mode;
+        memoryBotControl.stage = dbRow.mode;
+      } else if (dbRow.stage) {
+        memoryBotControl.mode = dbRow.stage;
+      }
+      // Derive scan/submit status if not explicit
+      if (memoryBotControl.mode === 'scanning') {
+        memoryBotControl.scan_enabled = true;
+        memoryBotControl.scan_status = 'running';
+        memoryBotControl.submit_status = 'off';
+        memoryBotControl.submit_enabled = false;
+      } else if (memoryBotControl.mode === 'submitting') {
+        memoryBotControl.submit_enabled = true;
+        memoryBotControl.submit_status = 'running';
+        memoryBotControl.scan_status = 'off';
+        memoryBotControl.scan_enabled = false;
+      } else if (memoryBotControl.mode === 'idle') {
+        if (memoryBotControl.scan_status === 'running') memoryBotControl.scan_status = 'off';
+        if (memoryBotControl.submit_status === 'running') memoryBotControl.submit_status = 'off';
+        memoryBotControl.scan_enabled = false;
+        memoryBotControl.submit_enabled = false;
+      }
+    }
+    return { ...memoryBotControl };
   } catch {
-    return null;
+    return { ...memoryBotControl };
   }
 }
 
 /**
- * Update the global bot_control table state.
+ * Update the global bot_control table state (R3 mode lock & R11 independent toggles).
  */
 export async function updateBotControl(patch = {}) {
-  if (!isSupabaseConfigured()) return false;
+  const now = new Date().toISOString();
+  Object.assign(memoryBotControl, patch, { updated_at: now });
+  if (patch.mode) {
+    memoryBotControl.stage = patch.mode;
+  } else if (patch.stage) {
+    memoryBotControl.mode = patch.stage;
+  }
+
+  if (!isSupabaseConfigured()) return true;
+
+  // Try updating with full patch
   try {
     const body = {
       ...patch,
-      updated_at: new Date().toISOString(),
+      updated_at: now,
     };
     await request('bot_control', {
       method: 'PATCH',
@@ -1493,9 +1557,90 @@ export async function updateBotControl(patch = {}) {
       body,
     });
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    // If table doesn't have the new columns yet, fallback to patching standard known columns
+    try {
+      const fallbackBody = {
+        stage: memoryBotControl.stage || memoryBotControl.mode || 'idle',
+        is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
+        is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
+        stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested ?? memoryBotControl.scan_stop_requested ?? memoryBotControl.submit_stop_requested),
+        active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
+        current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
+        updated_at: now,
+      };
+      await request('bot_control', {
+        method: 'PATCH',
+        query: '?id=eq.primary',
+        prefer: 'return=minimal',
+        body: fallbackBody,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
+}
+
+const memoryWorkerControls = {
+  scan: { key: 'scan', enabled: false, status: 'off', stop_requested: false, updated_by: 'system', updated_at: new Date().toISOString() },
+  submit: { key: 'submit', enabled: false, status: 'off', stop_requested: false, updated_by: 'system', updated_at: new Date().toISOString() },
+};
+
+/**
+ * Fetch all worker controls (scan and submit) synced with R11 state.
+ */
+export async function getWorkerControls() {
+  const bc = await getBotControl().catch(() => null);
+  return {
+    scan: {
+      key: 'scan',
+      enabled: Boolean(bc?.scan_enabled ?? memoryWorkerControls.scan.enabled),
+      status: bc?.scan_status || memoryWorkerControls.scan.status || 'off',
+      stop_requested: Boolean(bc?.scan_stop_requested ?? memoryWorkerControls.scan.stop_requested),
+      updated_at: bc?.updated_at || memoryWorkerControls.scan.updated_at,
+    },
+    submit: {
+      key: 'submit',
+      enabled: Boolean(bc?.submit_enabled ?? memoryWorkerControls.submit.enabled),
+      status: bc?.submit_status || memoryWorkerControls.submit.status || 'off',
+      stop_requested: Boolean(bc?.submit_stop_requested ?? memoryWorkerControls.submit.stop_requested),
+      updated_at: bc?.updated_at || memoryWorkerControls.submit.updated_at,
+    },
+  };
+}
+
+/**
+ * Update worker control row for key ('scan' | 'submit')
+ */
+export async function updateWorkerControl(key, patch = {}) {
+  if (!key) return false;
+  const now = new Date().toISOString();
+  if (memoryWorkerControls[key]) {
+    memoryWorkerControls[key] = {
+      ...memoryWorkerControls[key],
+      ...patch,
+      updated_at: now,
+    };
+  }
+  const bcPatch = {};
+  if (key === 'scan') {
+    if ('enabled' in patch) {
+      bcPatch.scan_enabled = patch.enabled;
+      bcPatch.scan_status = patch.enabled ? 'running' : 'off';
+    }
+    if ('status' in patch) bcPatch.scan_status = patch.status;
+    if ('stop_requested' in patch) bcPatch.scan_stop_requested = patch.stop_requested;
+  } else if (key === 'submit') {
+    if ('enabled' in patch) {
+      bcPatch.submit_enabled = patch.enabled;
+      bcPatch.submit_status = patch.enabled ? 'running' : 'off';
+    }
+    if ('status' in patch) bcPatch.submit_status = patch.status;
+    if ('stop_requested' in patch) bcPatch.submit_stop_requested = patch.stop_requested;
+  }
+  await updateBotControl(bcPatch).catch(() => {});
+  return true;
 }
 
 /**
@@ -1673,38 +1818,8 @@ export async function getActiveOperators() {
 const candidateAppTraceCache = new Map();
 
 export async function logAutomationTrace({ applicationId, applywizzId, stepIndex = 0, message = '' } = {}) {
-  if (!isSupabaseConfigured() || !message) return false;
-  try {
-    let resolvedAppId = applicationId || null;
-    if (!resolvedAppId && applywizzId) {
-      resolvedAppId = candidateAppTraceCache.get(applywizzId) || null;
-      if (!resolvedAppId) {
-        const app = await getApplicationForTask(applywizzId);
-        if (app?.id) {
-          resolvedAppId = app.id;
-          candidateAppTraceCache.set(applywizzId, resolvedAppId);
-        }
-      }
-    }
-
-    const row = {
-      step_index: stepIndex,
-      message: String(message),
-      ts: new Date().toISOString(),
-    };
-    if (resolvedAppId) {
-      row.application_id = resolvedAppId;
-    }
-
-    await request('automation_trace', {
-      method: 'POST',
-      prefer: 'return=minimal',
-      body: row,
-    }).catch(() => {});
-    return true;
-  } catch {
-    return false;
-  }
+  // automation_trace table was dropped in migration 026
+  return true;
 }
 
 // ==============================================================================
@@ -1718,6 +1833,7 @@ export async function saveScannedJob({
   applywizzId = null,
   jobId = null,
   jobUrl = '',
+  scanRunId = null,
   company = '',
   roleTitle = '',
   scrapedQuestions = [],
@@ -1731,6 +1847,14 @@ export async function saveScannedJob({
   if (!isSupabaseConfigured() || !jobUrl) return null;
   const cleanUrl = String(jobUrl).trim();
   const questionsArr = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
+
+  if (!scanRunId) {
+    try {
+      const bcRows = await request('bot_control', { query: '?id=eq.primary&select=scan_run_id&limit=1' });
+      scanRunId = bcRows?.[0]?.scan_run_id || null;
+    } catch { }
+  }
+
   const payload = {
     applywizz_id: applywizzId ? String(applywizzId).trim().toUpperCase() : null,
     job_id: jobId ? String(jobId).trim() : null,
@@ -1746,8 +1870,22 @@ export async function saveScannedJob({
     scanned_at: new Date().toISOString(),
     updated_at: new Date().toISOString(),
   };
+  let resolvedClientCount = parseInt(clientCount, 10) || 0;
+  if (resolvedClientCount <= 1) {
+    try {
+      const qRows = await request('batch_job_queue', {
+        method: 'GET',
+        query: `?job_url=eq.${encode(cleanUrl)}&select=applywizz_id`,
+      });
+      if (Array.isArray(qRows) && qRows.length > 0) {
+        resolvedClientCount = Math.max(resolvedClientCount, qRows.length);
+      }
+    } catch {}
+  }
+  if (resolvedClientCount < 1) resolvedClientCount = 1;
+
   if (screenshotPath) payload.screenshot_path = screenshotPath;
-  if (clientCount) payload.client_count = clientCount;
+  payload.client_count = resolvedClientCount;
 
   let savedRow = null;
   try {
@@ -1763,10 +1901,12 @@ export async function saveScannedJob({
     }
   } catch (err) {
     console.log(`   ⚠️ [scanned_jobs] Initial upsert error: ${err.message?.slice(0, 140)}`);
+    delete payload.scan_run_id;
     if (err?.message?.includes('PGRST204') || err?.message?.includes('column')) {
-      delete payload.screenshot_path;
-      delete payload.client_count;
-      delete payload.resolved_answers;
+      const match = err.message.match(/'([^']+)' column/);
+      if (match && match[1]) {
+        delete payload[match[1]];
+      }
     }
   }
 
@@ -2170,15 +2310,16 @@ export async function completeSubmittedTask({
       console.log(`   ⚠️ [job_distributions] completeSubmittedTask error: ${err?.message?.slice(0, 140)}`);
     });
 
-    // Also update applications table
-    await request('applications', {
+    // Also update submission_tasks table
+    await request('submission_tasks', {
       method: 'PATCH',
       query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
       prefer: 'return=minimal',
       body: {
         status: 'submitted',
-        screenshot_url: screenshotUrl || null,
-        failure_screenshot_url: screenshotUrl || null,
+        application_submitted_screenshot_url: screenshotUrl || null,
+        screenshot_path: screenshotUrl || null,
+        completed_at: now,
         updated_at: now,
       },
     }).catch(() => {});
@@ -2494,6 +2635,12 @@ export async function recordJobDistributions({
     const readyReviewCount = rows.filter(r => r.status === 'ready_for_review').length;
     const needsAnswersCount = rows.filter(r => r.status === 'needs_answers').length;
 
+    // Note: Ready for review rows in job_distributions are automatically mirrored into submission_tasks
+    // with their respective distribution_id linked via Postgres trigger `trg_job_distributions_insert_submission_task`
+    if (readyReviewCount > 0) {
+      console.log(`   📋 [submission_tasks] Trigger mirrored ${readyReviewCount} application(s) into submission_tasks as 'ready_for_review'.`);
+    }
+
     console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);
     console.log(`   • Company & Role:       ${cleanCompany} — ${cleanRole}`);
     console.log(`   • Job URL:              ${jobUrl}`);
@@ -2565,7 +2712,8 @@ export async function purgeOrphanedJobDistributions() {
 /**
  * Record a failed job application into the failed_jobs table.
  * Captures applywizz_id, job_id, job_url, company, role_title,
- * failure_reason, failed_at_step (e.g. My Experience, Auth Gateway), and screenshot_path.
+ * failure_reason, failed_at_step (e.g. My Experience, Auth Gateway), screenshot_path, failure_screenshot_url,
+ * and client_count.
  */
 export async function recordFailedJob({
   applywizzId = '',
@@ -2577,6 +2725,11 @@ export async function recordFailedJob({
   failedAtStep = 'Unknown',
   screenshotPath = '',
   resolvedAnswers = [],
+  clientCount = null,
+  failedClientCount = null,
+  failed_client_count = null,
+  clientIds = null,
+  client_ids = null,
 } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
   try {
@@ -2585,9 +2738,30 @@ export async function recordFailedJob({
     const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
     const cleanStep = String(failedAtStep || 'Unknown').trim();
     const now = new Date().toISOString();
-    const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
+    let countNum = parseInt(failed_client_count || failedClientCount || clientCount, 10) || 0;
+    let finalClientIds = Array.isArray(client_ids) && client_ids.length ? client_ids : (Array.isArray(clientIds) && clientIds.length ? clientIds : []);
 
-    // 1. Insert into failed_jobs table with resolved_answers and screenshot_path
+    // If client count is missing or only 1, query batch_job_queue by job_url to get the actual client count and candidate IDs
+    if (countNum <= 1 || finalClientIds.length <= 1) {
+      try {
+        const queueMatches = await request('batch_job_queue', {
+          method: 'GET',
+          query: `?job_url=eq.${encode(cleanUrl)}&select=applywizz_id`,
+        });
+        if (Array.isArray(queueMatches) && queueMatches.length > 0) {
+          const matchedIds = [...new Set(queueMatches.map(r => String(r.applywizz_id || '').trim().toUpperCase()).filter(Boolean))];
+          if (matchedIds.length > 0) {
+            countNum = Math.max(countNum, matchedIds.length);
+            finalClientIds = matchedIds;
+          }
+        }
+      } catch (qErr) {
+        // Continue with available count
+      }
+    }
+    if (countNum < 1) countNum = 1;
+    if (!finalClientIds.length) finalClientIds = [cleanId];
+    const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
     let insertOk = false;
     try {
       await request('failed_jobs', {
@@ -2601,19 +2775,18 @@ export async function recordFailedJob({
           role_title: roleTitle ? String(roleTitle).trim() : null,
           failure_reason: cleanReason,
           failed_at_step: cleanStep,
-          error_step: cleanStep,
           screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
-          failure_screenshot_url: screenshotPath ? String(screenshotPath).trim() : null,
-          detailed_dom_reason: cleanReason,
           resolved_answers: answersArr,
+          failed_client_count: countNum,
+          client_ids: finalClientIds,
           created_at: now,
           updated_at: now,
         },
       });
       insertOk = true;
     } catch (err) {
-      console.log(`   ⚠️ [failed_jobs] Initial insert error: ${err.message?.slice(0, 140)}`);
-      // Fallback if resolved_answers or failed_at_step column is not yet present
+      console.log(`   ⚠️ [failed_jobs] Primary insert notice: ${err.message?.slice(0, 140)}`);
+      // Clean fallback omitting extra metadata if needed
       await request('failed_jobs', {
         method: 'POST',
         prefer: 'return=minimal',
@@ -2624,7 +2797,10 @@ export async function recordFailedJob({
           company: company ? String(company).trim() : null,
           role_title: roleTitle ? String(roleTitle).trim() : null,
           failure_reason: `${cleanReason} (stopped at ${cleanStep})`,
+          failed_at_step: cleanStep,
           screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
+          failed_client_count: countNum,
+          client_ids: finalClientIds,
           created_at: now,
           updated_at: now,
         },

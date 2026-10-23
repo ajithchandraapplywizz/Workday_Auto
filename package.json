@@ -19,6 +19,7 @@
     "apply": "node backend/cli.mjs apply",
     "batch": "node backend/cli.mjs batch",
     "queue": "node backend/cli.mjs queue",
+    "submit": "node backend/scripts/queue_daemon.mjs submit",
     "status": "node backend/cli.mjs status",
     "test": "node --test backend/tests/clientQaRecord.test.mjs backend/tests/jobFormCache.test.mjs backend/tests/csvJobParser.test.mjs",
     "backend:dev": "node backend/cli.mjs",

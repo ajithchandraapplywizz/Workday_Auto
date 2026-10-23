@@ -131,7 +131,18 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
         throw lastError;
       }
 
-      return res.json();
+      const data = res.json();
+      if (data && data.usage) {
+        if (typeof globalThis !== 'undefined' && globalThis.__activeWorkerProfile) {
+          const prof = globalThis.__activeWorkerProfile;
+          prof._tokenUsage = prof._tokenUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+          prof._tokenUsage.prompt_tokens += (data.usage.prompt_tokens || 0);
+          prof._tokenUsage.completion_tokens += (data.usage.completion_tokens || 0);
+          prof._tokenUsage.total_tokens += (data.usage.total_tokens || 0);
+          prof._llmModel = model;
+        }
+      }
+      return data;
     } catch (err) {
       lastError = err;
       if (/429|502|503|quota|rate limit|not found/i.test(err.message)) {
