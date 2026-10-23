@@ -1160,10 +1160,10 @@ export async function runClusterBatchRunner({
           scanRunId,
         });
       } catch (err) {
-        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
+        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.jobUrl || cluster.canonicalKey}): ${err.message}`);
         res = {
           workerId,
-          jobUrl: cluster.canonicalUrl,
+          jobUrl: cluster.jobUrl || cluster.canonicalKey,
           company: cluster.company,
           role: cluster.roleTitle,
           total: cluster.clientCount,

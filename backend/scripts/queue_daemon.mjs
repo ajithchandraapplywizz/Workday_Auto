@@ -1563,7 +1563,18 @@ async function initOnStartup() {
   try {
     await ensureCanonicalWorkers();
     await resetAllWorkersIdle();
-    await syncBotControlState({ stage: 'idle', is_running: false, active_worker_count: 0 });
+    await syncBotControlState({
+      stage: 'idle',
+      mode: 'idle',
+      is_running: false,
+      scan_status: 'off',
+      scan_enabled: false,
+      submit_status: 'off',
+      submit_enabled: false,
+      last_action_requested: null,
+      active_worker_count: 0,
+      current_action: 'Idle',
+    });
     console.log(`[DAEMON] worker_status table initialized: strictly canonical rows set to idle.`);
     await recoverInterruptedSubmissionTasks();
     const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');

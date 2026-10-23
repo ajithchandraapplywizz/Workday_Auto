@@ -678,34 +678,34 @@ export async function reconcileOperatorsWithAPI() {
   }
 }
 
-export const CANONICAL_9_WORKERS = [
+export const CANONICAL_2_WORKERS = [
   'scanning_worker_1',
   'scanning_worker_2',
-  'scanning_worker_3',
   'resolving_worker_1',
   'resolving_worker_2',
-  'resolving_worker_3',
   'submitting_worker_1',
   'submitting_worker_2',
-  'submitting_worker_3',
 ];
 
+// Backwards compatibility alias
+export const CANONICAL_9_WORKERS = CANONICAL_2_WORKERS;
+
 /**
- * 16. Supabase: Fetch 9-Worker Pipeline Status
- * Strictly tracks the 9 canonical workers across Scanning, Resolving, and Submitting stages.
+ * 16. Supabase: Fetch 2-Worker Pipeline Status
+ * Tracks the 2 shared workers across Scanning, Resolving, and Submitting stages.
  */
 export async function fetchWorkerStatuses() {
   try {
     const { data, error } = await supabase
       .from('worker_status')
       .select('*')
-      .in('worker_id', CANONICAL_9_WORKERS)
+      .in('worker_id', CANONICAL_2_WORKERS)
       .order('worker_id');
     if (error) throw error;
     const rows = data || [];
     const now = Date.now();
 
-    const workers = CANONICAL_9_WORKERS.map((id) => {
+    const workers = CANONICAL_2_WORKERS.map((id) => {
       const match = rows.find((r) => r.worker_id === id);
       const last = match ? new Date(match.updated_at || 0).getTime() : 0;
       const isFresh = last && (now - last < 5 * 60 * 1000);
@@ -2498,7 +2498,7 @@ export async function triggerAutonomousBot() {
 
     return {
       success: true,
-      message: 'Autonomous 9-Worker Pipeline successfully triggered across Scanning, Resolving, and Submitting stages!',
+      message: 'Autonomous 2-Worker Pipeline (Scan & Resolve) successfully triggered across Worker 1 and Worker 2!',
     };
   } catch (err) {
     console.error('Failed to trigger autonomous bot:', err);
@@ -2507,9 +2507,9 @@ export async function triggerAutonomousBot() {
 }
 
 /**
- * Instantly stop/pause the autonomous 9-worker pipeline.
+ * Instantly stop/pause the autonomous 2-worker pipeline.
  * 1. Signals bot_control (is_running: false, stop_requested: true).
- * 2. Sets all 9 canonical worker rows to idle in Supabase worker_status.
+ * 2. Sets canonical worker rows to idle in Supabase worker_status.
  * 3. Pauses pending/processing queue items so all workers halt immediately.
  * 4. Calls local HTTP /api/bot/stop if daemon is running.
  */
@@ -2558,7 +2558,7 @@ export async function stopAutonomousBot() {
       console.warn('Note on updating bot_control stop state:', bcErr?.message);
     }
 
-    // 3. Mark strictly the 9 canonical worker rows idle in Supabase worker_status
+    // 3. Mark canonical worker rows idle in Supabase worker_status
     await supabase
       .from('worker_status')
       .update({
@@ -2566,7 +2566,7 @@ export async function stopAutonomousBot() {
         current_application_id: null,
         updated_at: now,
       })
-      .in('worker_id', CANONICAL_9_WORKERS);
+      .in('worker_id', CANONICAL_2_WORKERS);
 
     // 4. Mark any actively processing tasks back to pending on stop
     try {
@@ -2583,7 +2583,7 @@ export async function stopAutonomousBot() {
 
     return {
       success: true,
-      message: 'All 9 workers have been stopped and reset to idle.',
+      message: 'All 2 workers have been stopped and reset to idle.',
     };
   } catch (err) {
     console.error('Failed to stop autonomous bot:', err);
@@ -2728,7 +2728,7 @@ export async function fetchBotDaemonStatus() {
       supabase
         .from('worker_status')
         .select('*')
-        .in('worker_id', CANONICAL_9_WORKERS)
+        .in('worker_id', CANONICAL_2_WORKERS)
         .order('worker_id'),
       supabase
         .from('bot_control')

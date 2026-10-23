@@ -12,22 +12,22 @@
 import { updateWorkerStatus, recordJobDistributions, getActiveCaCandidateIds } from './supabaseClient.mjs';
 import { loadProfile } from './planner.mjs';
 import { preResolveClientAnswersDetailed } from './jobFormCache.mjs';
-import { isGlobalStopRequested } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isScanStopRequested } from './browserLifecycle.mjs';
 import { getCleanSupabaseEnv } from './clusterBatchRunner.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 
-const RESOLVER_WORKER_IDS = ['resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3'];
+const RESOLVER_WORKER_IDS = ['resolving_worker_1', 'resolving_worker_2'];
 
 /**
- * Run Stage 2: 3-Worker Resolving Pool
+ * Run Stage 2: 2-Worker Resolving Pool
  */
 export async function runResolvingWorkerPool(options = {}) {
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`⚡ [STAGE 2: RESOLVER] Launching 3 Resolving Workers for Candidate Answers...`);
+  console.log(`⚡ [STAGE 2: RESOLVER] Launching 2 Resolving Workers for Candidate Answers...`);
   console.log(`   Workers: ${RESOLVER_WORKER_IDS.join(', ')}`);
   console.log(`${'═'.repeat(72)}\n`);
 
-  if (isGlobalStopRequested()) {
+  if (isGlobalStopRequested() || isScanStopRequested()) {
     console.log(`🛑 [STAGE 2] Stop requested. Aborting resolving pool.`);
     return { success: false, aborted: true };
   }
@@ -59,7 +59,7 @@ export async function runResolvingWorkerPool(options = {}) {
 
   async function resolverLoop(workerId, slotIndex) {
     while (jobIndex < scannedJobs.length) {
-      if (isGlobalStopRequested()) {
+      if (isGlobalStopRequested() || isScanStopRequested()) {
         console.log(`🛑 [${workerId}] Stop active! Halting resolver loop.`);
         break;
       }
@@ -109,7 +109,7 @@ export async function runResolvingWorkerPool(options = {}) {
       };
 
       for (const awlId of candidatesToProcess) {
-        if (isGlobalStopRequested()) break;
+        if (isGlobalStopRequested() || isScanStopRequested()) break;
         try {
           const profile = await loadProfile(null, { applywizzId: awlId });
           if (profile) {

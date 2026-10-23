@@ -489,16 +489,25 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
-  // Handle triggering autonomous 9-worker pipeline
+  // Handle triggering autonomous 2-worker pipeline (Scan & Resolve)
   const handleTriggerBot = async () => {
+    if (botStatus.isSubmitting) {
+      setTriggerToast({
+        type: 'error',
+        text: '⚠️ Cannot start Scan & Resolve: Submissions are actively running! Stop Submissions first.',
+      });
+      setTimeout(() => setTriggerToast(null), 6000);
+      return;
+    }
+
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '⚡ Dispatching 9-Worker Pipeline trigger...' });
+    setTriggerToast({ type: 'info', text: '⚡ Dispatching 2-Worker Pipeline trigger (Scan & Resolve)...' });
     try {
       const res = await triggerAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Autonomous 9-Worker Pipeline Triggered! Workers are actively scanning links, pre-resolving questions, and preparing submissions.',
+          text: '✓ Autonomous 2-Worker Pipeline Triggered! Worker 1 and Worker 2 are actively scanning links and pre-resolving questions.',
         });
         setBotStatus((prev) => ({ ...prev, isRunning: true, state: 'running' }));
       } else {
@@ -560,14 +569,23 @@ export default function DeveloperDashboard() {
 
   // Handle triggering submission pipeline for all approved applications
   const handleTriggerSubmissions = async () => {
+    if (botStatus.isRunning) {
+      setTriggerToast({
+        type: 'error',
+        text: '⚠️ Cannot start Submissions: Scan & Resolve is actively running! Stop Scan & Resolve first.',
+      });
+      setTimeout(() => setTriggerToast(null), 6000);
+      return;
+    }
+
     setIsSubmitTriggering(true);
-    setTriggerToast({ type: 'info', text: '🚀 Launching Submissions for all approved applications...' });
+    setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across Worker 1 and Worker 2...' });
     try {
       const res = await triggerSubmissionStage();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across workers.',
+          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across 2 dedicated workers.',
         });
         setBotStatus((prev) => ({ ...prev, isSubmitting: true }));
       } else {
@@ -627,7 +645,7 @@ export default function DeveloperDashboard() {
 
   return (
     <div className="dashboard-container">
-      {/* 9-Worker Autonomous Pipeline Trigger Banner */}
+      {/* 2-Worker Autonomous Pipeline Trigger Banner (Scan & Resolve) */}
       <div style={{
         background: 'linear-gradient(135deg, #1e293b 0%, #0f172a 100%)',
         border: '1px solid #334155',
@@ -659,7 +677,7 @@ export default function DeveloperDashboard() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
-                Autonomous 9-Worker Pipeline Engine
+                Autonomous 2-Worker Pipeline (Scan &amp; Resolve)
               </h3>
               <span style={{
                 fontSize: '0.72rem',
@@ -670,11 +688,11 @@ export default function DeveloperDashboard() {
                 color: botStatus.isRunning ? '#34d399' : '#f87171',
                 border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {botStatus.isRunning ? `ACTIVE • ${workerPool.inFlight || 9} WORKERS RUNNING` : 'STOPPED • ALL 9 WORKERS IDLE'}
+                {botStatus.isRunning ? `ACTIVE • ${workerPool.inFlight || 2} WORKERS RUNNING` : 'STOPPED • WORKER 1 & WORKER 2 IDLE'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              3 Scanning Workers &bull; 3 Resolving Workers &bull; 3 Submitting Workers &mdash; 4-Tier Pre-Resolution &amp; Instant Stop Protection.
+              Worker 1 &amp; Worker 2 dedicated to Scanning &amp; Pre-Resolving answers into job_distributions. Submissions untouched.
             </p>
           </div>
         </div>
@@ -701,13 +719,14 @@ export default function DeveloperDashboard() {
                 transition: 'all 0.15s ease',
               }}
             >
-              <span>🛑 Stop 9-Worker Pipeline</span>
+              <span>🛑 Stop Scan &amp; Resolve</span>
             </button>
           ) : (
             <button
               type="button"
               onClick={handleTriggerBot}
-              disabled={isTriggering}
+              disabled={isTriggering || botStatus.isSubmitting}
+              title={botStatus.isSubmitting ? 'Stop Submissions first before starting Scan & Resolve' : ''}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -715,16 +734,19 @@ export default function DeveloperDashboard() {
                 padding: '0.65rem 1.35rem',
                 borderRadius: '6px',
                 border: 'none',
-                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-                color: '#ffffff',
+                background: botStatus.isSubmitting
+                  ? 'linear-gradient(135deg, #475569 0%, #334155 100%)'
+                  : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                color: botStatus.isSubmitting ? '#94a3b8' : '#ffffff',
                 fontSize: '0.9rem',
                 fontWeight: 700,
-                cursor: 'pointer',
-                boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
+                cursor: botStatus.isSubmitting ? 'not-allowed' : 'pointer',
+                boxShadow: botStatus.isSubmitting ? 'none' : '0 4px 12px rgba(2, 132, 199, 0.35)',
                 transition: 'all 0.15s ease',
+                opacity: botStatus.isSubmitting ? 0.6 : 1,
               }}
             >
-              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start 9-Worker Pipeline'}</span>
+              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start Scan & Resolve (2 Workers)'}</span>
             </button>
           )}
 
@@ -785,7 +807,7 @@ export default function DeveloperDashboard() {
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
               <h3 style={{ margin: 0, fontSize: '1.05rem', color: '#f8fafc', fontWeight: 700 }}>
-                Autonomous Batch Submissions Engine (Stage 3)
+                Autonomous 2-Worker Submissions Engine (Stage 3)
               </h3>
               <span style={{
                 fontSize: '0.72rem',
@@ -796,11 +818,11 @@ export default function DeveloperDashboard() {
                 color: botStatus.isSubmitting ? '#34d399' : '#94a3b8',
                 border: botStatus.isSubmitting ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
               }}>
-                {botStatus.isSubmitting ? `SUBMITTING • WORKERS ACTIVE` : 'SUBMIT IDLE • WAITING FOR TRIGGER'}
+                {botStatus.isSubmitting ? `SUBMITTING • WORKER 1 & WORKER 2 ACTIVE` : 'SUBMIT IDLE • WAITING FOR TRIGGER'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              Submits all applications that reached approved / ready_for_review. Instantly halts browser wizards and freezes terminal logs on stop.
+              Worker 1 &amp; Worker 2 dedicated to submitting approved applications. Instantly halts browser wizards and freezes terminal logs on stop.
             </p>
           </div>
         </div>
@@ -833,7 +855,8 @@ export default function DeveloperDashboard() {
             <button
               type="button"
               onClick={handleTriggerSubmissions}
-              disabled={isSubmitTriggering}
+              disabled={isSubmitTriggering || botStatus.isRunning}
+              title={botStatus.isRunning ? 'Stop Scan & Resolve first before starting Submissions' : ''}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -841,16 +864,19 @@ export default function DeveloperDashboard() {
                 padding: '0.65rem 1.35rem',
                 borderRadius: '6px',
                 border: 'none',
-                background: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
-                color: '#ffffff',
+                background: botStatus.isRunning
+                  ? 'linear-gradient(135deg, #475569 0%, #334155 100%)'
+                  : 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
+                color: botStatus.isRunning ? '#94a3b8' : '#ffffff',
                 fontSize: '0.9rem',
                 fontWeight: 700,
-                cursor: 'pointer',
-                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.35)',
+                cursor: botStatus.isRunning ? 'not-allowed' : 'pointer',
+                boxShadow: botStatus.isRunning ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.35)',
                 transition: 'all 0.15s ease',
+                opacity: botStatus.isRunning ? 0.6 : 1,
               }}
             >
-              <span>{isSubmitTriggering ? '🚀 Dispatching Submissions...' : '🚀 Submit All Approved Applications'}</span>
+              <span>{isSubmitTriggering ? '🚀 Dispatching Submissions...' : '🚀 Submit Approved Applications (2 Workers)'}</span>
             </button>
           )}
         </div>
