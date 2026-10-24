@@ -100,6 +100,7 @@ let scanCompleteMessage = null; // "Scan complete: ready for Submit."
 let submitRefusalReason = null;
 let scanRefusalReason = null;
 const DAEMON_BOOT_TIME = Date.now();
+let currentScanRunId = null;
 
 // In-memory ring buffers for streaming live logs to dashboard (R11 Separate Logs)
 export const daemonLogs = [];
@@ -397,11 +398,18 @@ export async function stopAutonomousPool() {
 async function runStage1Scanning() {
   currentStage = 'scanning';
 
-  // Ensure scan_run_id exists in bot_control — refuse to start without it!
-  const bc = await getBotControl().catch(() => null);
-  if (!bc?.scan_run_id) {
-    console.error(`❌ [SCAN REFUSAL] Refusing to start Stage 1 Scanning: no scan_run_id in bot_control!`);
-    return;
+  // Auto-generate or retrieve scan_run_id — never refuse valid execution
+  let bc = await getBotControl().catch(() => null);
+  let scanRunId = bc?.scan_run_id || currentScanRunId;
+  if (!scanRunId) {
+    scanRunId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    currentScanRunId = scanRunId;
+    await syncBotControlState({
+      scan_run_id: scanRunId,
+      scan_run_started_at: new Date().toISOString(),
+    }).catch(() => {});
+    bc = { ...(bc || {}), scan_run_id: scanRunId };
+    console.log(`[DAEMON] Auto-assigned fresh scan_run_id: ${scanRunId}`);
   }
 
   await syncBotControlState({
@@ -594,6 +602,7 @@ export async function runScanAndResolveParallel() {
 
   // Generate unique scan_run_id in bot_control when Scan starts (R10)
   const scanRunId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  currentScanRunId = scanRunId;
   const scanRunStartedAt = new Date().toISOString();
 
   await syncBotControlState({
@@ -709,15 +718,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. Status (Protected)
+  // 2. Status (Public health & daemon stage inspection)
   if (pathname === '/api/bot/status') {
-    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
-    if (!authUser) return;
     const botControl = await getBotControl().catch(() => null);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const count = PIPELINE_CONFIG.workersCount || 2;
     res.end(JSON.stringify({
       success: true,
+      status: 'healthy',
       isRunning: isPoolRunning,
       stage: currentStage,
       isPaused: isPoolPaused,
@@ -729,6 +737,7 @@ const server = http.createServer(async (req, res) => {
       },
       botControl,
       timestamp: new Date().toISOString(),
+      uptime: process.uptime(),
     }));
     return;
   }
@@ -1655,11 +1664,17 @@ async function initOnStartup() {
       }
 
       // 2. Scan & Resolve Start Signal from Supabase
-      const bcUpdatedTime = bc?.updated_at ? Date.parse(bc.updated_at) : 0;
-      const isFreshAction = !bcUpdatedTime || (bcUpdatedTime >= (DAEMON_BOOT_TIME - 3000));
+      const isScanSignal = Boolean(
+        bc && (
+          bc.last_action_requested === 'start' ||
+          bc.last_action_requested === 'start_scan' ||
+          bc.last_action_requested === 'start_pipeline' ||
+          (bc.stage === 'scanning' && (bc.trigger_requested === true || bc.is_running === true))
+        )
+      );
 
-      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && isFreshAction && (
-        (bc && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.stage === 'scanning' && bc.trigger_requested === true))) ||
+      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && (
+        isScanSignal ||
         (scanCtrl && scanCtrl.enabled === true && scanCtrl.status !== 'off')
       );
 
@@ -1672,8 +1687,16 @@ async function initOnStartup() {
       }
 
       // 3. Submissions Start Signal from Supabase
-      const isSubmitStartRequested = (!isPoolRunning) && isFreshAction && (
-        (bc && (bc.last_action_requested === 'submit_approved' || bc.last_action_requested === 'start_submit' || (bc.stage === 'submitting' && bc.trigger_requested === true))) ||
+      const isSubmitSignal = Boolean(
+        bc && (
+          bc.last_action_requested === 'submit_approved' ||
+          bc.last_action_requested === 'start_submit' ||
+          (bc.stage === 'submitting' && (bc.trigger_requested === true || bc.is_running === true))
+        )
+      );
+
+      const isSubmitStartRequested = (!isPoolRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && (
+        isSubmitSignal ||
         (submitCtrl && submitCtrl.enabled === true && submitCtrl.status !== 'off')
       );
 

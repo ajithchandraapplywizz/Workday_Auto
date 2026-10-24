@@ -179,6 +179,61 @@ export async function loadSupabaseAnswers(applywizzId) {
   }) || [];
 }
 
+/**
+ * Load QA Bank records for candidate (or global) from Supabase qa_bank table.
+ */
+export async function loadSupabaseQaBank(applywizzId) {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const cleanId = String(applywizzId || '').trim();
+    let q = cleanId
+      ? `?or=(applywizz_id.eq.${encode(cleanId)},applywizz_id.is.null)&select=id,applywizz_id,question,question_normalized,answer,field_type,source&order=created_at.desc&limit=1000`
+      : `?select=id,applywizz_id,question,question_normalized,answer,field_type,source&order=created_at.desc&limit=1000`;
+    const res = await request('qa_bank', { query: q });
+    return res || [];
+  } catch (err) {
+    console.warn('[Supabase] loadSupabaseQaBank error:', err.message?.slice(0, 80));
+    return [];
+  }
+}
+
+/**
+ * Upsert/insert a newly resolved question into Supabase qa_bank table.
+ */
+export async function upsertQaBankAnswer({
+  applywizzId = null,
+  question = '',
+  questionNormalized = '',
+  answer = '',
+  fieldType = 'text',
+  source = 'llm',
+} = {}) {
+  if (!isSupabaseConfigured() || !answer) return false;
+  const qNorm = String(questionNormalized || normalizeLabel(question) || '').trim().toLowerCase();
+  const qRaw = String(question || qNorm).trim();
+  if (!qNorm) return false;
+  try {
+    const row = {
+      applywizz_id: applywizzId ? String(applywizzId).trim().toUpperCase() : null,
+      question: qRaw,
+      question_normalized: qNorm,
+      answer: String(answer).trim(),
+      field_type: fieldType || 'text',
+      source: source || 'llm',
+      updated_at: new Date().toISOString(),
+    };
+    await request('qa_bank', {
+      method: 'POST',
+      prefer: 'return=minimal',
+      body: row,
+    });
+    return true;
+  } catch (err) {
+    console.warn('[Supabase] upsertQaBankAnswer notice:', err.message?.slice(0, 80));
+    return false;
+  }
+}
+
 export async function loadSupabaseClientSnapshot(applywizzId) {
   if (!isSupabaseConfigured() || !applywizzId) return null;
   const [clients, answers] = await Promise.all([
@@ -534,7 +589,10 @@ export async function hydrateSupabaseAnswers(profile = {}) {
   if (!id) return profile;
 
   try {
-    const answers = await loadSupabaseAnswers(id);
+    const [answers, qaBankList] = await Promise.all([
+      loadSupabaseAnswers(id),
+      loadSupabaseQaBank(id),
+    ]);
     profile._supabaseAnswers = answers || [];
     profile._supabaseQa = profile._supabaseQa || {};
     for (const row of (answers || [])) {
@@ -548,8 +606,24 @@ export async function hydrateSupabaseAnswers(profile = {}) {
         }
       }
     }
+
+    // Hydrate QA Bank into profile._supabaseQaBank and profile._supabaseQaBankList
+    profile._supabaseQaBankList = qaBankList || [];
+    profile._supabaseQaBank = profile._supabaseQaBank || {};
+    for (const row of (qaBankList || [])) {
+      if (row.question_normalized && row.answer) {
+        profile._supabaseQaBank[row.question_normalized] = String(row.answer);
+      }
+      if (row.question && row.answer) {
+        const rawNorm = normalizeLabel(row.question);
+        if (rawNorm && !profile._supabaseQaBank[rawNorm]) {
+          profile._supabaseQaBank[rawNorm] = String(row.answer);
+        }
+      }
+    }
+
     profile._supabaseHydrated = true;
-    console.log(`  ✓ Loaded ${profile._supabaseAnswers.length} cached answer(s) from Supabase for ${id}`);
+    console.log(`  ✓ Loaded ${profile._supabaseAnswers.length} cached answer(s) and ${profile._supabaseQaBankList.length} QA Bank record(s) from Supabase for ${id}`);
   } catch (err) {
     console.log(`  ⚠️  Supabase answers hydration failed: ${err.message?.slice(0, 120) || err}`);
   }
@@ -559,6 +633,56 @@ export async function hydrateSupabaseAnswers(profile = {}) {
 /**
  * Record a newly answered question into in-memory profile._supabaseQa immediately.
  */
+
+/**
+ * Synchronous lookup against profile._supabaseQaBank (Tier 5).
+ */
+export function lookupQaBankAnswerSync(rawLabel, profile = {}, opts = {}) {
+  const qaBank = profile?._supabaseQaBank;
+  if (!qaBank || typeof qaBank !== 'object') return null;
+  const stripped = stripWorkdayQuestionLabel(rawLabel);
+  const norm = normalizeLabel(stripped || rawLabel);
+  if (!norm) return null;
+
+  const options = opts.options || [];
+  const fieldType = opts.fieldType || '';
+
+  const align = (val) => {
+    if (!options.length) return val;
+    return alignAnswerToWorkdayOptions(val, options, fieldType) || val;
+  };
+
+  // 1. Exact normalized match
+  if (qaBank[norm]) {
+    const aligned = align(qaBank[norm]);
+    if (aligned) {
+      return { answer: aligned, source: 'qa_bank', score: 1.0, rawAnswer: qaBank[norm], matchedKey: norm };
+    }
+  }
+
+  // 2. Exact stripped match
+  if (stripped && qaBank[normalizeLabel(stripped)]) {
+    const rawVal = qaBank[normalizeLabel(stripped)];
+    const aligned = align(rawVal);
+    if (aligned) {
+      return { answer: aligned, source: 'qa_bank', score: 1.0, rawAnswer: rawVal, matchedKey: stripped };
+    }
+  }
+
+  // 3. Substring match for non-essay questions
+  for (const [k, v] of Object.entries(qaBank)) {
+    if (!v || k.length < 8) continue;
+    if (norm.includes(k) || k.includes(norm)) {
+      const aligned = align(v);
+      if (aligned) {
+        return { answer: aligned, source: 'qa_bank_substring', score: 0.88, rawAnswer: v, matchedKey: k };
+      }
+    }
+  }
+
+  return null;
+}
+
 export function recordSupabaseAnswerInMemory(profile = {}, rawLabel = '', answer = '') {
   if (!profile || !rawLabel || answer == null || answer === '') return;
   const stripped = stripWorkdayQuestionLabel(rawLabel);

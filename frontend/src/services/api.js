@@ -1383,14 +1383,23 @@ export async function fetchAutomationTrace(param = {}) {
  * - Batch 3: Submitting (submitting_worker_1, 2, 3)
  */
 export function getBackendBaseUrl() {
+  let url = '';
   if (typeof window !== 'undefined') {
     const custom = window.localStorage.getItem('WORKDAY_BACKEND_URL') || window.localStorage.getItem('VITE_BACKEND_URL');
     if (custom && custom.trim()) {
-      return custom.trim().replace(/\/+$/, '');
+      url = custom.trim();
     }
   }
-  const envUrl = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_BACKEND_URL || import.meta.env?.VITE_API_URL)) || '';
-  return String(envUrl).trim().replace(/\/+$/, '');
+  if (!url) {
+    const envUrl = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_BACKEND_URL || import.meta.env?.VITE_API_URL)) || '';
+    url = String(envUrl).trim();
+  }
+  if (!url) return '';
+  url = url.replace(/\/+$/, '');
+  if (!url.startsWith('http://') && !url.startsWith('https://')) {
+    url = 'https://' + url;
+  }
+  return url;
 }
 
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
@@ -1411,12 +1420,15 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       try {
         const resp = await fetch(ep, {
           method: 'GET',
-          headers: { 'Content-Type': 'application/json' },
-          signal: AbortSignal.timeout(1800),
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(2500),
         });
-        if (resp.ok) {
+        const contentType = resp.headers.get('content-type') || '';
+        if (resp.ok && contentType.includes('application/json')) {
           liveLogs = await resp.json();
-          break;
+          if (liveLogs && (liveLogs.logs || liveLogs.scanLogs || liveLogs.submitLogs)) {
+            break;
+          }
         }
       } catch {}
     }
@@ -2535,8 +2547,9 @@ export async function triggerAutonomousBot() {
 
     // 3. Webhook call to daemon (POST /api/bot/start / /api/bot/trigger)
     // Dispatches via relative proxy or direct backend URL if configured
-    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL) ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '') : '';
+    const backendBase = getBackendBaseUrl();
     const endpoints = [
+      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
       '/api/bot/start',
       '/api/bot/trigger',
       '/api/bot/webhook',
@@ -2546,7 +2559,6 @@ export async function triggerAutonomousBot() {
       'http://localhost:3001/api/bot/start',
       'http://localhost:3001/api/bot/trigger',
       'http://localhost:3001/api/bot/webhook',
-      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
     ];
     for (const ep of endpoints) {
       try {
@@ -2582,15 +2594,15 @@ export async function stopAutonomousBot() {
     const now = new Date().toISOString();
 
     // 1. Webhook stop call to daemon (POST /api/bot/stop)
-    const backendBase = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_BACKEND_URL) ? String(import.meta.env.VITE_BACKEND_URL).replace(/\/+$/, '') : '';
+    const backendBase = getBackendBaseUrl();
     const stopEndpoints = [
+      ...(backendBase ? [`${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
       '/api/bot/stop',
       '/api/bot/webhook',
       'http://localhost:3005/api/bot/stop',
       'http://localhost:3005/api/bot/webhook',
       'http://localhost:3001/api/bot/stop',
       'http://localhost:3001/api/bot/webhook',
-      ...(backendBase ? [`${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
     ];
     await Promise.any(
       stopEndpoints.map((u) =>
@@ -2767,21 +2779,32 @@ export async function fetchBotDaemonStatus() {
   try {
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
+    const backendBase = getBackendBaseUrl();
 
     // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
     const statusUrls = [
+      ...(backendBase ? [`${backendBase}/api/bot/status`, `${backendBase}/health`, `${backendBase}/`] : []),
       '/api/bot/status',
+      '/health',
       'http://localhost:3005/api/bot/status',
+      'http://localhost:3005/health',
       'http://localhost:3001/api/bot/status',
+      'http://localhost:3001/health',
     ];
     for (const u of statusUrls) {
       try {
-        const res = await fetch(u, { signal: AbortSignal.timeout(1200) });
-        if (res.ok) {
+        const res = await fetch(u, {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(2000),
+        });
+        const contentType = res.headers.get('content-type') || '';
+        if (res.ok && contentType.includes('application/json')) {
           const json = await res.json();
-          daemonApiRunning = Boolean(json.isRunning);
-          daemonApiStage = json.stage || 'idle';
-          break;
+          if (json.status === 'healthy' || json.success) {
+            daemonApiRunning = Boolean(json.isRunning);
+            daemonApiStage = json.stage || 'idle';
+            break;
+          }
         }
       } catch { }
     }
@@ -3121,7 +3144,7 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
     // Separate clean lists
     const nonPersonalFields = allFields.filter((f) => !f.isPersonal);
     const unansweredFields = nonPersonalFields.filter((f) => f.isUnanswered);
-    const aiFields = nonPersonalFields.filter((f) => f.source === 'ai' || f.tier === 4);
+    const aiFields = nonPersonalFields.filter((f) => f.source === 'ai' || f.tier === 6);
 
     let shot = distRow?.application_submitted_screenshot_url
       || distRow?.applied_screenshot

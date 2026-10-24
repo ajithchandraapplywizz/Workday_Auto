@@ -42,7 +42,7 @@ import {
 import { parseMonthYear, parseYear } from './experienceDates.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
-import { isSupabaseConfigured, upsertSupabaseAnswer } from './supabaseClient.mjs';
+import { isSupabaseConfigured, upsertSupabaseAnswer, upsertQaBankAnswer } from './supabaseClient.mjs';
 import { buildLlmDateContext, getTodayISODate } from './date-utils.mjs';
 import { isValidCityName, isValidStateName } from './clientContact.mjs';
 

@@ -1056,16 +1056,11 @@ export async function runClusterBatchRunner({
 } = {}) {
   const startTime = Date.now();
 
-  // Enforce scan_run_id requirement: Scan must REFUSE to start without it!
+  // Auto-generate or retrieve scan_run_id
   if (!scanRunId) {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    scanRunId = bc?.scan_run_id || null;
-  }
-
-  if (!scanRunId) {
-    console.error(`❌ [SCAN REFUSAL] Refusing to start scan: no scan_run_id present in bot_control!`);
-    return { success: false, refused: true, error: 'Scan refused: missing scan_run_id in bot_control' };
+    scanRunId = bc?.scan_run_id || `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
   console.log(`\n${'═'.repeat(78)}`);

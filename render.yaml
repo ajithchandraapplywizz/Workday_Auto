@@ -38,3 +38,8 @@ services:
         sync: false
       - key: VITE_SUPABASE_ANON_KEY
         sync: false
+      - key: VITE_BACKEND_URL
+        fromService:
+          type: web
+          name: workday-automation-backend
+          property: host

@@ -223,7 +223,7 @@ export default function ApplicationSlideDrawer({
       if (f.isPersonal) return false;
       const src = (f.source || '').toLowerCase();
       const label = (f.sourceLabel || '').toLowerCase();
-      return src === 'ai' || src === 'llm' || label.includes('ai') || label.includes('llm') || f.tier === 4;
+      return src === 'ai' || src === 'llm' || label.includes('ai') || label.includes('llm') || f.tier === 6;
     });
   }, [fields]);
 
@@ -452,7 +452,7 @@ export default function ApplicationSlideDrawer({
           )}
         </div>
 
-        {/* Prominent Banner for Questions Unresolved by 4-Tier Engine */}
+        {/* Prominent Banner for Questions Unresolved by 6-Tier Engine */}
         {missingFields.length > 0 && (
           <div style={{
             background: 'rgba(245, 158, 11, 0.12)',
@@ -466,7 +466,7 @@ export default function ApplicationSlideDrawer({
           }}>
             <AlertTriangle size={18} style={{ color: '#fbbf24', flexShrink: 0 }} />
             <div style={{ fontSize: '0.8rem', color: '#fef3c7' }}>
-              <strong>{missingFields.length} Question(s) Unresolved by 4-Tier Engine:</strong> Please enter candidate answers below and click <strong>"Save to QA Bank"</strong>. Once answered, you can approve and submit this application into the queue.
+              <strong>{missingFields.length} Question(s) Unresolved by 6-Tier Engine:</strong> Please enter candidate answers below and click <strong>"Save to QA Bank"</strong>. Once answered, you can approve and submit this application into the queue.
             </div>
           </div>
         )}
@@ -591,7 +591,7 @@ export default function ApplicationSlideDrawer({
               {displayedFields.map((field, idx) => {
                 const currentVal = editValues[field.id] ?? field.value ?? '';
                 const isMissing = field.isUnanswered || !currentVal;
-                const isAi = (field.source || '').toLowerCase() === 'ai' || (field.sourceLabel || '').includes('AI') || field.tier === 4;
+                const isAi = (field.source || '').toLowerCase() === 'ai' || (field.sourceLabel || '').includes('AI') || field.tier === 6;
                 const isQaBank = (field.source || '').toLowerCase() === 'qa_bank';
                 const isSaved = savedSuccessIds.has(field.id);
                 const isSaving = savingFieldId === field.id;

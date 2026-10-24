@@ -152,15 +152,23 @@ export default function ApplicationFormReviewModal({
     return Array.from(steps);
   }, [fields]);
 
-  // Count source resolution breakdown
+  // Count source resolution breakdown across 6 tiers
   const sourceStats = useMemo(() => {
-    const stats = { ai: 0, supabase: 0, resume: 0, identity: 0, total: fields.length };
+    const stats = { ai: 0, supabase: 0, resume: 0, identity: 0, fuzzy: 0, qa_bank: 0, total: fields.length };
     fields.forEach((f) => {
-      const src = f.source || 'ai';
-      if (stats[src] !== undefined) {
-        stats[src] += 1;
-      } else {
+      const src = (f.source || '').toLowerCase();
+      if (f.tier === 6 || /ai|llm/i.test(src)) {
         stats.ai += 1;
+      } else if (f.tier === 5 || /qa_bank/i.test(src)) {
+        stats.qa_bank += 1;
+      } else if (f.tier === 4 || /fuzzy/i.test(src)) {
+        stats.fuzzy += 1;
+      } else if (f.tier === 3 || /api|crm|identity/i.test(src)) {
+        stats.identity += 1;
+      } else if (f.tier === 2 || /resume|experience/i.test(src)) {
+        stats.resume += 1;
+      } else {
+        stats.supabase += 1;
       }
     });
     return stats;
@@ -232,25 +240,33 @@ export default function ApplicationFormReviewModal({
           </button>
         </header>
 
-        {/* Legend Bar with Source Resolution Breakdown */}
+        {/* Legend Bar with 6-Tier Source Resolution Breakdown */}
         <div className="fr-source-legend-bar">
-          <span className="fr-legend-title">Resolution Sources:</span>
+          <span className="fr-legend-title">6-Tier Resolution Engine:</span>
           <div className="fr-source-pills-row">
-            <span className="fr-source-badge ai" title="Resolved using LLM AI Inference (Gemini/OpenRouter)">
-              <Sparkles size={13} />
-              <span>AI / LLM 🤖 ({sourceStats.ai})</span>
-            </span>
-            <span className="fr-source-badge supabase" title="Matched from verified Supabase database answers">
+            <span className="fr-source-badge supabase" title="Tier 1: Supabase database facts">
               <Database size={13} />
-              <span>Supabase DB 💾 ({sourceStats.supabase})</span>
+              <span>Tier 1: Supabase DB 💾 ({sourceStats.supabase})</span>
             </span>
-            <span className="fr-source-badge resume" title="Parsed directly from candidate resume">
+            <span className="fr-source-badge resume" title="Tier 2: Parsed from candidate resume">
               <FileText size={13} />
-              <span>Resume Facts 📄 ({sourceStats.resume})</span>
+              <span>Tier 2: Resume Facts 📄 ({sourceStats.resume})</span>
             </span>
-            <span className="fr-source-badge identity" title="Direct from ApplyWizz candidate identity facts">
+            <span className="fr-source-badge identity" title="Tier 3: ApplyWizz CRM API">
               <User size={13} />
-              <span>Identity Profile 👤 ({sourceStats.identity})</span>
+              <span>Tier 3: CRM API 🌐 ({sourceStats.identity})</span>
+            </span>
+            <span className="fr-source-badge fuzzy" title="Tier 4: Cross-checked fuzzy match" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+              <Search size={13} />
+              <span>Tier 4: Fuzzy Match 🔍 ({sourceStats.fuzzy})</span>
+            </span>
+            <span className="fr-source-badge qabank" title="Tier 5: Supabase QA Bank table" style={{ background: 'rgba(167, 139, 250, 0.15)', color: '#a78bfa', border: '1px solid rgba(167, 139, 250, 0.3)' }}>
+              <Database size={13} />
+              <span>Tier 5: QA Bank 🏦 ({sourceStats.qa_bank})</span>
+            </span>
+            <span className="fr-source-badge ai" title="Tier 6: LLM AI Inference">
+              <Sparkles size={13} />
+              <span>Tier 6: AI / LLM 🤖 ({sourceStats.ai})</span>
             </span>
           </div>
         </div>
@@ -354,25 +370,35 @@ export default function ApplicationFormReviewModal({
                       </span>
                     )}
 
-                    {field.tier === 1 || field.source === 'supabase' || field.source === 'qa_bank' ? (
-                      <span className="fr-source-tag supabase" title="Answered from Supabase DB knowledge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                    {field.tier === 1 || field.source === 'supabase' ? (
+                      <span className="fr-source-tag supabase" title="Tier 1: Answered from Supabase DB knowledge" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
                         <Database size={12} />
                         <span>Tier 1: Supabase DB 💾</span>
                       </span>
                     ) : (field.tier === 2 || field.source === 'resume') ? (
-                      <span className="fr-source-tag resume" title="Extracted from candidate resume facts" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
+                      <span className="fr-source-tag resume" title="Tier 2: Extracted from candidate resume facts" style={{ background: 'rgba(59, 130, 246, 0.15)', color: '#60a5fa', border: '1px solid rgba(59, 130, 246, 0.3)' }}>
                         <FileText size={12} />
                         <span>Tier 2: Resume Extraction 📄</span>
                       </span>
                     ) : (field.tier === 3 || field.source === 'api' || field.source === 'identity') ? (
-                      <span className="fr-source-tag identity" title="Extracted from ApplyWizz CRM API" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
+                      <span className="fr-source-tag identity" title="Tier 3: Extracted from ApplyWizz CRM API" style={{ background: 'rgba(168, 85, 247, 0.15)', color: '#c084fc', border: '1px solid rgba(168, 85, 247, 0.3)' }}>
                         <User size={12} />
                         <span>Tier 3: CRM API 🌐</span>
                       </span>
-                    ) : (field.tier === 4 || field.source === 'ai' || field.source === 'llm') ? (
-                      <span className="fr-source-tag ai" title="Answered by AI/LLM model" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
+                    ) : (field.tier === 4 || field.source === 'fuzzy') ? (
+                      <span className="fr-source-tag fuzzy" title="Tier 4: Cross-checked fuzzy match" style={{ background: 'rgba(56, 189, 248, 0.15)', color: '#38bdf8', border: '1px solid rgba(56, 189, 248, 0.3)' }}>
+                        <Search size={12} />
+                        <span>Tier 4: Fuzzy Match 🔍</span>
+                      </span>
+                    ) : (field.tier === 5 || field.source === 'qa_bank') ? (
+                      <span className="fr-source-tag qabank" title="Tier 5: Supabase QA Bank table" style={{ background: 'rgba(167, 139, 250, 0.15)', color: '#a78bfa', border: '1px solid rgba(167, 139, 250, 0.3)' }}>
+                        <Database size={12} />
+                        <span>Tier 5: QA Bank 🏦</span>
+                      </span>
+                    ) : (field.tier === 6 || field.source === 'ai' || field.source === 'llm') ? (
+                      <span className="fr-source-tag ai" title="Tier 6: Resolved by AI/LLM model" style={{ background: 'rgba(245, 158, 11, 0.15)', color: '#fbbf24', border: '1px solid rgba(245, 158, 11, 0.3)' }}>
                         <Sparkles size={12} />
-                        <span>Tier 4: AI / LLM 🤖</span>
+                        <span>Tier 6: AI / LLM 🤖</span>
                       </span>
                     ) : field.source === 'manual' ? (
                       <span className="fr-source-tag manual" title="Answered manually by Career Associate">

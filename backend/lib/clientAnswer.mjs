@@ -26,9 +26,12 @@ import { isMinimumAgeQuestion, resolveMinimumAgeAnswer } from './minimumAge.mjs'
 import { trace } from './trace.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 import { enrichFieldWithTypeCode, fieldTypeToCode } from './fieldTypeCodes.mjs';
+import { fuzzyScore } from './fields.mjs';
 import {
   lookupSupabaseAnswer,
   lookupSupabaseAnswerSync,
+  lookupQaBankAnswerSync,
+  upsertQaBankAnswer,
   isSupabaseConfigured,
   upsertSupabaseAnswer,
   recordSupabaseAnswerInMemory,
@@ -252,6 +255,94 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
  * Sync peek: age/safety first, then Tier 1 (Supabase clients table -> client_questions table) -> Tier 2 (Resume parsing).
  * Never calls the LLM.
  */
+
+/**
+ * Tier 4: Fuzzy Match Cross-Check
+ * Cross-checks Supabase DB (client_questions), Resume parsed facts/text, and QA Bank table.
+ * Approximate/fuzzy matches (0.55 <= score < 1.0). Exact matches are reserved for Tier 1 / Tier 5.
+ * @returns {{ answer: string, source: string, score: number, matchedKey?: string, tier: number }|null}
+ */
+export function fuzzyMatchCrossCheck(rawLabel, profile = {}, opts = {}) {
+  const norm = normalizeLabel(rawLabel);
+  if (!norm || norm.length < 3) return null;
+
+  const options = opts.options || [];
+  const fieldType = opts.fieldType || '';
+
+  const align = (val) => {
+    return acceptClientValue(rawLabel, val, { options, fieldType, profile });
+  };
+
+  let best = null;
+  let bestScore = 0;
+
+  // 1. Cross-check Supabase client_questions (_supabaseQa) for fuzzy matches
+  const qa = profile._supabaseQa || {};
+  for (const [k, v] of Object.entries(qa)) {
+    if (!v || typeof v !== 'string' || v.length > 500) continue;
+    const normK = normalizeLabel(k);
+    if (normK === norm) continue; // Exact matches handled in Tier 1
+    const score = fuzzyScore(norm, normK);
+    if (score > bestScore && score >= 0.55 && score < 1.0) {
+      const aligned = align(v);
+      if (aligned) {
+        bestScore = score;
+        best = { answer: aligned, source: 'fuzzy_supabase_db', score, matchedKey: k, tier: 4 };
+      }
+    }
+  }
+
+  // 2. Cross-check QA Bank table (_supabaseQaBank) for fuzzy matches
+  const qaBank = profile._supabaseQaBank || {};
+  for (const [k, v] of Object.entries(qaBank)) {
+    if (!v || typeof v !== 'string' || v.length > 500) continue;
+    const normK = normalizeLabel(k);
+    if (normK === norm) continue; // Exact matches handled in Tier 5 QA Bank
+    const score = fuzzyScore(norm, normK);
+    if (score > bestScore && score >= 0.55 && score < 1.0) {
+      const aligned = align(v);
+      if (aligned) {
+        bestScore = score;
+        best = { answer: aligned, source: 'fuzzy_qa_bank', score, matchedKey: k, tier: 4 };
+      }
+    }
+  }
+
+  // 3. Cross-check Resume parsed text & facts (for skill/experience fuzzy matches)
+  if (profile._resumeText && options.length && !best) {
+    const lowerResume = (profile._resumeText || '').toLowerCase();
+    const words = norm.split(/\s+/).filter(w => w.length >= 4 && !/^(have|years|experience|with|about|role|please|select|indicate|your)\b/i.test(w));
+    if (words.length > 0) {
+      const matchCount = words.filter(w => lowerResume.includes(w)).length;
+      const ratio = matchCount / words.length;
+      if (ratio >= 0.6) {
+        const yesOpt = options.find(o => /^yes\b/i.test(o));
+        if (yesOpt) {
+          best = { answer: yesOpt, source: 'fuzzy_resume_skills', score: ratio, tier: 4 };
+        }
+      }
+    }
+  }
+
+  // 4. Cross-check ApplyWizz QA for fuzzy matches
+  const awQa = profile._applyWizzQa || {};
+  for (const [k, v] of Object.entries(awQa)) {
+    if (!v || typeof v !== 'string') continue;
+    const normK = normalizeLabel(k);
+    if (normK === norm) continue;
+    const score = fuzzyScore(norm, normK);
+    if (score > bestScore && score >= 0.55 && score < 1.0) {
+      const aligned = align(v);
+      if (aligned) {
+        bestScore = score;
+        best = { answer: aligned, source: 'fuzzy_crm_api', score, matchedKey: k, tier: 4 };
+      }
+    }
+  }
+
+  return best;
+}
+
 export function peekClientAnswer(label, profile = {}, opts = {}) {
   const question = String(label || '').replace(/\s+/g, ' ').trim();
   if (!question || !profile) return null;
@@ -288,13 +379,26 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const expOk = acceptClientValue(question, fromExperience?.answer, { options, fieldType, profile });
   if (expOk) return expOk;
 
-  // ─── TIER 3: CRM API (Apply Wizz Fallback) ──────────────────────────────────
+  // ─── TIER 3: CRM API (Apply Wizz Candidate Context) ────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(question, profile, {
     options,
     fieldType,
-    threshold: 0.48,
+    threshold: 0.75,
   });
-  return acceptClientValue(question, fromApi?.answer, { options, fieldType, profile });
+  const apiOk = acceptClientValue(question, fromApi?.answer, { options, fieldType, profile });
+  if (apiOk && !/fuzzy|substring/.test(String(fromApi?.source || ''))) return apiOk;
+
+  // ─── TIER 4: Fuzzy Match Cross-Check (Supabase DB + Resume + QA Bank) ───────
+  const fromFuzzy = fuzzyMatchCrossCheck(question, profile, { options, fieldType });
+  const fuzzyOk = acceptClientValue(question, fromFuzzy?.answer, { options, fieldType, profile });
+  if (fuzzyOk) return fuzzyOk;
+
+  // ─── TIER 5: QA Bank Table in Supabase (1,839+ curated Q&A records) ─────────
+  const fromQaBank = lookupQaBankAnswerSync(question, profile, { options, fieldType });
+  const qaBankOk = acceptClientValue(question, fromQaBank?.answer, { options, fieldType, profile });
+  if (qaBankOk) return qaBankOk;
+
+  return null;
 }
 
 /**
@@ -326,22 +430,22 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   const required = enriched.required === true || opts.required === true || /\*/.test(label) || enriched.hasRequiredMarker === true;
   const availabilityTiming = isAvailabilityTimingQuestion(label);
 
-  const finish = (answer, source) => {
+  const finish = (answer, source, tier = 1) => {
     const value = acceptClientValue(label, answer, { options, fieldType, profile });
     if (!value) return null;
-    return { answer: value, source, field_type_code: code, field_type: fieldType };
+    return { answer: value, source, field_type_code: code, field_type: fieldType, tier };
   };
 
   // 0. Legal & safety guards
   if (/password/i.test(label) || fieldType === 'password') {
     const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
     console.log(`    🔑 [Password] "${label.slice(0, 55)}" ← (auto-filled workday password)`);
-    return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType };
+    return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType, tier: 1 };
   }
 
   const ageYes = resolveMinimumAgeAnswer(label, profile);
   if (ageYes) {
-    const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
+    const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType, tier: 1 };
     console.log(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
     return hit;
   }
@@ -353,7 +457,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)
   const fromProfileIdentity = isPersonalIdentityQuestion(label) ? profileFactForLabel(label, profile) : null;
   if (fromProfileIdentity) {
-    const hit = finish(fromProfileIdentity, 'supabase_client_fact');
+    const hit = finish(fromProfileIdentity, 'supabase_client_fact', 1);
     if (hit) {
       console.log(`    👤 [Identity] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Identity Match] "${label.slice(0, 50)}" ← "${hit.answer}"`);
@@ -364,7 +468,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   // 1b. Exact question-and-answer from Supabase client_questions table for this client (AWL ID)
   const fromSupabase = await lookupSupabaseAnswer(label, profile, { options, fieldType });
   if (fromSupabase?.answer) {
-    const supabaseHit = finish(fromSupabase.answer, fromSupabase.source || 'supabase_client_questions');
+    const supabaseHit = finish(fromSupabase.answer, fromSupabase.source || 'supabase_client_questions', 1);
     if (supabaseHit) {
       console.log(`    🗄️  [Supabase Tier 1 client_questions] "${label.slice(0, 55)}" ← "${supabaseHit.answer.slice(0, 40)}" (${fromSupabase.source})`);
       profile?._onLog?.(currentStep, `[Tier 1 Supabase Match] "${label.slice(0, 50)}" ← "${supabaseHit.answer.slice(0, 45)}"`);
@@ -378,7 +482,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     || isDescribeExperienceQuestion(label)
     || isProceedQuestion(label);
   if (fromProfile && !domainQuestion) {
-    const hit = finish(fromProfile, 'supabase_clients_table');
+    const hit = finish(fromProfile, 'supabase_clients_table', 1);
     if (hit) {
       console.log(`    🗄️  [Supabase Tier 1 clients table] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Profile Match] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
@@ -388,7 +492,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   const priorEmployer = priorEmployerAnswer(label, profile);
   if (priorEmployer) {
-    const hit = finish(priorEmployer, 'supabase_clients_table');
+    const hit = finish(priorEmployer, 'supabase_clients_table', 1);
     if (hit) {
       console.log(`    🧾 [Supabase Tier 1 Prior Employer] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Prior Employer] "${label.slice(0, 50)}" ← "${hit.answer}"`);
@@ -401,14 +505,18 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   // ─── TIER 2: Resume Parsing (Primary Source of Truth for Experience & Skills) ───
   const fromExperience = resolveExperienceQuestionAnswer(label, profile, { options, fieldType });
-  let expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`);
+  let expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`, 2);
   
   if (!expHit && profile._resumeText) {
     // Check if question asks about specific skill / experience in resume
     const { inferAnswerFromResume } = await import('./resumeParser.mjs');
     const directInfer = inferAnswerFromResume(label, profile._resumeText, { options, fieldType });
     if (directInfer) {
-      expHit = finish(directInfer, 'resume_direct_infer');
+      let inferVal = directInfer;
+      if (isYesNoQuestionLabel(label) && options.length) {
+        inferVal = options.find(o => /^yes\b/i.test(o)) || 'Yes';
+      }
+      expHit = finish(inferVal, 'resume_direct_infer', 2);
     } else if (isYesNoQuestionLabel(label) && options.length) {
       // If asking "Do you have at least X years experience in <tech>", check if tech is in resume
       const lowerResume = (profile._resumeText || '').toLowerCase();
@@ -417,7 +525,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       const hasTopic = topicTokens.length > 0 && topicTokens.some(t => lowerResume.includes(t));
       if (hasTopic) {
         const yesOpt = options.find(o => /^yes\b/i.test(o)) || 'Yes';
-        expHit = finish(yesOpt, 'resume_keyword_match');
+        expHit = finish(yesOpt, 'resume_keyword_match', 2);
       }
     }
   }
@@ -427,7 +535,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     if (profile._resumeText) {
       const fromResume = extractDobFromResumeText(profile._resumeText);
       if (fromResume) {
-        expHit = finish(fromResume, 'resume_extracted_dob');
+        expHit = finish(fromResume, 'resume_extracted_dob', 2);
         if (expHit && profile._applyWizzId) {
           recordSupabaseAnswerInMemory(profile, 'date of birth', fromResume);
           upsertSupabaseAnswer({
@@ -445,7 +553,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     if (!expHit && (required || opts.forceLlm === true)) {
       const derivedDob = deriveAdultDobFromProfile(profile);
       if (derivedDob) {
-        expHit = finish(derivedDob, 'derived_adult_dob');
+        expHit = finish(derivedDob, 'derived_adult_dob', 2);
         if (expHit && profile._applyWizzId) {
           recordSupabaseAnswerInMemory(profile, 'date of birth', derivedDob);
           upsertSupabaseAnswer({
@@ -482,15 +590,15 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
   trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
 
-  // ─── TIER 3: CRM API (Apply Wizz Fallback) ────────────────────────────────────
+  // ─── TIER 3: CRM API (Apply Wizz Candidate Context) ────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
     options,
     fieldType,
-    threshold: 0.48,
+    threshold: 0.75,
   });
   const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
-  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
-    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api');
+  if (fromApi?.answer && !apiIsFuzzy) {
+    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api', 3);
     if (apiHit) {
       trace({
         stage: 'tier3',
@@ -501,12 +609,54 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         source: fromApi.source,
         answer: apiHit.answer,
       });
-      console.log(`    🗄️  [CRM API Tier 3 Fallback] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      console.log(`    🌐 [CRM API Tier 3] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
       profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
       return apiHit;
     }
   }
   trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── TIER 4: Fuzzy Match Cross-Check (Supabase DB + Resume + QA Bank) ───────
+  const fromFuzzy = fuzzyMatchCrossCheck(label, profile, { options, fieldType });
+  if (fromFuzzy?.answer) {
+    const fuzzyHit = finish(fromFuzzy.answer, fromFuzzy.source || 'fuzzy_cross_check', 4);
+    if (fuzzyHit) {
+      trace({
+        stage: 'tier4',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        source: fuzzyHit.source,
+        answer: fuzzyHit.answer,
+      });
+      console.log(`    🔍 [Fuzzy Tier 4 Match] "${label.slice(0, 55)}" ← "${fuzzyHit.answer.slice(0, 40)}" (${fromFuzzy.source}, score ${(fromFuzzy.score || 0).toFixed(2)})`);
+      profile?._onLog?.(currentStep, `[Tier 4 Fuzzy Match] "${label.slice(0, 50)}" ← "${fuzzyHit.answer.slice(0, 45)}"`);
+      return fuzzyHit;
+    }
+  }
+  trace({ stage: 'tier4', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── TIER 5: QA Bank Table in Supabase (1,839+ curated Q&A records) ─────────
+  const fromQaBank = lookupQaBankAnswerSync(label, profile, { options, fieldType });
+  if (fromQaBank?.answer) {
+    const qaHit = finish(fromQaBank.answer, fromQaBank.source || 'qa_bank', 5);
+    if (qaHit) {
+      trace({
+        stage: 'tier5',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        source: fromQaBank.source,
+        answer: qaHit.answer,
+      });
+      console.log(`    🏦 [QA Bank Tier 5 Table] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}" (${fromQaBank.source})`);
+      profile?._onLog?.(currentStep, `[Tier 5 QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
+      return qaHit;
+    }
+  }
+  trace({ stage: 'tier5', clientId, tenant, query: normalizeLabel(label), hit: false });
 
   // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 1, 2, or 3) ───
   const sensitive = lookupSensitiveSafeAnswer(label);
@@ -533,24 +683,24 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     return null;
   }
 
-  // ─── TIER 4: LLM Analysis with Live Playwright DOM Context ───────────────────
+  // ─── TIER 6: Semantic Analysis & LLM AI with Live Playwright DOM Context ───────────────────
   // (4) Tier 4 LLM must never answer work-auth, sponsorship, or EEO questions.
   const isProtectedCompliance = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo/i.test(label);
   if (isProtectedCompliance) {
     trace({
-      stage: 'tier4',
+      stage: 'tier6',
       clientId,
       tenant,
       query: normalizeLabel(label),
       hit: false,
       rejectionReason: 'llm_blocked_for_compliance',
     });
-    console.log(`    🛑 [LLM Tier 4 blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
+    console.log(`    🛑 [LLM Tier 6 blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
     profile?._onLog?.(currentStep, `[Compliance Blocked] "${label.slice(0, 50)}" — protected question, manual answer needed`);
     return null;
   }
 
-  console.log(`    🤖 [LLM Tier 4] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
+  console.log(`    🤖 [LLM Tier 6] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
   const llmAnswer = await resolveUnknownWithLlm(label, {
     ...enriched,
     fieldType,
@@ -574,7 +724,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const pFact = profileFactForLabel(label, profile);
     if (pFact && options.length === 0 && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
       trace({
-        stage: 'tier4',
+        stage: 'tier6',
         clientId,
         tenant,
         query: normalizeLabel(label),
@@ -583,16 +733,16 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         llmAnswer,
         profileFact: pFact,
       });
-      console.log(`    🛑 [LLM Tier 4 rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
+      console.log(`    🛑 [LLM Tier 6 rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
       return null;
     }
   }
 
-  const llmHit = finish(llmAnswer, 'llm_profile');
+  const llmHit = finish(llmAnswer, 'llm_profile', 6);
 
   if (llmHit) {
     trace({
-      stage: 'tier4',
+      stage: 'tier6',
       clientId,
       tenant,
       query: normalizeLabel(label),
@@ -601,7 +751,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       allowedOptions: options,
       dryRun: opts.dryRun === true,
     });
-    profile?._onLog?.(currentStep, `[Tier 4 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
+    profile?._onLog?.(currentStep, `[Tier 6 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
 
     const awlId = profile._applyWizzId || profile.applywizz_id || profile.client_id || process.env.APPLYWIZZ_ID || '';
     if (awlId && isSupabaseConfigured() && opts.dryRun !== true) {
@@ -619,10 +769,10 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       }).catch((e) => console.log(`    ⚠️  Supabase write error: ${e.message?.slice(0, 80)}`));
       recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
     }
-    console.log(`    🤖 [LLM Tier 4${opts.dryRun ? ' (dry-run)' : ' → Supabase saved'}] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
+    console.log(`    🤖 [LLM Tier 6${opts.dryRun ? ' (dry-run)' : ' → Supabase saved'}] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
     return llmHit;
   }
-  trace({ stage: 'tier4', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
+  trace({ stage: 'tier6', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
 
   if (isProceedQuestion(label)) {
     const yes = options.find((opt) => /^yes\b/i.test(opt)) || 'Yes';
@@ -633,7 +783,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), Tier 3 (CRM API), Tier 4 (LLM) for "${label.slice(0, 55)}"`);
+  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), Tier 3 (CRM API), Tier 4 (Fuzzy Match), Tier 5 (QA Bank), Tier 6 (LLM AI) for "${label.slice(0, 55)}"`);
   return null;
 }
 

@@ -15,6 +15,7 @@ import {
   fetchBotDaemonStatus,
   resolveSupabaseStorageUrl,
   cleanCanonicalJobUrl,
+  getBackendBaseUrl,
   supabase,
 } from '../services/api';
 
@@ -67,6 +68,12 @@ export default function DeveloperDashboard() {
   const [isSubmitTriggering, setIsSubmitTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
+  // Dedicated Backend Daemon URL & Connection Status
+  const [backendUrl, setBackendUrl] = useState(() => getBackendBaseUrl());
+  const [backendUrlInput, setBackendUrlInput] = useState(() => getBackendBaseUrl());
+  const [showBackendConfig, setShowBackendConfig] = useState(false);
+  const [backendPingStatus, setBackendPingStatus] = useState('checking'); // 'connected' | 'offline' | 'checking'
+
   const tabs = ['System', 'Worker Logs', 'CA Roster', 'Runs', 'Errors', 'Queue', 'Debugger', 'Guide'];
 
   // Dynamic label for period tile
@@ -76,34 +83,44 @@ export default function DeveloperDashboard() {
     return 'Today';
   }, [timeframe]);
 
-  // Live polling for Batch Worker Logs when Worker Logs tab is active
-  const isPipelineActive = Boolean(botStatus.isRunning || botStatus.isSubmitting || workerPool.inFlight > 0);
+  // Periodic Backend Ping to check connectivity
+  useEffect(() => {
+    let isMounted = true;
+    async function checkBackend() {
+      try {
+        const res = await fetchBotDaemonStatus();
+        if (!isMounted) return;
+        setBackendPingStatus(res.success && (res.isRunning !== undefined) ? 'connected' : 'offline');
+      } catch {
+        if (isMounted) setBackendPingStatus('offline');
+      }
+    }
+    checkBackend();
+    const interval = setInterval(checkBackend, 8000);
+    return () => { isMounted = false; clearInterval(interval); };
+  }, [backendUrl]);
 
+  // Live polling for Batch Worker Logs when Worker Logs tab is active
   useEffect(() => {
     if (activeTab !== 'Worker Logs') return;
     let isMounted = true;
     async function pollBatchLogs() {
-      // If pipeline is stopped, do not keep spamming background log requests
-      if (!isPipelineActive) return;
       const res = await fetchBatchWorkerLogs({ limit: 120 });
       if (!isMounted) return;
       if (res.success && res.batches) {
         setBatchLogs(res.batches);
       }
     }
-    // Initial fetch
-    fetchBatchWorkerLogs({ limit: 120 }).then((res) => {
-      if (isMounted && res.success && res.batches) setBatchLogs(res.batches);
-    });
+    // Immediate initial fetch
+    pollBatchLogs();
 
-    if (!isPipelineActive) return;
-
+    // Continuous polling every 2.5s while viewing logs
     const interval = setInterval(pollBatchLogs, 2500);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activeTab, isPipelineActive]);
+  }, [activeTab]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -1043,6 +1060,135 @@ export default function DeveloperDashboard() {
       {/* 2. WORKER LOGS TAB — 3 Separate Log Consoles for 9 Workers (Batch-Wise) */}
       {activeTab === 'Worker Logs' && (
         <div className="tab-body-fade">
+          {/* Production Service Bridge Connection Header */}
+          <div style={{
+            background: '#090d16',
+            border: '1px solid #1e293b',
+            borderRadius: '8px',
+            padding: '10px 16px',
+            marginBottom: '0.85rem',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            flexWrap: 'wrap',
+            gap: '10px',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+              <span style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '6px',
+                padding: '4px 10px',
+                borderRadius: '12px',
+                fontSize: '0.75rem',
+                fontWeight: 700,
+                letterSpacing: '0.03em',
+                background: backendPingStatus === 'connected' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
+                color: backendPingStatus === 'connected' ? '#4ade80' : '#f87171',
+                border: `1px solid ${backendPingStatus === 'connected' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+              }}>
+                <span style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: backendPingStatus === 'connected' ? '#22c55e' : '#ef4444',
+                  boxShadow: backendPingStatus === 'connected' ? '0 0 8px #22c55e' : '0 0 8px #ef4444',
+                }} />
+                {backendPingStatus === 'connected' ? 'LIVE BACKEND CONNECTED' : 'DAEMON OFFLINE / DETACHED'}
+              </span>
+              <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
+                Backend Target: <strong style={{ color: '#e2e8f0', fontFamily: 'monospace' }}>{backendUrl || '(Direct Relative / Same Domain)'}</strong>
+              </span>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <button
+                type="button"
+                onClick={() => setShowBackendConfig(!showBackendConfig)}
+                style={{
+                  padding: '5px 12px',
+                  fontSize: '0.76rem',
+                  fontWeight: 600,
+                  borderRadius: '4px',
+                  background: showBackendConfig ? '#334155' : '#1e293b',
+                  color: '#e2e8f0',
+                  border: '1px solid #475569',
+                  cursor: 'pointer',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '5px',
+                }}
+              >
+                ⚙️ {showBackendConfig ? 'Close Backend Config' : 'Configure Backend URL'}
+              </button>
+            </div>
+          </div>
+
+          {/* Collapsible Backend URL Input Bar */}
+          {showBackendConfig && (
+            <div style={{
+              background: '#0d1322',
+              border: '1px solid #3b82f6',
+              borderRadius: '8px',
+              padding: '12px 16px',
+              marginBottom: '1rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '12px',
+              flexWrap: 'wrap',
+            }}>
+              <div style={{ flex: 1, minWidth: '280px' }}>
+                <div style={{ fontSize: '0.78rem', color: '#93c5fd', marginBottom: '4px', fontWeight: 600 }}>
+                  Render / Railway Automation Backend URL:
+                </div>
+                <input
+                  type="text"
+                  placeholder="https://workday-automation-backend-xxxx.onrender.com"
+                  value={backendUrlInput}
+                  onChange={(e) => setBackendUrlInput(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '7px 12px',
+                    fontSize: '0.82rem',
+                    borderRadius: '4px',
+                    background: '#020617',
+                    border: '1px solid #334155',
+                    color: '#ffffff',
+                    fontFamily: 'monospace',
+                  }}
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  let cleaned = backendUrlInput.trim().replace(/\/+$/, '');
+                  if (cleaned && !cleaned.startsWith('http://') && !cleaned.startsWith('https://')) {
+                    cleaned = 'https://' + cleaned;
+                  }
+                  localStorage.setItem('WORKDAY_BACKEND_URL', cleaned);
+                  setBackendUrl(cleaned);
+                  setBackendUrlInput(cleaned);
+                  setShowBackendConfig(false);
+                  fetchBotDaemonStatus().then((res) => setBackendPingStatus(res.success && (res.isRunning !== undefined) ? 'connected' : 'offline'));
+                  fetchBatchWorkerLogs({ limit: 120 }).then((res) => { if (res.success && res.batches) setBatchLogs(res.batches); });
+                }}
+                style={{
+                  padding: '8px 16px',
+                  fontSize: '0.82rem',
+                  fontWeight: 700,
+                  borderRadius: '4px',
+                  background: 'linear-gradient(135deg, #2563eb 0%, #1d4ed8 100%)',
+                  color: '#ffffff',
+                  border: 'none',
+                  cursor: 'pointer',
+                  marginTop: '18px',
+                }}
+              >
+                Save & Connect
+              </button>
+            </div>
+          )}
+
           {/* Top Control Bar for Batch Logs */}
           <div style={{
             background: '#0f172a',

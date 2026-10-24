@@ -402,7 +402,7 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
     return;
   }
 
-  console.log(`\n  🔄 Bulk pre-resolving across 4-tier engine for ${pendingTasks.length} pending task(s)...`);
+  console.log(`\n  🔄 Bulk pre-resolving across 6-tier engine for ${pendingTasks.length} pending task(s)...`);
 
   for (const row of pendingTasks) {
     const awlId = row.applywizz_id;
@@ -436,6 +436,6 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
     }
   }
 
-  console.log(`  ✅ Bulk 4-tier pre-resolution complete for ${pendingTasks.length} queued task(s).\n`);
+  console.log(`  ✅ Bulk 6-tier pre-resolution complete for ${pendingTasks.length} queued task(s).\n`);
 }
 
