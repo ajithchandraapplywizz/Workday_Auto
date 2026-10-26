@@ -996,10 +996,7 @@ export async function loadJobFormSchema(jobUrl, { maxAgeHours = 24, runStartedAt
 
     // Rescan scoping check: schemas older than current run must not be reused
     if (!runStartedAt) {
-      try {
-        const bcRows = await request('bot_control', { query: '?id=eq.primary&select=scan_run_started_at&limit=1' });
-        runStartedAt = bcRows?.[0]?.scan_run_started_at || null;
-      } catch { }
+      runStartedAt = memoryBotControl.updated_at || null;
     }
     if (runStartedAt && schema.created_at) {
       const schemaTime = new Date(schema.created_at).getTime();
@@ -1669,7 +1666,6 @@ export async function getBotControl() {
 }
 
 const VALID_BOT_CONTROL_COLUMNS = new Set([
-  'mode',
   'stage',
   'is_running',
   'is_paused',
@@ -1678,16 +1674,6 @@ const VALID_BOT_CONTROL_COLUMNS = new Set([
   'last_action_requested',
   'active_worker_count',
   'current_action',
-  'scan_enabled',
-  'scan_status',
-  'scan_stop_requested',
-  'submit_enabled',
-  'submit_status',
-  'submit_stop_requested',
-  'scan_message',
-  'refusal_reason',
-  'scan_run_id',
-  'scan_run_started_at',
   'updated_at',
 ]);
 
@@ -1705,9 +1691,14 @@ export async function updateBotControl(patch = {}) {
 
   if (!isSupabaseConfigured()) return true;
 
-  // Build clean body containing only valid columns in the Supabase schema
+  // Build clean body containing ONLY valid columns in the Supabase schema
   const cleanBody = {};
-  if (patch.mode && !patch.stage) cleanBody.stage = patch.mode;
+  if (patch.stage) {
+    cleanBody.stage = patch.stage;
+  } else if (patch.mode) {
+    cleanBody.stage = patch.mode;
+  }
+
   for (const [key, value] of Object.entries(patch)) {
     if (VALID_BOT_CONTROL_COLUMNS.has(key)) {
       cleanBody[key] = value;
@@ -1996,10 +1987,7 @@ export async function saveScannedJob({
   const questionsArr = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
 
   if (!scanRunId) {
-    try {
-      const bcRows = await request('bot_control', { query: '?id=eq.primary&select=scan_run_id&limit=1' });
-      scanRunId = bcRows?.[0]?.scan_run_id || null;
-    } catch { }
+    scanRunId = memoryBotControl.scan_run_id || null;
   }
 
   const payload = {

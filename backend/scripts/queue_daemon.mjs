@@ -1587,15 +1587,8 @@ async function initOnStartup() {
     try {
       await supabase.from('bot_control').update({
         stage: 'idle',
-        mode: 'idle',
         is_running: false,
         is_paused: false,
-        scan_status: 'off',
-        scan_enabled: false,
-        scan_stop_requested: false,
-        submit_status: 'off',
-        submit_enabled: false,
-        submit_stop_requested: false,
         stop_requested: false,
         trigger_requested: false,
         last_action_requested: null,
