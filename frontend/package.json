@@ -4,9 +4,9 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "npm --prefix .. run dev",
-    "build": "npm --prefix .. run build",
-    "start": "vite build && vite preview",
+    "dev": "vite",
+    "build": "vite build",
+    "start": "vite preview",
     "lint": "oxlint",
     "preview": "vite preview"
   },
