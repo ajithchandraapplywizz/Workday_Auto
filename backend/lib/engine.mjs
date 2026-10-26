@@ -459,10 +459,20 @@ export async function isResumeRequiredAndMissing(page) {
 
 async function uploadResumeViaFileChooser(page, absPath) {
   try {
-    const selectBtn = page.locator('button:has-text("Select files"), [data-automation-id*="select-files"], label:has-text("Select files"), button:has-text("Upload"), [data-automation-id*="file-upload-drop-zone"]').first();
-    if (await selectBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+    const selectBtn = page.locator([
+      'button:has-text("Select files")',
+      '[data-automation-id*="select-files"]',
+      'label:has-text("Select files")',
+      'button:has-text("Upload")',
+      '[data-automation-id*="file-upload-drop-zone"]',
+      '[data-automation-id*="dropZone"]',
+      '[data-automation-id*="fileUpload"] button',
+      'button:has-text("Drop files here")'
+    ].join(', ')).first();
+
+    if (await selectBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
       const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 3000 }).catch(() => null),
+        page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null),
         selectBtn.click({ force: true }).catch(() => {}),
       ]);
       if (fileChooser) {
@@ -542,20 +552,21 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
     await page.waitForTimeout(700);
     const state = await page.evaluate((needle) => {
       const item = document.querySelector(
-        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"], [class*="uploaded-file"], [data-automation-id*="fileUploadItem"]'
       );
-      const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+      const deleteBtn = document.querySelector('[data-automation-id="delete-file"], [data-automation-id*="delete" i], [aria-label*="delete" i], [aria-label*="remove" i], [data-automation-id="clear-upload"]');
       const itemText = (item?.textContent || '').replace(/\s+/g, ' ').trim();
       const body = document.body?.innerText || '';
       const successBanner = /successfully\s*uploaded/i.test(body);
       const nameHit = needle
         ? itemText.toLowerCase().includes(needle) || (deleteBtn && body.toLowerCase().includes(needle))
         : /\.pdf\b/i.test(itemText);
+      const hasPdfChip = /\.pdf\b/i.test(itemText) || (deleteBtn !== null);
       return {
         hasItem: Boolean(item && (item.offsetParent !== null || item.getClientRects().length > 0)),
         hasDelete: Boolean(deleteBtn),
         successBanner,
-        nameHit,
+        nameHit: nameHit || hasPdfChip,
         itemText: itemText.slice(0, 80),
       };
     }, expectBase).catch(() => ({ hasItem: false, hasDelete: false, successBanner: false, nameHit: false, itemText: '' }));

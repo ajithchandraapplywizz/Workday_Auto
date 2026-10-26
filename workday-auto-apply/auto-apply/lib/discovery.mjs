@@ -636,8 +636,15 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
       console.log('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
       return;
     }
-    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
-    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
+
+    // 0. If Sign In form (password input visible and NO verifyPassword) is ALREADY active, do not touch anything!
+    if (await isSignInFormVisible(page)) {
+      console.log('   ✅ Pre-scan: Sign-in form already active and ready (password input visible).');
+      return;
+    }
+
+    // If verifyPassword or create account tab is present, click "Sign In" tab/link
+    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasSignInUnderCreateAccount)) {
       console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
       await clickGatewaySignIn(page);
     }
@@ -670,16 +677,22 @@ export async function isSignInFormVisible(page) {
 
 // ─── Click the gateway "Sign In" link (below Create Account, not nav bar) ───
 export async function clickGatewaySignIn(page) {
-  // Try candidates inside modal dialog first, then main document
+  // If Sign In form is already visible, do not click anything!
+  if (await isSignInFormVisible(page)) {
+    return true;
+  }
+
+  // Try tab/link candidates inside modal dialog first, then main document (links/tabs ONLY, never submit buttons)
   const candidates = await page.$$([
     '[role="dialog"] [data-automation-id="signInLink"]',
     '[role="dialog"] [data-automation-id="signInTab"]',
-    '[role="dialog"] button:has-text("Sign In")',
     '[role="dialog"] a:has-text("Sign In")',
     '[data-automation-id="signInLink"]',
     '[data-automation-id="signInTab"]',
-    'button:has-text("Sign In")',
     'a:has-text("Sign In")',
+    '[role="tab"]:has-text("Sign In")',
+    'button[data-automation-id="signInTab"]',
+    'button[data-automation-id="signInLink"]',
   ].join(', '));
 
   for (const el of candidates) {
@@ -704,7 +717,7 @@ export async function clickGatewaySignIn(page) {
 
 // ─── Click the gateway "Create Account" button/tab (not nav bar) ───────────
 export async function clickGatewayCreateAccount(page) {
-  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
+  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id*="verify" i]:visible, input[name*="verify" i]:visible').catch(() => null);
   if (verifyPwd) {
     console.log('   Create Account form is already visible.');
     return true;
@@ -719,12 +732,14 @@ export async function clickGatewayCreateAccount(page) {
   }
 
   const buttons = await page.$$([
-    '[role="dialog"] button[data-automation-id="createAccountLink"]',
+    '[role="dialog"] [data-automation-id="createAccountLink"]',
     '[role="dialog"] button:has-text("Create Account")',
-    'button[data-automation-id="createAccountLink"]',
+    '[role="dialog"] a:has-text("Create Account")',
+    '[data-automation-id="createAccountLink"]',
     '[data-automation-id="createAccountTab"]',
     'button:has-text("Create Account")',
     'a:has-text("Create Account")',
+    '[role="tab"]:has-text("Create Account")',
   ].join(', '));
 
   for (const btn of buttons) {
@@ -732,12 +747,14 @@ export async function clickGatewayCreateAccount(page) {
     const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
     const type = await btn.getAttribute('type').catch(() => '');
 
-    if (autoId === 'createAccountSubmitButton' || type === 'submit') continue;
+    // Skip submit buttons
+    if (autoId === 'createAccountSubmitButton' || autoId === 'createAccountButton' || type === 'submit') continue;
     if (await isInNavOrHeader(btn)) continue;
 
     console.log('   Clicking gateway "Create Account" button (not nav bar)...');
     await btn.click({ force: true }).catch(() => btn.evaluate(e => e.click()));
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(2000);
+    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
     return true;
   }
 

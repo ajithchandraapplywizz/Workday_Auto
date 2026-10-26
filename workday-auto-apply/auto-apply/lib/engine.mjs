@@ -506,20 +506,21 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
     await page.waitForTimeout(700);
     const state = await page.evaluate((needle) => {
       const item = document.querySelector(
-        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"], [class*="uploaded-file"], [data-automation-id*="fileUploadItem"]'
       );
-      const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+      const deleteBtn = document.querySelector('[data-automation-id="delete-file"], [data-automation-id*="delete" i], [aria-label*="delete" i], [aria-label*="remove" i], [data-automation-id="clear-upload"]');
       const itemText = (item?.textContent || '').replace(/\s+/g, ' ').trim();
       const body = document.body?.innerText || '';
       const successBanner = /successfully\s*uploaded/i.test(body);
       const nameHit = needle
         ? itemText.toLowerCase().includes(needle) || (deleteBtn && body.toLowerCase().includes(needle))
         : /\.pdf\b/i.test(itemText);
+      const hasPdfChip = /\.pdf\b/i.test(itemText) || (deleteBtn !== null);
       return {
         hasItem: Boolean(item && (item.offsetParent !== null || item.getClientRects().length > 0)),
         hasDelete: Boolean(deleteBtn),
         successBanner,
-        nameHit,
+        nameHit: nameHit || hasPdfChip,
         itemText: itemText.slice(0, 80),
       };
     }, expectBase).catch(() => ({ hasItem: false, hasDelete: false, successBanner: false, nameHit: false, itemText: '' }));

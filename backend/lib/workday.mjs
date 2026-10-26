@@ -318,21 +318,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     return true;
   }
 
-  // 2. If the account was detected as already existing, attempt sign in or trigger forgot password
+  // 2. If the account was detected as already existing, trigger automated Forgot Password recovery via Zoho Mail
   if (page._accountAlreadyExists) {
-    console.log('   🔐 Account already exists on this tenant — attempting sign in with credentials...');
-    await handleAdaptiveGateway(page, 'signin');
-    const directLogin = await workdayLogin(page, email, createdPassword);
-    if (directLogin === true) {
-      return finishSuccessfulLogin(page, mode, profile);
-    }
-    if (await isWorkdayWizardVisible(page)) {
-      return true;
-    }
-
-    // Login on existing account failed (wrong password or locked) -> launch automated Forgot Password flow
-    console.log('   📩 Existing account password mismatched or locked — launching automated Forgot Password recovery via Zoho Mail...');
-    const effectivePassword = createdPassword || password || process.env.WORKDAY_PASSWORD;
+    console.log('   🔐 Account already exists on this tenant (mismatched password or locked) — launching automated Forgot Password recovery via Zoho Mail...');
+    const effectivePassword = createdPassword || password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
     const forgotResult = await executeWorkdayForgotPassword(page, {
       email,
       password: effectivePassword,
@@ -352,7 +341,7 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
 
       if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
         console.log('   ✅ Application wizard active post-password reset!');
-        return true;
+        return finishSuccessfulLogin(page, mode, profile);
       }
       await handleAdaptiveGateway(page, 'signin');
       const postResetLogin = await workdayLogin(page, email, effectivePassword);
@@ -360,7 +349,7 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
         return finishSuccessfulLogin(page, mode, profile);
       }
       if (await isWorkdayWizardVisible(page)) {
-        return true;
+        return finishSuccessfulLogin(page, mode, profile);
       }
     }
   }
@@ -585,12 +574,34 @@ export async function workdayLogin(page, email, password) {
     'input[placeholder*="email" i]'
   ].join(', '));
   let emailFilled = false;
+  let targetEmailInput = null;
   for (const inp of emailInputs) {
     if (await inp.isVisible().catch(() => false)) {
       await inp.fill(email);
+      await inp.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }).catch(() => {});
       await page.waitForTimeout(200);
       emailFilled = true;
+      targetEmailInput = inp;
       break;
+    }
+  }
+
+  // Fallback: search by label "Email" if not filled yet
+  if (!emailFilled) {
+    const labelInput = page.locator('label:has-text("Email") ~ input, [data-automation-id*="formField"]:has-text("Email") input, form input[type="text"]').first();
+    if (await labelInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await labelInput.fill(email);
+      await labelInput.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }).catch(() => {});
+      emailFilled = true;
+      targetEmailInput = labelInput;
     }
   }
 
@@ -602,11 +613,18 @@ export async function workdayLogin(page, email, password) {
     'input[id*="password" i]:not([id*="verify" i])'
   ].join(', '));
   let passwordFilled = false;
+  let targetPasswordInput = null;
   for (const inp of passwordInputs) {
     if (await inp.isVisible().catch(() => false)) {
       await inp.fill(password);
+      await inp.evaluate(el => {
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      }).catch(() => {});
       await page.waitForTimeout(200);
       passwordFilled = true;
+      targetPasswordInput = inp;
       break;
     }
   }
@@ -635,8 +653,14 @@ export async function workdayLogin(page, email, password) {
     for (const inp of newPasswordInputs) {
       if (await inp.isVisible().catch(() => false)) {
         await inp.fill(password);
+        await inp.evaluate(el => {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }).catch(() => {});
         await page.waitForTimeout(200);
         passwordFilled = true;
+        targetPasswordInput = inp;
         break;
       }
     }
@@ -647,22 +671,50 @@ export async function workdayLogin(page, email, password) {
     return false;
   }
 
-  // 5. Click visible Sign In submit button with force: true (excluding nav header)
+  // 5. Submit Sign In form (Click visible button + Enter key on password field)
   const signInButtons = await page.$$([
     'button[data-automation-id="signInSubmitButton"]',
+    'button:has-text("Sign In")',
+    '[role="button"]:has-text("Sign In")',
     'button[type="submit"]',
-    'button:has-text("Sign In")'
+    'button[data-automation-id*="signIn" i]',
+    'button[data-automation-id*="login" i]'
   ].join(', '));
+
+  let submitClicked = false;
   for (const btn of signInButtons) {
     if (await btn.isVisible().catch(() => false)) {
       if (await isInNavOrHeader(btn)) continue;
+      const text = (await btn.textContent().catch(() => '')).trim().toLowerCase();
       const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
       const type = await btn.getAttribute('type').catch(() => '');
-      if (autoId === 'signInSubmitButton' || type === 'submit') {
+
+      // Click if it has sign-in text or sign-in automation id or submit type
+      if (
+        text.includes('sign in') ||
+        text.includes('log in') ||
+        autoId.toLowerCase().includes('signin') ||
+        autoId.toLowerCase().includes('submit') ||
+        type === 'submit'
+      ) {
+        console.log(`   🚀 Clicking Sign In button (text="${text}", autoId="${autoId}", type="${type}")...`);
         await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        submitClicked = true;
         break;
       }
     }
+  }
+
+  // Backup submission: Press Enter on the password input & trigger form submit
+  if (targetPasswordInput) {
+    if (!submitClicked) {
+      console.log('   ⌨️ Dispatching Enter key on password input to submit form...');
+    }
+    await targetPasswordInput.press('Enter').catch(() => {});
+    await targetPasswordInput.evaluate(el => {
+      const form = el.closest('form');
+      if (form) form.dispatchEvent(new Event('submit', { bubbles: true, cancelable: true }));
+    }).catch(() => {});
   }
 
   await page.waitForTimeout(4000);
@@ -712,65 +764,157 @@ export async function workdayLogin(page, email, password) {
 // ─── Create Workday account ─────────────────────────────────────────────────
 export async function workdayCreateAccount(page, email, givenPassword) {
   console.log('   Creating Workday account...');
+  const password = givenPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
 
   // 1. If on two-button page, Social SSO, or Sign In tab, click "Create Account" button/link (not nav bar)
   await clickGatewayCreateAccount(page);
 
-  // 2. Wait explicitly for create account form (verifyPassword input) to appear
+  // 2. Wait explicitly for create account inputs to appear
   try {
-    await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 8000 });
+    await page.waitForSelector('input[type="password"]:visible, input[data-automation-id="email"]:visible, input[type="email"]:visible', { timeout: 8000 });
   } catch {}
 
-  const verifyVisible = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
-  if (!verifyVisible) {
-    await clickGatewayCreateAccount(page);
-    try {
-      await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 5000 });
-    } catch {}
-  }
-
-  const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"]');
+  // 3. Fill email
+  const emailInputs = await page.$$([
+    'input[data-automation-id="email"]',
+    'input[data-automation-id*="email" i]',
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[id*="email" i]',
+    'input[aria-label*="email" i]',
+    'input[placeholder*="email" i]'
+  ].join(', '));
   for (const inp of emailInputs) {
     if (await inp.isVisible().catch(() => false)) {
       await inp.fill(email);
+      await inp.dispatchEvent('input').catch(() => {});
+      await inp.dispatchEvent('change').catch(() => {});
+      await inp.dispatchEvent('blur').catch(() => {});
       break;
     }
   }
 
-  const password = givenPassword || generatePassword();
-  const pwdInputs = await page.$$('input[data-automation-id="password"], input[type="password"]');
+  // 4. Fill password & verify/confirm password
+  const pwdInputs = await page.$$([
+    'input[data-automation-id*="password" i]',
+    'input[type="password"]',
+    'input[name*="password" i]',
+    'input[id*="password" i]',
+    'input[aria-label*="password" i]'
+  ].join(', '));
+
   for (const inp of pwdInputs) {
     if (await inp.isVisible().catch(() => false)) {
-      const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
-      if (autoId === 'verifyPassword') continue;
       await inp.fill(password);
-      break;
+      await inp.dispatchEvent('input').catch(() => {});
+      await inp.dispatchEvent('change').catch(() => {});
+      await inp.dispatchEvent('blur').catch(() => {});
+      await page.waitForTimeout(150);
     }
   }
 
-  const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]');
-  if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) {
-    await verifyPwdInput.fill(password);
+  // Also verify confirm password specifically
+  const verifyInputs = await page.$$([
+    'input[data-automation-id="verifyPassword"]',
+    'input[data-automation-id*="verify" i]',
+    'input[data-automation-id*="confirm" i]',
+    'input[name*="verify" i]',
+    'input[name*="confirm" i]',
+    'input[id*="verify" i]',
+    'input[id*="confirm" i]',
+    'input[aria-label*="verify" i]',
+    'input[aria-label*="confirm" i]',
+    'input[placeholder*="verify" i]',
+    'input[placeholder*="confirm" i]'
+  ].join(', '));
+  for (const vInp of verifyInputs) {
+    if (await vInp.isVisible().catch(() => false)) {
+      await vInp.fill(password);
+      await vInp.dispatchEvent('input').catch(() => {});
+      await vInp.dispatchEvent('change').catch(() => {});
+      await vInp.dispatchEvent('blur').catch(() => {});
+      await page.waitForTimeout(150);
+    }
   }
 
-  const termsCheckbox = await page.$('input[type="checkbox"][data-automation-id*="createAccountCheckbox"], input[type="checkbox"][data-automation-id*="agree"], input[type="checkbox"][name*="agree"], label:has-text("agree") input[type="checkbox"]');
-  if (termsCheckbox) {
-    const isChecked = await termsCheckbox.isChecked().catch(() => false);
-    if (!isChecked) await termsCheckbox.click({ force: true }).catch(() => termsCheckbox.evaluate(el => el.click()));
+  // 5. Check mandatory Terms / Privacy / Agreement checkbox
+  const termsCheckboxes = await page.$$([
+    '[data-automation-id*="createAccountCheckbox"] input[type="checkbox"]',
+    'input[type="checkbox"][data-automation-id*="createAccountCheckbox"]',
+    '[data-automation-id*="checkbox"] input[type="checkbox"]',
+    '[data-automation-id*="consent"] input[type="checkbox"]',
+    '[data-automation-id*="disclaimer"] input[type="checkbox"]',
+    'input[type="checkbox"][data-automation-id*="agree"]',
+    'input[type="checkbox"][name*="agree"]',
+    'input[type="checkbox"][id*="agree" i]',
+    'label:has-text("agree") input[type="checkbox"]',
+    'label:has-text("Terms") input[type="checkbox"]',
+    'label:has-text("Privacy") input[type="checkbox"]',
+    'label:has-text("acknowledge") input[type="checkbox"]',
+    'div[data-automation-id="createAccountCheckbox"]',
+    'form input[type="checkbox"]',
+  ].join(', '));
+
+  for (const cb of termsCheckboxes) {
+    if (await cb.isVisible().catch(() => false)) {
+      const isInput = await cb.evaluate(el => el.tagName.toLowerCase() === 'input').catch(() => false);
+      if (isInput) {
+        const isChecked = await cb.isChecked().catch(() => false);
+        if (!isChecked) {
+          await cb.click({ force: true }).catch(() => cb.evaluate(el => el.click()));
+          await cb.dispatchEvent('change').catch(() => {});
+          await page.waitForTimeout(200);
+        }
+      } else {
+        await cb.click({ force: true }).catch(() => cb.evaluate(el => el.click()));
+        await page.waitForTimeout(200);
+      }
+    }
   }
 
+  // Ensure all inputs trigger validation
+  await page.evaluate(() => {
+    document.querySelectorAll('input').forEach(i => {
+      i.dispatchEvent(new Event('input', { bubbles: true }));
+      i.dispatchEvent(new Event('change', { bubbles: true }));
+      i.dispatchEvent(new Event('blur', { bubbles: true }));
+    });
+  }).catch(() => {});
+  await page.waitForTimeout(500);
+
+  // 6. Submit the Create Account form
   const submitBtns = await page.$$([
     'button[data-automation-id="createAccountSubmitButton"]',
-    'button:has-text("Create Account")',
-    'button[type="submit"]'
+    'button[data-automation-id="createAccountButton"]',
+    'form button[type="submit"]',
+    'button[type="submit"]:has-text("Create Account")',
+    'button:has-text("Create Account")'
   ].join(', '));
 
   let submitted = false;
   for (const btn of submitBtns) {
     if (await btn.isVisible().catch(() => false)) {
       if (await isInNavOrHeader(btn)) continue;
+      const role = await btn.getAttribute('role').catch(() => '');
+      const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
+      // Avoid clicking the tab switcher instead of submit
+      if (role === 'tab' || autoId === 'createAccountLink' || autoId === 'createAccountTab') continue;
+
+      const isDisabled = await btn.isDisabled().catch(() => false) || (await btn.getAttribute('aria-disabled').catch(() => '')) === 'true';
+      if (isDisabled) {
+        console.log('   ⚠️  Create Account submit button disabled — attempting re-trigger of inputs...');
+        await page.evaluate(() => {
+          document.querySelectorAll('input').forEach(i => {
+            i.dispatchEvent(new Event('input', { bubbles: true }));
+            i.dispatchEvent(new Event('change', { bubbles: true }));
+          });
+        }).catch(() => {});
+        await page.waitForTimeout(500);
+      }
+
       const registrationTime = Date.now();
       page._lastRegistrationTime = registrationTime - 30000;
+      console.log('   🚀 Clicking "Create Account" submit button...');
       await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
       submitted = true;
       await page.waitForTimeout(4000);
@@ -780,25 +924,26 @@ export async function workdayCreateAccount(page, email, givenPassword) {
   }
 
   if (!submitted) {
-    console.log('   ❌ Could not submit Create Account form.');
+    console.log('   ❌ Could not locate or click Create Account submit button.');
     return null;
   }
 
-  // Check if an error banner or message explicitly states the account already exists
+  // 7. Check if Workday says account already exists
   const alreadyExists = await page.evaluate(() => {
     const errorEl = document.querySelector('.error-message, [data-automation-id*="error" i], [role="alert"]');
-    if (!errorEl) return false;
-    const text = (errorEl.textContent || '').toLowerCase();
+    const bodyText = (document.body?.innerText || '').toLowerCase();
+    const errText = errorEl ? (errorEl.textContent || '').toLowerCase() : '';
+    const combined = `${errText} ${bodyText}`;
     return (
-      text.includes('already exists') ||
-      text.includes('already registered') ||
-      text.includes('an account with this email') ||
-      text.includes('user already exists')
+      combined.includes('already exists') ||
+      combined.includes('already registered') ||
+      combined.includes('an account with this email') ||
+      combined.includes('user already exists')
     );
   }).catch(() => false);
 
   if (alreadyExists) {
-    console.log('   ℹ️  Account already exists with this email (error alert detected) — switching to Sign In...');
+    console.log('   ℹ️  Account already exists with this email on this tenant — marked for Forgot Password recovery.');
     page._accountAlreadyExists = true;
     await clickGatewaySignIn(page);
     return password;
