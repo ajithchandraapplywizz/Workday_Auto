@@ -83,7 +83,7 @@ import {
 } from './workdayDom.mjs';
 import { runDynamicFieldLoop, resetPerApplicationSessionState } from './dynamicFieldEngine.mjs';
 import { validatePage } from './interaction/index.mjs';
-import { repairRequiredFieldsFromErrors, parseErrorFieldNames } from './workdayErrorRepair.mjs';
+import { repairRequiredFieldsFromErrors, parseErrorFieldNames, resolvePostalCodeWithLlm } from './workdayErrorRepair.mjs';
 import { bootstrapClientContext } from './profileBootstrap.mjs';
 import { resolvePostalForWorkday, workdayPhoneCodeForCountry } from './clientContact.mjs';
 import { disarmRiskyAddButtons, installScriptOnlyClickGuard, drainBlockedScriptClicks } from './safeClick.mjs';
@@ -1000,8 +1000,20 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      const c = profile?.personal?.city || profile?.personal?.City || profile?.qa_answers?.city;
+      if (c && (!pin || pin === '75038' || pin === '500001')) {
+        pin = await resolvePostalCodeWithLlm({
+          city: c,
+          state: profile?.personal?.state || profile?.personal?.State || profile?.qa_answers?.state,
+          country: profile?.personal?.country,
+          profile,
+        }).catch(() => pin);
+      }
+      await interactAndRescan(page, async () => {
+        await postalInput.fill('').catch(() => {});
+        await postalInput.fill(pin);
+      });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
       logFieldTrace({
@@ -1232,8 +1244,20 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      const c = profile?.personal?.city || profile?.personal?.City || profile?.qa_answers?.city;
+      if (c && (!pin || pin === '75038' || pin === '500001')) {
+        pin = await resolvePostalCodeWithLlm({
+          city: c,
+          state: profile?.personal?.state || profile?.personal?.State || profile?.qa_answers?.state,
+          country: profile?.personal?.country,
+          profile,
+        }).catch(() => pin);
+      }
+      await interactAndRescan(page, async () => {
+        await postalInput.fill('').catch(() => {});
+        await postalInput.fill(pin);
+      });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
     }
@@ -1943,6 +1967,22 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       console.log(`     … and ${profile._humanRequired.length - 8} more`);
     }
     if (confirmSubmit && !dryRun) {
+      try {
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+          if (buf) {
+            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+            const cleanId = String(profile?.applywizz_id || profile?._applyWizzId || 'CLIENT').trim().toUpperCase();
+            const taskId = profile?._taskId || profile?._distributionId || Date.now();
+            const filename = `${cleanId}_${taskId}_human_required_${Date.now()}.jpg`;
+            const uploadedUrl = await uploadStorageScreenshot('failed-applications', filename, buf, 'image/jpeg');
+            if (uploadedUrl) {
+              profile._submissionScreenshotUrl = uploadedUrl;
+              profile._submissionScreenshotBuffer = buf;
+            }
+          }
+        }
+      } catch {}
       return 'human-required';
     }
     console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
@@ -2032,12 +2072,24 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
     try {
       if (page && !page.isClosed()) {
-        console.log('  📸 Capturing mandatory Review & Submit complete page screenshot...');
+        console.log('  📸 Capturing mandatory full-page Review & Submit complete page screenshot...');
         await page.waitForLoadState('domcontentloaded').catch(() => {});
-        await page.waitForTimeout(1500).catch(() => {});
+        await page.waitForTimeout(1000).catch(() => {});
 
-        // Level 1: Full page screenshot with 8s timeout
-        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
+        // Progressive smooth scroll from top to bottom and back to render all lazy-loaded review accordions
+        await page.evaluate(async () => {
+          const scrollStep = 600;
+          const totalHeight = document.body.scrollHeight || 3000;
+          for (let y = 0; y < totalHeight; y += scrollStep) {
+            window.scrollTo(0, y);
+            await new Promise((r) => setTimeout(r, 60));
+          }
+          window.scrollTo(0, 0);
+          await new Promise((r) => setTimeout(r, 200));
+        }).catch(() => {});
+
+        // Level 1: Full-page long screenshot
+        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 20000 }).catch(() => null);
 
         // Level 2: High-resolution viewport screenshot fallback
         if (!reviewBuf) {
@@ -2128,25 +2180,31 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
   }
 
-  // Capture authentic browser screenshot of the confirmation page/modal & upload directly to bucket
+  // Capture authentic browser full-page screenshot of the confirmation page/modal & upload directly to bucket
   try {
     if (page && !page.isClosed()) {
-      const buf = await page.screenshot({ type: 'png', timeout: 8000 }).catch(() => null);
+      await page.waitForTimeout(1000).catch(() => {});
+      // Scroll to top so complete confirmation header & body is captured
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      let buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
+      if (!buf) {
+        buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+      }
       if (buf) {
         profile._submissionScreenshotBuffer = buf;
         const cleanId = String(profile?.applywizz_id || profile?.id || 'CLIENT').trim().toUpperCase();
         const taskId = profile?._taskId || profile?._distributionId || Date.now();
-        const filename = `${cleanId}_${taskId}_submitted_${Date.now()}.png`;
+        const filename = `${cleanId}_${taskId}_submitted_${Date.now()}.jpg`;
         const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-        const uploadedUrl = await uploadStorageScreenshot('submitted-applications', filename, buf, 'image/png');
+        const uploadedUrl = await uploadStorageScreenshot('submitted-applications', filename, buf, 'image/jpeg');
         if (uploadedUrl) {
           profile._submissionScreenshotUrl = uploadedUrl;
-          console.log(`  ☁️ Confirmation proof uploaded to submitted-applications: ${uploadedUrl}`);
+          console.log(`  ☁️ Full-page confirmation proof uploaded to submitted-applications: ${uploadedUrl}`);
         }
       }
     }
   } catch (shotErr) {
-    console.warn('  ⚠️ Confirmation screenshot upload error:', shotErr?.message);
+    console.warn('  ⚠️ Full-page confirmation screenshot upload error:', shotErr?.message);
   }
 
   if (confirmationFound) {
@@ -2332,27 +2390,26 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
               options: hb.options || [],
               step: stepName,
             });
-            if (hb.required) {
-              const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-              const existing = profile._scrapedWizardQuestions.get(qNorm);
-              const existingOpts = existing?.options || [];
-              const newOpts = hb.options || [];
-              profile._scrapedWizardQuestions.set(qNorm, {
-                question: hb.label,
-                label: hb.label,
-                question_normalized: qNorm,
-                field_type: hb.fieldType || 'text',
-                type: hb.fieldType || 'text',
-                options: newOpts.length ? newOpts : existingOpts,
-                required: true,
-                is_required: true,
-                step: stepName,
-                value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
-              });
-            }
+            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+            const existing = profile._scrapedWizardQuestions.get(qNorm);
+            const existingOpts = existing?.options || [];
+            const newOpts = hb.options || [];
+            const isReq = Boolean(hb.required || hb.is_required);
+            profile._scrapedWizardQuestions.set(qNorm, {
+              question: hb.label,
+              label: hb.label,
+              question_normalized: qNorm,
+              field_type: hb.fieldType || 'text',
+              type: hb.fieldType || 'text',
+              options: newOpts.length ? newOpts : existingOpts,
+              required: isReq,
+              is_required: isReq,
+              step: stepName,
+              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+            });
           }
-          const stepReqCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
-          console.log(`  📋 Scraped ${stepReqCount} mandatory question(s) on "${stepName}" with types & options.`);
+          const stepTotalCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
+          console.log(`  📋 Scraped ${stepTotalCount} question(s) on "${stepName}" with labels, types & options.`);
         }
       } catch (hErr) {
         console.log(`  ⚠️  Question scrape notice on "${stepName}": ${hErr.message}`);
@@ -2399,24 +2456,23 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
             options: hb.options || [],
             step: stepName,
           });
-          if (hb.required) {
-            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-            const existing = profile._scrapedWizardQuestions.get(qNorm);
-            const existingOpts = existing?.options || [];
-            const newOpts = hb.options || [];
-            profile._scrapedWizardQuestions.set(qNorm, {
-              question: hb.label,
-              label: hb.label,
-              question_normalized: qNorm,
-              field_type: hb.fieldType || 'text',
-              type: hb.fieldType || 'text',
-              options: newOpts.length ? newOpts : existingOpts,
-              required: true,
-              is_required: true,
-              step: stepName,
-              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
-            });
-          }
+          const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+          const existing = profile._scrapedWizardQuestions.get(qNorm);
+          const existingOpts = existing?.options || [];
+          const newOpts = hb.options || [];
+          const isReq = Boolean(hb.required || hb.is_required);
+          profile._scrapedWizardQuestions.set(qNorm, {
+            question: hb.label,
+            label: hb.label,
+            question_normalized: qNorm,
+            field_type: hb.fieldType || 'text',
+            type: hb.fieldType || 'text',
+            options: newOpts.length ? newOpts : existingOpts,
+            required: isReq,
+            is_required: isReq,
+            step: stepName,
+            value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+          });
         }
       }
     } catch {}
@@ -2528,11 +2584,38 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
   }
+
+  // Mandatory failure screenshot when wizard does not reach review
+  let failShotUrl = null;
+  try {
+    if (page && !page.isClosed()) {
+      const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+      if (buf) {
+        const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+        const cleanId = String(profile?.applywizz_id || profile?._applyWizzId || 'APP').trim().toUpperCase();
+        const shotName = `${cleanId}_${Date.now()}_incomplete.jpg`;
+        failShotUrl = await uploadStorageScreenshot('failed-applications', shotName, buf);
+        if (!failShotUrl) {
+          failShotUrl = await uploadStorageScreenshot('submitted-applications', shotName, buf);
+        }
+        if (profile) {
+          profile._submissionScreenshotUrl = failShotUrl;
+          profile._submissionScreenshotBuffer = buf;
+        }
+      }
+    }
+  } catch {}
+
+  const failureReasonClean = profile._lastValidationError
+    ? `${stoppedTitle}: ${profile._lastValidationError}`
+    : `${stoppedTitle}: Application stopped before reaching Review & Submit`;
+
   await recordClientApplication(profile, {
     url: profile._canonicalJobUrl || plan?.url || page.url(),
     company: profile._company || plan?.company || '',
     status: 'failed',
-    failureReason: `wizard_did_not_reach_review (stopped at ${stoppedTitle}) [step: ${stoppedTitle}]`,
+    failureReason: failureReasonClean,
+    failureScreenshotUrl: failShotUrl,
   }).catch(() => {});
   return 'incomplete';
 }
@@ -3701,10 +3784,33 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     const errorUrl = activeProfile?._canonicalJobUrl || activeProfile?._jobUrl || url;
 
     console.error(`\n❌ [${timestamp}] Fill failed on ${errorUrl}: ${err.message}`);
+
+    // Mandatory failure screenshot on uncaught error
+    let failureShotUrl = null;
+    try {
+      if (page && !page.isClosed()) {
+        const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+        if (buf) {
+          const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+          const cleanId = String(activeProfile?.applywizz_id || activeProfile?._applyWizzId || 'APP').trim().toUpperCase();
+          const shotName = `${cleanId}_${Date.now()}_fill_failed.jpg`;
+          failureShotUrl = await uploadStorageScreenshot('failed-applications', shotName, buf);
+          if (!failureShotUrl) {
+            failureShotUrl = await uploadStorageScreenshot('submitted-applications', shotName, buf);
+          }
+          if (activeProfile) {
+            activeProfile._submissionScreenshotUrl = failureShotUrl;
+            activeProfile._submissionScreenshotBuffer = buf;
+          }
+        }
+      }
+    } catch {}
+
     await recordClientApplication(activeProfile || {}, {
       url: errorUrl,
       status: 'failed',
       failureReason: err.message,
+      failureScreenshotUrl: failureShotUrl,
     }).catch(() => {});
 
     if (!isBatch && page && !page.isClosed()) {

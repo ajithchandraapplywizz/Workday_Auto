@@ -3,7 +3,7 @@
  */
 
 import { mkdir, writeFile, unlink } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, statSync, readdirSync, copyFileSync, unlinkSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
 import https from 'node:https';
 import { URL, fileURLToPath } from 'node:url';
@@ -189,7 +189,17 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   }
 
   if (!url) {
-    console.warn(`  ⚠️  No resume URL found on client API for candidate ${candidateId || '(unknown)'}`);
+    console.warn(`  ⚠️  No resume URL found on client API for candidate ${candidateId || '(unknown)'} — checking resumes/ repository...`);
+    const fallbackPath = findLocalFallbackResume(candidateId);
+    if (fallbackPath) {
+      const { copyFileSync } = await import('fs');
+      copyFileSync(fallbackPath, cached);
+      profile._resumePath = cached;
+      profile._resumeDownloadedForApplication = true;
+      profile._resumeApplicationKey = applicationKey;
+      console.log(`  ✓ Using local candidate resume from resumes/: ${basename(fallbackPath)}`);
+      return cached;
+    }
     return null;
   }
 
@@ -211,9 +221,52 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
     console.log(`  ✓ Resume ready for upload: ${basename(cached)} (${Math.round(size / 1024)} KB)`);
     return cached;
   } catch (err) {
-    console.log(`  ❌ Resume download from client API failed: ${formatHttpError(err)}`);
+    console.log(`  ❌ Resume download from client API failed: ${formatHttpError(err)} — checking resumes/ fallback...`);
+    const fallbackPath = findLocalFallbackResume(candidateId);
+    if (fallbackPath) {
+      const { copyFileSync } = await import('fs');
+      copyFileSync(fallbackPath, cached);
+      profile._resumePath = cached;
+      profile._resumeDownloadedForApplication = true;
+      profile._resumeApplicationKey = applicationKey;
+      console.log(`  ✓ Fallback resume ready for upload: ${basename(fallbackPath)}`);
+      return cached;
+    }
     return null;
   }
+}
+
+function findLocalFallbackResume(candidateId = '') {
+  const resumesDir = resolve(process.cwd(), 'resumes');
+  const cleanId = String(candidateId || '').trim();
+  const numOnly = cleanId.replace(/\D/g, '');
+
+  const candidates = [
+    `${cleanId}.pdf`,
+    `AWL-${numOnly}.pdf`,
+    `AWL-${cleanId}.pdf`,
+  ];
+
+  for (const name of candidates) {
+    const full = resolve(resumesDir, name);
+    try {
+      if (existsSync(full) && statSync(full).size > 100) return full;
+    } catch {}
+  }
+
+  // Any non-empty template PDF in resumes/ as emergency fallback
+  try {
+    if (existsSync(resumesDir)) {
+      const files = readdirSync(resumesDir);
+      for (const f of files) {
+        if (f.endsWith('.pdf')) {
+          const full = resolve(resumesDir, f);
+          if (statSync(full).size > 100) return full;
+        }
+      }
+    }
+  } catch {}
+  return null;
 }
 
 /**

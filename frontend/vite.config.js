@@ -17,6 +17,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     port,
+    strictPort: false,
     host: '0.0.0.0',
     allowedHosts: true,
     proxy: {
@@ -34,6 +35,7 @@ export default defineConfig({
   },
   preview: {
     port,
+    strictPort: false,
     host: '0.0.0.0',
     allowedHosts: true,
     proxy: {

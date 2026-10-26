@@ -637,12 +637,12 @@ export default function DeveloperDashboard() {
         await new Promise((r) => setTimeout(r, 600));
       }
 
-      setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across Worker 1 and Worker 2...' });
+      setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across 3 dedicated workers...' });
       const res = await triggerSubmissionStage();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across 2 dedicated workers.',
+          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across 3 dedicated workers.',
         });
         setBotStatus((prev) => ({
           ...prev,
@@ -789,6 +789,106 @@ export default function DeveloperDashboard() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {/* Stage 1: Trigger / Stop Scanning & Resolving (3 Workers) */}
+          {isScanActive ? (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              disabled={isTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                background: 'rgba(239, 68, 68, 0.15)',
+                color: '#f87171',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+              title="Stop scanning workers immediately"
+            >
+              <span>🛑 Stop Scanning (3 Workers)</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerBot}
+              disabled={isTriggering || isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                color: '#ffffff',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Trigger 3 parallel workers to scan links and pre-resolve candidate answers into job_distributions"
+            >
+              <span>⚡ Trigger Scanning & Resolving (3 Workers)</span>
+            </button>
+          )}
+
+          {/* Stage 2: Trigger / Stop Submissions (3 Workers) */}
+          {isSubmitActive ? (
+            <button
+              type="button"
+              onClick={handleStopSubmissions}
+              disabled={isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: '1px solid rgba(239, 68, 68, 0.4)',
+                background: 'rgba(239, 68, 68, 0.15)',
+                color: '#f87171',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: 'pointer',
+                transition: 'all 0.15s ease',
+              }}
+              title="Stop submission workers immediately"
+            >
+              <span>🛑 Stop Submissions (3 Workers)</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerSubmissions}
+              disabled={isTriggering || isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #10b981 0%, #047857 100%)',
+                color: '#ffffff',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(16, 185, 129, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Trigger 3 dedicated workers to submit applications in ready_for_review"
+            >
+              <span>🚀 Trigger Submissions (3 Workers)</span>
+            </button>
+          )}
+
           {(isScanActive || isSubmitActive) && (
             <button
               type="button"
@@ -801,7 +901,7 @@ export default function DeveloperDashboard() {
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '8px',
-                padding: '0.65rem 1.35rem',
+                padding: '0.65rem 1.25rem',
                 borderRadius: '6px',
                 border: 'none',
                 background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
@@ -814,7 +914,7 @@ export default function DeveloperDashboard() {
               }}
               title="Immediately abort active browser sessions and halt all running workers"
             >
-              <span>🛑 Emergency Stop All Workers</span>
+              <span>🛑 Emergency Stop All</span>
             </button>
           )}
         </div>

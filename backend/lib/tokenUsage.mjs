@@ -264,7 +264,11 @@ export async function recordApplicationTokenUsage({
       },
     }, { attempts: 2, label: `InsertTokenUsage:${tableName}` });
 
-    return insertRes.ok ? insertRes.json() : null;
+    if (insertRes.ok) {
+      console.log(`📊 [TokenUsage] Inserted ${calculated.total_tokens} tokens ($${calculated.total_cost}) for ${applywizz_id} on "${job_url}" into ${tableName}`);
+      return insertRes.json();
+    }
+    return null;
   } catch (err) {
     console.error(`[TokenUsage ERROR] Failed to record token usage in ${tableName}:`, err.message);
     return null;

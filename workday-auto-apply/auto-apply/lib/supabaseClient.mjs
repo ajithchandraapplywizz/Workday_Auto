@@ -1731,6 +1731,15 @@ export async function saveScannedJob({
     console.log(`   • Proof Screenshot:     ${payload.screenshot_path || 'None'}`);
     console.log(`   • Total Clients:        ${payload.client_count || 1}`);
     console.log(`   • Scan Status:          ${payload.scan_status}\n`);
+
+    // Auto-clean: Purge any stale failed_jobs record for this job_url since it has now successfully reached review & scanned_jobs!
+    try {
+      await request('failed_jobs', {
+        method: 'DELETE',
+        query: `?job_url=eq.${encode(cleanUrl)}`,
+      });
+    } catch { }
+
     return savedRow;
   }
 
@@ -2319,6 +2328,19 @@ export async function recordJobDistributions({
     }
     const dedupedClients = Array.from(uniqueClientMap.values());
 
+    // Fetch existing distributions for this job URL to protect ready_for_review and submitted rows
+    const existingStatusMap = new Map();
+    try {
+      const existingDistRes = await request(`job_distributions?job_url=eq.${encodeURIComponent(cleanUrl)}&select=applywizz_id,status`);
+      if (Array.isArray(existingDistRes)) {
+        for (const item of existingDistRes) {
+          if (item?.applywizz_id) {
+            existingStatusMap.set(String(item.applywizz_id).trim().toUpperCase(), (item.status || '').toLowerCase().trim());
+          }
+        }
+      }
+    } catch { }
+
     const rows = dedupedClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
@@ -2355,11 +2377,15 @@ export async function recordJobDistributions({
         ? Number(c.unansweredCount)
         : clientUnanswered.length;
       const clientIsFully = (clientCountUnanswered === 0);
+      const existingStatus = existingStatusMap.get(String(awlId).trim().toUpperCase());
       let clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
-      if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
+
+      // Strict Protection: If application is already ready_for_review or submitted, worker/re-trigger has NO RIGHT to touch or mutate it!
+      if (existingStatus === 'ready_for_review' || existingStatus === 'submitted' || existingStatus === 'queued' || existingStatus === 'applying') {
+        clientStatus = existingStatus;
+      } else if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
         clientStatus = c.status;
       }
-      const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : null;
 
       return {
         applywizz_id: String(awlId).trim().toUpperCase(),
@@ -2508,6 +2534,29 @@ export async function recordFailedJob({
 
     const reasonLower = cleanReason.toLowerCase();
     const stepLower = cleanStep.toLowerCase();
+
+    // STRICT GUARD: If job application reached 'Review & Submit' or status is ready for review,
+    // it MUST NOT be recorded into failed_jobs table. Ready for review jobs belong in scanned_jobs & job_distributions.
+    const isReadyForReview = (
+      stepLower.includes('review') ||
+      reasonLower.includes('ready_for_review') ||
+      reasonLower.includes('ready to review') ||
+      reasonLower.includes('reached-review') ||
+      reasonLower.includes('reached_review')
+    ) && !reasonLower.includes('submission failed') && !reasonLower.includes('submit button');
+
+    if (isReadyForReview) {
+      console.log(`🛡️ [failed_jobs GUARD] Suppressing insert into failed_jobs for ${cleanId} on "${cleanUrl}". Status is Ready for Review (step: "${cleanStep}").`);
+      return false;
+    }
+
+    // STRICT RULE: Only upload to failed_jobs WITH screenshots!
+    // Without a screenshot, do NOT upload to failed_jobs. Job will be rescanned/retried to reach ready_for_review.
+    const cleanShot = String(screenshotPath || '').trim();
+    if (!cleanShot) {
+      console.log(`🛡️ [failed_jobs GUARD] Suppressing insert into failed_jobs for ${cleanId} on "${cleanUrl}" — no screenshot provided. Job will be rescanned/retried to reach ready_for_review.`);
+      return false;
+    }
 
     // Dynamic & exact status classification for failed_at_step and failure_reason
     if (

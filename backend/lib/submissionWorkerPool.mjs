@@ -160,12 +160,12 @@ export async function claimNextTask(workerId) {
     }
   } catch { }
 
-  // 2. Direct atomic fallback (CAS: Compare-And-Swap on oldest queued or ready_for_review row)
+  // 2. Direct atomic claim (CAS: Compare-And-Swap on oldest ready_for_review, queued, or approved tasks)
   try {
     const { data: candidates } = await supabase
       .from('submission_tasks')
       .select('id, status')
-      .in('status', ['queued', 'ready_for_review'])
+      .in('status', ['queued', 'approved_for_submission', 'ready_for_review'])
       .order('created_at', { ascending: true })
       .limit(10);
 
@@ -463,6 +463,37 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     }
 
     if (isSuccess) {
+      // Mandatorily ensure success screenshot is captured if page is still open and shot is missing
+      if (!finalShotUrl) {
+        try {
+          const ctx = getWorkerContext(workerId);
+          if (ctx?.page && !ctx.page.isClosed()) {
+            await ctx.page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+            let buf = await ctx.page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
+            if (!buf) {
+              buf = await ctx.page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+            }
+            if (buf) {
+              const cleanId = String(task.applywizz_id).trim().toUpperCase();
+              const timestamp = Date.now();
+              const succShotPath = `${cleanId}_${task.id}_submitted_${timestamp}.jpg`;
+              const upRes = await supabase.storage
+                .from('submitted-applications')
+                .upload(succShotPath, buf, { contentType: 'image/jpeg', upsert: true });
+              if (!upRes.error) {
+                const { data: urlData } = supabase.storage
+                  .from('submitted-applications')
+                  .getPublicUrl(succShotPath);
+                finalShotUrl = urlData?.publicUrl || null;
+                console.log(`[${workerId}] mandatory full-page success screenshot uploaded to submitted-applications: ${succShotPath}`);
+              }
+            }
+          }
+        } catch (succShotErr) {
+          console.warn(`[${workerId}] Notice capturing success screenshot:`, succShotErr?.message);
+        }
+      }
+
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
@@ -480,7 +511,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           workerId,
           patch: {
             status: 'submitted',
-            application_submitted_screenshot_url: finalShotUrl,
+            application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
+            screenshot_path: finalShotUrl || finalStoragePath,
             updated_at: now,
           },
         });
@@ -513,6 +545,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'already_applied',
             application_submitted_screenshot_url: proofUrl,
+            screenshot_path: proofUrl,
             error_message: null,
             updated_at: now,
           },
@@ -524,9 +557,22 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
       } catch {}
     } else if (result?.status === 'job_expired' || result?.isExpired || result?.status === 'job_not_found') {
-      const expiredReason = "Job link expired: The page you are looking for doesn't exist";
+      const expiredReason = "Job link expired";
       console.log(`❌ [${workerId}] Job link expired for task #${task.id} (${task.company}): ${expiredReason}`);
-      const expiredShot = result?.screenshotUrl || finalShotUrl || finalStoragePath;
+      let expiredShot = result?.screenshotUrl || finalShotUrl || finalStoragePath;
+      if (!expiredShot) {
+        try {
+          const ctx = getWorkerContext(workerId);
+          if (ctx?.page && !ctx.page.isClosed()) {
+            const { captureAndUploadFailureScreenshot } = await import('./workerPool.mjs');
+            expiredShot = await captureAndUploadFailureScreenshot(ctx.page, {
+              applywizzId: task.applywizz_id,
+              taskId: task.id,
+              stepName: 'job_link_expired',
+            });
+          }
+        } catch {}
+      }
 
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
@@ -547,7 +593,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'failed',
             error_message: expiredReason,
+            stopped_at_step: 'Job link expired',
+            failure_reason: expiredReason,
             application_submitted_screenshot_url: expiredShot,
+            screenshot_path: expiredShot,
             updated_at: now,
           },
         });
@@ -592,8 +641,49 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           .eq('id', task.distribution_id);
       }
     } else {
-      const errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
-      const failShot = finalShotUrl || finalStoragePath || null;
+      let errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
+      let failShot = result?.screenshotUrl || finalShotUrl || finalStoragePath || null;
+      let failedStep = result?.stoppedAtStep || result?.failedAtStep || null;
+
+      try {
+        const ctx = getWorkerContext(workerId);
+        if (ctx?.page && !ctx.page.isClosed()) {
+          const { extractUniqueFailureReason, captureAndUploadFailureScreenshot } = await import('./workerPool.mjs');
+          const failureDiag = await extractUniqueFailureReason(ctx.page, null, failedStep || 'Review & Submit', errMsg);
+          failedStep = failureDiag.step;
+          errMsg = failureDiag.reason;
+
+          if (!failShot) {
+            failShot = await captureAndUploadFailureScreenshot(ctx.page, {
+              applywizzId: task.applywizz_id,
+              taskId: task.id,
+              stepName: failedStep,
+            });
+          }
+        }
+      } catch (diagErr) {
+        console.warn(`[${workerId}] Notice during failure diagnosis/screenshot:`, diagErr.message);
+      }
+
+      if (!failedStep) {
+        const raw = String(errMsg).toLowerCase();
+        if (raw.includes('expired') || raw.includes("doesn't exist") || raw.includes('not exist') || raw.includes('404')) {
+          failedStep = 'Job link expired';
+        } else if (raw.includes('auth') || raw.includes('password') || raw.includes('credential') || raw.includes('sign in') || raw.includes('create account')) {
+          failedStep = 'Auth Gateway (Sign In / Sign Up)';
+        } else if (raw.includes('zoho') || raw.includes('mailbox') || raw.includes('verification') || raw.includes('otp')) {
+          failedStep = 'Verification: Zoho Mail';
+        } else if (raw.includes('resume') || raw.includes('experience') || raw.includes('work history')) {
+          failedStep = 'Step 2: My Experience';
+        } else if (raw.includes('voluntary') || raw.includes('eeo') || raw.includes('disclosure') || raw.includes('self identify')) {
+          failedStep = 'Step 4: Voluntary Disclosures';
+        } else if (raw.includes('timed out') || raw.includes('timeout') || raw.includes('watchdog')) {
+          failedStep = 'Session Closed / Watchdog Timeout';
+        } else {
+          failedStep = 'Step 5: Review & Submit';
+        }
+      }
+
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
@@ -613,6 +703,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'failed',
             error_message: errMsg,
+            stopped_at_step: failedStep,
+            failure_reason: errMsg,
             application_submitted_screenshot_url: failShot,
             screenshot_path: failShot,
             updated_at: now,
@@ -622,6 +714,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
       try {
         const { recordFailedJob } = await import('./supabaseClient.mjs');
+        const failAnswers = (Array.isArray(result?.resolvedAnswers) && result.resolvedAnswers.length)
+          ? result.resolvedAnswers
+          : (Array.isArray(task.resolved_answers) ? task.resolved_answers : []);
         await recordFailedJob({
           applywizzId: task.applywizz_id,
           jobId: task.job_id || null,
@@ -629,10 +724,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           company: task.company,
           roleTitle: task.role_title,
           failureReason: errMsg,
-          failedAtStep: result?.stoppedAtStep || 'Submission',
+          failedAtStep: failedStep,
           screenshotPath: failShot,
+          resolvedAnswers: failAnswers,
         });
-      } catch {}
+      } catch (recErr) {
+        console.warn(`[${workerId}] Warning: recordFailedJob recording notice:`, recErr?.message);
+      }
     }
   } catch (err) {
     stopHeartbeat();
@@ -658,12 +756,19 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           let upRes = await supabase.storage
             .from('failed-applications')
             .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
+          let bucketUsed = 'failed-applications';
+          if (upRes.error) {
+            upRes = await supabase.storage
+              .from('submitted-applications')
+              .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
+            bucketUsed = 'submitted-applications';
+          }
           if (!upRes.error) {
             const { data: urlData } = supabase.storage
-              .from('failed-applications')
+              .from(bucketUsed)
               .getPublicUrl(errShotPath);
             errShotUrl = urlData?.publicUrl || null;
-            console.log(`[${workerId}] screenshot uploaded to failed-applications: ${errShotPath}`);
+            console.log(`[${workerId}] screenshot uploaded to ${bucketUsed}: ${errShotPath}`);
           }
         }
       }
@@ -676,6 +781,18 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     const catchShot = errShotUrl || errShotPath || null;
     const catchErr = err?.message || 'Execution error';
+
+    let catchStep = 'Runtime Exception';
+    const rawCatch = String(catchErr).toLowerCase();
+    if (rawCatch.includes('timeout') || rawCatch.includes('watchdog')) {
+      catchStep = 'Session Closed / Watchdog Timeout';
+    } else if (rawCatch.includes('auth') || rawCatch.includes('password')) {
+      catchStep = 'Auth Gateway (Sign In / Sign Up)';
+    } else if (rawCatch.includes('zoho')) {
+      catchStep = 'Verification: Zoho Mail';
+    } else if (rawCatch.includes('target') || rawCatch.includes('closed') || rawCatch.includes('browser')) {
+      catchStep = 'Session Closed / Watchdog Timeout';
+    }
 
     await updateSubmissionTaskWithCheck({
       taskId: task.id,
@@ -696,6 +813,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         patch: {
           status: 'failed',
           error_message: catchErr,
+          stopped_at_step: catchStep,
+          failure_reason: catchErr,
           application_submitted_screenshot_url: catchShot,
           screenshot_path: catchShot,
           updated_at: now,
@@ -705,6 +824,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     try {
       const { recordFailedJob } = await import('./supabaseClient.mjs');
+      const failAnswers = (Array.isArray(result?.resolvedAnswers) && result.resolvedAnswers.length)
+        ? result.resolvedAnswers
+        : (Array.isArray(task.resolved_answers) ? task.resolved_answers : []);
       await recordFailedJob({
         applywizzId: task.applywizz_id,
         jobId: task.job_id || null,
@@ -712,10 +834,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         company: task.company,
         roleTitle: task.role_title,
         failureReason: catchErr,
-        failedAtStep: 'Runtime Exception',
+        failedAtStep: catchStep,
         screenshotPath: catchShot,
+        resolvedAnswers: failAnswers,
       });
-    } catch {}
+    } catch (recCatchErr) {
+      console.warn(`[${workerId}] Warning: recordFailedJob recording notice in catch block:`, recCatchErr?.message);
+    }
   } finally {
     stopHeartbeat();
     if (watchdogTimer) clearTimeout(watchdogTimer);

@@ -1440,7 +1440,7 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
  * Update worker state in Supabase worker_status table.
  * Strictly 10 shared canonical workers (worker_1 through worker_10).
  */
-const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || Array.from({ length: WORKER_COUNT || 2 }, (_, i) => `worker_${i + 1}`);
+const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || Array.from({ length: WORKER_COUNT || 3 }, (_, i) => `worker_${i + 1}`);
 
 export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
 export const CANONICAL_9_WORKERS = CANONICAL_10_WORKERS; // Backward compatibility alias
@@ -2085,6 +2085,15 @@ export async function saveScannedJob({
     console.log(`   • Proof Screenshot:     ${payload.screenshot_path || 'None'}`);
     console.log(`   • Total Clients:        ${payload.client_count || 1}`);
     console.log(`   • Scan Status:          ${payload.scan_status}\n`);
+
+    // Auto-clean: Purge any stale failed_jobs record for this job_url since it has now successfully reached review & scanned_jobs!
+    try {
+      await request('failed_jobs', {
+        method: 'DELETE',
+        query: `?job_url=eq.${encode(cleanUrl)}`,
+      });
+    } catch { }
+
     return savedRow;
   }
 
@@ -2689,6 +2698,19 @@ export async function recordJobDistributions({
       eligibleClients.push(c);
     }
 
+    // Fetch existing distributions for this job URL to protect ready_for_review and submitted rows
+    const existingStatusMap = new Map();
+    try {
+      const existingDistRes = await request(`job_distributions?job_url=eq.${encodeURIComponent(cleanUrl)}&select=applywizz_id,status`);
+      if (Array.isArray(existingDistRes)) {
+        for (const item of existingDistRes) {
+          if (item?.applywizz_id) {
+            existingStatusMap.set(String(item.applywizz_id).trim().toUpperCase(), (item.status || '').toLowerCase().trim());
+          }
+        }
+      }
+    } catch { }
+
     const rows = eligibleClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
@@ -2725,11 +2747,15 @@ export async function recordJobDistributions({
         ? Number(c.unansweredCount)
         : clientUnanswered.length;
       const clientIsFully = (clientCountUnanswered === 0);
+      const existingStatus = existingStatusMap.get(String(awlId).trim().toUpperCase());
       let clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
-      if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
+
+      // Strict Protection: If application is already ready_for_review or submitted, worker/re-trigger has NO RIGHT to touch or mutate it!
+      if (existingStatus === 'ready_for_review' || existingStatus === 'submitted' || existingStatus === 'queued' || existingStatus === 'applying') {
+        clientStatus = existingStatus;
+      } else if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
         clientStatus = c.status;
       }
-      const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : null;
 
       return {
         applywizz_id: String(awlId).trim().toUpperCase(),
@@ -2745,7 +2771,7 @@ export async function recordJobDistributions({
         unanswered_questions: clientCountUnanswered === 0 ? [] : clientUnanswered,
         unanswered_count: clientCountUnanswered,
         is_fully_answered: clientIsFully,
-        application_submitted_screenshot_url: clientShot || finalShot || null,
+        application_submitted_screenshot_url: null, // Strictly null: screenshots belong only in submission_tasks post-submission
         status: clientStatus,
         created_at: now,
         updated_at: now,
@@ -2789,25 +2815,6 @@ export async function recordJobDistributions({
     // with their respective distribution_id linked via Postgres trigger `trg_job_distributions_insert_submission_task`
     if (readyReviewCount > 0) {
       console.log(`   📋 [submission_tasks] Trigger mirrored ${readyReviewCount} application(s) into submission_tasks as 'ready_for_review'.`);
-    }
-
-    // Sync review screenshot to submission_tasks as well
-    if (finalShot) {
-      try {
-        const { createClient } = await import('@supabase/supabase-js');
-        const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false } });
-        const { data: dRows } = await sb.from('job_distributions').select('id').eq('job_url', cleanUrl);
-        if (dRows && dRows.length > 0) {
-          const dIds = dRows.map(r => r.id).filter(Boolean);
-          await sb.from('submission_tasks').update({
-            screenshot_path: finalShot,
-            application_submitted_screenshot_url: finalShot,
-            updated_at: now,
-          }).in('distribution_id', dIds);
-        }
-      } catch (syncErr) {
-        console.log('   ⚠️ [submission_tasks] Screenshot sync notice:', syncErr.message);
-      }
     }
 
     console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);
@@ -2910,6 +2917,41 @@ export async function recordFailedJob({
     const reasonLower = cleanReason.toLowerCase();
     const stepLower = cleanStep.toLowerCase();
 
+    // STRICT GUARD: If job application reached 'Review & Submit' or status is ready for review,
+    // it MUST NOT be recorded into failed_jobs table. Ready for review jobs belong in scanned_jobs & job_distributions.
+    const isReadyForReview = (
+      stepLower.includes('review') ||
+      reasonLower.includes('ready_for_review') ||
+      reasonLower.includes('ready to review') ||
+      reasonLower.includes('reached-review') ||
+      reasonLower.includes('reached_review')
+    ) && !reasonLower.includes('submission failed') && !reasonLower.includes('submit button');
+
+    if (isReadyForReview) {
+      console.log(`🛡️ [failed_jobs GUARD] Suppressing insert into failed_jobs for ${cleanId} on "${cleanUrl}". Status is Ready for Review (step: "${cleanStep}").`);
+      return false;
+    }
+
+    // STRICT RULE: Only upload to failed_jobs WITH screenshots!
+    // Without a screenshot, do NOT upload to failed_jobs. Job will be rescanned/retried to reach ready_for_review.
+    const cleanShot = String(screenshotPath || '').trim();
+    if (!cleanShot) {
+      console.log(`🛡️ [failed_jobs GUARD] Suppressing insert into failed_jobs for ${cleanId} on "${cleanUrl}" — no screenshot provided. Job will be rescanned/retried to reach ready_for_review.`);
+      return false;
+    }
+
+    // STRICT GUARD: If job is already successfully saved in scanned_jobs, NEVER record into failed_jobs!
+    try {
+      const existingScanned = await request('scanned_jobs', {
+        method: 'GET',
+        query: `?job_url=eq.${encode(cleanUrl)}&select=id`,
+      });
+      if (Array.isArray(existingScanned) && existingScanned.length > 0) {
+        console.log(`🛡️ [failed_jobs GUARD] Suppressing insert into failed_jobs for "${cleanUrl}" — job is already successfully saved in scanned_jobs.`);
+        return false;
+      }
+    } catch { }
+
     // Dynamic & exact status classification for failed_at_step and failure_reason
     if (
       reasonLower.includes("doesn't exist") ||
@@ -2924,9 +2966,7 @@ export async function recordFailedJob({
       (stepLower.includes("gateway") && reasonLower.includes("doesn't exist"))
     ) {
       cleanStep = 'Job link expired';
-      if (!cleanReason.toLowerCase().startsWith('job link expired')) {
-        cleanReason = `Job link expired: ${cleanReason.replace(/^Authentication \/ Gateway check:\s*/i, '').trim()}`;
-      }
+      cleanReason = 'Job link expired';
     } else if (
       reasonLower.includes("upload a file") ||
       reasonLower.includes("resume upload") ||

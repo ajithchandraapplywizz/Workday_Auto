@@ -192,6 +192,22 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
           prof._tokenUsage.completion_tokens += outputTokens;
           prof._tokenUsage.total_tokens += (inputTokens + outputTokens);
           prof._llmModel = data.model || model;
+
+          const awId = prof.applywizz_id || prof._applyWizzId || prof.candidateId;
+          const jUrl = prof._canonicalJobUrl || prof._jobUrl || prof.jobUrl;
+          if (awId && jUrl) {
+            import('./tokenUsage.mjs').then(({ recordApplicationTokenUsage }) => {
+              recordApplicationTokenUsage({
+                applywizz_id: awId,
+                job_url: jUrl,
+                role: prof._jobTitle || prof._roleTitle || 'Workday Application',
+                model: data.model || model,
+                prompt_tokens: inputTokens,
+                completion_tokens: outputTokens,
+                metadata: { caller: 'Claude' },
+              }).catch(() => {});
+            }).catch(() => {});
+          }
         }
 
         return {
@@ -273,10 +289,28 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
         if (typeof globalThis !== 'undefined' && globalThis.__activeWorkerProfile) {
           const prof = globalThis.__activeWorkerProfile;
           prof._tokenUsage = prof._tokenUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-          prof._tokenUsage.prompt_tokens += (data.usage.prompt_tokens || 0);
-          prof._tokenUsage.completion_tokens += (data.usage.completion_tokens || 0);
-          prof._tokenUsage.total_tokens += (data.usage.total_tokens || 0);
+          const pTokens = data.usage.prompt_tokens || 0;
+          const cTokens = data.usage.completion_tokens || 0;
+          prof._tokenUsage.prompt_tokens += pTokens;
+          prof._tokenUsage.completion_tokens += cTokens;
+          prof._tokenUsage.total_tokens += (data.usage.total_tokens || (pTokens + cTokens));
           prof._llmModel = model;
+
+          const awId = prof.applywizz_id || prof._applyWizzId || prof.candidateId;
+          const jUrl = prof._canonicalJobUrl || prof._jobUrl || prof.jobUrl;
+          if (awId && jUrl) {
+            import('./tokenUsage.mjs').then(({ recordApplicationTokenUsage }) => {
+              recordApplicationTokenUsage({
+                applywizz_id: awId,
+                job_url: jUrl,
+                role: prof._jobTitle || prof._roleTitle || 'Workday Application',
+                model,
+                prompt_tokens: pTokens,
+                completion_tokens: cTokens,
+                metadata: { caller: 'OpenRouter' },
+              }).catch(() => {});
+            }).catch(() => {});
+          }
         }
       }
       return data;

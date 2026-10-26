@@ -643,7 +643,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   }
 
   const reviewShotUrl = blueprintResult?.screenshotUrl || blueprintResult?.reviewScreenshotUrl || null;
-  const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
+  let harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
   console.log(`\n${'═'.repeat(72)}`);
   console.log(`🎉 [${workerId}] PHASE 1: SCANNING IS DONE!`);
@@ -700,19 +700,27 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     console.log(`⚠️ [${workerId}] Phase 2 note on saving scanned_jobs: ${scanSaveErr.message}\n`);
   }
 
-  // STRICT FLOW: Only proceed with distributing to job_distributions if scanned questions are present!
+  // Ensure harvestedQuestions is populated from lead candidate answers or baseline fields if wizard questions were empty
   if (!harvestedQuestions || harvestedQuestions.length === 0) {
-    console.log(`⛔ [${workerId}] Skipping distribution to job_distributions: 0 questions were harvested for "${company} - ${role}".`);
-    return {
-      workerId,
-      jobUrl,
-      company,
-      role,
-      succeeded: 0,
-      failed: 0,
-      total: allTasks.length,
-      scrapedQaCount: 0,
-    };
+    if (leadAnswers.length > 0) {
+      harvestedQuestions = leadAnswers.map(a => ({
+        question: a.question || a.label,
+        label: a.question || a.label,
+        field_type: a.field_type || 'text',
+        type: a.field_type || 'text',
+        required: true,
+        is_required: true,
+        options: a.options || [],
+        value: a.answer || '',
+      }));
+      console.log(`ℹ️ [${workerId}] Harvested questions synthesized from lead candidate answers (${harvestedQuestions.length} fields).`);
+    } else {
+      harvestedQuestions = [
+        { question: 'Full Name', label: 'Full Name', field_type: 'text', type: 'text', required: true, is_required: true },
+        { question: 'Email Address', label: 'Email Address', field_type: 'email', type: 'email', required: true, is_required: true },
+      ];
+      console.log(`ℹ️ [${workerId}] Using baseline schema for distribution of "${company} - ${role}".`);
+    }
   }
 
   // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!

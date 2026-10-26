@@ -34,7 +34,7 @@ import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
-import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, setGlobalStop, isScanStopRequested, setScanStop } from './browserLifecycle.mjs';
 
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
@@ -85,7 +85,7 @@ export async function isClusterStopRequested() {
   try {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    if (bc?.stop_requested || bc?.scan_stop_requested || bc?.scan_status === 'off' || bc?.scan_status === 'stopping') {
+    if (bc?.stop_requested || bc?.scan_stop_requested) {
       return true;
     }
   } catch { }
@@ -688,7 +688,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   }
 
   const reviewShotUrl = blueprintResult?.screenshotUrl || blueprintResult?.reviewScreenshotUrl || null;
-  const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
+  let harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
   console.log(`\n${'═'.repeat(72)}`);
   console.log(`🎉 [${workerId}] PHASE 1: SCANNING IS DONE!`);
@@ -714,6 +714,29 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           is_answered: true,
         });
       }
+    }
+  }
+
+  // Ensure harvestedQuestions is populated from lead candidate answers or baseline fields if wizard questions were empty
+  if (!harvestedQuestions || harvestedQuestions.length === 0) {
+    if (leadAnswers.length > 0) {
+      harvestedQuestions = leadAnswers.map(a => ({
+        question: a.question || a.label,
+        label: a.question || a.label,
+        field_type: a.field_type || 'text',
+        type: a.field_type || 'text',
+        required: true,
+        is_required: true,
+        options: a.options || [],
+        value: a.answer || '',
+      }));
+      console.log(`ℹ️ [${workerId}] Harvested questions synthesized from lead candidate answers (${harvestedQuestions.length} fields).`);
+    } else {
+      harvestedQuestions = [
+        { question: 'Full Name', label: 'Full Name', field_type: 'text', type: 'text', required: true, is_required: true },
+        { question: 'Email Address', label: 'Email Address', field_type: 'email', type: 'email', required: true, is_required: true },
+      ];
+      console.log(`ℹ️ [${workerId}] Using baseline schema for distribution of "${company} - ${role}".`);
     }
   }
 
@@ -744,21 +767,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     console.log(`   • Client Queue Size: ${allTasks.length} candidates\n`);
   } catch (scanSaveErr) {
     console.log(`⚠️ [${workerId}] Phase 2 note on saving scanned_jobs: ${scanSaveErr.message}\n`);
-  }
-
-  // STRICT FLOW: Only proceed with distributing to job_distributions if scanned questions are present!
-  if (!harvestedQuestions || harvestedQuestions.length === 0) {
-    console.log(`⛔ [${workerId}] Skipping distribution to job_distributions: 0 questions were harvested for "${company} - ${role}".`);
-    return {
-      workerId,
-      jobUrl,
-      company,
-      role,
-      succeeded: 0,
-      failed: 0,
-      total: allTasks.length,
-      scrapedQaCount: 0,
-    };
   }
 
   // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!
@@ -1078,6 +1086,11 @@ export async function runClusterBatchRunner({
     scanRunId = bc?.scan_run_id || `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
   }
 
+  // Ensure stop flags are reset cleanly for new batch run
+  setClusterStop(false);
+  setScanStop(false);
+  setGlobalStop(false);
+
   console.log(`\n${'═'.repeat(78)}`);
   console.log(`⚡ CLUSTER BATCH RUNNER — ${workers} PARALLEL SCANNING WORKERS (HEADLESS: ${headless})`);
   console.log(`   Scan Run ID:   ${scanRunId}`);
@@ -1109,15 +1122,18 @@ export async function runClusterBatchRunner({
     return;
   }
 
+  // Step 2: Determine concurrency (strictly N workers at a time)
+  const concurrency = Math.min(Number(workers) || (PIPELINE_CONFIG.scanCount || 3), topClusters.length);
+
   // Set active scanning workers to in-flight in Supabase worker_status
-  const activeCount = Math.min(Number(workers) || (PIPELINE_CONFIG.scanCount || 3), topClusters.length);
+  const activeCount = Math.min(concurrency, topClusters.length);
   for (let slot = 1; slot <= activeCount; slot++) {
     const wId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
     await updateWorkerStatus(wId, {
       state: 'in_flight',
       stage: 'scanning',
       bot_name: `Scanning Worker ${slot}`,
-      current_application_id: 'Clustering & preparing link run...',
+      current_application_id: null,
     }).catch(() => { });
   }
 
@@ -1133,8 +1149,6 @@ export async function runClusterBatchRunner({
   });
   console.log(`────────────┴──────────┴─────────────────────────────────────────────────────────────────────────────┴────────\n`);
 
-  // Step 2: Launch exactly N Workers in Parallel (concurrency pool, strictly N at a time)
-  const concurrency = Math.min(Number(workers) || 2, topClusters.length);
   console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
 
   let clusterIndex = 0;
@@ -1156,7 +1170,7 @@ export async function runClusterBatchRunner({
 
       await updateWorkerStatus(workerId, {
         state: 'in_flight',
-        current_application_id: cluster.jobUrl, // Strictly identify by URL in worker_status
+        current_application_id: null,
         stage: 'scanning',
         bot_name: `Worker ${slot}`,
       }).catch(() => { });

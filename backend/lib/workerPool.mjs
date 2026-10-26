@@ -40,11 +40,172 @@ async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId, screenshotUrl = null
   console.log(`   🚫 [${workerId}] Purging dead job URL from queue for ALL clients: "${jobUrl}"`);
   try {
     const { purgeDeadJobUrlFromQueue } = await import('./supabaseClient.mjs');
-    const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${screenshotUrl ? ` [screenshot: ${screenshotUrl}]` : ''}`;
+    const expiredReason = 'Job link expired';
     await purgeDeadJobUrlFromQueue(jobUrl, { expiredReason, screenshotUrl });
   } catch (err) {
     console.log(`   ⚠️ [${workerId}] Queue purge notice: ${err.message}`);
   }
+}
+
+/**
+ * Reliably capture a failure screenshot (full page with viewport fallback)
+ * and stream in-memory buffer directly to Supabase storage with retries.
+ * Adheres strictly to Zero Local Screenshots Policy (no local disk saving).
+ */
+export async function captureAndUploadFailureScreenshot(page, {
+  applywizzId = '',
+  taskId = '',
+  stepName = 'failed',
+  maxUploadRetries = 3,
+} = {}) {
+  if (!page || page.isClosed()) return null;
+
+  const cleanId = String(applywizzId || 'APP').trim().toUpperCase();
+  const effectiveTaskId = taskId || Date.now();
+  const timestamp = Date.now();
+  const cleanStepSlug = String(stepName || 'failed').toLowerCase().replace(/[^a-z0-9]/g, '_').slice(0, 30);
+  const filename = `${cleanId}_${effectiveTaskId}_${cleanStepSlug}_${timestamp}.png`;
+
+  let buf = null;
+  // Step 1: Capture screenshot buffer (try full page 12s, fallback to viewport 5s)
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 12000 });
+      if (buf && buf.length > 0) break;
+    } catch (e1) {
+      try {
+        buf = await page.screenshot({ type: 'png', fullPage: false, timeout: 5000 });
+        if (buf && buf.length > 0) break;
+      } catch (e2) {
+        if (attempt === 3) {
+          console.warn(`[Screenshot] Failed to capture failure buffer after 3 attempts: ${e2.message}`);
+        } else {
+          await page.waitForTimeout(400);
+        }
+      }
+    }
+  }
+
+  if (!buf || buf.length === 0) return null;
+
+  // Step 2: Stream in-memory buffer to Supabase Storage with multiple retries
+  let uploadedUrl = null;
+  for (let attempt = 1; attempt <= maxUploadRetries; attempt++) {
+    try {
+      uploadedUrl = await uploadStorageScreenshot('failed-applications', filename, buf);
+      if (uploadedUrl) {
+        console.log(`📸 [Screenshot] Successfully uploaded failure screenshot to "failed-applications": ${uploadedUrl}`);
+        return uploadedUrl;
+      }
+    } catch (err1) {
+      console.warn(`[Screenshot] Upload attempt ${attempt} to "failed-applications" failed: ${err1.message}`);
+    }
+
+    try {
+      uploadedUrl = await uploadStorageScreenshot('submitted-applications', filename, buf);
+      if (uploadedUrl) {
+        console.log(`📸 [Screenshot] Fallback uploaded failure screenshot to "submitted-applications": ${uploadedUrl}`);
+        return uploadedUrl;
+      }
+    } catch (err2) {
+      console.warn(`[Screenshot] Upload attempt ${attempt} to "submitted-applications" failed: ${err2.message}`);
+    }
+
+    if (attempt < maxUploadRetries) {
+      await new Promise(r => setTimeout(r, 600));
+    }
+  }
+
+  return uploadedUrl;
+}
+
+/**
+ * Extract live, unique, DOM-accurate failure reasons and step names from the page.
+ * Avoids any generic canned strings.
+ */
+export async function extractUniqueFailureReason(page, profile, stoppedBlock, fallbackError = null) {
+  const normStopped = String(stoppedBlock || '').toLowerCase();
+  if (
+    normStopped.includes('expired') ||
+    profile?._isJobExpired ||
+    /job link expired|page is expired/i.test(String(fallbackError || ''))
+  ) {
+    return {
+      step: 'Job link expired',
+      reason: 'Job link expired',
+    };
+  }
+
+  if (stoppedBlock === 'Resume upload failed' || profile?._failedAtStep === 'Resume upload failed') {
+    const detail = profile?._lastValidationError || 'Upload a file (5MB max) is required and must have a value.';
+    return {
+      step: 'Step 2: My Experience',
+      reason: `Resume upload failed: ${detail}`,
+    };
+  }
+
+  let extractedErrors = [];
+  if (page && !page.isClosed()) {
+    try {
+      extractedErrors = await page.evaluate(() => {
+        const errs = [];
+        // 1. Error banners or alerts
+        const banners = document.querySelectorAll('[data-automation-id="errorBanner"], [data-automation-id="formFeedbackError"], [data-automation-id*="errorMessage" i], .alert-danger, .error-banner, [role="alert"]');
+        banners.forEach(b => {
+          const t = (b.textContent || '').trim();
+          if (t && t.length > 3 && t.length < 300 && !/success|uploaded|saving/i.test(t)) {
+            errs.push(t);
+          }
+        });
+
+        // 2. Inline field validation errors with labels
+        const fieldErrors = document.querySelectorAll('[data-automation-id*="error" i], .form-feedback-error, .invalid-feedback, [aria-invalid="true"]');
+        fieldErrors.forEach(fe => {
+          const container = fe.closest('[data-automation-id*="formField"], .form-group, fieldset, [data-automation-id*="compositeSubform"]') || fe.parentElement;
+          const label = container ? (container.querySelector('label, legend, [data-automation-id*="label"]')?.textContent || '').replace(/\*+/g, '').trim() : '';
+          const text = (fe.textContent || '').trim();
+          if (text && text.length > 2 && text.length < 250 && !/success|uploaded/i.test(text)) {
+            if (label && !text.toLowerCase().includes(label.toLowerCase())) {
+              errs.push(`${label}: ${text}`);
+            } else {
+              errs.push(text);
+            }
+          }
+        });
+
+        return [...new Set(errs)];
+      }).catch(() => []);
+    } catch {}
+  }
+
+  const cleanStep = (stoppedBlock && stoppedBlock !== 'Unknown') ? stoppedBlock : (profile?._currentStep || 'Application');
+
+  if (extractedErrors.length > 0) {
+    const errorDetails = extractedErrors.slice(0, 3).join(' | ');
+    return {
+      step: cleanStep,
+      reason: `${cleanStep}: ${errorDetails}`,
+    };
+  }
+
+  if (profile?._lastValidationError) {
+    return {
+      step: cleanStep,
+      reason: `${cleanStep}: ${profile._lastValidationError}`,
+    };
+  }
+
+  if (fallbackError && !/wizard_did_not_reach_review|form stalled/i.test(fallbackError)) {
+    return {
+      step: cleanStep,
+      reason: `${cleanStep}: ${fallbackError}`,
+    };
+  }
+
+  return {
+    step: cleanStep,
+    reason: `${cleanStep}: Required field validation check failed or step stalled`,
+  };
 }
 
 function findFilePath(relPath) {
@@ -401,17 +562,19 @@ export async function executeWorkerTask({
                 if (match) match.scrollIntoView({ behavior: 'instant', block: 'center' });
               }).catch(() => {});
               await page.waitForTimeout(300);
-              const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-              if (buf) {
-                expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
-              }
+              expiredShotUrl = await captureAndUploadFailureScreenshot(page, {
+                applywizzId,
+                taskId,
+                stepName: 'job_link_expired',
+              });
             }
           } catch {}
 
           await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
           await browser.close().catch(() => {});
+          const expiredReason = 'Job link expired';
           if (queueTaskId) {
-            await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
+            await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: expiredReason, screenshotPath: expiredShotUrl });
           }
           await upsertSupabaseApplication({
             applywizzId,
@@ -419,10 +582,35 @@ export async function executeWorkerTask({
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
             status: 'failed',
-            failureReason: 'Job page does not exist (dead/expired URL)',
+            failureReason: expiredReason,
             failureScreenshotUrl: expiredShotUrl,
+            stoppedAtStep: 'Job link expired',
           }).catch(() => {});
-          return { status: 'failed', reason: 'job_expired_or_not_found', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
+
+          try {
+            const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+            await recordFailedJob({
+              applywizzId,
+              jobId: task.job_id || task.jobId || null,
+              jobUrl,
+              company,
+              roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+              failureReason: expiredReason,
+              failedAtStep: 'Job link expired',
+              screenshotPath: expiredShotUrl,
+            });
+            await recordApplicationFailure({
+              applywizzId,
+              jobId: task.job_id || task.jobId || null,
+              jobUrl,
+              company,
+              roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+              failureReason: expiredReason,
+              screenshotPath: expiredShotUrl,
+            });
+          } catch {}
+
+          return { status: 'failed', isExpired: true, reason: expiredReason, screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job link expired' };
         }
       }
 
@@ -484,16 +672,17 @@ export async function executeWorkerTask({
       let expiredShotUrl = status?.screenshotUrl || null;
       try {
         if (!expiredShotUrl && page && !page.isClosed()) {
-          const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-          if (buf) {
-            expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
-          }
+          expiredShotUrl = await captureAndUploadFailureScreenshot(page, {
+            applywizzId,
+            taskId,
+            stepName: 'job_link_expired',
+          });
         }
       } catch {}
 
       await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
 
-      const expiredReason = "Job link expired: The page you are looking for doesn't exist";
+      const expiredReason = "Job link expired";
       if (queueTaskId) {
         await updateQueueTaskStatus(queueTaskId, {
           status: 'failed',
@@ -601,7 +790,7 @@ export async function executeWorkerTask({
             await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
             await page.waitForTimeout(500).catch(() => {});
           }
-          buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
+          buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
           if (!buf) {
             buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
           }
@@ -628,10 +817,19 @@ export async function executeWorkerTask({
           bucket = 'failed-applications';
           filename = `${applywizzId}_${Date.now()}_job_link_expired.jpg`;
           storagePath = filename;
+        } else {
+          // Mandatory failure screenshot for any other failure / non-success status
+          bucket = 'failed-applications';
+          const effectiveTaskId = taskId || task.id || Date.now();
+          filename = `${applywizzId}_${effectiveTaskId}_failed_${Date.now()}.png`;
+          storagePath = filename;
         }
 
         if (bucket && filename && buf) {
           completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf);
+          if (!completionShotUrl && bucket === 'failed-applications') {
+            completionShotUrl = await uploadStorageScreenshot('submitted-applications', filename, buf);
+          }
           if (completionShotUrl) {
             console.log(`[${workerId}] screenshot uploaded: ${filename}`);
           }
@@ -639,9 +837,9 @@ export async function executeWorkerTask({
       }
     } catch {}
 
-    const isAlreadyApplied = Boolean(status === 'already_applied' || status?.status === 'already_applied' || status?.alreadyApplied);
-    const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
-    const isSuccessStatus = (
+    let isAlreadyApplied = Boolean(status === 'already_applied' || status?.status === 'already_applied' || status?.alreadyApplied);
+    let onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
+    let isSuccessStatus = (
       status === 'submitted' ||
       status === 'reached-review' ||
       status === 'reached_review' ||
@@ -655,6 +853,59 @@ export async function executeWorkerTask({
       : (isSuccessStatus
         ? 'Step 5: Review & Submit'
         : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information')));
+
+    // If application did not reach review on first attempt, retry scan & fill once more to attempt reaching Ready to Review
+    if (!isSuccessStatus && !isAlreadyApplied && stoppedBlock !== 'Job link expired' && !task._retryAttempt) {
+      task._retryAttempt = 1;
+      console.log(`\n🔄 [${workerId}] Application did not reach review on first attempt (stopped at "${stoppedBlock}"). Re-attempting scan & fill once more to reach Ready to Review...`);
+      try {
+        await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
+        await page.waitForTimeout(2000);
+        const retryStatus = await fillForm(jobUrl, plan, {
+          browser,
+          context,
+          page,
+          profile,
+          workdayEmail,
+          workdayPassword,
+          mode: 'signin',
+          confirmSubmit: effectiveConfirmSubmit,
+          dryRun: isBlueprintScan ? true : dryRun,
+          isBatch: true,
+        });
+        if (retryStatus === 'reached-review' || retryStatus === 'reached_review' || retryStatus === 'submitted') {
+          status = retryStatus;
+          console.log(`   🎉 [${workerId}] Retry attempt succeeded! Reached "${status}".`);
+        }
+      } catch (retryErr) {
+        console.warn(`   ⚠️ [${workerId}] Retry scan & fill pass error:`, retryErr.message);
+      }
+
+      // Re-evaluate after retry
+      isAlreadyApplied = Boolean(status === 'already_applied' || status?.status === 'already_applied' || status?.alreadyApplied);
+      onReviewPage = String(profile._currentStep || '').toLowerCase().includes('review');
+      isSuccessStatus = (
+        status === 'submitted' ||
+        status === 'reached-review' ||
+        status === 'reached_review' ||
+        status === 'ready_for_review' ||
+        isAlreadyApplied ||
+        (status === 'human-required' && onReviewPage) ||
+        onReviewPage
+      );
+      if (isSuccessStatus) {
+        stoppedBlock = 'Step 5: Review & Submit';
+      }
+    }
+
+    // Mandatory robust failure screenshot capture and upload with retries
+    if (!isSuccessStatus && !completionShotUrl && page && !page.isClosed()) {
+      completionShotUrl = await captureAndUploadFailureScreenshot(page, {
+        applywizzId,
+        taskId,
+        stepName: stoppedBlock,
+      });
+    }
 
     if (isAlreadyApplied && status?.screenshotUrl) {
       completionShotUrl = status.screenshotUrl;
@@ -678,13 +929,9 @@ export async function executeWorkerTask({
 
     let fullFailureReason = null;
     if (!isSuccessStatus) {
-      if (stoppedBlock === 'Job link expired') {
-        fullFailureReason = "Job link expired: The page you are looking for doesn't exist.";
-      } else if (stoppedBlock === 'Resume upload failed') {
-        fullFailureReason = "Resume upload failed: " + (profile?._lastValidationError || "The field Upload a file (5MB max) is required and must have a value.");
-      } else {
-        fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
-      }
+      const failureDiagnosis = await extractUniqueFailureReason(page, profile, stoppedBlock, status?.reason || status?.error);
+      stoppedBlock = failureDiagnosis.step;
+      fullFailureReason = failureDiagnosis.reason;
       if (completionShotUrl) {
         fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
       }
@@ -734,28 +981,88 @@ export async function executeWorkerTask({
 
     if (!isSuccessStatus) {
       const answeredSoFar = [];
-      if (profile?._filledValues) {
-        for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
-          if (qLabel && qVal != null) {
-            answeredSoFar.push({
-              question: qLabel,
-              answer: String(qVal),
-              step: profile?._currentStep || stoppedBlock || 'Application',
-              is_answered: true,
-            });
-          }
+      const seenLabels = new Set();
+
+      // 1. All questions scraped across wizard steps reached so far
+      if (profile?._scrapedWizardQuestions instanceof Map) {
+        for (const [normKey, q] of profile._scrapedWizardQuestions.entries()) {
+          const lbl = q.question || q.label;
+          if (!lbl || seenLabels.has(lbl.toLowerCase().trim())) continue;
+          seenLabels.add(lbl.toLowerCase().trim());
+          const val = q.value || (profile._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
+          answeredSoFar.push({
+            question: lbl,
+            label: lbl,
+            answer: val,
+            step: q.step || stoppedBlock || 'Application',
+            field_type: q.field_type || q.type || 'text',
+            type: q.field_type || q.type || 'text',
+            required: Boolean(q.required || q.is_required),
+            is_required: Boolean(q.required || q.is_required),
+            options: q.options || [],
+            is_answered: Boolean(val),
+          });
         }
       }
+
+      // 2. All harvested DOM fields across wizard pages
+      if (Array.isArray(profile?._harvestedFields)) {
+        for (const f of profile._harvestedFields) {
+          const lbl = f.label || f.id;
+          if (!lbl || seenLabels.has(lbl.toLowerCase().trim())) continue;
+          seenLabels.add(lbl.toLowerCase().trim());
+          const val = f.value || (profile._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
+          answeredSoFar.push({
+            question: lbl,
+            label: lbl,
+            answer: val,
+            step: f.step || stoppedBlock || 'Application',
+            field_type: f.fieldType || f.type || 'text',
+            type: f.fieldType || f.type || 'text',
+            required: Boolean(f.required),
+            is_required: Boolean(f.required),
+            options: f.options || [],
+            is_answered: Boolean(val),
+          });
+        }
+      }
+
+      // 3. Any additional filled answers
+      if (profile?._filledValues) {
+        for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
+          if (!qLabel || seenLabels.has(qLabel.toLowerCase().trim())) continue;
+          seenLabels.add(qLabel.toLowerCase().trim());
+          answeredSoFar.push({
+            question: qLabel,
+            label: qLabel,
+            answer: String(qVal),
+            step: profile?._currentStep || stoppedBlock || 'Application',
+            field_type: 'text',
+            type: 'text',
+            required: true,
+            is_required: true,
+            options: [],
+            is_answered: true,
+          });
+        }
+      }
+
       if (profile?._answerCache && answeredSoFar.length === 0) {
         for (const [qLabel, qVal] of profile._answerCache.entries()) {
-          if (qLabel && qVal != null) {
-            answeredSoFar.push({
-              question: qLabel,
-              answer: String(qVal),
-              step: profile?._currentStep || stoppedBlock || 'Application',
-              is_answered: true,
-            });
-          }
+          if (!qLabel || seenLabels.has(qLabel.toLowerCase().trim())) continue;
+          seenLabels.add(qLabel.toLowerCase().trim());
+          answeredSoFar.push({
+            question: qLabel,
+            label: qLabel,
+            answer: String(qVal),
+            step: profile?._currentStep || stoppedBlock || 'Application',
+            field_type: 'text',
+            type: 'text',
+            required: true,
+            is_required: true,
+            options: [],
+            is_answered: true,
+          });
         }
       }
 
@@ -767,7 +1074,7 @@ export async function executeWorkerTask({
           jobUrl,
           company,
           roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+          failureReason: fullFailureReason || `${stoppedBlock}: Application did not advance to Review`,
           failedAtStep: stoppedBlock,
           screenshotPath: completionShotUrl,
           resolvedAnswers: answeredSoFar,
@@ -778,7 +1085,7 @@ export async function executeWorkerTask({
           jobUrl,
           company,
           roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+          failureReason: fullFailureReason || `${stoppedBlock}: Application did not advance to Review`,
           screenshotPath: completionShotUrl,
         });
       } catch {}
@@ -927,10 +1234,9 @@ export async function executeWorkerTask({
       }
     }
 
-    // Strictly filter to mandatory/required questions only and ensure options are filled
+    // Scrape all discovered questions across all wizard steps with types, options, and required flags
     const allQuestions = Array.from(questionMap.values());
-    const requiredQuestions = allQuestions.filter((q) => q.is_required || q.required);
-    const finalScrapedQuestions = (requiredQuestions.length > 0 ? requiredQuestions : allQuestions).map((q) => {
+    const finalScrapedQuestions = allQuestions.map((q) => {
       if ((!q.options || !q.options.length) && /dropdown|select|radio|combobox/i.test(q.field_type)) {
         const inferred = inferStandardOptions(q.label || q.question, q.field_type);
         if (inferred.length) q.options = inferred;
@@ -1136,23 +1442,17 @@ export async function executeWorkerTask({
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         const liveStep = await detectWorkdayStep(page).catch(() => null);
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
-        const buf = await page.screenshot({ type: 'png' }).catch(() => null);
-        if (buf) {
-          const timestamp = Date.now();
-          const effectiveTaskId = taskId || task.id || timestamp;
-          const failStoragePath = `${applywizzId}_${effectiveTaskId}_failed_${timestamp}.png`;
-          errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf);
-          if (!errShotUrl) {
-            errShotUrl = await uploadStorageScreenshot('submitted-applications', failStoragePath, buf);
-          }
-          if (errShotUrl) {
-            console.log(`[${workerId}] screenshot uploaded: ${failStoragePath}`);
-          }
-        }
+        errShotUrl = await captureAndUploadFailureScreenshot(page, {
+          applywizzId,
+          taskId,
+          stepName: errStep,
+        });
       }
     } catch {}
 
-    let fullErrReason = `${err.message} (stopped at ${errStep}) [step: ${errStep}]`;
+    const failureDiagnosis = await extractUniqueFailureReason(page, profile, errStep, err.message);
+    errStep = failureDiagnosis.step;
+    let fullErrReason = failureDiagnosis.reason;
     if (errShotUrl) fullErrReason += ` [screenshot: ${errShotUrl}]`;
 
     appLog(99, `Task halted: ${fullErrReason}`);
@@ -1172,29 +1472,119 @@ export async function executeWorkerTask({
     }).catch(() => {});
 
     const answeredSoFar = [];
-    if (profile?._filledValues) {
-      for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
-        if (qLabel && qVal != null) {
-          answeredSoFar.push({
-            question: qLabel,
-            answer: String(qVal),
-            step: profile?._currentStep || errStep || 'Application',
-            is_answered: true,
-          });
-        }
+    const seenLabels = new Set();
+
+    if (profile?._scrapedWizardQuestions instanceof Map) {
+      for (const [normKey, q] of profile._scrapedWizardQuestions.entries()) {
+        const lbl = q.question || q.label;
+        if (!lbl || seenLabels.has(lbl.toLowerCase().trim())) continue;
+        seenLabels.add(lbl.toLowerCase().trim());
+        const val = q.value || (profile._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
+        answeredSoFar.push({
+          question: lbl,
+          label: lbl,
+          answer: val,
+          step: q.step || errStep || 'Application',
+          field_type: q.field_type || q.type || 'text',
+          type: q.field_type || q.type || 'text',
+          required: Boolean(q.required || q.is_required),
+          is_required: Boolean(q.required || q.is_required),
+          options: q.options || [],
+          is_answered: Boolean(val),
+        });
       }
     }
+
+    if (Array.isArray(profile?._harvestedFields)) {
+      for (const f of profile._harvestedFields) {
+        const lbl = f.label || f.id;
+        if (!lbl || seenLabels.has(lbl.toLowerCase().trim())) continue;
+        seenLabels.add(lbl.toLowerCase().trim());
+        const val = f.value || (profile._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
+        answeredSoFar.push({
+          question: lbl,
+          label: lbl,
+          answer: val,
+          step: f.step || errStep || 'Application',
+          field_type: f.fieldType || f.type || 'text',
+          type: f.fieldType || f.type || 'text',
+          required: Boolean(f.required),
+          is_required: Boolean(f.required),
+          options: f.options || [],
+          is_answered: Boolean(val),
+        });
+      }
+    }
+
+    if (profile?._filledValues) {
+      for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
+        if (!qLabel || seenLabels.has(qLabel.toLowerCase().trim())) continue;
+        seenLabels.add(qLabel.toLowerCase().trim());
+        answeredSoFar.push({
+          question: qLabel,
+          label: qLabel,
+          answer: String(qVal),
+          step: profile?._currentStep || errStep || 'Application',
+          field_type: 'text',
+          type: 'text',
+          required: true,
+          is_required: true,
+          options: [],
+          is_answered: true,
+        });
+      }
+    }
+
     if (profile?._answerCache && answeredSoFar.length === 0) {
       for (const [qLabel, qVal] of profile._answerCache.entries()) {
-        if (qLabel && qVal != null) {
-          answeredSoFar.push({
-            question: qLabel,
-            answer: String(qVal),
-            step: profile?._currentStep || errStep || 'Application',
-            is_answered: true,
-          });
-        }
+        if (!qLabel || seenLabels.has(qLabel.toLowerCase().trim())) continue;
+        seenLabels.add(qLabel.toLowerCase().trim());
+        answeredSoFar.push({
+          question: qLabel,
+          label: qLabel,
+          answer: String(qVal),
+          step: profile?._currentStep || errStep || 'Application',
+          field_type: 'text',
+          type: 'text',
+          required: true,
+          is_required: true,
+          options: [],
+          is_answered: true,
+        });
       }
+    }
+
+    const isReviewReached = String(errStep || profile?._currentStep || '').toLowerCase().includes('review') ||
+      Boolean(profile?._submissionScreenshotUrl) ||
+      (profile?._scrapedReviewMap && Object.keys(profile._scrapedReviewMap).length > 0);
+
+    if (isReviewReached) {
+      console.log(`🛡️ [${workerId}] Application for ${applywizzId} reached Review step before error (${err.message}). Treating as successful review discovery and avoiding failed_jobs.`);
+      const reviewQuestions = (Array.isArray(profile?._scrapedQuestions) && profile._scrapedQuestions.length > 0)
+        ? profile._scrapedQuestions
+        : (profile?._scrapedReviewMap ? Object.entries(profile._scrapedReviewMap).map(([k, v]) => ({
+            question: k,
+            label: k,
+            value: String(v || ''),
+            field_type: 'text',
+            required: true,
+            is_required: true,
+          })) : []);
+
+      return {
+        status: 'reached-review',
+        stoppedAtStep: 'Step 5: Review & Submit',
+        cacheHit,
+        screenshotUrl: profile?._submissionScreenshotUrl || errShotUrl,
+        reviewScreenshotUrl: profile?._submissionScreenshotUrl || errShotUrl,
+        answersMap: {
+          ...(profile?._scrapedReviewMap || {}),
+          ...(profile?._filledValues || {}),
+        },
+        harvestedFields: reviewQuestions,
+        scrapedQuestionsCount: reviewQuestions.length,
+        scrapedQuestions: reviewQuestions,
+      };
     }
 
     try {
