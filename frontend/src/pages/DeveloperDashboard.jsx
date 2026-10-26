@@ -120,7 +120,7 @@ export default function DeveloperDashboard() {
     };
   }, [backendUrl, isAnyPipelineActive]);
 
-  // Live polling for Batch Worker Logs when Worker Logs tab is active AND a pipeline is active
+  // Live polling for Batch Worker Logs whenever Worker Logs tab is active
   useEffect(() => {
     if (activeTab !== 'Worker Logs') return;
     let isMounted = true;
@@ -134,16 +134,13 @@ export default function DeveloperDashboard() {
     // Immediate initial fetch
     pollBatchLogs();
 
-    // If both toggles are idle/stopped, do NOT fire continuous background network logs
-    if (!isAnyPipelineActive) return;
-
-    // Continuous polling every 2.5s only while an active pipeline is running
+    // Continuous live polling every 2.5s while user is viewing Worker Logs tab
     const interval = setInterval(pollBatchLogs, 2500);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activeTab, isAnyPipelineActive]);
+  }, [activeTab]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {

@@ -1227,6 +1227,9 @@ export async function executeWorkerTask({
     try {
       const { cleanupClientResume } = await import('./applyWizzResume.mjs');
       await cleanupClientResume(profile).catch(() => {});
+      if (applywizzId) {
+        await cleanupClientResume({ applywizz_id: applywizzId }).catch(() => {});
+      }
     } catch {}
 
     try {

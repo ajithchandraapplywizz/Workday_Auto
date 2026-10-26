@@ -49,16 +49,18 @@ const envWorkers = parseInt(
 ) || 3;
 
 const scanCount = parseInt(process.env.SCAN_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
-const resolveCount = parseInt(process.env.RESOLVE_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
 const submitCount = parseInt(process.env.SUBMIT_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
 
+// Pool 1: 3 shared workers for Scanning & Resolving together
 const scanWorkerIds = Array.from({ length: scanCount }, (_, i) => `scanning_worker_${i + 1}`);
-const resolveWorkerIds = Array.from({ length: resolveCount }, (_, i) => `resolving_worker_${i + 1}`);
+const resolveWorkerIds = scanWorkerIds; // Shared pool: Scanning worker immediately resolves all link clients
+const resolveCount = scanCount;
+
+// Pool 2: 3 separate workers for Submissions only
 const submitWorkerIds = Array.from({ length: submitCount }, (_, i) => `submitting_worker_${i + 1}`);
 
 const workerNames = {};
-scanWorkerIds.forEach((id, i) => { workerNames[id] = `Scanning Worker ${i + 1}`; });
-resolveWorkerIds.forEach((id, i) => { workerNames[id] = `Resolving Worker ${i + 1}`; });
+scanWorkerIds.forEach((id, i) => { workerNames[id] = `Scanning & Resolving Worker ${i + 1}`; });
 submitWorkerIds.forEach((id, i) => { workerNames[id] = `Submitting Worker ${i + 1}`; });
 
 export const PIPELINE_CONFIG = {
@@ -80,7 +82,7 @@ export const PIPELINE_CONFIG = {
   submitWorkerIds,
   workerNames,
 
-  allWorkerIds: [...new Set([...scanWorkerIds, ...resolveWorkerIds, ...submitWorkerIds])],
+  allWorkerIds: [...new Set([...scanWorkerIds, ...submitWorkerIds])],
 
   webhookPort: Number(process.env.DAEMON_PORT) || 3001,
   headless: process.env.HEADLESS !== 'false',

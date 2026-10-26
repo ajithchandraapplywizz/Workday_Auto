@@ -135,52 +135,90 @@ async function downloadBinary(url, destPath) {
 }
 
 /**
- * Download resume PDF from URL or Supabase; cache under data/client-resumes/.
+ * Download resume PDF from client API URL or Supabase; temporarily cache under data/client-resumes/.
+ * Stored strictly as a temporary cache ONLY while the application is in-flight,
+ * and deleted immediately at any cost once submission completes or fails.
  * @param {object} profile
  * @returns {Promise<string|null>} absolute path to PDF
  */
 export async function ensureClientResumeFromApplyWizz(profile = {}) {
-  let url = resolveApplyWizzResumeUrl(profile);
   const candidateId = String(profile._applyWizzId || profile.applywizz_id || profile.applywizzId || '').trim();
+  let url = resolveApplyWizzResumeUrl(profile);
 
-  // If no URL on profile, query Supabase clients table directly
+  // 1. If no URL on profile, query Supabase clients table directly
   if (!url && candidateId) {
     url = await fetchResumeUrlFromSupabase(candidateId);
+  }
+
+  // 2. If still no URL, fetch fresh from ApplyWizz CRM client API (get-client-details)
+  if (!url && candidateId) {
+    try {
+      const { fetchJsonWithRetry, DEFAULT_API_BASE } = await import('./applyWizzClient.mjs').catch(() => ({}));
+      if (fetchJsonWithRetry) {
+        const apiUrl = `${DEFAULT_API_BASE || 'https://www.apply-wizz.me/api/get-client-details'}?applywizz_id=${encodeURIComponent(candidateId)}`;
+        const json = await fetchJsonWithRetry(apiUrl).catch(() => null);
+        const liveUrl = json?.client?.resume_url || json?.client?.resume_path || json?.additional_information?.resume_url || json?.additional_information?.resume_path;
+        if (liveUrl) {
+          url = absolutizeApplyWizzResumeUrl(liveUrl);
+        }
+      }
+    } catch (apiErr) {
+      console.warn(`  ⚠️ Client API resume fetch note: ${apiErr.message}`);
+    }
   }
 
   const cached = cachePathForClient(profile);
   const applicationKey = String(profile._jobUrl || profile._currentJobUrl || '').trim();
 
+  // If already downloaded in this exact in-flight session and valid, return it
+  if (profile._resumeDownloadedForApplication && existsSync(cached)) {
+    try {
+      const { statSync } = await import('fs');
+      if (statSync(cached).size > 100) {
+        return cached;
+      }
+    } catch (_) {}
+  }
+
+  // Remove any stale/residual file from previous runs before fresh download
   if (existsSync(cached)) {
-    profile._resumePath = cached;
-    if (url) profile._resumeUrl = url;
-    profile._resumeDownloadedForApplication = true;
-    profile._resumeApplicationKey = applicationKey;
-    return cached;
+    try {
+      const { unlinkSync } = await import('fs');
+      unlinkSync(cached);
+    } catch (_) {}
   }
 
   if (!url) {
-    return profile._resumePath || null;
+    console.warn(`  ⚠️  No resume URL found on client API for candidate ${candidateId || '(unknown)'}`);
+    return null;
   }
 
   try {
-    console.log(`  📥 Downloading resume for upload...`);
+    console.log(`  📥 Downloading fresh resume from client API for upload...`);
     console.log(`     URL: ${url.slice(0, 120)}${url.length > 120 ? '…' : ''}`);
     await downloadBinary(url, cached);
+
+    const { statSync } = await import('fs');
+    const size = statSync(cached).size;
+    if (size < 100) {
+      throw new Error(`Downloaded resume file is empty or corrupted (${size} bytes)`);
+    }
+
     profile._resumePath = cached;
     profile._resumeUrl = url;
     profile._resumeDownloadedForApplication = true;
     profile._resumeApplicationKey = applicationKey;
-    console.log(`  ✓ Resume cached: ${basename(cached)}`);
+    console.log(`  ✓ Resume ready for upload: ${basename(cached)} (${Math.round(size / 1024)} KB)`);
     return cached;
   } catch (err) {
-    console.log(`  ⚠️  Resume download failed: ${formatHttpError(err)}`);
-    return profile._resumePath || null;
+    console.log(`  ❌ Resume download from client API failed: ${formatHttpError(err)}`);
+    return null;
   }
 }
 
 /**
- * Clean up client resume: unlink PDF from data/client-resumes/ when application succeeds or fails.
+ * Clean up client resume: unlink PDF from data/client-resumes/ IMMEDIATELY at any cost
+ * when application succeeds, fails, errors, or aborts.
  */
 export async function cleanupClientResume(profile = {}) {
   let p = String(profile._resumePath || '').trim();
@@ -192,17 +230,44 @@ export async function cleanupClientResume(profile = {}) {
   }
   if (!p) return false;
   try {
-    const { unlinkSync } = await import('fs');
+    const { unlinkSync, existsSync } = await import('fs');
     if (existsSync(p)) {
       unlinkSync(p);
       console.log(`  🗑️  Cleaned up local cached resume: ${basename(p)}`);
       profile._resumePath = null;
+      profile._resumeDownloadedForApplication = false;
       return true;
     }
   } catch (err) {
     console.log(`  ⚠️ Resume file cleanup notice: ${err.message}`);
   }
   return false;
+}
+
+/**
+ * Clean up all cached resume PDFs on local disk.
+ */
+export async function cleanupAllCachedResumes() {
+  try {
+    const { existsSync, readdirSync, unlinkSync } = await import('fs');
+    if (!existsSync(CACHE_DIR)) return 0;
+    const files = readdirSync(CACHE_DIR);
+    let count = 0;
+    for (const f of files) {
+      if (f.endsWith('.pdf')) {
+        try {
+          unlinkSync(resolve(CACHE_DIR, f));
+          count++;
+        } catch (_) {}
+      }
+    }
+    if (count > 0) {
+      console.log(`🧹 [RESUME CLEANUP] Purged ${count} residual cached resume PDF(s) from disk.`);
+    }
+    return count;
+  } catch (_) {
+    return 0;
+  }
 }
 
 /**

@@ -1566,54 +1566,139 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       };
     }
 
-    // Supabase Cloud Fallback: Synthesize live logs directly from worker_status and bot_control
+    // Supabase Cloud Fallback: Synthesize live logs directly from worker_status, scanned_jobs, job_distributions, and submission_tasks
     try {
-      const [{ data: wsData }, { data: bcData }] = await Promise.all([
+      const [
+        { data: wsData },
+        { data: bcData },
+        { data: sjData },
+        { data: jdData },
+        { data: stData },
+      ] = await Promise.all([
         supabase.from('worker_status').select('*').order('updated_at', { ascending: false }).limit(20),
         supabase.from('bot_control').select('*').eq('id', 'primary').maybeSingle(),
+        supabase.from('scanned_jobs').select('id, company, role_title, job_url, question_count, scraped_questions, created_at, updated_at').order('created_at', { ascending: false }).limit(30),
+        supabase.from('job_distributions').select('id, applywizz_id, company, role_title, status, created_at, updated_at').order('updated_at', { ascending: false }).limit(30),
+        supabase.from('submission_tasks').select('id, applywizz_id, company, role_title, status, error_message, created_at, updated_at').order('updated_at', { ascending: false }).limit(30),
       ]);
 
       const scanningLogs = [];
       const resolvingLogs = [];
       const submittingLogs = [];
 
+      // 1. Daemon & Pipeline High-Level Status
       if (bcData?.current_action) {
         const bcLog = {
           id: 'bc-' + (bcData.updated_at || Date.now()),
+          ts: bcData.updated_at || new Date().toISOString(),
           created_at: bcData.updated_at || new Date().toISOString(),
-          message: `[DAEMON] Stage: ${bcData.stage || 'idle'} | State: ${bcData.is_running ? 'RUNNING' : 'IDLE'} | ${bcData.current_action}`,
+          message: `[DAEMON] Stage: ${(bcData.stage || 'idle').toUpperCase()} | Active Workers: ${bcData.active_worker_count || 0} | ${bcData.current_action}`,
           step_index: 1,
+          cluster: (bcData.stage === 'submitting') ? 'Submit' : ((bcData.stage === 'resolving') ? 'Resolve' : 'Scan'),
         };
         if (bcData.stage === 'submitting') submittingLogs.push(bcLog);
         else if (bcData.stage === 'resolving') resolvingLogs.push(bcLog);
         else scanningLogs.push(bcLog);
       }
 
+      // 2. Real-Time Active Worker States
       if (wsData && wsData.length > 0) {
         for (const w of wsData) {
-          if (!w.current_application_id && w.state === 'idle') continue;
+          const isWorking = (w.state === 'in_flight' || w.state === 'busy');
+          const wid = String(w.worker_id || '').toLowerCase();
+          const isSubmit = wid.includes('submit');
+          const isResolve = wid.includes('resolv');
+          const cluster = isSubmit ? 'Submit' : (isResolve ? 'Resolve' : 'Scan');
+          const workerNum = parseInt((wid.match(/\d+/) || [1])[0], 10);
+
           const wLog = {
             id: 'ws-' + w.worker_id + '-' + (w.updated_at || Date.now()),
+            ts: w.updated_at || new Date().toISOString(),
             created_at: w.updated_at || new Date().toISOString(),
-            message: `[${w.bot_name || w.worker_id}] State: ${String(w.state || '').toUpperCase()} | ${w.current_application_id || 'Waiting for tasks...'}`,
-            step_index: 1,
+            message: `[${w.bot_name || w.worker_id}] ${isWorking ? '🟢 WORKING' : '⚪ IDLE'} | ${w.current_application_id || (isWorking ? 'Processing application...' : 'Standby / Ready')}`,
+            level: 'info',
+            cluster,
+            worker_id: w.worker_id,
+            worker_num: workerNum,
+            step_index: isWorking ? 2 : 1,
           };
-          const wid = String(w.worker_id || '').toLowerCase();
-          if (wid.includes('submit')) submittingLogs.push(wLog);
-          else if (wid.includes('resolv')) resolvingLogs.push(wLog);
+          if (isSubmit) submittingLogs.push(wLog);
+          else if (isResolve) resolvingLogs.push(wLog);
           else scanningLogs.push(wLog);
         }
       }
+
+      // 3. Live Scanned Jobs Activity
+      if (sjData && sjData.length > 0) {
+        for (const s of sjData) {
+          const qCount = s.question_count || (Array.isArray(s.scraped_questions) ? s.scraped_questions.length : 0);
+          scanningLogs.push({
+            id: 'sj-' + s.id,
+            ts: s.created_at || s.updated_at || new Date().toISOString(),
+            created_at: s.created_at || s.updated_at || new Date().toISOString(),
+            message: `[Scanning Pool] 🔍 Scanned & Harvested: ${s.company || 'Employer'} - "${s.role_title || 'Position'}" | ${qCount} questions scraped | ${s.job_url}`,
+            level: 'info',
+            cluster: 'Scan',
+            worker_id: 'scanning_worker_1',
+            worker_num: 1,
+            step_index: 2,
+          });
+        }
+      }
+
+      // 4. Live Resolving Activity (Pre-resolved answers)
+      if (jdData && jdData.length > 0) {
+        for (const d of jdData) {
+          resolvingLogs.push({
+            id: 'jd-' + d.id,
+            ts: d.updated_at || d.created_at || new Date().toISOString(),
+            created_at: d.updated_at || d.created_at || new Date().toISOString(),
+            message: `[Resolving Pool] ⚡ Pre-Resolved Candidate Answers: ${d.applywizz_id} @ ${d.company || 'Employer'} - "${d.role_title || 'Role'}" -> Status: ${d.status}`,
+            level: d.status === 'ready_for_review' ? 'info' : 'warn',
+            cluster: 'Resolve',
+            worker_id: 'resolving_worker_1',
+            worker_num: 1,
+            step_index: 3,
+          });
+        }
+      }
+
+      // 5. Live Application Submissions Activity
+      if (stData && stData.length > 0) {
+        for (const st of stData) {
+          const isDone = st.status === 'submitted' || st.status === 'already_applied';
+          const isFail = st.status === 'failed';
+          const isBusy = st.status === 'applying';
+          const icon = isDone ? '✅' : (isFail ? '❌' : (isBusy ? '🚀' : '📋'));
+
+          submittingLogs.push({
+            id: 'st-' + st.id,
+            ts: st.updated_at || st.created_at || new Date().toISOString(),
+            created_at: st.updated_at || st.created_at || new Date().toISOString(),
+            message: `[Submissions Pool] ${icon} [${String(st.status || '').toUpperCase()}] ${st.applywizz_id} @ ${st.company || 'Employer'} - "${st.role_title || 'Role'}" ${st.error_message ? `| Info: ${st.error_message}` : ''}`,
+            level: isFail ? 'error' : 'info',
+            cluster: 'Submit',
+            worker_id: 'submitting_worker_1',
+            worker_num: 1,
+            step_index: isDone ? 5 : (isFail ? 99 : 4),
+          });
+        }
+      }
+
+      const sortByTs = (a, b) => new Date(a.ts).getTime() - new Date(b.ts).getTime();
+      scanningLogs.sort(sortByTs);
+      resolvingLogs.sort(sortByTs);
+      submittingLogs.sort(sortByTs);
 
       if (scanningLogs.length > 0 || resolvingLogs.length > 0 || submittingLogs.length > 0) {
         return {
           success: true,
           batches: {
-            scanning: scanningLogs,
-            resolving: resolvingLogs,
-            submitting: submittingLogs,
+            scanning: scanningLogs.slice(-limit),
+            resolving: resolvingLogs.slice(-limit),
+            submitting: submittingLogs.slice(-limit),
           },
-          allLogs: [...scanningLogs, ...resolvingLogs, ...submittingLogs],
+          allLogs: [...scanningLogs, ...resolvingLogs, ...submittingLogs].sort(sortByTs).slice(-limit * 2),
         };
       }
     } catch {}

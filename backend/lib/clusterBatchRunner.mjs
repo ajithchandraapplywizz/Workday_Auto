@@ -983,7 +983,13 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
   }
 
-  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: ${company} — Tested Lead (${blueprintTask.applywizz_id}) in Browser & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
+  // Clean up lead blueprint candidate's local cached resume immediately
+  try {
+    const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+    await cleanupClientResume({ _applyWizzId: blueprintTask?.applywizz_id, applywizz_id: blueprintTask?.applywizz_id });
+  } catch (_) {}
+
+  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: Tested Lead (${blueprintTask.applywizz_id}) & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
   return {
     workerId,
     jobUrl,
@@ -1233,13 +1239,15 @@ export async function runClusterBatchRunner({
     current10BatchCycle = [];
   }
 
-  // Return all scanning workers to idle
-  for (let slot = 1; slot <= 10; slot++) {
-    await updateWorkerStatus(`worker_${slot}`, {
+  // Return all canonical scanning workers to idle
+  const scanWorkerIds = PIPELINE_CONFIG?.scanWorkerIds || ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
+  for (let slot = 0; slot < scanWorkerIds.length; slot++) {
+    const wId = scanWorkerIds[slot];
+    await updateWorkerStatus(wId, {
       state: 'idle',
       current_application_id: null,
       stage: 'scanning',
-      bot_name: `Worker ${slot}`,
+      bot_name: `Scanning Worker ${slot + 1}`,
     }).catch(() => { });
   }
 
