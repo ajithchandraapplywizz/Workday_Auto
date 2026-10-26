@@ -684,34 +684,56 @@ export async function reconcileOperatorsWithAPI() {
   }
 }
 
-export const CANONICAL_2_WORKERS = [
-  'scanning_worker_1',
-  'scanning_worker_2',
-  'resolving_worker_1',
-  'resolving_worker_2',
-  'submitting_worker_1',
-  'submitting_worker_2',
-];
+export function getEnvWorkerCounts() {
+  let count = 2;
+  if (typeof window !== 'undefined') {
+    const custom = window.localStorage.getItem('WORKER_COUNT') || window.localStorage.getItem('VITE_WORKER_COUNT');
+    if (custom && parseInt(custom, 10)) {
+      count = parseInt(custom, 10);
+    }
+  }
+  if (typeof import.meta !== 'undefined' && import.meta.env) {
+    const envVal = import.meta.env.VITE_WORKER_COUNT || import.meta.env.VITE_WORKERS_COUNT;
+    if (envVal && parseInt(envVal, 10)) {
+      count = parseInt(envVal, 10);
+    }
+  }
+  const scanCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SCAN_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SCAN_WORKER_COUNT, 10) : count;
+  const resolveCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RESOLVE_WORKER_COUNT) ? parseInt(import.meta.env.VITE_RESOLVE_WORKER_COUNT, 10) : count;
+  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : count;
+  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || count };
+}
 
-// Backwards compatibility alias
+export function getDynamicWorkerIds() {
+  const { scan, resolve, submit } = getEnvWorkerCounts();
+  const scanIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
+  const resolveIds = Array.from({ length: resolve }, (_, i) => `resolving_worker_${i + 1}`);
+  const submitIds = Array.from({ length: submit }, (_, i) => `submitting_worker_${i + 1}`);
+  return [...new Set([...scanIds, ...resolveIds, ...submitIds])];
+}
+
+export const CANONICAL_2_WORKERS = getDynamicWorkerIds();
 export const CANONICAL_9_WORKERS = CANONICAL_2_WORKERS;
 
 /**
- * 16. Supabase: Fetch 2-Worker Pipeline Status
- * Tracks the 2 shared workers across Scanning, Resolving, and Submitting stages.
+ * 16. Supabase: Fetch Dynamic Worker Pipeline Status
+ * Tracks workers across Scanning, Resolving, and Submitting stages dynamically from env.
  */
 export async function fetchWorkerStatuses() {
   try {
+    const dynamicIds = getDynamicWorkerIds();
     const { data, error } = await supabase
       .from('worker_status')
       .select('*')
-      .in('worker_id', CANONICAL_2_WORKERS)
       .order('worker_id');
     if (error) throw error;
     const rows = data || [];
     const now = Date.now();
 
-    const workers = CANONICAL_2_WORKERS.map((id) => {
+    // Combine all worker IDs from DB and dynamic env configuration
+    const allKnownIds = [...new Set([...dynamicIds, ...rows.map((r) => r.worker_id).filter(Boolean)])];
+
+    const workers = allKnownIds.map((id) => {
       const match = rows.find((r) => r.worker_id === id);
       const last = match ? new Date(match.updated_at || 0).getTime() : 0;
       const isFresh = last && (now - last < 5 * 60 * 1000);
@@ -719,7 +741,8 @@ export async function fetchWorkerStatuses() {
 
       let stage = 'scanning';
       let cluster = 'Scan';
-      const num = id.slice(-1);
+      const numMatch = id.match(/\d+$/);
+      const num = numMatch ? numMatch[0] : '1';
       if (id.startsWith('resolving')) {
         stage = 'resolving';
         cluster = 'Resolve';
@@ -765,10 +788,12 @@ export async function fetchWorkerStatuses() {
       submittingActive,
     };
   } catch (err) {
-    const fallback = CANONICAL_9_WORKERS.map((id) => {
+    const fallbackIds = getDynamicWorkerIds();
+    const fallback = fallbackIds.map((id) => {
       let stage = 'scanning';
       let cluster = 'Scan';
-      const num = id.slice(-1);
+      const numMatch = id.match(/\d+$/);
+      const num = numMatch ? numMatch[0] : '1';
       if (id.startsWith('resolving')) {
         stage = 'resolving';
         cluster = 'Resolve';
@@ -783,21 +808,23 @@ export async function fetchWorkerStatuses() {
         stage,
         state: 'idle',
         current_application_id: null,
+        current_step: stage,
         updated_at: new Date().toISOString(),
       };
     });
     return {
       success: false,
       workers: fallback,
-      scanWorkers: fallback.slice(0, 3),
-      resolveWorkers: fallback.slice(3, 6),
-      submitWorkers: fallback.slice(6, 9),
+      scanWorkers: fallback.filter((w) => w.cluster === 'Scan'),
+      resolveWorkers: fallback.filter((w) => w.cluster === 'Resolve'),
+      submitWorkers: fallback.filter((w) => w.cluster === 'Submit'),
       inFlight: 0,
-      idle: 9,
-      total: 9,
+      idle: fallback.length,
+      total: fallback.length,
       scanningActive: 0,
       resolvingActive: 0,
       submittingActive: 0,
+      error: err.message,
     };
   }
 }
@@ -1408,6 +1435,12 @@ export function getBackendBaseUrl() {
   return url;
 }
 
+export function isLocalEnvironment() {
+  if (typeof window === 'undefined') return false;
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
 export function getStaffAuthHeaders(baseHeaders = {}) {
   const headers = { 'Content-Type': 'application/json', ...baseHeaders };
   try {
@@ -1433,14 +1466,17 @@ export function getStaffAuthHeaders(baseHeaders = {}) {
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
   try {
     const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
     const endpoints = [
       ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
       '/api/bot/logs',
       '/api/developer/logs',
-      'http://localhost:3005/api/bot/logs',
-      'http://localhost:3005/api/developer/logs',
-      'http://localhost:3001/api/bot/logs',
-      'http://localhost:3001/api/developer/logs',
+      ...(isLocal ? [
+        'http://localhost:3005/api/bot/logs',
+        'http://localhost:3005/api/developer/logs',
+        'http://localhost:3001/api/bot/logs',
+        'http://localhost:3001/api/developer/logs',
+      ] : []),
     ];
 
     let liveLogs = null;
@@ -2523,7 +2559,7 @@ export async function triggerAutonomousBot() {
       console.warn('Note on unpausing batch_job_queue:', qErr?.message);
     }
 
-    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control and worker_control
+    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control
     let supabaseSuccess = false;
     const actionNonce = Date.now().toString();
     try {
@@ -2531,16 +2567,10 @@ export async function triggerAutonomousBot() {
         .from('bot_control')
         .update({
           stage: 'scanning',
-          mode: 'scanning',
           is_running: true,
           is_paused: false,
-          scan_status: 'running',
-          scan_enabled: true,
-          scan_stop_requested: false,
           stop_requested: false,
           trigger_requested: true,
-          action_nonce: actionNonce,
-          trigger_id: actionNonce,
           last_action_requested: 'start_scan',
           current_action: 'Scanning unique job links...',
           updated_at: now,
@@ -2562,7 +2592,8 @@ export async function triggerAutonomousBot() {
       }, { onConflict: 'key' }).catch(() => {});
     } catch {}
 
-    const scanningWorkerIds = ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
+    const { scan } = getEnvWorkerCounts();
+    const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
     for (const wid of scanningWorkerIds) {
       try {
         const { error: wErr } = await supabase
@@ -2593,17 +2624,20 @@ export async function triggerAutonomousBot() {
     // 3. Webhook call to daemon (POST /api/bot/start / /api/bot/trigger)
     // Dispatches via relative proxy or direct backend URL if configured
     const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
     const endpoints = [
       ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
       '/api/bot/start',
       '/api/bot/trigger',
       '/api/bot/webhook',
-      'http://localhost:3005/api/bot/start',
-      'http://localhost:3005/api/bot/trigger',
-      'http://localhost:3005/api/bot/webhook',
-      'http://localhost:3001/api/bot/start',
-      'http://localhost:3001/api/bot/trigger',
-      'http://localhost:3001/api/bot/webhook',
+      ...(isLocal ? [
+        'http://localhost:3005/api/bot/start',
+        'http://localhost:3005/api/bot/trigger',
+        'http://localhost:3005/api/bot/webhook',
+        'http://localhost:3001/api/bot/start',
+        'http://localhost:3001/api/bot/trigger',
+        'http://localhost:3001/api/bot/webhook',
+      ] : []),
     ];
     for (const ep of endpoints) {
       try {
@@ -2641,15 +2675,18 @@ export async function stopAutonomousBot() {
 
     // 1. Webhook stop call to daemon (POST /api/bot/stop / /api/bot/scan/stop)
     const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
     const stopEndpoints = [
       ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
       '/api/bot/scan/stop',
       '/api/bot/stop',
       '/api/bot/webhook',
-      'http://localhost:3005/api/bot/scan/stop',
-      'http://localhost:3005/api/bot/stop',
-      'http://localhost:3001/api/bot/scan/stop',
-      'http://localhost:3001/api/bot/stop',
+      ...(isLocal ? [
+        'http://localhost:3005/api/bot/scan/stop',
+        'http://localhost:3005/api/bot/stop',
+        'http://localhost:3001/api/bot/scan/stop',
+        'http://localhost:3001/api/bot/stop',
+      ] : []),
     ];
     await Promise.any(
       stopEndpoints.map((u) =>
@@ -2662,18 +2699,15 @@ export async function stopAutonomousBot() {
       )
     ).catch(() => {});
 
-    // 2. Set bot_control & worker_control stop signal in Supabase
+    // 2. Set bot_control stop signal in Supabase
     try {
       await supabase
         .from('bot_control')
         .update({
-          scan_status: 'off',
-          scan_enabled: false,
-          scan_stop_requested: true,
+          stage: 'idle',
+          is_running: false,
           stop_requested: true,
           trigger_requested: true,
-          action_nonce: actionNonce,
-          trigger_id: actionNonce,
           last_action_requested: 'stop_scan',
           current_action: 'Scan & Resolve stopped by user.',
           updated_at: now,
@@ -2693,7 +2727,8 @@ export async function stopAutonomousBot() {
       }, { onConflict: 'key' }).catch(() => {});
     } catch {}
 
-    // 3. Mark scanning worker rows idle in Supabase worker_status
+    // 3. Mark all active worker rows idle in Supabase worker_status
+    const allDynamicIds = getDynamicWorkerIds();
     await supabase
       .from('worker_status')
       .update({
@@ -2701,7 +2736,7 @@ export async function stopAutonomousBot() {
         current_application_id: null,
         updated_at: now,
       })
-      .in('worker_id', ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3']);
+      .in('worker_id', allDynamicIds);
 
     // 4. Mark any actively processing tasks back to pending on stop
     try {
@@ -2738,16 +2773,10 @@ export async function triggerSubmissionStage() {
       .from('bot_control')
       .update({
         stage: 'submitting',
-        mode: 'submitting',
         is_running: true,
         is_paused: false,
-        submit_status: 'running',
-        submit_enabled: true,
-        submit_stop_requested: false,
         stop_requested: false,
         trigger_requested: true,
-        action_nonce: actionNonce,
-        trigger_id: actionNonce,
         last_action_requested: 'start_submit',
         current_action: 'Submitting approved applications...',
         updated_at: now,
@@ -2770,15 +2799,18 @@ export async function triggerSubmissionStage() {
   } catch {}
 
   const backendBase = getBackendBaseUrl();
+  const isLocal = isLocalEnvironment();
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
     '/api/bot/submit/start',
     '/api/bot/submit',
     '/api/bot/webhook',
-    'http://localhost:3005/api/bot/submit/start',
-    'http://localhost:3005/api/bot/submit',
-    'http://localhost:3001/api/bot/submit/start',
-    'http://localhost:3001/api/bot/submit',
+    ...(isLocal ? [
+      'http://localhost:3005/api/bot/submit/start',
+      'http://localhost:3005/api/bot/submit',
+      'http://localhost:3001/api/bot/submit/start',
+      'http://localhost:3001/api/bot/submit',
+    ] : []),
   ];
 
   for (const ep of endpoints) {
@@ -2812,13 +2844,10 @@ export async function stopSubmissionStage() {
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
-        submit_status: 'off',
-        submit_enabled: false,
-        submit_stop_requested: true,
+        stage: 'idle',
+        is_running: false,
         stop_requested: true,
         trigger_requested: true,
-        action_nonce: actionNonce,
-        trigger_id: actionNonce,
         last_action_requested: 'stop_submit',
         current_action: 'Submissions stopped by user.',
         updated_at: now,
@@ -2840,15 +2869,18 @@ export async function stopSubmissionStage() {
   } catch {}
 
   const backendBase = getBackendBaseUrl();
+  const isLocal = isLocalEnvironment();
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
     '/api/bot/submit/stop',
     '/api/bot/stop',
     '/api/bot/webhook',
-    'http://localhost:3005/api/bot/submit/stop',
-    'http://localhost:3005/api/bot/stop',
-    'http://localhost:3001/api/bot/submit/stop',
-    'http://localhost:3001/api/bot/stop',
+    ...(isLocal ? [
+      'http://localhost:3005/api/bot/submit/stop',
+      'http://localhost:3005/api/bot/stop',
+      'http://localhost:3001/api/bot/submit/stop',
+      'http://localhost:3001/api/bot/stop',
+    ] : []),
   ];
 
   for (const ep of endpoints) {
@@ -2873,16 +2905,19 @@ export async function fetchBotDaemonStatus() {
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
     const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
 
     // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
     const statusUrls = [
       ...(backendBase ? [`${backendBase}/api/bot/status`, `${backendBase}/health`, `${backendBase}/`] : []),
       '/api/bot/status',
       '/health',
-      'http://localhost:3005/api/bot/status',
-      'http://localhost:3005/health',
-      'http://localhost:3001/api/bot/status',
-      'http://localhost:3001/health',
+      ...(isLocal ? [
+        'http://localhost:3005/api/bot/status',
+        'http://localhost:3005/health',
+        'http://localhost:3001/api/bot/status',
+        'http://localhost:3001/health',
+      ] : []),
     ];
     for (const u of statusUrls) {
       try {
@@ -2906,7 +2941,6 @@ export async function fetchBotDaemonStatus() {
       supabase
         .from('worker_status')
         .select('*')
-        .in('worker_id', CANONICAL_2_WORKERS)
         .order('worker_id'),
       supabase
         .from('bot_control')
@@ -2947,13 +2981,13 @@ export async function fetchBotDaemonStatus() {
       isSubmitting,
       state: isRunning ? currentStage : 'idle',
       stage: currentStage,
-      workersAssigned: 9,
+      workersAssigned: workers.length || getDynamicWorkerIds().length,
       workers,
       botControl,
       triggeredAt: botControl?.updated_at || workers.find(w => w.state === 'in_flight')?.updated_at || null,
     };
   } catch (err) {
-    return { success: false, isRunning: false, isScanning: false, isSubmitting: false, state: 'idle', workersAssigned: 9, error: err.message };
+    return { success: false, isRunning: false, isScanning: false, isSubmitting: false, state: 'idle', workersAssigned: getDynamicWorkerIds().length, error: err.message };
   }
 }
 

@@ -13,6 +13,7 @@ import {
   triggerSubmissionStage,
   stopSubmissionStage,
   fetchBotDaemonStatus,
+  fetchAllOperators,
   resolveSupabaseStorageUrl,
   cleanCanonicalJobUrl,
   getBackendBaseUrl,
@@ -52,7 +53,18 @@ export default function DeveloperDashboard() {
     queued: 0,
     total: 0
   });
-  const [workerPool, setWorkerPool] = useState({ inFlight: 0, idle: 9, total: 9, scanningActive: 0, resolvingActive: 0, submittingActive: 0, workers: [] });
+  const [workerPool, setWorkerPool] = useState({
+    inFlight: 0,
+    idle: 0,
+    total: 0,
+    scanningActive: 0,
+    resolvingActive: 0,
+    submittingActive: 0,
+    workers: [],
+    scanWorkers: [],
+    resolveWorkers: [],
+    submitWorkers: [],
+  });
   const [healthResults, setHealthResults] = useState([]);
   const [applications, setApplications] = useState([]);
   const [queueItems, setQueueItems] = useState([]);
@@ -741,11 +753,11 @@ export default function DeveloperDashboard() {
                 color: isScanActive ? '#34d399' : '#f87171',
                 border: isScanActive ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {isScanActive ? `ACTIVE • ${workerPool.inFlight || 2} WORKERS RUNNING` : 'STOPPED • WORKER 1 & WORKER 2 IDLE'}
+                {isScanActive ? `ACTIVE • ${workerPool.inFlight || workerPool.total || 2} WORKERS RUNNING` : `STOPPED • ${workerPool.total || 2} WORKERS IDLE`}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
-              Worker 1 &amp; Worker 2 dedicated to Scanning &amp; Pre-Resolving answers into job_distributions. Submissions untouched.
+              Autonomous workers dedicated to Scanning &amp; Pre-Resolving answers into job_distributions. Submissions untouched.
             </p>
           </div>
         </div>
@@ -1047,13 +1059,13 @@ export default function DeveloperDashboard() {
             {/* Tile 10: Workers (from worker_status: strictly 9 canonical workers) */}
             <div className="integration-status-card">
               <div className="isc-header">
-                <span className="isc-title">WORKERS (9-PIPELINE)</span>
+                <span className="isc-title">WORKERS ({workerPool.total || 'DYNAMIC'}-PIPELINE)</span>
                 <span className={`isc-badge ${workerPool.inFlight > 0 ? 'ok' : 'idle'}`}>
                   {workerPool.inFlight > 0 ? `${workerPool.inFlight} ACTIVE` : 'ALL IDLE'}
                 </span>
               </div>
               <p className="isc-detail">
-                Scan: {workerPool.scanningActive || 0}/3 &bull; Resolve: {workerPool.resolvingActive || 0}/3 &bull; Submit: {workerPool.submittingActive || 0}/3
+                Scan: {workerPool.scanningActive || 0}/{workerPool.scanWorkers?.length || 2} &bull; Resolve: {workerPool.resolvingActive || 0}/{workerPool.resolveWorkers?.length || 2} &bull; Submit: {workerPool.submittingActive || 0}/{workerPool.submitWorkers?.length || 2}
               </p>
               <span className="isc-speed">{workerPool.idle || 0} idle</span>
             </div>
@@ -1327,17 +1339,18 @@ export default function DeveloperDashboard() {
                       </strong>
                     </div>
                     <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
-                      Workers 1–3 &bull; Auth &amp; Gateway &bull; Job Questions Discovery
+                      Workers 1–{workerPool.scanWorkers?.length || 2} &bull; Auth &amp; Gateway &bull; Job Questions Discovery
                     </div>
                   </div>
 
                   {/* Worker Sub-Filter */}
                   <div style={{ display: 'flex', gap: '3px' }}>
                     {[
-                      { id: 'all', label: 'All (1-3)' },
-                      { id: 'scanning_worker_1', label: 'W1' },
-                      { id: 'scanning_worker_2', label: 'W2' },
-                      { id: 'scanning_worker_3', label: 'W3' },
+                      { id: 'all', label: `All (1-${workerPool.scanWorkers?.length || 2})` },
+                      ...(workerPool.scanWorkers && workerPool.scanWorkers.length > 0
+                        ? workerPool.scanWorkers.map((w, idx) => ({ id: w.worker_id, label: `W${idx + 1}` }))
+                        : Array.from({ length: 2 }, (_, idx) => ({ id: `scanning_worker_${idx + 1}`, label: `W${idx + 1}` }))
+                      ),
                     ].map((w) => (
                       <button
                         key={w.id}
@@ -1450,17 +1463,18 @@ export default function DeveloperDashboard() {
                       </strong>
                     </div>
                     <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
-                      Workers 1–3 &bull; 4-Tier Engine &bull; QA Bank &amp; LLM Reasoning
+                      Workers 1–{workerPool.resolveWorkers?.length || 2} &bull; 4-Tier Engine &bull; QA Bank &amp; LLM Reasoning
                     </div>
                   </div>
 
                   {/* Worker Sub-Filter */}
                   <div style={{ display: 'flex', gap: '3px' }}>
                     {[
-                      { id: 'all', label: 'All (1-3)' },
-                      { id: 'resolving_worker_1', label: 'W1' },
-                      { id: 'resolving_worker_2', label: 'W2' },
-                      { id: 'resolving_worker_3', label: 'W3' },
+                      { id: 'all', label: `All (1-${workerPool.resolveWorkers?.length || 2})` },
+                      ...(workerPool.resolveWorkers && workerPool.resolveWorkers.length > 0
+                        ? workerPool.resolveWorkers.map((w, idx) => ({ id: w.worker_id, label: `W${idx + 1}` }))
+                        : Array.from({ length: 2 }, (_, idx) => ({ id: `resolving_worker_${idx + 1}`, label: `W${idx + 1}` }))
+                      ),
                     ].map((w) => (
                       <button
                         key={w.id}
@@ -1573,17 +1587,18 @@ export default function DeveloperDashboard() {
                       </strong>
                     </div>
                     <div style={{ fontSize: '0.72rem', color: '#94a3b8', marginTop: '2px' }}>
-                      Workers 1–3 &bull; Workday Wizard Filling &bull; Proof Capture &amp; Submit
+                      Workers 1–{workerPool.submitWorkers?.length || 2} &bull; Workday Wizard Filling &bull; Proof Capture &amp; Submit
                     </div>
                   </div>
 
                   {/* Worker Sub-Filter */}
                   <div style={{ display: 'flex', gap: '3px' }}>
                     {[
-                      { id: 'all', label: 'All (1-3)' },
-                      { id: 'submitting_worker_1', label: 'W1' },
-                      { id: 'submitting_worker_2', label: 'W2' },
-                      { id: 'submitting_worker_3', label: 'W3' },
+                      { id: 'all', label: `All (1-${workerPool.submitWorkers?.length || 2})` },
+                      ...(workerPool.submitWorkers && workerPool.submitWorkers.length > 0
+                        ? workerPool.submitWorkers.map((w, idx) => ({ id: w.worker_id, label: `W${idx + 1}` }))
+                        : Array.from({ length: 2 }, (_, idx) => ({ id: `submitting_worker_${idx + 1}`, label: `W${idx + 1}` }))
+                      ),
                     ].map((w) => (
                       <button
                         key={w.id}

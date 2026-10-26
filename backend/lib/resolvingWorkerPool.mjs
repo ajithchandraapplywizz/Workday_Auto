@@ -15,15 +15,16 @@ import { preResolveClientAnswersDetailed } from './jobFormCache.mjs';
 import { isGlobalStopRequested, isScanStopRequested } from './browserLifecycle.mjs';
 import { getCleanSupabaseEnv } from './clusterBatchRunner.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
+import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
-const RESOLVER_WORKER_IDS = ['resolving_worker_1', 'resolving_worker_2'];
+const RESOLVER_WORKER_IDS = PIPELINE_CONFIG?.resolveWorkerIds || ['resolving_worker_1', 'resolving_worker_2'];
 
 /**
- * Run Stage 2: 2-Worker Resolving Pool
+ * Run Stage 2: Dynamic-Worker Resolving Pool
  */
 export async function runResolvingWorkerPool(options = {}) {
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`⚡ [STAGE 2: RESOLVER] Launching 2 Resolving Workers for Candidate Answers...`);
+  console.log(`⚡ [STAGE 2: RESOLVER] Launching ${RESOLVER_WORKER_IDS.length} Resolving Workers for Candidate Answers...`);
   console.log(`   Workers: ${RESOLVER_WORKER_IDS.join(', ')}`);
   console.log(`${'═'.repeat(72)}\n`);
 
