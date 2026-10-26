@@ -101,13 +101,14 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
   const candidateModels = Array.from(new Set([primaryModel, ...OPENROUTER_FALLBACK_MODELS]));
 
   let lastError = null;
-    const safeMessages = (messages || []).map((m) => {
-      if (typeof m?.content === 'string' && m.content.length > 5000) {
-        return { ...m, content: m.content.slice(0, 5000) + '\n...[context clamped]' };
-      }
-      return m;
-    });
+  const safeMessages = (messages || []).map((m) => {
+    if (typeof m?.content === 'string' && m.content.length > 5000) {
+      return { ...m, content: m.content.slice(0, 5000) + '\n...[context clamped]' };
+    }
+    return m;
+  });
 
+  for (const model of candidateModels) {
     try {
       const res = await httpsJsonWithRetry({
         url: OPENROUTER_URL,

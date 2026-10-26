@@ -19,6 +19,7 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG?.submitWorkerIds || [
   'submitting_worker_1',
   'submitting_worker_2',
+  'submitting_worker_3',
 ];
 
 /**
@@ -592,6 +593,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       }
     } else {
       const errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
+      const failShot = finalShotUrl || finalStoragePath || null;
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
@@ -599,7 +601,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           error_message: errMsg,
           completed_at: now,
-          application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
+          application_submitted_screenshot_url: failShot,
           updated_at: now,
         },
       });
@@ -611,11 +613,26 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'failed',
             error_message: errMsg,
-            application_submitted_screenshot_url: null,
+            application_submitted_screenshot_url: failShot,
+            screenshot_path: failShot,
             updated_at: now,
           },
         });
       }
+
+      try {
+        const { recordFailedJob } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId: task.applywizz_id,
+          jobId: task.job_id || null,
+          jobUrl: task.job_url,
+          company: task.company,
+          roleTitle: task.role_title,
+          failureReason: errMsg,
+          failedAtStep: result?.stoppedAtStep || 'Submission',
+          screenshotPath: failShot,
+        });
+      } catch {}
     }
   } catch (err) {
     stopHeartbeat();
@@ -657,14 +674,17 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     result.screenshotUrl = errShotUrl;
     result.screenshotPath = errShotPath;
 
+    const catchShot = errShotUrl || errShotPath || null;
+    const catchErr = err?.message || 'Execution error';
+
     await updateSubmissionTaskWithCheck({
       taskId: task.id,
       workerId,
       patch: {
         status: 'failed',
-        error_message: err?.message || 'Execution error',
+        error_message: catchErr,
         completed_at: now,
-        screenshot_path: errShotUrl || errShotPath,
+        application_submitted_screenshot_url: catchShot,
         updated_at: now,
       },
     });
@@ -675,12 +695,27 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         workerId,
         patch: {
           status: 'failed',
-          error_message: err?.message || 'Execution error',
-          application_submitted_screenshot_url: errShotUrl,
+          error_message: catchErr,
+          application_submitted_screenshot_url: catchShot,
+          screenshot_path: catchShot,
           updated_at: now,
         },
       });
     }
+
+    try {
+      const { recordFailedJob } = await import('./supabaseClient.mjs');
+      await recordFailedJob({
+        applywizzId: task.applywizz_id,
+        jobId: task.job_id || null,
+        jobUrl: task.job_url,
+        company: task.company,
+        roleTitle: task.role_title,
+        failureReason: catchErr,
+        failedAtStep: 'Runtime Exception',
+        screenshotPath: catchShot,
+      });
+    } catch {}
   } finally {
     stopHeartbeat();
     if (watchdogTimer) clearTimeout(watchdogTimer);

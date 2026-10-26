@@ -305,10 +305,17 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   }
 
   // Filter clusters by minClients and sort descending by clientCount
-  return clusters
+  const sortedClusters = clusters
     .filter((c) => c.clientCount >= minClients)
     .sort((a, b) => b.clientCount - a.clientCount)
     .slice(0, limit);
+
+  // Allocate a clean unique ID for every unique link
+  sortedClusters.forEach((c, idx) => {
+    c.linkId = `LINK-${String(idx + 1).padStart(3, '0')}`;
+  });
+
+  return sortedClusters;
 }
 
 /**
@@ -502,11 +509,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const allTasks = cluster.tasks;
   const allTaskIds = allTasks.map((t) => t.id);
 
+  const linkId = cluster.linkId || `LINK-${cluster.reqId || '001'}`;
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`🚀 [${workerId}] ASSIGNED CLUSTER: ${company.toUpperCase()} — ${role}`);
-  console.log(`   Canonical URL: ${jobUrl}`);
+  console.log(`🚀 [${workerId}] ASSIGNED UNIQUE LINK ID: [${linkId}]`);
+  console.log(`   Job URL:       ${jobUrl}`);
+  console.log(`   Total Clients: ${cluster.clientCount} tasks generated`);
   console.log(`   Job Req ID:    ${cluster.reqId || 'N/A'}`);
-  console.log(`   Total Clients: ${cluster.clientCount} (clustered across ${cluster.rawUrls.size} messy link variations)`);
   console.log(`   Browser Mode:  ${headless ? 'Headless' : 'HEADED (Visible Browser Window)'}`);
   console.log(`${'═'.repeat(72)}`);
 
@@ -1082,12 +1090,13 @@ export async function runClusterBatchRunner({
 
   if (!topClusters.length) {
     console.log(`❌ No tasks found in batch_job_queue! Setting scanning workers to idle.`);
-    const workerLimit = Number(workers) || 2;
+    const workerLimit = Number(workers) || (PIPELINE_CONFIG.scanCount || 3);
     for (let slot = 1; slot <= workerLimit; slot++) {
-      await updateWorkerStatus(`worker_${slot}`, {
+      const wId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
+      await updateWorkerStatus(wId, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: `Worker ${slot}`,
+        bot_name: `Scanning Worker ${slot}`,
         current_application_id: 'Ready (0 pending queue items)',
       }).catch(() => { });
     }
@@ -1095,27 +1104,28 @@ export async function runClusterBatchRunner({
   }
 
   // Set active scanning workers to in-flight in Supabase worker_status
-  const activeCount = Math.min(Number(workers) || 2, topClusters.length);
+  const activeCount = Math.min(Number(workers) || (PIPELINE_CONFIG.scanCount || 3), topClusters.length);
   for (let slot = 1; slot <= activeCount; slot++) {
-    await updateWorkerStatus(`worker_${slot}`, {
+    const wId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
+    await updateWorkerStatus(wId, {
       state: 'in_flight',
       stage: 'scanning',
-      bot_name: `Worker ${slot}`,
+      bot_name: `Scanning Worker ${slot}`,
       current_application_id: 'Clustering & preparing link run...',
     }).catch(() => { });
   }
 
-  console.log(`\n📋 Selected Top ${topClusters.length} Unique Job URLs for Parallel Execution:\n`);
-  console.log(` Worker   │ Job URL (Strict URL Identification)                                            │ Clients │ Links`);
-  console.log(`──────────┼────────────────────────────────────────────────────────────────────────────────┼─────────┼──────`);
+  console.log(`\n📋 Selected Top ${topClusters.length} Unique Job Links for Parallel Execution:\n`);
+  console.log(` Link ID    │ Worker   │ Job URL                                                                     │ Clients`);
+  console.log(`────────────┼──────────┼─────────────────────────────────────────────────────────────────────────────┼────────`);
   topClusters.forEach((c, idx) => {
-    const workerLabel = `Worker ${idx + 1}`.padEnd(8, ' ');
-    const urlDisplay = (c.jobUrl || '').slice(0, 78).padEnd(78, ' ');
-    const count = String(c.clientCount).padStart(7, ' ');
-    const variations = String(c.rawUrls.size).padStart(5, ' ');
-    console.log(` ${workerLabel} │ ${urlDisplay} │ ${count} │ ${variations}`);
+    const linkIdDisplay = (c.linkId || `LINK-${String(idx + 1).padStart(3, '0')}`).padEnd(10, ' ');
+    const workerLabel = `Worker ${((idx % concurrency) + 1)}`.padEnd(8, ' ');
+    const urlDisplay = (c.jobUrl || '').slice(0, 75).padEnd(75, ' ');
+    const count = `${c.clientCount} tasks`.padStart(8, ' ');
+    console.log(` ${linkIdDisplay} │ ${workerLabel} │ ${urlDisplay} │ ${count}`);
   });
-  console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
+  console.log(`────────────┴──────────┴─────────────────────────────────────────────────────────────────────────────┴────────\n`);
 
   // Step 2: Launch exactly N Workers in Parallel (concurrency pool, strictly N at a time)
   const concurrency = Math.min(Number(workers) || 2, topClusters.length);
@@ -1145,8 +1155,8 @@ export async function runClusterBatchRunner({
         bot_name: `Worker ${slot}`,
       }).catch(() => { });
 
-      console.log(`\n▶️ [Worker ${slot}] [Batch #${myIndex + 1}/${topClusters.length}] Assigned Job URL: ${cluster.jobUrl}`);
-      console.log(`   Job Metadata: ${cluster.company} — ${cluster.roleTitle} (${cluster.clientCount} clients)`);
+      console.log(`\n▶️ [Worker ${slot}] [Batch #${myIndex + 1}/${topClusters.length}] Assigned Unique Link [${cluster.linkId || `LINK-${myIndex + 1}`}]: ${cluster.jobUrl}`);
+      console.log(`   Task Queue: ${cluster.clientCount} client tasks generated for this link`);
 
       let res = null;
       try {

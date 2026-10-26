@@ -685,7 +685,7 @@ export async function reconcileOperatorsWithAPI() {
 }
 
 export function getEnvWorkerCounts() {
-  let count = 2;
+  let count = 3;
   if (typeof window !== 'undefined') {
     const custom = window.localStorage.getItem('WORKER_COUNT') || window.localStorage.getItem('VITE_WORKER_COUNT');
     if (custom && parseInt(custom, 10)) {
@@ -1498,29 +1498,60 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
     }
 
     if (liveLogs && (liveLogs.logs || liveLogs.scanLogs || liveLogs.submitLogs)) {
-      const all = liveLogs.logs || [];
-      const scanningLogs = [];
-      const resolvingLogs = [];
-      const submittingLogs = [];
-
-      for (const log of all) {
+      function normalizeLog(log, defaultCluster = 'Scan') {
         const msg = String(log.message || '');
-        const lower = msg.toLowerCase();
-        const cluster = log.cluster;
+        const cluster = log.cluster || defaultCluster;
+        let workerId = log.worker_id || null;
+        let workerNum = log.worker_num || null;
 
-        const normalized = {
-          id: log.ts || Math.random(),
-          created_at: log.ts || new Date().toISOString(),
+        if (!workerId) {
+          const match = msg.match(/(?:scanning_worker_|submitting_worker_|resolving_worker_|Worker\s*|Scanning Worker\s*|Submitting Worker\s*|Resolving Worker\s*)(\d+)/i);
+          if (match) {
+            workerNum = parseInt(match[1], 10);
+            workerId = `${cluster.toLowerCase()}_worker_${workerNum}`;
+          }
+        }
+
+        return {
+          id: log.id || log.ts || Math.random(),
+          ts: log.ts || log.created_at || new Date().toISOString(),
+          created_at: log.ts || log.created_at || new Date().toISOString(),
           message: msg,
-          step_index: log.level === 'error' ? 99 : 1,
+          level: log.level || 'info',
+          cluster,
+          worker_id: workerId,
+          worker_num: workerNum,
+          step_index: log.step_index || (log.level === 'error' ? 99 : 1),
         };
+      }
 
-        if (cluster === 'Submit' || lower.includes('[submit') || lower.includes('submitting') || lower.includes('wizard')) {
-          submittingLogs.push(normalized);
-        } else if (cluster === 'Resolve' || lower.includes('resolv') || lower.includes('tier') || lower.includes('answer')) {
-          resolvingLogs.push(normalized);
-        } else {
-          scanningLogs.push(normalized);
+      let scanningLogs = [];
+      let resolvingLogs = [];
+      let submittingLogs = [];
+
+      if (Array.isArray(liveLogs.scanLogs) && liveLogs.scanLogs.length > 0) {
+        scanningLogs = liveLogs.scanLogs.map((l) => normalizeLog(l, 'Scan'));
+      }
+      if (Array.isArray(liveLogs.resolveLogs) && liveLogs.resolveLogs.length > 0) {
+        resolvingLogs = liveLogs.resolveLogs.map((l) => normalizeLog(l, 'Resolve'));
+      }
+      if (Array.isArray(liveLogs.submitLogs) && liveLogs.submitLogs.length > 0) {
+        submittingLogs = liveLogs.submitLogs.map((l) => normalizeLog(l, 'Submit'));
+      }
+
+      // Fallback: partition all logs if individual arrays were not populated
+      if (scanningLogs.length === 0 && submittingLogs.length === 0) {
+        const all = liveLogs.logs || [];
+        for (const raw of all) {
+          const norm = normalizeLog(raw);
+          const lower = norm.message.toLowerCase();
+          if (norm.cluster === 'Submit' || lower.includes('[submit') || lower.includes('submitting') || lower.includes('wizard')) {
+            submittingLogs.push({ ...norm, cluster: 'Submit' });
+          } else if (norm.cluster === 'Resolve' || lower.includes('resolv') || lower.includes('tier') || lower.includes('answer')) {
+            resolvingLogs.push({ ...norm, cluster: 'Resolve' });
+          } else {
+            scanningLogs.push({ ...norm, cluster: 'Scan' });
+          }
         }
       }
 
@@ -1531,7 +1562,7 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
           resolving: resolvingLogs.slice(-limit),
           submitting: submittingLogs.slice(-limit),
         },
-        allLogs: all.slice(-limit * 2),
+        allLogs: (liveLogs.logs || []).map((l) => normalizeLog(l)).slice(-limit * 2),
       };
     }
 

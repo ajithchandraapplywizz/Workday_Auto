@@ -17,7 +17,11 @@ import { getCleanSupabaseEnv } from './clusterBatchRunner.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
-const RESOLVER_WORKER_IDS = PIPELINE_CONFIG?.resolveWorkerIds || ['resolving_worker_1', 'resolving_worker_2'];
+const RESOLVER_WORKER_IDS = PIPELINE_CONFIG?.resolveWorkerIds || [
+  'resolving_worker_1',
+  'resolving_worker_2',
+  'resolving_worker_3',
+];
 
 /**
  * Run Stage 2: Dynamic-Worker Resolving Pool

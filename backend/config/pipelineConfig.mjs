@@ -44,9 +44,9 @@ const envWorkers = parseInt(
   process.env.WORKER_COUNT ||
   process.env.WORKERS_COUNT ||
   process.env.PIPELINE_WORKER_COUNT ||
-  '2',
+  '3',
   10
-) || 2;
+) || 3;
 
 const scanCount = parseInt(process.env.SCAN_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
 const resolveCount = parseInt(process.env.RESOLVE_WORKER_COUNT || String(envWorkers), 10) || envWorkers;

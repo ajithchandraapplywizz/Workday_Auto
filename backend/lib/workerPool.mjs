@@ -100,9 +100,8 @@ export async function executeWorkerTask({
   const company = task.company || extractWorkdayCompanyName(jobUrl);
 
   console.log(`\n${'─'.repeat(70)}`);
-  console.log(`🚀 [${workerId}] [${taskIndex}/${totalTasks}] Starting task for ${applywizzId}`);
-  console.log(`   🏢 Company: ${company || 'Workday'}`);
-  console.log(`   🔗 URL: ${jobUrl}`);
+  console.log(`🚀 [${workerId}] [${taskIndex}/${totalTasks}] Starting task for candidate: ${applywizzId}`);
+  console.log(`   🔗 Job URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
 
   if (await isWorkerPoolStopRequested()) {

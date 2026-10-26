@@ -107,6 +107,7 @@ let currentScanRunId = null;
 // In-memory ring buffers for streaming live logs to dashboard (R11 Separate Logs)
 export const daemonLogs = [];
 export const scanLogs = [];
+export const resolveLogs = [];
 export const submitLogs = [];
 
 const origLog = console.log;
@@ -115,21 +116,46 @@ const origErr = console.error;
 function routeLogEntry(level, args) {
   try {
     const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-    const cluster = (currentMode === 'submitting' || currentStage === 'submitting' || text.includes('[SUBMIT') || text.includes('[10-WORKER DISPATCHER]'))
-      ? 'Submit'
-      : (currentStage === 'resolving' ? 'Resolve' : 'Scan');
+    const isSubmit = currentMode === 'submitting' || currentStage === 'submitting' ||
+      text.includes('[SUBMIT') || text.includes('submit') || text.includes('[DISPATCHER]') ||
+      text.includes('DISPATCHER') || text.includes('submitting_worker') || text.includes('Submissions Runner');
+    const isResolve = currentStage === 'resolving' || text.includes('[STAGE 2') ||
+      text.includes('RESOLV') || text.includes('resolving_worker') || text.includes('Pre-resolving');
 
-    const entry = { ts: new Date().toISOString(), message: text, level, cluster };
+    const cluster = isSubmit ? 'Submit' : (isResolve ? 'Resolve' : 'Scan');
+
+    // Parse worker tag if present in log text
+    let workerId = null;
+    let workerNum = null;
+    const workerMatch = text.match(/(?:scanning_worker_|submitting_worker_|resolving_worker_|Worker\s*|Scanning Worker\s*|Submitting Worker\s*|Resolving Worker\s*)(\d+)/i);
+    if (workerMatch) {
+      workerNum = parseInt(workerMatch[1], 10);
+      workerId = `${cluster.toLowerCase()}_worker_${workerNum}`;
+    }
+
+    const entry = {
+      ts: new Date().toISOString(),
+      message: text,
+      level,
+      cluster,
+      worker_id: workerId,
+      worker_num: workerNum,
+    };
 
     daemonLogs.push(entry);
-    if (daemonLogs.length > 300) daemonLogs.shift();
+    if (daemonLogs.length > 500) daemonLogs.shift();
 
     if (cluster === 'Submit') {
       submitLogs.push(entry);
-      if (submitLogs.length > 300) submitLogs.shift();
+      if (submitLogs.length > 500) submitLogs.shift();
+    } else if (cluster === 'Resolve') {
+      resolveLogs.push(entry);
+      if (resolveLogs.length > 500) resolveLogs.shift();
+      scanLogs.push(entry);
+      if (scanLogs.length > 500) scanLogs.shift();
     } else {
       scanLogs.push(entry);
-      if (scanLogs.length > 300) scanLogs.shift();
+      if (scanLogs.length > 500) scanLogs.shift();
     }
   } catch { }
 }
@@ -424,7 +450,7 @@ async function runStage1Scanning() {
     stage: 'scanning',
     is_running: true,
     current_action: `Scanning unique Workday links (Run: ${bc.scan_run_id})`,
-    active_worker_count: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 2),
+    active_worker_count: TEST_MODE ? 1 : (PIPELINE_CONFIG.scanCount || 3),
   });
 
   console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}) under run ${bc.scan_run_id}...`);
@@ -434,7 +460,7 @@ async function runStage1Scanning() {
     scanRunId: bc.scan_run_id,
     topLinks: TEST_MODE ? 1 : (Number(process.env.SCAN_TOP_LINKS_LIMIT) || 100),
     minClients: Number(process.env.MIN_CLIENTS_THRESHOLD) || 1,
-    workers: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 2),
+    workers: TEST_MODE ? 1 : (PIPELINE_CONFIG.scanCount || 3),
     headless: HEADLESS,
     confirmSubmit: false,
     limitPerLink: TEST_MODE ? 1 : null,
@@ -456,7 +482,7 @@ async function runStage2Resolving() {
     stage: 'resolving',
     is_running: true,
     current_action: 'Pre-resolving candidate answers across 4 tiers into job_distributions',
-    active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+    active_worker_count: PIPELINE_CONFIG.resolveCount || 3,
   });
 
   console.log(`\n⚡ [DAEMON] Starting Stage 2: Resolving candidate answers with ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers (${PIPELINE_CONFIG.resolveWorkerIds.join(', ')})...`);
@@ -478,8 +504,7 @@ async function runStage3Submissions(isContinuous = false) {
   currentStage = 'submitting';
   submitStatus = 'running';
   isPoolRunning = true;
-
-  const SUBMIT_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+  const SUBMIT_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3'];
 
   console.log(`\n🚀 [DAEMON] ${isContinuous ? 'Continuous Submit Daemon' : 'Submissions Runner'} active across ${SUBMIT_WORKER_IDS.length} parallel workers (${SUBMIT_WORKER_IDS.join(', ')})...`);
 
@@ -646,13 +671,13 @@ export async function runScanAndResolveParallel() {
         scan_stop_requested: false,
         is_running: true,
         current_action: `Loop #${loopIteration}: Scanning 50+ unique links & resolving for 20+ clients (Run: ${scanRunId})`,
-        active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+        active_worker_count: (PIPELINE_CONFIG.scanCount || 3) + (PIPELINE_CONFIG.resolveCount || 3),
       });
 
-      // Workers run in parallel; each worker handles Scan -> Resolve sequentially per application
-      console.log(`\n⚡ [DAEMON] Launching ${PIPELINE_CONFIG.workersCount} parallel workers — Scanning & Resolving in sequence per application...`);
+      // 1. Stage 1: Scanning with 3 dedicated scanning workers (scanning_worker_1..3)
+      console.log(`\n⚡ [DAEMON] Launching 3 Dedicated Scanning Workers (scanning_worker_1..3)...`);
       await runStage1Scanning().catch((err) => {
-        console.error(`❌ [DAEMON] Stage 1 Scanning & Resolving error:`, err?.message || err);
+        console.error(`❌ [DAEMON] Stage 1 Scanning error:`, err?.message || err);
       });
 
       if (isGlobalStopRequested() || isScanStopRequested() || isPoolPaused || scanStatus !== 'running') {
@@ -660,9 +685,19 @@ export async function runScanAndResolveParallel() {
         break;
       }
 
-      scanCompleteMessage = `Loop #${loopIteration} complete: Scanned links resolved and saved to submission_tasks at ready_for_review. Stopped here.`;
-      console.log(`\n✅ [DAEMON] Loop #${loopIteration} complete: scanned_jobs -> job_distributions -> submission_tasks (ready_for_review).`);
-      console.log(`🛑 [DAEMON] Stopped at ready_for_review. Applications waiting for review. Auto-submissions halted. Checking for more unique links in 10s...`);
+      // 2. Stage 2: Resolving with 3 dedicated resolving workers (resolving_worker_1..3)
+      console.log(`\n⚡ [DAEMON] Launching 3 Dedicated Resolving Workers (resolving_worker_1..3) -> saving ready_for_review to job_distributions...`);
+      await runStage2Resolving().catch((err) => {
+        console.error(`❌ [DAEMON] Stage 2 Resolving error:`, err?.message || err);
+      });
+
+      if (isGlobalStopRequested() || isScanStopRequested() || isPoolPaused || scanStatus !== 'running') {
+        console.log(`🛑 [DAEMON] Pipeline stopped.`);
+        break;
+      }
+
+      scanCompleteMessage = `Loop #${loopIteration} complete: Scanned links resolved and saved to job_distributions (ready_for_review).`;
+      console.log(`\n✅ [DAEMON] Loop #${loopIteration} complete: scanned_jobs -> job_distributions (ready_for_review). Submissions will trigger automatically.`);
 
       await syncBotControlState({
         mode: 'scanning',
@@ -671,8 +706,8 @@ export async function runScanAndResolveParallel() {
         scan_status: 'running',
         is_running: true,
         scan_message: scanCompleteMessage,
-        current_action: `Applications reached ready_for_review across 20+ clients. Looping for more links...`,
-        active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+        current_action: `Applications reached ready_for_review in job_distributions. Looping for more links...`,
+        active_worker_count: (PIPELINE_CONFIG.scanCount || 3) + (PIPELINE_CONFIG.resolveCount || 3),
       });
 
       // Brief pause between loops, checking stop signal every second
@@ -932,9 +967,10 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
-      logs: daemonLogs.slice(-150),
-      scanLogs: scanLogs.slice(-150),
-      submitLogs: submitLogs.slice(-150),
+      logs: daemonLogs.slice(-200),
+      scanLogs: scanLogs.slice(-200),
+      resolveLogs: resolveLogs.slice(-200),
+      submitLogs: submitLogs.slice(-200),
     }));
     return;
   }
@@ -1675,7 +1711,57 @@ async function initOnStartup() {
       const updatedAtMs = bc?.updated_at ? new Date(bc.updated_at).getTime() : 0;
       const isFreshAction = isTriggerRequested || isNewNonce || (updatedAtMs >= (DAEMON_BOOT_TIME - 3000));
 
-      // 3. Scan & Resolve Start Signal from Supabase
+      // 2b. Auto-detect pending CSV tasks in batch_job_queue (Mandatory Launch of Scanning & Resolving Workers)
+      let pendingCsvTasksCount = 0;
+      try {
+        const { count, error } = await supabase
+          .from('batch_job_queue')
+          .select('id', { count: 'exact', head: true })
+          .not('status', 'in', '("submitted","completed","already_applied","failed")');
+        if (!error && typeof count === 'number') {
+          pendingCsvTasksCount = count;
+        } else {
+          const { count: fallbackCount } = await supabase
+            .from('batch_job_queue')
+            .select('id', { count: 'exact', head: true })
+            .in('status', ['pending', 'queued']);
+          pendingCsvTasksCount = fallbackCount || 0;
+        }
+      } catch {
+        try {
+          const { count: fallbackCount } = await supabase
+            .from('batch_job_queue')
+            .select('id', { count: 'exact', head: true })
+            .in('status', ['pending', 'queued']);
+          pendingCsvTasksCount = fallbackCount || 0;
+        } catch {}
+      }
+
+      const hasAutoCsvTrigger = pendingCsvTasksCount > 0 && scanStatus !== 'running' && !hasScanStopSignal && !hasGlobalStopSignal;
+
+      // 2c. Auto-detect ready_for_review in job_distributions and submission_tasks (Mandatory Launch of Submissions)
+      let readyJobDistributionsCount = 0;
+      try {
+        const { count } = await supabase
+          .from('job_distributions')
+          .select('id', { count: 'exact', head: true })
+          .in('status', ['ready_for_review', 'ready_to_review']);
+        readyJobDistributionsCount = count || 0;
+      } catch {}
+
+      let actionableSubmissionsCount = 0;
+      try {
+        const { count } = await supabase
+          .from('submission_tasks')
+          .select('id', { count: 'exact', head: true })
+          .in('status', ['ready_for_review', 'ready_to_review', 'queued', 'approved', 'approved_for_submission']);
+        actionableSubmissionsCount = count || 0;
+      } catch {}
+
+      const totalReadyForSubmission = readyJobDistributionsCount + actionableSubmissionsCount;
+      const hasAutoSubmitTrigger = totalReadyForSubmission > 0 && submitStatus !== 'running' && !hasSubmitStopSignal && !hasGlobalStopSignal;
+
+      // 3. Scan & Resolve Start Signal (Manual or Automatic CSV upload detection)
       const isScanSignal = Boolean(
         isFreshAction && bc && (
           bc.last_action_requested === 'start' ||
@@ -1690,14 +1776,15 @@ async function initOnStartup() {
         (isFreshAction && scanCtrl && scanCtrl.enabled === true && scanCtrl.status === 'running')
       );
 
-      if (isScanStartRequested && (scanStatus !== 'running')) {
+      if ((isScanStartRequested || hasAutoCsvTrigger) && (scanStatus !== 'running')) {
         if (actionNonce) lastProcessedNonce = actionNonce;
         if (!ALLOW_CONCURRENT_PIPELINE && (currentMode === 'submitting' || submitStatus === 'running')) {
           console.log(`\n🔄 [DAEMON SWITCH] Active Submission trigger running! Halting submissions to start Scan & Resolve...`);
           await stopSubmitPool();
         }
 
-        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker sequential pipeline (Scan & Resolve)...`);
+        const sourceDesc = hasAutoCsvTrigger ? `Automated CSV Queue Ingestion (${pendingCsvTasksCount} pending items in batch_job_queue)` : 'Supabase Trigger';
+        console.log(`\n⚡ [DAEMON AUTO-QUEUE] ${sourceDesc}! Launching Dedicated Scan & Resolve Workers...`);
         currentMode = 'scanning';
         currentStage = 'scanning';
         scanStatus = 'running';
@@ -1715,13 +1802,14 @@ async function initOnStartup() {
           scan_enabled: true,
           stop_requested: false,
           scan_stop_requested: false,
+          active_worker_count: (PIPELINE_CONFIG.scanCount || 3) + (PIPELINE_CONFIG.resolveCount || 3),
         });
         await updateWorkerControl('scan', { enabled: true, status: 'running', stop_requested: false }).catch(() => {});
         runScanAndResolveParallel().catch(console.error);
         return;
       }
 
-      // 4. Submissions Start Signal from Supabase
+      // 4. Submissions Start Signal (Manual or Automatic ready_for_review detection in job_distributions/submission_tasks)
       const isSubmitSignal = Boolean(
         isFreshAction && bc && (
           bc.last_action_requested === 'submit_approved' ||
@@ -1735,15 +1823,18 @@ async function initOnStartup() {
         (isFreshAction && submitCtrl && submitCtrl.enabled === true && submitCtrl.status === 'running')
       );
 
-      if (isSubmitStartRequested && (submitStatus !== 'running')) {
+      if ((isSubmitStartRequested || hasAutoSubmitTrigger) && (submitStatus !== 'running')) {
         if (actionNonce) lastProcessedNonce = actionNonce;
         if (!ALLOW_CONCURRENT_PIPELINE && (currentMode === 'scanning' || scanStatus === 'running')) {
           console.log(`\n🔄 [DAEMON SWITCH] Active Scan & Resolve trigger running! Halting Scan & Resolve to start Submissions...`);
           await stopScanPool();
         }
 
-        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
-        currentMode = 'submitting';
+        const submitDesc = hasAutoSubmitTrigger 
+          ? `Automated Trigger (${readyJobDistributionsCount} in job_distributions, ${actionableSubmissionsCount} in submission_tasks ready for review)` 
+          : 'Supabase Trigger';
+        console.log(`\n🚀 [DAEMON AUTO-SUBMIT] ${submitDesc}! Launching 3 Dedicated Submission Workers...`);
+        currentMode = (scanStatus === 'running' && ALLOW_CONCURRENT_PIPELINE) ? 'dual' : 'submitting';
         currentStage = 'submitting';
         submitStatus = 'running';
         submitStopRequested = false;
@@ -1754,15 +1845,16 @@ async function initOnStartup() {
           last_action_requested: null,
           trigger_requested: false,
           is_running: true,
-          stage: 'submitting',
-          mode: 'submitting',
+          stage: scanStatus === 'running' ? 'scanning' : 'submitting',
+          mode: scanStatus === 'running' ? 'dual' : 'submitting',
           submit_status: 'running',
           submit_enabled: true,
           stop_requested: false,
           submit_stop_requested: false,
+          active_worker_count: PIPELINE_CONFIG.submitCount || 3,
         });
         await updateWorkerControl('submit', { enabled: true, status: 'running', stop_requested: false }).catch(() => {});
-        runStage3Submissions().finally(async () => {
+        runStage3Submissions(true).finally(async () => {
           submitStatus = 'off';
           currentStage = scanStatus === 'running' ? 'scanning' : 'idle';
           currentMode = scanStatus === 'running' ? 'scanning' : 'idle';

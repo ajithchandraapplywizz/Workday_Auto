@@ -1,7 +1,8 @@
-import { loadLocalEnvOnce, getSupabase } from '../lib/supabaseClient.mjs';
+import { loadLocalEnvOnce } from '../lib/supabaseClient.mjs';
+import { createClient } from '@supabase/supabase-js';
 
 loadLocalEnvOnce();
-const supabase = getSupabase();
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
 
 async function inspect() {
   console.log('--- Checking batch_job_queue ---');

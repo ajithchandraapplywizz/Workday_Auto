@@ -207,6 +207,11 @@ function profileFactForLabel(label, profile = {}) {
   if (/authorized to work|legally authorized|eligible to work/.test(n)) return w.authorized_us || null;
   if (/sponsor|visa sponsorship/.test(n)) return w.sponsorship_needed || null;
   if (/visa type/.test(n)) return w.visa_type || null;
+  if (/currently\s+on\s+a\s+visa|hold.*(h1-?b|e-?3|visa)|on\s+a\s+visa.*(h1-?b|e-?3)/i.test(n)) {
+    const v = String(w.visa_type || profile?._applyWizzQa?.['visa type'] || '').toLowerCase();
+    if (/h1|h-1b|e3|e-3/.test(v)) return 'Yes';
+    return 'No';
+  }
 
   if (/please select your gender|^gender$|^sex$/.test(n) || (/\bgender\b/.test(n) && /identify|select|please/.test(n))) {
     return eeo.gender || null;

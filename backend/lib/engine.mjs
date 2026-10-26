@@ -38,6 +38,7 @@ import { isAutoApplyMode } from './openRouterLlm.mjs';
 import { detectWorkdayStep } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,
+  advanceApplicationQuestionsPage,
   countUnfilledMandatoryQuestions,
   acknowledgeAllPageAgreements,
 } from './workdayQuestionFill.mjs';
