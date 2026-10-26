@@ -23,6 +23,8 @@ import {
   clickContinueApplicationIfPresent,
   ensureWorkdayApplicationWizard,
   extractWorkdayCompanyName,
+  isAlreadyAppliedDetected,
+  isWorkdayJobPageMissing,
 } from './discovery.mjs';
 import {
   resolveWorkdayVerification,
@@ -115,6 +117,22 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
   await page.waitForTimeout(3000);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
+  // 0. Check if candidate has already applied for this job or if job link is expired
+  if (await isWorkdayJobPageMissing(page)) {
+    console.log('   ❌ [WorkdayBot] Job link expired detected in finishSuccessfulLogin ("The page you are looking for doesn\'t exist").');
+    return 'job_expired';
+  }
+
+  if (await isWorkdayJobPageMissing(page)) {
+    console.log('   ❌ [WorkdayBot] Job link expired detected in finishSuccessfulLogin ("The page you are looking for doesn\'t exist").');
+    return 'job_expired';
+  }
+
+  if (await isAlreadyAppliedDetected(page)) {
+    console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+    return 'already_applied';
+  }
+
   // 1. Recover immediately if Workday displays transient "Something went wrong"
   let bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText)) {
@@ -170,6 +188,16 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
       console.log('   ✅ Successfully verified on application wizard after reload.');
       return true;
     }
+  }
+
+  if (await isWorkdayJobPageMissing(page)) {
+    console.log('   ❌ [WorkdayBot] Job link expired detected in finishSuccessfulLogin ("The page you are looking for doesn\'t exist").');
+    return 'job_expired';
+  }
+
+  if (await isAlreadyAppliedDetected(page)) {
+    console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+    return 'already_applied';
   }
 
   const onWizard = await isWorkdayWizardVisible(page);
@@ -499,6 +527,7 @@ export async function isWorkdayLogin(page) {
   if (await isWorkdayWizardVisible(page)) return false;
 
   const scan = await prescanGatewayElements(page);
+  if (scan.hasJobExpired || scan.hasAlreadyApplied) return false;
   if (scan.hasWizardFields) return false;
   if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword && !scan.hasEmailInput) return false;
 
@@ -812,6 +841,16 @@ export async function isWorkdaySignInPage(page) {
 
 // ─── Full Workday flow ──────────────────────────────────────────────────────
 export async function handleWorkday(page, { email, password, mode = 'signin', profile = null } = {}) {
+  if (await isWorkdayJobPageMissing(page)) {
+    console.log('   ❌ [WorkdayBot] Job link expired detected in handleWorkday ("The page you are looking for doesn\'t exist").');
+    return 'job_expired';
+  }
+
+  if (await isAlreadyAppliedDetected(page)) {
+    console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+    return 'already_applied';
+  }
+
   if (await isWorkdayWizardVisible(page)) {
     console.log('   Already on Workday application form wizard — skipping discovery.');
     return true;
@@ -824,6 +863,16 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
     }
   }
 
+  if (await isWorkdayJobPageMissing(page)) {
+    console.log('   ❌ [WorkdayBot] Job link expired detected in handleWorkday ("The page you are looking for doesn\'t exist").');
+    return 'job_expired';
+  }
+
+  if (await isAlreadyAppliedDetected(page)) {
+    console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+    return 'already_applied';
+  }
+
   if (await isWorkdayWizardVisible(page)) {
     console.log('   Already authenticated on Workday application form.');
     return true;
@@ -831,11 +880,28 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
   if (!await isWorkdayLogin(page)) {
     await handleAdaptiveGateway(page, mode);
+    if (await isWorkdayJobPageMissing(page)) {
+      console.log('   ❌ [WorkdayBot] Job link expired detected in handleWorkday ("The page you are looking for doesn\'t exist").');
+      return 'job_expired';
+    }
+
+    if (await isAlreadyAppliedDetected(page)) {
+      console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+      return 'already_applied';
+    }
     if (await isWorkdayWizardVisible(page)) {
       console.log('   Already authenticated on Workday application form.');
       return true;
     }
     if (!await isWorkdayLogin(page)) {
+      if (await isWorkdayJobPageMissing(page)) {
+        console.log('   ❌ [WorkdayBot] Job link expired detected in handleWorkday ("The page you are looking for doesn\'t exist").');
+        return 'job_expired';
+      }
+      if (await isAlreadyAppliedDetected(page)) {
+        console.log('   ✅ [WorkdayBot] Candidate has already applied for this job.');
+        return 'already_applied';
+      }
       console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
       return false;
     }

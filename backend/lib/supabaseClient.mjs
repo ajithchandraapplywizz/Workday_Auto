@@ -554,17 +554,28 @@ export async function getApplicationForTask(applywizzId, jobUrl = '') {
  * @param {string} companyName
  * @returns {Promise<boolean>}
  */
-export async function hasClientAppliedToCompany(applywizzId, companyName) {
+export async function hasClientAppliedToCompany(applywizzId, companyName, { excludeDistributionId, excludeTaskId } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !companyName) return false;
   try {
     const cleanCompany = String(companyName).trim();
-    const res = await request('job_distributions', {
-      query: `?applywizz_id=eq.${encode(applywizzId)}&company=ilike.${encode(cleanCompany)}&select=id,status&limit=10`,
-    });
-    if (Array.isArray(res) && res.length > 0) {
-      const valid = res.some((r) => r.status === 'submitted' || r.status === 'in_progress');
-      return valid || res.length > 0;
+    const cleanId = String(applywizzId).trim().toUpperCase();
+
+    // 1. Check job_distributions for submitted or already_applied
+    let jdQuery = `?applywizz_id=eq.${encode(cleanId)}&company=ilike.${encode(cleanCompany)}&status=in.(submitted,already_applied)&select=id,status&limit=5`;
+    if (excludeDistributionId) {
+      jdQuery += `&id=neq.${encode(excludeDistributionId)}`;
     }
+    const jdRes = await request('job_distributions', { query: jdQuery }).catch(() => null);
+    if (Array.isArray(jdRes) && jdRes.length > 0) return true;
+
+    // 2. Check submission_tasks for submitted or already_applied
+    let stQuery = `?applywizz_id=eq.${encode(cleanId)}&company=ilike.${encode(cleanCompany)}&status=in.(submitted,already_applied)&select=id,status&limit=5`;
+    if (excludeTaskId) {
+      stQuery += `&id=neq.${encode(excludeTaskId)}`;
+    }
+    const stRes = await request('submission_tasks', { query: stQuery }).catch(() => null);
+    if (Array.isArray(stRes) && stRes.length > 0) return true;
+
     return false;
   } catch (err) {
     console.log(`  ⚠️  Supabase hasClientAppliedToCompany query error: ${err.message?.slice(0, 100)}`);
@@ -1509,6 +1520,7 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
       return true;
     }
   } catch (err) {
+    console.error('[updateBotControl ERROR]:', err?.message || err);
     return false;
   }
 }
@@ -1633,26 +1645,21 @@ export async function getBotControl() {
       // Synchronize mode and stage
       if (dbRow.mode) {
         memoryBotControl.mode = dbRow.mode;
-        memoryBotControl.stage = dbRow.mode;
-      } else if (dbRow.stage) {
-        memoryBotControl.mode = dbRow.stage;
       }
-      // Derive scan/submit status if not explicit
-      if (memoryBotControl.mode === 'scanning') {
-        memoryBotControl.scan_enabled = true;
-        memoryBotControl.scan_status = 'running';
-        memoryBotControl.submit_status = 'off';
-        memoryBotControl.submit_enabled = false;
-      } else if (memoryBotControl.mode === 'submitting') {
-        memoryBotControl.submit_enabled = true;
-        memoryBotControl.submit_status = 'running';
+      if (dbRow.stage) {
+        memoryBotControl.stage = dbRow.stage;
+      }
+      if ('scan_enabled' in dbRow) memoryBotControl.scan_enabled = Boolean(dbRow.scan_enabled);
+      if ('scan_status' in dbRow) memoryBotControl.scan_status = dbRow.scan_status;
+      if ('scan_stop_requested' in dbRow) memoryBotControl.scan_stop_requested = Boolean(dbRow.scan_stop_requested);
+      if ('submit_enabled' in dbRow) memoryBotControl.submit_enabled = Boolean(dbRow.submit_enabled);
+      if ('submit_status' in dbRow) memoryBotControl.submit_status = dbRow.submit_status;
+      if ('submit_stop_requested' in dbRow) memoryBotControl.submit_stop_requested = Boolean(dbRow.submit_stop_requested);
+      if (memoryBotControl.mode === 'idle' || memoryBotControl.stage === 'idle') {
+        memoryBotControl.scan_enabled = false;
         memoryBotControl.scan_status = 'off';
-        memoryBotControl.scan_enabled = false;
-      } else if (memoryBotControl.mode === 'idle') {
-        if (memoryBotControl.scan_status === 'running') memoryBotControl.scan_status = 'off';
-        if (memoryBotControl.submit_status === 'running') memoryBotControl.submit_status = 'off';
-        memoryBotControl.scan_enabled = false;
         memoryBotControl.submit_enabled = false;
+        memoryBotControl.submit_status = 'off';
       }
     }
     return { ...memoryBotControl };
@@ -1662,6 +1669,7 @@ export async function getBotControl() {
 }
 
 const VALID_BOT_CONTROL_COLUMNS = new Set([
+  'mode',
   'stage',
   'is_running',
   'is_paused',
@@ -1670,6 +1678,16 @@ const VALID_BOT_CONTROL_COLUMNS = new Set([
   'last_action_requested',
   'active_worker_count',
   'current_action',
+  'scan_enabled',
+  'scan_status',
+  'scan_stop_requested',
+  'submit_enabled',
+  'submit_status',
+  'submit_stop_requested',
+  'scan_message',
+  'refusal_reason',
+  'scan_run_id',
+  'scan_run_started_at',
   'updated_at',
 ]);
 
@@ -1706,6 +1724,7 @@ export async function updateBotControl(patch = {}) {
     });
     return true;
   } catch (err) {
+    console.error('[updateBotControl ERROR]:', err?.message || err);
     return false;
   }
 }
@@ -2667,7 +2686,22 @@ export async function recordJobDistributions({
     }
     const dedupedClients = Array.from(uniqueClientMap.values());
 
-    const rows = dedupedClients.map((c) => {
+    // Filter out candidates who have already applied to this company (single application per company guardrail)
+    const eligibleClients = [];
+    for (const c of dedupedClients) {
+      const awlId = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim().toUpperCase();
+      const specificCompany = (typeof c === 'object' && c.company) ? c.company : cleanCompany;
+      if (awlId && specificCompany && specificCompany !== 'Workday Employer' && specificCompany !== 'Workday') {
+        const alreadyApplied = await hasClientAppliedToCompany(awlId, specificCompany);
+        if (alreadyApplied) {
+          console.log(`   ⏭️  [job_distributions] Candidate ${awlId} has already applied to "${specificCompany}". Skipping duplicate distribution.`);
+          continue;
+        }
+      }
+      eligibleClients.push(c);
+    }
+
+    const rows = eligibleClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
       const specificJobUrl = (typeof c === 'object' && (c.jobUrl || c.job_url)) ? c.jobUrl || c.job_url : cleanUrl;

@@ -52,8 +52,8 @@ export async function getZohoUser(email) {
  * Ensure admin login on Zoho Mail Reader so all mailboxes can be accessed.
  */
 export async function ensureZohoAdminLogin() {
-  const username = process.env.ZOHO_ADMIN_USERNAME || 'Created@123';
-  const password = process.env.ZOHO_ADMIN_PASSWORD || 'Applywizz@2026';
+  const username = process.env.ZOHO_ADMIN_USERNAME || '';
+  const password = process.env.ZOHO_ADMIN_PASSWORD || '';
   try {
     const res = await fetch(`${ZOHO_BASE_URL}/api/zoho/ui/login`, {
       method: 'POST',

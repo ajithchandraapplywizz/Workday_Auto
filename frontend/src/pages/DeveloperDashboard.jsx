@@ -510,27 +510,40 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
-  // Handle triggering autonomous 2-worker pipeline (Scan & Resolve)
-  const handleTriggerBot = async () => {
-    if (botStatus.isSubmitting) {
-      setTriggerToast({
-        type: 'error',
-        text: '⚠️ Cannot start Scan & Resolve: Submissions are actively running! Stop Submissions first.',
-      });
-      setTimeout(() => setTriggerToast(null), 6000);
-      return;
-    }
+  // Active states for the two separate triggers
+  const isScanActive = Boolean(botStatus.isScanning || (botStatus.isRunning && !botStatus.isSubmitting && botStatus.stage !== 'submitting'));
+  const isSubmitActive = Boolean(botStatus.isSubmitting || botStatus.stage === 'submitting');
 
+  // Handle triggering autonomous 2-worker pipeline (Scan & Resolve)
+  // If Submissions is active, automatically terminate it and switch cleanly
+  const handleTriggerBot = async () => {
     setIsTriggering(true);
-    setTriggerToast({ type: 'info', text: '⚡ Dispatching 2-Worker Pipeline trigger (Scan & Resolve)...' });
     try {
+      if (isSubmitActive) {
+        setTriggerToast({
+          type: 'info',
+          text: '🔄 Halting active Submissions to switch to Scan & Resolve...',
+        });
+        await stopSubmissionStage();
+        setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
+        await new Promise((r) => setTimeout(r, 600));
+      }
+
+      setTriggerToast({ type: 'info', text: '⚡ Dispatching 2-Worker Pipeline trigger (Scan & Resolve)...' });
       const res = await triggerAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
           text: '✓ Autonomous 2-Worker Pipeline Triggered! Worker 1 and Worker 2 are actively scanning links and pre-resolving questions.',
         });
-        setBotStatus((prev) => ({ ...prev, isRunning: true, state: 'running' }));
+        setBotStatus((prev) => ({
+          ...prev,
+          isRunning: true,
+          isScanning: true,
+          isSubmitting: false,
+          state: 'scanning',
+          stage: 'scanning',
+        }));
       } else {
         setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch signal') });
       }
@@ -542,16 +555,21 @@ export default function DeveloperDashboard() {
     }
   };
 
-  // Handle stopping autonomous workers
+  // Handle stopping autonomous scan & resolve workers
   const handleStopBot = async () => {
     setIsTriggering(true);
     setTriggerToast({ type: 'info', text: '🛑 Halting all background scan & resolve workers immediately...' });
     
     // Immediately reflect stopped state in UI without waiting
-    setBotStatus((prev) => ({ ...prev, isRunning: false, state: 'stopped' }));
+    setBotStatus((prev) => ({
+      ...prev,
+      isScanning: false,
+      isRunning: prev.isSubmitting,
+      state: prev.isSubmitting ? 'submitting' : 'stopped',
+    }));
     setWorkerPool((prev) => ({
       ...prev,
-      inFlight: 0,
+      inFlight: prev.submittingActive || 0,
       scanningActive: 0,
       resolvingActive: 0,
     }));
@@ -589,26 +607,35 @@ export default function DeveloperDashboard() {
   };
 
   // Handle triggering submission pipeline for all approved applications
+  // If Scan & Resolve is active, automatically terminate it and switch cleanly
   const handleTriggerSubmissions = async () => {
-    if (botStatus.isRunning) {
-      setTriggerToast({
-        type: 'error',
-        text: '⚠️ Cannot start Submissions: Scan & Resolve is actively running! Stop Scan & Resolve first.',
-      });
-      setTimeout(() => setTriggerToast(null), 6000);
-      return;
-    }
-
     setIsSubmitTriggering(true);
-    setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across Worker 1 and Worker 2...' });
     try {
+      if (isScanActive) {
+        setTriggerToast({
+          type: 'info',
+          text: '🔄 Halting active Scan & Resolve to switch to Submissions...',
+        });
+        await stopAutonomousBot();
+        setBotStatus((prev) => ({ ...prev, isScanning: false, isRunning: false, state: 'idle' }));
+        await new Promise((r) => setTimeout(r, 600));
+      }
+
+      setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across Worker 1 and Worker 2...' });
       const res = await triggerSubmissionStage();
       if (res.success) {
         setTriggerToast({
           type: 'success',
           text: '✓ Submissions Pipeline Triggered! Submitting approved applications across 2 dedicated workers.',
         });
-        setBotStatus((prev) => ({ ...prev, isSubmitting: true }));
+        setBotStatus((prev) => ({
+          ...prev,
+          isRunning: true,
+          isSubmitting: true,
+          isScanning: false,
+          state: 'submitting',
+          stage: 'submitting',
+        }));
       } else {
         setTriggerToast({ type: 'error', text: 'Submission trigger error: ' + (res.error || 'Failed to launch submissions') });
       }
@@ -626,10 +653,15 @@ export default function DeveloperDashboard() {
     setTriggerToast({ type: 'info', text: '🛑 Halting all submission workers and active browsers immediately...' });
 
     // Immediately reflect stopped state in UI without waiting
-    setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
+    setBotStatus((prev) => ({
+      ...prev,
+      isSubmitting: false,
+      isRunning: prev.isScanning,
+      state: prev.isScanning ? 'scanning' : 'stopped',
+    }));
     setWorkerPool((prev) => ({
       ...prev,
-      inFlight: 0,
+      inFlight: (prev.scanningActive || 0) + (prev.resolvingActive || 0),
       submittingActive: 0,
     }));
 
@@ -685,15 +717,15 @@ export default function DeveloperDashboard() {
             width: '42px',
             height: '42px',
             borderRadius: '8px',
-            background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.15)' : 'rgba(56, 189, 248, 0.15)',
-            border: botStatus.isRunning ? '1px solid #10b981' : '1px solid #0284c7',
+            background: isScanActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(56, 189, 248, 0.15)',
+            border: isScanActive ? '1px solid #10b981' : '1px solid #0284c7',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: botStatus.isRunning ? '#34d399' : '#38bdf8',
+            color: isScanActive ? '#34d399' : '#38bdf8',
             fontSize: '1.25rem'
           }}>
-            {botStatus.isRunning ? '🚀' : '⚡'}
+            {isScanActive ? '🚀' : '⚡'}
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -705,11 +737,11 @@ export default function DeveloperDashboard() {
                 fontWeight: 700,
                 padding: '2px 8px',
                 borderRadius: '12px',
-                background: botStatus.isRunning ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.15)',
-                color: botStatus.isRunning ? '#34d399' : '#f87171',
-                border: botStatus.isRunning ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
+                background: isScanActive ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.15)',
+                color: isScanActive ? '#34d399' : '#f87171',
+                border: isScanActive ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(239, 68, 68, 0.3)',
               }}>
-                {botStatus.isRunning ? `ACTIVE • ${workerPool.inFlight || 2} WORKERS RUNNING` : 'STOPPED • WORKER 1 & WORKER 2 IDLE'}
+                {isScanActive ? `ACTIVE • ${workerPool.inFlight || 2} WORKERS RUNNING` : 'STOPPED • WORKER 1 & WORKER 2 IDLE'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
@@ -719,7 +751,7 @@ export default function DeveloperDashboard() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {botStatus.isRunning ? (
+          {isScanActive ? (
             <button
               type="button"
               onClick={handleStopBot}
@@ -746,8 +778,8 @@ export default function DeveloperDashboard() {
             <button
               type="button"
               onClick={handleTriggerBot}
-              disabled={isTriggering || botStatus.isSubmitting}
-              title={botStatus.isSubmitting ? 'Stop Submissions first before starting Scan & Resolve' : ''}
+              disabled={isTriggering || isSubmitTriggering}
+              title={isSubmitActive ? 'Submissions currently active — clicking will terminate Submissions and start Scan & Resolve' : 'Start autonomous 2-worker scanning and question resolution'}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -755,23 +787,20 @@ export default function DeveloperDashboard() {
                 padding: '0.65rem 1.35rem',
                 borderRadius: '6px',
                 border: 'none',
-                background: botStatus.isSubmitting
-                  ? 'linear-gradient(135deg, #475569 0%, #334155 100%)'
-                  : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
-                color: botStatus.isSubmitting ? '#94a3b8' : '#ffffff',
+                background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                color: '#ffffff',
                 fontSize: '0.9rem',
                 fontWeight: 700,
-                cursor: botStatus.isSubmitting ? 'not-allowed' : 'pointer',
-                boxShadow: botStatus.isSubmitting ? 'none' : '0 4px 12px rgba(2, 132, 199, 0.35)',
+                cursor: isTriggering || isSubmitTriggering ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
                 transition: 'all 0.15s ease',
-                opacity: botStatus.isSubmitting ? 0.6 : 1,
               }}
             >
-              <span>{isTriggering ? '⚡ Dispatching Signal...' : '⚡ Start Scan & Resolve (2 Workers)'}</span>
+              <span>{isTriggering ? '⚡ Dispatching Signal...' : (isSubmitActive ? '⚡ Switch to Scan & Resolve (2 Workers)' : '⚡ Start Scan & Resolve (2 Workers)')}</span>
             </button>
           )}
 
-          {botStatus.isRunning && (
+          {isScanActive && (
             <button
               type="button"
               onClick={handleStopBot}
@@ -815,15 +844,15 @@ export default function DeveloperDashboard() {
             width: '42px',
             height: '42px',
             borderRadius: '8px',
-            background: botStatus.isSubmitting ? 'rgba(16, 185, 129, 0.15)' : 'rgba(129, 140, 248, 0.15)',
-            border: botStatus.isSubmitting ? '1px solid #10b981' : '1px solid #6366f1',
+            background: isSubmitActive ? 'rgba(16, 185, 129, 0.15)' : 'rgba(129, 140, 248, 0.15)',
+            border: isSubmitActive ? '1px solid #10b981' : '1px solid #6366f1',
             display: 'flex',
             alignItems: 'center',
             justifyContent: 'center',
-            color: botStatus.isSubmitting ? '#34d399' : '#a5b4fc',
+            color: isSubmitActive ? '#34d399' : '#a5b4fc',
             fontSize: '1.25rem'
           }}>
-            {botStatus.isSubmitting ? '📤' : '📋'}
+            {isSubmitActive ? '📤' : '📋'}
           </div>
           <div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -835,11 +864,11 @@ export default function DeveloperDashboard() {
                 fontWeight: 700,
                 padding: '2px 8px',
                 borderRadius: '12px',
-                background: botStatus.isSubmitting ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
-                color: botStatus.isSubmitting ? '#34d399' : '#94a3b8',
-                border: botStatus.isSubmitting ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
+                background: isSubmitActive ? 'rgba(16, 185, 129, 0.2)' : 'rgba(148, 163, 184, 0.15)',
+                color: isSubmitActive ? '#34d399' : '#94a3b8',
+                border: isSubmitActive ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.3)',
               }}>
-                {botStatus.isSubmitting ? `SUBMITTING • WORKER 1 & WORKER 2 ACTIVE` : 'SUBMIT IDLE • WAITING FOR TRIGGER'}
+                {isSubmitActive ? `SUBMITTING • WORKER 1 & WORKER 2 ACTIVE` : 'SUBMIT IDLE • WAITING FOR TRIGGER'}
               </span>
             </div>
             <p style={{ margin: '4px 0 0', fontSize: '0.8rem', color: '#94a3b8' }}>
@@ -849,7 +878,7 @@ export default function DeveloperDashboard() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {botStatus.isSubmitting ? (
+          {isSubmitActive ? (
             <button
               type="button"
               onClick={handleStopSubmissions}
@@ -876,8 +905,8 @@ export default function DeveloperDashboard() {
             <button
               type="button"
               onClick={handleTriggerSubmissions}
-              disabled={isSubmitTriggering || botStatus.isRunning}
-              title={botStatus.isRunning ? 'Stop Scan & Resolve first before starting Submissions' : ''}
+              disabled={isSubmitTriggering || isTriggering}
+              title={isScanActive ? 'Scan & Resolve currently active — clicking will terminate Scan & Resolve and start Submissions' : 'Start autonomous 2-worker submission pipeline'}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -885,19 +914,16 @@ export default function DeveloperDashboard() {
                 padding: '0.65rem 1.35rem',
                 borderRadius: '6px',
                 border: 'none',
-                background: botStatus.isRunning
-                  ? 'linear-gradient(135deg, #475569 0%, #334155 100%)'
-                  : 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
-                color: botStatus.isRunning ? '#94a3b8' : '#ffffff',
+                background: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
+                color: '#ffffff',
                 fontSize: '0.9rem',
                 fontWeight: 700,
-                cursor: botStatus.isRunning ? 'not-allowed' : 'pointer',
-                boxShadow: botStatus.isRunning ? 'none' : '0 4px 12px rgba(99, 102, 241, 0.35)',
+                cursor: isSubmitTriggering || isTriggering ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(99, 102, 241, 0.35)',
                 transition: 'all 0.15s ease',
-                opacity: botStatus.isRunning ? 0.6 : 1,
               }}
             >
-              <span>{isSubmitTriggering ? '🚀 Dispatching Submissions...' : '🚀 Submit Approved Applications (2 Workers)'}</span>
+              <span>{isSubmitTriggering ? '🚀 Dispatching Submissions...' : (isScanActive ? '🚀 Switch to Submissions (2 Workers)' : '🚀 Submit Approved Applications (2 Workers)')}</span>
             </button>
           )}
         </div>

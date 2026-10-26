@@ -208,9 +208,9 @@ export async function executeWorkerTask({
     workdayEmail = `${rawName}@applywizard.ai`;
   }
   if (!workdayEmail) {
-    workdayEmail = process.env.WORKDAY_DEFAULT_USERNAME || 'Created@123';
+    workdayEmail = process.env.WORKDAY_DEFAULT_USERNAME || '';
   }
-  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026';
+  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || '';
 
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
   const skillsCount = profile.skills?.length || 0;
@@ -472,21 +472,29 @@ export async function executeWorkerTask({
       isBatch: true,
     });
 
-    if (status === 'job_not_found') {
+    const isJobExpiredOnFill = Boolean(
+      status === 'job_not_found' ||
+      status === 'job_expired' ||
+      status?.status === 'job_expired' ||
+      status?.isExpired ||
+      /doesn'?t exist|expired|not found|dead url/i.test(status?.reason || '')
+    );
+
+    if (isJobExpiredOnFill) {
       console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — capturing screenshot & purging queue for all clients.`);
-      let expiredShotUrl = null;
+      let expiredShotUrl = status?.screenshotUrl || null;
       try {
-        if (page && !page.isClosed()) {
+        if (!expiredShotUrl && page && !page.isClosed()) {
           const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
           if (buf) {
-            expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
+            expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
           }
         }
       } catch {}
 
       await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
 
-      const expiredReason = `Link Expired: The page you are looking for doesn't exist [step: Link Expired]${expiredShotUrl ? ` [screenshot: ${expiredShotUrl}]` : ''}`;
+      const expiredReason = "Job link expired: The page you are looking for doesn't exist";
       if (queueTaskId) {
         await updateQueueTaskStatus(queueTaskId, {
           status: 'failed',
@@ -502,7 +510,7 @@ export async function executeWorkerTask({
         status: 'failed',
         failureReason: expiredReason,
         failureScreenshotUrl: expiredShotUrl,
-        stoppedAtStep: 'Link Expired',
+        stoppedAtStep: 'Job link expired',
       }).catch(() => {});
 
       try {
@@ -514,7 +522,7 @@ export async function executeWorkerTask({
           company,
           roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
           failureReason: expiredReason,
-          failedAtStep: 'Job Discovery / Link Expired',
+          failedAtStep: 'Job link expired',
           screenshotPath: expiredShotUrl,
         });
         await recordApplicationFailure({
@@ -528,7 +536,7 @@ export async function executeWorkerTask({
         });
       } catch {}
 
-      return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
+      return { status: 'job_expired', isExpired: true, reason: expiredReason, screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job link expired' };
     }
 
     // Step E: Save newly discovered form schema to Supabase if unique link
@@ -617,8 +625,8 @@ export async function executeWorkerTask({
           bucket = 'application-failures';
           filename = `${applywizzId}_${Date.now()}_resume_upload_fail.jpg`;
           storagePath = filename;
-        } else if (status === 'job_not_found') {
-          bucket = 'application-failures';
+        } else if (status === 'job_not_found' || status === 'job_expired' || status?.status === 'job_expired' || status?.isExpired) {
+          bucket = 'failed-applications';
           filename = `${applywizzId}_${Date.now()}_job_link_expired.jpg`;
           storagePath = filename;
         }
@@ -632,22 +640,37 @@ export async function executeWorkerTask({
       }
     } catch {}
 
+    const isAlreadyApplied = Boolean(status === 'already_applied' || status?.status === 'already_applied' || status?.alreadyApplied);
     const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
     const isSuccessStatus = (
       status === 'submitted' ||
       status === 'reached-review' ||
       status === 'reached_review' ||
       status === 'ready_for_review' ||
+      isAlreadyApplied ||
       (status === 'human-required' && onReviewPage) ||
       onReviewPage
     );
-    let stoppedBlock = isSuccessStatus
-      ? 'Step 5: Review & Submit'
-      : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+    let stoppedBlock = isAlreadyApplied
+      ? 'Already Applied'
+      : (isSuccessStatus
+        ? 'Step 5: Review & Submit'
+        : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information')));
+
+    if (isAlreadyApplied && status?.screenshotUrl) {
+      completionShotUrl = status.screenshotUrl;
+    }
 
     // Dynamic error diagnosis: Check for expired link or resume upload failure
     if (!isSuccessStatus) {
-      if (status === 'job_not_found') {
+      const isJobExpired = Boolean(
+        status === 'job_not_found' ||
+        status === 'job_expired' ||
+        status?.status === 'job_expired' ||
+        status?.isExpired ||
+        /doesn'?t exist|expired|not found|dead url/i.test(status?.reason || '')
+      );
+      if (isJobExpired) {
         stoppedBlock = 'Job link expired';
       } else if (profile?._failedAtStep === 'Resume upload failed') {
         stoppedBlock = 'Resume upload failed';
@@ -666,15 +689,19 @@ export async function executeWorkerTask({
       if (completionShotUrl) {
         fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
       }
+    } else if (isAlreadyApplied) {
+      fullFailureReason = null;
     } else if (completionShotUrl) {
       fullFailureReason = `[screenshot: ${completionShotUrl}]`;
     }
 
-    const appStatus = (status === 'submitted')
-      ? 'submitted'
-      : (status === 'reached-review' || status === 'reached_review' || isSuccessStatus)
-        ? 'ready_for_review'
-        : status;
+    const appStatus = isAlreadyApplied
+      ? 'already_applied'
+      : ((status === 'submitted')
+        ? 'submitted'
+        : (status === 'reached-review' || status === 'reached_review' || isSuccessStatus)
+          ? 'ready_for_review'
+          : status);
 
     await upsertSupabaseApplication({
       applywizzId,
@@ -1065,10 +1092,11 @@ export async function executeWorkerTask({
 
     console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
     return {
-      status,
+      status: typeof status === 'object' && status?.status ? status.status : status,
+      alreadyApplied: isAlreadyApplied,
       cacheHit,
-      screenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || null,
-      reviewScreenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || null,
+      screenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || status?.screenshotUrl || null,
+      reviewScreenshotUrl: completionShotUrl || profile._submissionScreenshotUrl || status?.screenshotUrl || null,
       stoppedAtStep: stoppedBlock,
       answersMap: {
         ...(profile._scrapedReviewMap || {}),
@@ -1672,7 +1700,7 @@ export async function executeSingleTargetedSubmission({
   jobUrl = '',
   workerId = 'submitting_worker_1',
   headless = true,
-  defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+  defaultPassword = process.env.WORKDAY_PASSWORD || '',
 } = {}) {
   const cleanId = String(applywizzId || '').trim().toUpperCase();
   const cleanUrl = String(jobUrl || '').trim();

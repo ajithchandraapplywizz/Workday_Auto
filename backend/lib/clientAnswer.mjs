@@ -438,7 +438,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   // 0. Legal & safety guards
   if (/password/i.test(label) || fieldType === 'password') {
-    const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+    const pwd = profile.password || process.env.WORKDAY_PASSWORD || '';
     console.log(`    🔑 [Password] "${label.slice(0, 55)}" ← (auto-filled workday password)`);
     return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType, tier: 1 };
   }

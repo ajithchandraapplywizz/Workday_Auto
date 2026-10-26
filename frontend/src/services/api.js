@@ -367,7 +367,13 @@ export async function checkAllApiHealth() {
       service: 'get-client-details API',
       runner: async () => {
         const start = performance.now();
-        const res = await fetch(`${CLIENT_DETAILS_BASE}/get-client-details?applywizz_id=AWL-34133`);
+        // Dynamically pick first active client from database or active clients API
+        let targetId = 'AWL-1';
+        try {
+          const { data } = await supabase.from('clients').select('applywizz_id').limit(1);
+          if (data && data[0]?.applywizz_id) targetId = data[0].applywizz_id;
+        } catch {}
+        const res = await fetch(`${CLIENT_DETAILS_BASE}/get-client-details?applywizz_id=${encodeURIComponent(targetId)}`);
         return { ok: res.ok, status: res.ok ? 'OK' : 'ERROR', time: Math.round(performance.now() - start), meta: 'HTTP 200 (AWL candidate graph accessible)' };
       },
     },
@@ -1400,6 +1406,28 @@ export function getBackendBaseUrl() {
     url = 'https://' + url;
   }
   return url;
+}
+
+export function getStaffAuthHeaders(baseHeaders = {}) {
+  const headers = { 'Content-Type': 'application/json', ...baseHeaders };
+  try {
+    const raw = typeof window !== 'undefined' ? window.localStorage.getItem('applywizz_auth_session') : null;
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (parsed?.email) {
+        headers['x-staff-email'] = parsed.email;
+      }
+    }
+  } catch {}
+  try {
+    const anonKey = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) ||
+      'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl1cHB4bXdyenRiaXJzbnpnZmpoIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MjY2MDY5MSwiZXhwIjoyMTA4MjM2NjkxfQ.rzyqJKwuMW81IFAEtGsKOPSyjlxuQTXNsUYHrC6wUGg';
+    if (anonKey) {
+      headers['apikey'] = anonKey;
+      headers['Authorization'] = `Bearer ${anonKey}`;
+    }
+  } catch {}
+  return headers;
 }
 
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
@@ -2495,17 +2523,24 @@ export async function triggerAutonomousBot() {
       console.warn('Note on unpausing batch_job_queue:', qErr?.message);
     }
 
-    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control
+    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control and worker_control
     let supabaseSuccess = false;
+    const actionNonce = Date.now().toString();
     try {
       const { error: bcErr } = await supabase
         .from('bot_control')
         .update({
           stage: 'scanning',
+          mode: 'scanning',
           is_running: true,
           is_paused: false,
+          scan_status: 'running',
+          scan_enabled: true,
+          scan_stop_requested: false,
           stop_requested: false,
           trigger_requested: true,
+          action_nonce: actionNonce,
+          trigger_id: actionNonce,
           last_action_requested: 'start_scan',
           current_action: 'Scanning unique job links...',
           updated_at: now,
@@ -2516,6 +2551,16 @@ export async function triggerAutonomousBot() {
     } catch (bcErr) {
       console.warn('Note on updating bot_control:', bcErr?.message);
     }
+
+    try {
+      await supabase.from('worker_control').upsert({
+        key: 'scan',
+        enabled: true,
+        status: 'running',
+        stop_requested: false,
+        updated_at: now,
+      }, { onConflict: 'key' }).catch(() => {});
+    } catch {}
 
     const scanningWorkerIds = ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
     for (const wid of scanningWorkerIds) {
@@ -2564,8 +2609,8 @@ export async function triggerAutonomousBot() {
       try {
         const resp = await fetch(ep, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'start', trigger: true, timestamp: now }),
+          headers: getStaffAuthHeaders(),
+          body: JSON.stringify({ action: 'start', trigger: true, nonce: actionNonce, timestamp: now }),
           signal: AbortSignal.timeout(2000),
         });
         if (resp.ok) break;
@@ -2592,39 +2637,45 @@ export async function triggerAutonomousBot() {
 export async function stopAutonomousBot() {
   try {
     const now = new Date().toISOString();
+    const actionNonce = Date.now().toString();
 
-    // 1. Webhook stop call to daemon (POST /api/bot/stop)
+    // 1. Webhook stop call to daemon (POST /api/bot/stop / /api/bot/scan/stop)
     const backendBase = getBackendBaseUrl();
     const stopEndpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+      '/api/bot/scan/stop',
       '/api/bot/stop',
       '/api/bot/webhook',
+      'http://localhost:3005/api/bot/scan/stop',
       'http://localhost:3005/api/bot/stop',
-      'http://localhost:3005/api/bot/webhook',
+      'http://localhost:3001/api/bot/scan/stop',
       'http://localhost:3001/api/bot/stop',
-      'http://localhost:3001/api/bot/webhook',
     ];
     await Promise.any(
       stopEndpoints.map((u) =>
         fetch(u, {
           method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'stop', stop: true, timestamp: now }),
+          headers: getStaffAuthHeaders(),
+          body: JSON.stringify({ action: 'stop_scan', stop: true, nonce: actionNonce, timestamp: now }),
           signal: AbortSignal.timeout(1500),
         })
       )
     ).catch(() => {});
 
-    // 2. Set bot_control stop signal in Supabase
+    // 2. Set bot_control & worker_control stop signal in Supabase
     try {
       await supabase
         .from('bot_control')
         .update({
-          stage: 'idle',
-          is_running: false,
+          scan_status: 'off',
+          scan_enabled: false,
+          scan_stop_requested: true,
           stop_requested: true,
-          last_action_requested: 'stop',
-          current_action: 'Pipeline stopped by user.',
+          trigger_requested: true,
+          action_nonce: actionNonce,
+          trigger_id: actionNonce,
+          last_action_requested: 'stop_scan',
+          current_action: 'Scan & Resolve stopped by user.',
           updated_at: now,
         })
         .eq('id', 'primary');
@@ -2632,7 +2683,17 @@ export async function stopAutonomousBot() {
       console.warn('Note on updating bot_control stop state:', bcErr?.message);
     }
 
-    // 3. Mark canonical worker rows idle in Supabase worker_status
+    try {
+      await supabase.from('worker_control').upsert({
+        key: 'scan',
+        enabled: false,
+        status: 'off',
+        stop_requested: true,
+        updated_at: now,
+      }, { onConflict: 'key' }).catch(() => {});
+    } catch {}
+
+    // 3. Mark scanning worker rows idle in Supabase worker_status
     await supabase
       .from('worker_status')
       .update({
@@ -2640,7 +2701,7 @@ export async function stopAutonomousBot() {
         current_application_id: null,
         updated_at: now,
       })
-      .in('worker_id', CANONICAL_2_WORKERS);
+      .in('worker_id', ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3']);
 
     // 4. Mark any actively processing tasks back to pending on stop
     try {
@@ -2657,7 +2718,7 @@ export async function stopAutonomousBot() {
 
     return {
       success: true,
-      message: 'All 2 workers have been stopped and reset to idle.',
+      message: 'Scanning & Resolving workers stopped and reset to idle.',
     };
   } catch (err) {
     console.error('Failed to stop autonomous bot:', err);
@@ -2670,17 +2731,24 @@ export async function stopAutonomousBot() {
  */
 export async function triggerSubmissionStage() {
   const now = new Date().toISOString();
+  const actionNonce = Date.now().toString();
   let supabaseSuccess = false;
   try {
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
         stage: 'submitting',
+        mode: 'submitting',
         is_running: true,
         is_paused: false,
+        submit_status: 'running',
+        submit_enabled: true,
+        submit_stop_requested: false,
         stop_requested: false,
         trigger_requested: true,
-        last_action_requested: 'submit_approved',
+        action_nonce: actionNonce,
+        trigger_id: actionNonce,
+        last_action_requested: 'start_submit',
         current_action: 'Submitting approved applications...',
         updated_at: now,
       })
@@ -2691,24 +2759,34 @@ export async function triggerSubmissionStage() {
     console.warn('Supabase bot_control error:', err);
   }
 
+  try {
+    await supabase.from('worker_control').upsert({
+      key: 'submit',
+      enabled: true,
+      status: 'running',
+      stop_requested: false,
+      updated_at: now,
+    }, { onConflict: 'key' }).catch(() => {});
+  } catch {}
+
   const backendBase = getBackendBaseUrl();
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
     '/api/bot/submit/start',
     '/api/bot/submit',
     '/api/bot/webhook',
+    'http://localhost:3005/api/bot/submit/start',
     'http://localhost:3005/api/bot/submit',
-    'http://localhost:3005/api/bot/webhook',
+    'http://localhost:3001/api/bot/submit/start',
     'http://localhost:3001/api/bot/submit',
-    'http://localhost:3001/api/bot/webhook',
   ];
 
   for (const ep of endpoints) {
     try {
       const resp = await fetch(ep, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'submit_approved', timestamp: now }),
+        headers: getStaffAuthHeaders(),
+        body: JSON.stringify({ action: 'submit_approved', nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) {
@@ -2728,14 +2806,19 @@ export async function triggerSubmissionStage() {
  */
 export async function stopSubmissionStage() {
   const now = new Date().toISOString();
+  const actionNonce = Date.now().toString();
   let supabaseSuccess = false;
   try {
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
-        stage: 'idle',
-        is_running: false,
+        submit_status: 'off',
+        submit_enabled: false,
+        submit_stop_requested: true,
         stop_requested: true,
+        trigger_requested: true,
+        action_nonce: actionNonce,
+        trigger_id: actionNonce,
         last_action_requested: 'stop_submit',
         current_action: 'Submissions stopped by user.',
         updated_at: now,
@@ -2745,6 +2828,16 @@ export async function stopSubmissionStage() {
   } catch (err) {
     console.warn('Supabase stop error:', err);
   }
+
+  try {
+    await supabase.from('worker_control').upsert({
+      key: 'submit',
+      enabled: false,
+      status: 'off',
+      stop_requested: true,
+      updated_at: now,
+    }, { onConflict: 'key' }).catch(() => {});
+  } catch {}
 
   const backendBase = getBackendBaseUrl();
   const endpoints = [
@@ -2762,12 +2855,12 @@ export async function stopSubmissionStage() {
     try {
       const resp = await fetch(ep, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'stop', stage: 'submitting', timestamp: now }),
+        headers: getStaffAuthHeaders(),
+        body: JSON.stringify({ action: 'stop_submit', stage: 'submitting', nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(2000),
       });
       if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions hard-stopped across all workers.' };
+        return { success: true, message: 'Stage 3 Submissions stopped across all workers.' };
       }
     } catch { }
   }
@@ -2829,14 +2922,28 @@ export async function fetchBotDaemonStatus() {
     // Any worker in_flight or busy indicates active background running
     const hasActiveWorkers = workers.some((w) => w.state === 'in_flight' || w.state === 'busy');
 
-    const isRunning = daemonApiRunning || Boolean(botControl?.is_running && !botControl?.stop_requested) || hasActiveWorkers;
-    const currentStage = daemonApiStage !== 'idle' ? daemonApiStage : (botControl?.stage || (isRunning ? 'running' : 'idle'));
+    const isScanStopped = Boolean(botControl?.scan_stop_requested || botControl?.stop_requested);
+    const isSubmitStopped = Boolean(botControl?.submit_stop_requested || botControl?.stop_requested);
 
-    const isSubmitting = Boolean(botControl?.stage === 'submitting' || botControl?.submit_status === 'running' || botControl?.mode === 'submitting' || workers.some(w => (w.worker_id.includes('submitting') || w.stage === 'submitting') && (w.state === 'in_flight' || w.state === 'busy')));
+    const isScanning = !isScanStopped && Boolean(
+      botControl?.scan_status === 'running' ||
+      ((botControl?.stage === 'scanning' || botControl?.stage === 'resolving') && botControl?.is_running) ||
+      workers.some((w) => (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id.includes('scan') || w.worker_id.includes('resolv')) && (w.state === 'in_flight' || w.state === 'busy'))
+    );
+
+    const isSubmitting = !isSubmitStopped && Boolean(
+      botControl?.submit_status === 'running' ||
+      (botControl?.stage === 'submitting' && botControl?.is_running) ||
+      workers.some((w) => (w.stage === 'submitting' || w.worker_id.includes('submit')) && (w.state === 'in_flight' || w.state === 'busy'))
+    );
+
+    const isRunning = isScanning || isSubmitting || (daemonApiRunning && !botControl?.stop_requested);
+    const currentStage = isSubmitting ? 'submitting' : (isScanning ? (botControl?.stage || 'scanning') : 'idle');
 
     return {
       success: true,
       isRunning,
+      isScanning,
       isSubmitting,
       state: isRunning ? currentStage : 'idle',
       stage: currentStage,
@@ -2846,7 +2953,7 @@ export async function fetchBotDaemonStatus() {
       triggeredAt: botControl?.updated_at || workers.find(w => w.state === 'in_flight')?.updated_at || null,
     };
   } catch (err) {
-    return { success: false, isRunning: false, isSubmitting: false, state: 'idle', workersAssigned: 9, error: err.message };
+    return { success: false, isRunning: false, isScanning: false, isSubmitting: false, state: 'idle', workersAssigned: 9, error: err.message };
   }
 }
 

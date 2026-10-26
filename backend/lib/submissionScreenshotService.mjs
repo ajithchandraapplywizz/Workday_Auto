@@ -84,7 +84,6 @@ export async function recordTaskSubmissionProof({
         .update({
           status: 'submitted',
           application_submitted_screenshot_url: publicUrl,
-          screenshot_path: storagePath,
           completed_at: now,
           updated_at: now,
         })

@@ -69,7 +69,7 @@ export async function getApplicationsList({
   // 2. Fetch submission_tasks
   const { data: subTasks, error: stErr } = await supabase
     .from('submission_tasks')
-    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, error_message, created_at, started_at, completed_at, updated_at, screenshot_path');
+    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, error_message, created_at, started_at, completed_at, updated_at, application_submitted_screenshot_url');
 
   if (stErr) throw stErr;
 
@@ -159,7 +159,7 @@ export async function getApplicationsList({
     const failureCategory = effectiveStatus === 'failed' ? classifyFailure(rawError) : null;
     const errorSnippet = rawError ? String(rawError).slice(0, 120) : '';
 
-    const screenshotLink = task?.screenshot_path ||
+    const screenshotLink = task?.application_submitted_screenshot_url ||
       jd.application_submitted_screenshot_url ||
       null;
     const hasScreenshot = Boolean(screenshotLink);

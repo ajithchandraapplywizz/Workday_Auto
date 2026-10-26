@@ -13,7 +13,7 @@
  *   3. Launches 3 parallel workers on 3 different links simultaneously in HEADED browser mode.
  *   4. For each assigned link:
  *      - PHASE 1 (Blueprint Inspection):
- *        • Candidate 1 (lowest numeric AWL ID, e.g. AWL-1568) runs FIRST in a visible browser.
+ *        • Candidate 1 (first queued client sorted by ascending AWL ID) runs FIRST in a visible browser.
  *        • Fills 4-tier application (with strict 2-digit date formatting: 04, 16, 2026).
  *        • At Review & Submit DOM, scrapes all required Q&A into JSONB.
  *        • Captures mandatory screenshot -> saved to Supabase screenshot_path.
@@ -192,7 +192,7 @@ async function queueDbRequest(path, { method = 'GET', query = '', body = null, p
 /**
  * Fetch and cluster all queue tasks using canonical job keys.
  * Merges messy link variations (?source=LinkedIn, /en-US/, etc.) into single clusters.
- * Tasks inside each cluster are sorted numerically ascending by AWL ID (AWL-1568 first).
+ * Tasks inside each cluster are sorted numerically ascending by AWL ID.
  */
 export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId = null } = {}) {
   const { configured } = getCleanSupabaseEnv();
@@ -294,7 +294,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
 
   const clusters = Array.from(clusterMap.values());
 
-  // Sort tasks within each cluster numerically ascending by AWL ID (AWL-1568 first)
+  // Sort tasks within each cluster numerically ascending by AWL ID
   for (const c of clusters) {
     c.tasks.sort((a, b) => {
       const numA = parseInt(String(a.applywizz_id || '').replace(/\D/g, '') || '0', 10);
@@ -483,7 +483,7 @@ export async function fetchFreshTasksByIds(taskIds = []) {
 
 /**
  * Worker dedicated to processing a single link cluster end-to-end:
- *   1. Blueprint Leader (AWL-1568) -> Form fill in HEADED browser -> Review DOM Q&A Scrape -> Screenshot
+ *   1. Blueprint Leader (First Candidate) -> Form fill in HEADED browser -> Review DOM Q&A Scrape -> Screenshot
  *   2. Copy-paste JSON to all other client rows in Supabase by their task IDs
  *   3. Fast-fill followers using pre_resolved_answers in HEADED browser
  */
@@ -492,7 +492,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     headless = false, // HEADED by default!
     confirmSubmit = false,
     limitPerLink = null,
-    defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026',
+    defaultPassword = process.env.WORKDAY_PASSWORD || '',
     scanRunId = null,
   } = options;
 
@@ -1048,10 +1048,11 @@ export function print10BatchMilestoneReport({
 export async function runClusterBatchRunner({
   topLinks = 10,
   workers = PIPELINE_CONFIG?.workersCount || Number(process.env.WORKER_COUNT) || 2,
+  minClients = Number(process.env.MIN_CLIENTS_THRESHOLD) || 1,
   headless = process.env.HEADLESS !== 'false',
   confirmSubmit = false,
   limitPerLink = null,
-  defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
+  defaultPassword = process.env.WORKDAY_PASSWORD || '',
   scanRunId = null,
 } = {}) {
   const startTime = Date.now();
@@ -1066,7 +1067,7 @@ export async function runClusterBatchRunner({
   console.log(`\n${'═'.repeat(78)}`);
   console.log(`⚡ CLUSTER BATCH RUNNER — ${workers} PARALLEL SCANNING WORKERS (HEADLESS: ${headless})`);
   console.log(`   Scan Run ID:   ${scanRunId}`);
-  console.log(`   Top Links:     ${topLinks} highest client-count clusters`);
+  console.log(`   Top Links:     ${topLinks} highest client-count clusters (minClients: ${minClients})`);
   console.log(`   Workers:       ${workers} parallel scanning workers running simultaneously`);
   console.log(`   Browser Mode:  ${headless ? 'HEADLESS (Production Mode)' : 'HEADED (Visible GUI)'}`);
   console.log(`   Submission:    ${confirmSubmit ? 'Auto-Submit' : 'Halt at Review (Screenshots & Scrapes Only)'}`);
@@ -1077,7 +1078,7 @@ export async function runClusterBatchRunner({
 
   // Step 1: Cluster links canonically and select top N
   console.log(`🔍 Canonicalizing & clustering URLs from Supabase batch_job_queue...`);
-  const topClusters = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId });
+  const topClusters = await fetchQueueClusters({ minClients, limit: topLinks, scanRunId });
 
   if (!topClusters.length) {
     console.log(`❌ No tasks found in batch_job_queue! Setting scanning workers to idle.`);

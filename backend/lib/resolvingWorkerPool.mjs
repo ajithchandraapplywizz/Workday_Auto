@@ -94,7 +94,7 @@ export async function runResolvingWorkerPool(options = {}) {
       } catch {}
 
       if (candidatesToProcess.length === 0) {
-        candidatesToProcess = [job.applywizz_id || 'AWL-PRIMARY'];
+        candidatesToProcess = job.applywizz_id ? [job.applywizz_id] : [];
       }
 
       console.log(`   🔍 [${workerId}] [Job #${myIndex + 1}/${scannedJobs.length}] Resolving answers for Job URL: ${job.job_url}`);

@@ -22,6 +22,7 @@ import {
   ensureWorkdayApplicationWizard,
   extractWorkdayCompanyName,
   extractJobRoleFromDom,
+  isAlreadyAppliedDetected,
 } from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
@@ -3070,11 +3071,46 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         const hasExpired = /doesn'?t exist|expired|not found|\berror 404\b|closed|filled/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;
       }, { timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(2000);
     }
-    if (await isWorkdayJobPageMissing(page)) {
-      console.log('❌ Job page does not exist (dead/expired URL) — skipping');
-      return 'job_not_found';
+    if (await isWorkdayJobPageMissing(page, { waitMs: 1500 })) {
+      console.log('❌ Job page does not exist (dead/expired URL) — capturing screenshot & returning job_expired');
+      let shotUrl = null;
+      try {
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+          if (buf) {
+            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+            const applywizzId = profileIn?._applyWizzId || profileIn?.applywizz_id || 'CLIENT';
+            shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
+          }
+        }
+      } catch {}
+      if (ownBrowser) await browser.close().catch(() => {});
+      return {
+        status: 'job_expired',
+        isExpired: true,
+        reason: "Job link expired: The page you are looking for doesn't exist",
+        screenshotUrl: shotUrl,
+      };
+    }
+
+    // Check if page already shows candidate has applied
+    if (await isAlreadyAppliedDetected(page)) {
+      console.log('  ✅ [WorkdayBot] Detected "Already Applied" on initial page load. Capturing proof screenshot...');
+      let shotUrl = null;
+      try {
+        if (page && !page.isClosed()) {
+          const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
+          if (buf) {
+            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+            const applywizzId = profileIn?._applyWizzId || profileIn?.applywizz_id || 'CLIENT';
+            shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+          }
+        }
+      } catch {}
+      if (ownBrowser) await browser.close().catch(() => {});
+      return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
     }
 
     const profile = profileIn || await loadProfile().catch(() => ({}));
@@ -3095,11 +3131,50 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           mode,
           profile,
         });
-        if (!wdOk || wdOk === 'mailbox_not_connected') {
+
+        if (wdOk === 'already_applied' || await isAlreadyAppliedDetected(page)) {
+          console.log('  ✅ [WorkdayBot] Detected "Already Applied" post-auth. Capturing proof screenshot...');
+          let shotUrl = null;
+          try {
+            if (page && !page.isClosed()) {
+              const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
+              if (buf) {
+                const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+                const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
+                shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+              }
+            }
+          } catch {}
+          if (ownBrowser) await browser.close().catch(() => {});
+          return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
+        }
+
+        if (!wdOk || wdOk === 'mailbox_not_connected' || wdOk === 'job_expired') {
           if (wdOk === 'mailbox_not_connected') {
             console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — skipping client cleanly.');
             if (ownBrowser) await browser.close();
             return 'skipped';
+          }
+          if (wdOk === 'job_expired' || await isWorkdayJobPageMissing(page, { waitMs: 1000 })) {
+            console.log('  ❌ [engine] Job link expired detected during auth check ("The page you are looking for doesn\'t exist").');
+            let shotUrl = null;
+            try {
+              if (page && !page.isClosed()) {
+                const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+                if (buf) {
+                  const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+                  const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
+                  shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
+                }
+              }
+            } catch {}
+            if (ownBrowser) await browser.close().catch(() => {});
+            return {
+              status: 'job_expired',
+              isExpired: true,
+              reason: "Job link expired: The page you are looking for doesn't exist",
+              screenshotUrl: shotUrl,
+            };
           }
           console.log('  ❌ Workday authentication could not be confirmed — aborting wizard loop.');
           if (ownBrowser) await browser.close();
@@ -3107,6 +3182,23 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         }
       }
       if (!await isWorkdayWizardVisible(page)) {
+        if (await isAlreadyAppliedDetected(page)) {
+          console.log('  ✅ [WorkdayBot] Detected "Already Applied" before wizard entry. Capturing proof screenshot...');
+          let shotUrl = null;
+          try {
+            if (page && !page.isClosed()) {
+              const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
+              if (buf) {
+                const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+                const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
+                shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+              }
+            }
+          } catch {}
+          if (ownBrowser) await browser.close().catch(() => {});
+          return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
+        }
+
         const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
         if (entry.entered) {
           console.log(`  ✅ Entered application wizard via ${entry.method}`);
@@ -3118,11 +3210,50 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
             mode,
             profile,
           });
+
+          if (wdRetry === 'already_applied' || await isAlreadyAppliedDetected(page)) {
+            console.log('  ✅ [WorkdayBot] Detected "Already Applied" on retry. Capturing proof screenshot...');
+            let shotUrl = null;
+            try {
+              if (page && !page.isClosed()) {
+                const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
+                if (buf) {
+                  const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+                  const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
+                  shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+                }
+              }
+            } catch {}
+            if (ownBrowser) await browser.close().catch(() => {});
+            return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
+          }
+
           if (wdRetry === 'mailbox_not_connected') {
             if (ownBrowser) await browser.close();
             return 'skipped';
           }
-          if (!wdRetry) {
+          if (!wdRetry || wdRetry === 'job_expired') {
+            if (wdRetry === 'job_expired' || await isWorkdayJobPageMissing(page, { waitMs: 1000 })) {
+              console.log('  ❌ [engine] Job link expired detected on retry ("The page you are looking for doesn\'t exist").');
+              let shotUrl = null;
+              try {
+                if (page && !page.isClosed()) {
+                  const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+                  if (buf) {
+                    const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
+                    const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
+                    shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
+                  }
+                }
+              } catch {}
+              if (ownBrowser) await browser.close().catch(() => {});
+              return {
+                status: 'job_expired',
+                isExpired: true,
+                reason: "Job link expired: The page you are looking for doesn't exist",
+                screenshotUrl: shotUrl,
+              };
+            }
             if (ownBrowser) await browser.close();
             return 'auth-failed';
           }

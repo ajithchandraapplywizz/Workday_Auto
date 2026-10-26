@@ -241,7 +241,7 @@ export async function isWorkdayPasswordResetSetPage(page) {
  * @returns {Promise<boolean>} True if password setup form was detected and submitted
  */
 export async function completeWorkdayPasswordResetForm(page, email, password) {
-  const targetPassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+  const targetPassword = password || process.env.WORKDAY_PASSWORD || '';
   const targetEmail = email || process.env.WORKDAY_EMAIL || '';
   if (!page) return false;
 

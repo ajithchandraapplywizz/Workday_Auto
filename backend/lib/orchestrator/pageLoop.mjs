@@ -192,7 +192,7 @@ export async function runPageOrchestrator({
     let decision = decisionForField(pack, field);
     const isPassword = field.controlType === 'password' || field.elementType === 'password' || /password/i.test(field.label);
     if (isPassword && (!decision || !decision.answer || decision.answer === '')) {
-      const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+      const pwd = profile.password || process.env.WORKDAY_PASSWORD || '';
       decision = {
         questionId: field.questionId,
         intent: 'password',

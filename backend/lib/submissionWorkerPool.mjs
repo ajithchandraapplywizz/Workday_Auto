@@ -45,6 +45,11 @@ export async function updateSubmissionTaskWithCheck({
         .select('*');
 
       if (error) {
+        if (error.code === '23514' && patch.status === 'already_applied') {
+          console.warn(`[${workerId}] Warning: 'already_applied' check constraint pending migration. Falling back to status='submitted'.`);
+          patch = { ...patch, status: 'submitted', error_message: patch.error_message || 'The application is already submitted' };
+          continue;
+        }
         lastErr = new Error(`Supabase update error: ${error.message} (code: ${error.code || 'unknown'})`);
         console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} failed: ${error.message}`);
         if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
@@ -58,6 +63,12 @@ export async function updateSubmissionTaskWithCheck({
           .update(patch)
           .eq('id', cleanTaskId)
           .select('*');
+
+        if (fbErr?.code === '23514' && patch.status === 'already_applied') {
+          console.warn(`[${workerId}] Warning: 'already_applied' check constraint pending migration. Falling back to status='submitted'.`);
+          patch = { ...patch, status: 'submitted', error_message: patch.error_message || 'The application is already submitted' };
+          continue;
+        }
 
         if (!fbErr && fallbackData && fallbackData.length > 0) {
           console.log(`[${workerId}] task row updated via fallback (rows=${fallbackData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
@@ -293,6 +304,40 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
   console.log(`\n🚀 [${workerId}] Processing task #${task.id} (${task.applywizz_id} @ ${task.company || 'Company'})...`);
 
+  // Pre-flight check: Has candidate already submitted to this company?
+  const cleanComp = String(task.company || '').trim();
+  const cleanId = String(task.applywizz_id || '').trim().toUpperCase();
+  if (cleanId && cleanComp && cleanComp !== 'Workday Employer' && cleanComp !== 'Workday') {
+    const { hasClientAppliedToCompany } = await import('./supabaseClient.mjs');
+    const alreadyApplied = await hasClientAppliedToCompany(cleanId, cleanComp, { excludeTaskId: task.id });
+    if (alreadyApplied) {
+      console.log(`⚡ [${workerId}] Pre-flight guard: Candidate ${cleanId} has ALREADY submitted an application to company "${cleanComp}". Skipping browser launch and marking already_applied.`);
+      const now = new Date().toISOString();
+      await updateSubmissionTaskWithCheck({
+        taskId: task.id,
+        workerId,
+        patch: {
+          status: 'already_applied',
+          error_message: `Candidate has already submitted an application to ${cleanComp}`,
+          completed_at: now,
+          updated_at: now,
+        },
+      });
+      if (task.distribution_id) {
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id,
+          workerId,
+          patch: {
+            status: 'already_applied',
+            error_message: `Candidate has already submitted an application to ${cleanComp}`,
+            updated_at: now,
+          },
+        });
+      }
+      return { status: 'already_applied', success: true };
+    }
+  }
+
   // Update worker_status table
   await updateWorkerStatus(workerId, {
     state: 'in_flight',
@@ -424,7 +469,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'submitted',
           completed_at: now,
           application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
-          screenshot_path: finalShotUrl || finalStoragePath,
           updated_at: now,
         },
       });
@@ -446,7 +490,94 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         const { cleanupClientResume } = await import('./applyWizzResume.mjs');
         await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
       } catch {}
-    } else if (result?.status === 'stopped' || isGlobalStopRequested() || isSubmitStopRequested()) {
+    } else if (result?.status === 'already_applied' || result?.alreadyApplied) {
+      console.log(`✅ [${workerId}] Candidate ${task.applywizz_id} has ALREADY APPLIED to this job (${task.company}). Recording proof screenshot and setting status to 'already_applied'.`);
+      const proofUrl = result?.screenshotUrl || finalShotUrl || finalStoragePath;
+      await updateSubmissionTaskWithCheck({
+        taskId: task.id,
+        workerId,
+        patch: {
+          status: 'already_applied',
+          completed_at: now,
+          application_submitted_screenshot_url: proofUrl,
+          error_message: null,
+          updated_at: now,
+        },
+      });
+
+      if (task.distribution_id) {
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id,
+          workerId,
+          patch: {
+            status: 'already_applied',
+            application_submitted_screenshot_url: proofUrl,
+            error_message: null,
+            updated_at: now,
+          },
+        });
+      }
+
+      try {
+        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
+      } catch {}
+    } else if (result?.status === 'job_expired' || result?.isExpired || result?.status === 'job_not_found') {
+      const expiredReason = "Job link expired: The page you are looking for doesn't exist";
+      console.log(`❌ [${workerId}] Job link expired for task #${task.id} (${task.company}): ${expiredReason}`);
+      const expiredShot = result?.screenshotUrl || finalShotUrl || finalStoragePath;
+
+      await updateSubmissionTaskWithCheck({
+        taskId: task.id,
+        workerId,
+        patch: {
+          status: 'failed',
+          error_message: expiredReason,
+          completed_at: now,
+          application_submitted_screenshot_url: expiredShot,
+          updated_at: now,
+        },
+      });
+
+      if (task.distribution_id) {
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id,
+          workerId,
+          patch: {
+            status: 'failed',
+            error_message: expiredReason,
+            application_submitted_screenshot_url: expiredShot,
+            updated_at: now,
+          },
+        });
+      }
+
+      try {
+        const { recordFailedJob } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId: task.applywizz_id,
+          jobId: task.job_id || null,
+          jobUrl: task.job_url,
+          company: task.company,
+          roleTitle: task.role_title,
+          failureReason: expiredReason,
+          failedAtStep: 'Job link expired',
+          screenshotPath: expiredShot,
+        });
+      } catch {}
+
+      try {
+        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
+        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
+      } catch {}
+    } else if (
+      result?.status === 'stopped' ||
+      isGlobalStopRequested() ||
+      isSubmitStopRequested() ||
+      String(result?.error || result?.reason || '').toLowerCase().includes('closed') ||
+      String(result?.error || result?.reason || '').toLowerCase().includes('abort') ||
+      String(result?.error || result?.reason || '').toLowerCase().includes('target')
+    ) {
       // User requested stop: Revert cleanly to ready_for_review so no work is corrupted and it can resume cleanly
       console.log(`🛑 [${workerId}] Task #${task.id} aborted due to stop request. Reverting status to ready_for_review.`);
       await supabase
@@ -468,7 +599,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           error_message: errMsg,
           completed_at: now,
-          screenshot_path: finalShotUrl || finalStoragePath,
           application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
           updated_at: now,
         },

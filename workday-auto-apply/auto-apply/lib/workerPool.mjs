@@ -520,7 +520,10 @@ export async function executeWorkerTask({
           } catch {}
 
           const effectiveReason = domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check';
-          const failReasonText = `Authentication / Gateway check: ${effectiveReason}`;
+          const isDead = /doesn'?t exist|job (?:is no longer|has expired|not found|does not exist)|position (?:has been )?filled|no longer accepting applications/i.test(effectiveReason);
+          const failReasonText = isDead
+            ? "Job link expired: The page you are looking for doesn't exist"
+            : (domSpecificReason || `Authentication / Gateway check: ${effectiveReason}`);
           console.log(`   ❌ [${workerId}] ${failReasonText}`);
 
           let authShotUrl = null;
@@ -534,8 +537,7 @@ export async function executeWorkerTask({
               await page.waitForTimeout(400);
               const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
               if (buf) {
-                const isDead = /doesn'?t exist|job expired|not found/i.test(effectiveReason);
-                authShotUrl = await uploadStorageScreenshot('application-failures', isDead ? `${applywizzId}_${Date.now()}_job_link_expired.jpg` : `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+                authShotUrl = await uploadStorageScreenshot('failed-applications', isDead ? `${applywizzId}_${Date.now()}_job_link_expired.jpg` : `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
               }
             }
           } catch {}
@@ -550,7 +552,7 @@ export async function executeWorkerTask({
             status: 'failed',
             failureReason: failReasonText,
             failureScreenshotUrl: authShotUrl,
-            stoppedAtStep: /doesn'?t exist|job expired|not found/i.test(effectiveReason) ? 'Job link expired' : 'Auth Gateway (Sign In / Sign Up)',
+            stoppedAtStep: isDead ? 'Job link expired' : 'Auth Gateway (Sign In / Sign Up)',
           }).catch(() => {});
 
         try {
@@ -562,7 +564,7 @@ export async function executeWorkerTask({
             company,
             roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
             failureReason: failReasonText,
-            failedAtStep: /doesn'?t exist|job expired|not found/i.test(effectiveReason) ? 'Job link expired' : 'Auth Gateway (Sign In / Sign Up)',
+            failedAtStep: isDead ? 'Job link expired' : 'Auth Gateway (Sign In / Sign Up)',
             screenshotPath: authShotUrl,
           });
           await recordApplicationFailure({
@@ -575,6 +577,10 @@ export async function executeWorkerTask({
             screenshotPath: authShotUrl,
           });
         } catch {}
+
+        if (isDead) {
+          return { status: 'job_expired', isExpired: true, reason: failReasonText, screenshotUrl: authShotUrl, stoppedAtStep: 'Job link expired', failureReason: failReasonText };
+        }
 
         return { status: 'auth_failed', screenshotUrl: authShotUrl, stoppedAtStep: 'Auth Gateway (Sign In / Sign Up)', failureReason: failReasonText };
       }

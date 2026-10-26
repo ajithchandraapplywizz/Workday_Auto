@@ -13,12 +13,13 @@ const CSV_REPORT = resolve(process.cwd(), 'data', 'applied.csv');
 const QUEUE_FILE = resolve(process.cwd(), 'data', 'queue.csv');
 
 export async function takeScreenshot(page, label) {
-  await mkdir(SCREENSHOTS_DIR, { recursive: true });
-  const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = resolve(SCREENSHOTS_DIR, `${label}-${ts}.png`);
-  await page.screenshot({ path, fullPage: true });
-  console.log(`  📸 Screenshot: ${basename(path)}`);
-  return path;
+  // Capture in-memory buffer only — zero local disk writes
+  try {
+    const buf = await page.screenshot({ fullPage: true }).catch(() => null);
+    return buf;
+  } catch {
+    return null;
+  }
 }
 
 const CSV_HEADER = 'date,company,role,url,status,ats,screenshot,notes\n';

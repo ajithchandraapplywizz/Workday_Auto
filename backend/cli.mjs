@@ -888,7 +888,7 @@ async function cmdQueueRun() {
   if (!url) {
     const { fetchPendingTasksForActiveCAs } = await import('./lib/supabaseClient.mjs');
     const tasks = await fetchPendingTasksForActiveCAs();
-    const firstTask = tasks.find((t) => t.applywizz_id === 'AWL-1568') || tasks[0];
+    const firstTask = tasks?.[0];
     url = firstTask?.job_url;
   }
 

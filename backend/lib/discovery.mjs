@@ -209,8 +209,11 @@ export async function getWorkdayAuthErrorMessage(page) {
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
  */
-export async function isWorkdayJobPageMissing(page) {
+export async function isWorkdayJobPageMissing(page, { waitMs = 0 } = {}) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  if (waitMs > 0) {
+    await page.waitForTimeout(waitMs).catch(() => {});
+  }
   return await page.evaluate(() => {
     // 1. If an Apply or Continue Application button is visible in the DOM, it is 100% NOT missing/expired
     const hasApply = Boolean(
@@ -232,7 +235,7 @@ export async function isWorkdayJobPageMissing(page) {
     if (hasWizard) return false;
 
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!text || text.length < 20) return false; // Still empty / loading, do not jump to conclusion
+    if (!text || text.length < 15) return false; // Still empty / loading, do not jump to conclusion
 
     const hasNotExist = /the page you are looking for doesn'?t exist/i.test(text)
       || /page (?:you are looking for )?doesn'?t exist/i.test(text)
@@ -460,11 +463,53 @@ export async function isInNavOrHeader(el) {
   }).catch(() => false);
 }
 
+// ─── Detect if page indicates candidate has already applied ─────────────────
+export async function isAlreadyAppliedDetected(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  return await page.evaluate(() => {
+    const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+    const hasAppliedText = (
+      bodyText.includes("you've already applied for this job") ||
+      bodyText.includes("you have already applied for this job") ||
+      bodyText.includes("you've already applied for this position") ||
+      bodyText.includes("you have already applied for this position") ||
+      bodyText.includes("you have already submitted an application") ||
+      bodyText.includes("you've already submitted an application") ||
+      bodyText.includes("already applied for this job") ||
+      bodyText.includes("already applied for this role")
+    );
+    const hasViewMyAppsLink = Boolean(
+      document.querySelector('a[href*="my-applications" i], [data-automation-id="viewMyApplications"]') ||
+      Array.from(document.querySelectorAll('a, button')).some(el => /view my applications/i.test((el.textContent || '').trim()))
+    );
+    return hasAppliedText || (hasAppliedText && hasViewMyAppsLink);
+  }).catch(() => false);
+}
+
 // ─── Pre-scan page & modal elements to detect gateway state ────────────────
 export async function prescanGatewayElements(page) {
   return await page.evaluate(() => {
     const modal = document.querySelector('[role="dialog"], .modal, [data-automation-id*="modal"], [data-automation-id*="dialog"]');
     const root = modal || document;
+
+    const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
+    const hasAlreadyApplied = (
+      bodyText.includes("you've already applied for this job") ||
+      bodyText.includes("you have already applied for this job") ||
+      bodyText.includes("already applied for this job") ||
+      Boolean(document.querySelector('a[href*="my-applications" i], [data-automation-id="viewMyApplications"]'))
+    );
+
+    const hasJobExpired = (
+      bodyText.includes("the page you are looking for doesn't exist") ||
+      bodyText.includes("page you are looking for doesn't exist") ||
+      bodyText.includes("this job is no longer available") ||
+      bodyText.includes("this job has expired") ||
+      bodyText.includes("job posting has expired") ||
+      bodyText.includes("position has been filled") ||
+      bodyText.includes("we couldn't find the page") ||
+      (Boolean(document.querySelector('button[data-automation-id="searchForJobs"], a[data-automation-id="searchForJobs"]')) && !document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i]'))
+    );
 
     const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]), textarea'));
     const buttons = Array.from(root.querySelectorAll('button, a, [role="button"]'));
@@ -566,6 +611,8 @@ export async function prescanGatewayElements(page) {
       hasSignInUnderCreateAccount,
       hasForgotPasswordBtn,
       hasResetPasswordBtn,
+      hasAlreadyApplied,
+      hasJobExpired,
     };
   }).catch(() => ({}));
 }
