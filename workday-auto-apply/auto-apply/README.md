@@ -2,7 +2,7 @@
 
 **Autonomous Workday job application engine.** Supply Apply Wizz client data (API + local YAML), resume PDFs, and job URLs. The bot logs into Workday, scans each wizard page from the live DOM, resolves every question by **intent + verified evidence** (never keyword guessing), fills controls through Playwright, verifies acceptance, and advances until Review → Submit.
 
-Built on [Playwright](https://playwright.dev). **Workday only** — no Greenhouse, Lever, Ashby, or other ATS logic.
+Built on [Playwright](https://playwright.dev). **Workday only** —
 
 ```bash
 cd workday-auto-apply/auto-apply

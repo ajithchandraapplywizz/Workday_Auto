@@ -3208,10 +3208,24 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
     // Handle Workday multi-step wizard
     if (ats === 'workday') {
+      let effAuthEmail = String(workdayEmail || profile?.personal?.company_email || profile?.personal?.email || profile?.email || '').trim();
+      let effAuthPassword = String(workdayPassword || profile?.workday_password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789').trim();
+
+      if (!effAuthEmail && (profile?._applyWizzId || profile?.applywizz_id)) {
+        const awId = String(profile._applyWizzId || profile.applywizz_id).trim();
+        const rawFirst = profile?.personal?.first_name || '';
+        const rawLast = profile?.personal?.last_name || '';
+        const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || awId.toLowerCase().replace(/[^a-z0-9]/g, '');
+        effAuthEmail = `${rawName}@applywizard.ai`;
+      }
+      if (!effAuthEmail && process.env.WORKDAY_DEFAULT_USERNAME) {
+        effAuthEmail = String(process.env.WORKDAY_DEFAULT_USERNAME).trim();
+      }
+
       if (!await isWorkdayWizardVisible(page)) {
         const wdOk = await handleWorkday(page, {
-          email: workdayEmail,
-          password: workdayPassword,
+          email: effAuthEmail,
+          password: effAuthPassword,
           mode,
           profile,
         });
@@ -3289,8 +3303,8 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         }
         if (!await isWorkdayWizardVisible(page)) {
           const wdRetry = await handleWorkday(page, {
-            email: workdayEmail,
-            password: workdayPassword,
+            email: effAuthEmail,
+            password: effAuthPassword,
             mode,
             profile,
           });

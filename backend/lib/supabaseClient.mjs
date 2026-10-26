@@ -236,9 +236,22 @@ export async function upsertQaBankAnswer({
 
 export async function loadSupabaseClientSnapshot(applywizzId) {
   if (!isSupabaseConfigured() || !applywizzId) return null;
+  const rawId = String(applywizzId).trim();
+  const cleanId = rawId.toUpperCase();
+  const numOnly = rawId.replace(/\D/g, '');
+  const orParts = [
+    `applywizz_id.eq.${encode(rawId)}`,
+    `applywizz_id.eq.${encode(cleanId)}`,
+    `applywizz_id.ilike.${encode(rawId)}`,
+  ];
+  if (numOnly) {
+    orParts.push(`applywizz_id.eq.AWL-${encode(numOnly)}`);
+    orParts.push(`applywizz_id.eq.${encode(numOnly)}`);
+  }
+  const query = `?or=(${Array.from(new Set(orParts)).join(',')})&select=*&limit=1`;
   const [clients, answers] = await Promise.all([
-    request('clients', { query: `?applywizz_id=eq.${encode(applywizzId)}&select=*&limit=1` }),
-    loadSupabaseAnswers(applywizzId),
+    request('clients', { query }),
+    loadSupabaseAnswers(rawId),
   ]);
   const client = clients?.[0] || null;
   if (!client) return null;

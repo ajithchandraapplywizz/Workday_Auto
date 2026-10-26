@@ -107,11 +107,18 @@ export async function updateJobDistributionWithCheck({
   if (!distributionId) return { success: false, error: new Error('No distributionId provided') };
   let lastErr = null;
 
+  // Sanitize patch: job_distributions does NOT have failure_reason column
+  const cleanPatch = { ...patch };
+  if (!cleanPatch.error_message && cleanPatch.failure_reason) {
+    cleanPatch.error_message = cleanPatch.failure_reason;
+  }
+  delete cleanPatch.failure_reason;
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { data, error } = await supabase
         .from('job_distributions')
-        .update(patch)
+        .update(cleanPatch)
         .eq('id', distributionId)
         .select('*');
 
@@ -594,7 +601,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             status: 'failed',
             error_message: expiredReason,
             stopped_at_step: 'Job link expired',
-            failure_reason: expiredReason,
             application_submitted_screenshot_url: expiredShot,
             screenshot_path: expiredShot,
             updated_at: now,
@@ -704,7 +710,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             status: 'failed',
             error_message: errMsg,
             stopped_at_step: failedStep,
-            failure_reason: errMsg,
             application_submitted_screenshot_url: failShot,
             screenshot_path: failShot,
             updated_at: now,
@@ -814,7 +819,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           error_message: catchErr,
           stopped_at_step: catchStep,
-          failure_reason: catchErr,
           application_submitted_screenshot_url: catchShot,
           screenshot_path: catchShot,
           updated_at: now,

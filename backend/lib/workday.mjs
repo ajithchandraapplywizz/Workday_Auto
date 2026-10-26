@@ -841,6 +841,39 @@ export async function isWorkdaySignInPage(page) {
 
 // ─── Full Workday flow ──────────────────────────────────────────────────────
 export async function handleWorkday(page, { email, password, mode = 'signin', profile = null } = {}) {
+  let effEmail = String(email || '').trim();
+  let effPassword = String(password || '').trim();
+
+  if (!effEmail && profile) {
+    effEmail = String(
+      profile.personal?.company_email ||
+      profile.company_email ||
+      profile.personal?.email ||
+      profile.email ||
+      profile.workday_email ||
+      ''
+    ).trim();
+    if (!effEmail && (profile._applyWizzId || profile.applywizz_id)) {
+      const awId = String(profile._applyWizzId || profile.applywizz_id).trim();
+      const rawFirst = profile.personal?.first_name || '';
+      const rawLast = profile.personal?.last_name || '';
+      const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || awId.toLowerCase().replace(/[^a-z0-9]/g, '');
+      effEmail = `${rawName}@applywizard.ai`;
+    }
+  }
+  if (!effEmail && process.env.WORKDAY_DEFAULT_USERNAME) {
+    effEmail = String(process.env.WORKDAY_DEFAULT_USERNAME).trim();
+  }
+
+  if (!effPassword) {
+    effPassword = String(
+      profile?.workday_password ||
+      profile?.password ||
+      process.env.WORKDAY_PASSWORD ||
+      'Applywizz@2026789'
+    ).trim();
+  }
+
   if (await isWorkdayJobPageMissing(page)) {
     console.log('   ❌ [WorkdayBot] Job link expired detected in handleWorkday ("The page you are looking for doesn\'t exist").');
     return 'job_expired';
@@ -914,9 +947,9 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
   //        if account already existed (_accountAlreadyExists) → Forgot Password → continue
   //        if fresh account created → verify + login normally
   if (mode === 'signin') {
-    if (email && password) {
-      console.log(`   Logging in to Workday as ${email}...`);
-      const loginResult = await workdayLogin(page, email, password);
+    if (effEmail && effPassword) {
+      console.log(`   Logging in to Workday as ${effEmail}...`);
+      const loginResult = await workdayLogin(page, effEmail, effPassword);
 
       if (loginResult === true) {
         return finishSuccessfulLogin(page, mode, profile);
@@ -930,8 +963,8 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         console.log('   📩 Workday reports account requires email verification. Resolving via Zoho Mail Reader...');
         const company = extractWorkdayCompanyName(page.url());
         const verified = await resolveWorkdayVerification(page, {
-          email,
-          password,
+          email: effEmail,
+          password: effPassword,
           company,
           startTime: Date.now() - 300000,
         }).catch((err) => {
@@ -951,7 +984,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         if (verified?.success) {
           console.log('   ✅ Email verification resolved! Logging in...');
           await handleAdaptiveGateway(page, 'signin');
-          const relogin = await workdayLogin(page, email, password);
+          const relogin = await workdayLogin(page, effEmail, effPassword);
           if (relogin === true) {
             return finishSuccessfulLogin(page, mode, profile);
           }
@@ -966,8 +999,8 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
       // This guarantees we never run Forgot Password on a tenant where the account doesn't exist yet.
       console.log(`   ℹ️  Login failed (result="${loginResult}") — running Create Account first to ensure account exists on this tenant, then will use Forgot Password if needed...`);
       return fallbackCreateAccountAndLogin(page, {
-        email,
-        password,
+        email: effEmail,
+        password: effPassword,
         mode,
         profile,
       });
@@ -978,9 +1011,9 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
   // Mode: "signup" -> call workdayCreateAccount() then workdayLogin()
   if (mode === 'signup') {
-    if (email) {
-      console.log(`   Creating new Workday account for ${email}...`);
-      const newPassword = await workdayCreateAccount(page, email, password);
+    if (effEmail) {
+      console.log(`   Creating new Workday account for ${effEmail}...`);
+      const newPassword = await workdayCreateAccount(page, effEmail, effPassword);
       if (newPassword) {
         console.log('   Checking page state after account creation...');
         await page.waitForTimeout(3000);
@@ -996,7 +1029,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         console.log(`   ${isVerif ? '📩 Workday account created, tenant requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
         const company = extractWorkdayCompanyName(page.url());
         const verified = await resolveWorkdayVerification(page, {
-          email,
+          email: effEmail,
           company,
           startTime: page._lastRegistrationTime || (Date.now() - 30000),
           timeoutMs: isVerif ? 60000 : 35000,
