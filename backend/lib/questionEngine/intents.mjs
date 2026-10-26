@@ -125,6 +125,9 @@ export function classifyQuestionIntent(label = '', field = {}) {
   }
   if (isSpecificManagerOrLocationQuestion(text)) return 'location_preference';
 
+  if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(text)) {
+    return 'referral_source';
+  }
   if (isMinimumAgeQuestion(text)) return 'minimum_age';
   if (isProceedQuestion(text)) return 'proceed_confirmation';
   if (isGenericTotalYearsQuestion(text)) return 'years_experience';

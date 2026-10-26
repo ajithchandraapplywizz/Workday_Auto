@@ -95,6 +95,11 @@ export default function DeveloperDashboard() {
     return 'Today';
   }, [timeframe]);
 
+  // Active states for the two separate triggers
+  const isScanActive = Boolean(botStatus.isScanning || (botStatus.isRunning && !botStatus.isSubmitting && botStatus.stage !== 'submitting'));
+  const isSubmitActive = Boolean(botStatus.isSubmitting || botStatus.stage === 'submitting');
+  const isAnyPipelineActive = isScanActive || isSubmitActive;
+
   // Periodic Backend Ping to check connectivity
   useEffect(() => {
     let isMounted = true;
@@ -108,11 +113,14 @@ export default function DeveloperDashboard() {
       }
     }
     checkBackend();
-    const interval = setInterval(checkBackend, 8000);
-    return () => { isMounted = false; clearInterval(interval); };
-  }, [backendUrl]);
+    const interval = isAnyPipelineActive ? setInterval(checkBackend, 10000) : null;
+    return () => {
+      isMounted = false;
+      if (interval) clearInterval(interval);
+    };
+  }, [backendUrl, isAnyPipelineActive]);
 
-  // Live polling for Batch Worker Logs when Worker Logs tab is active
+  // Live polling for Batch Worker Logs when Worker Logs tab is active AND a pipeline is active
   useEffect(() => {
     if (activeTab !== 'Worker Logs') return;
     let isMounted = true;
@@ -126,13 +134,16 @@ export default function DeveloperDashboard() {
     // Immediate initial fetch
     pollBatchLogs();
 
-    // Continuous polling every 2.5s while viewing logs
+    // If both toggles are idle/stopped, do NOT fire continuous background network logs
+    if (!isAnyPipelineActive) return;
+
+    // Continuous polling every 2.5s only while an active pipeline is running
     const interval = setInterval(pollBatchLogs, 2500);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activeTab]);
+  }, [activeTab, isAnyPipelineActive]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -228,10 +239,10 @@ export default function DeveloperDashboard() {
 
     loadData(false);
 
-    // Dynamic 3s interval for smooth active polling without flicker
-    const pollInterval = setInterval(() => {
+    // Only poll metrics if an active pipeline is running; otherwise rely on Supabase Realtime WebSocket push
+    const pollInterval = isAnyPipelineActive ? setInterval(() => {
       loadData(true);
-    }, 3000);
+    }, 4000) : null;
 
     // Supabase Realtime channel for instant push updates
     const channel = supabase
@@ -247,10 +258,10 @@ export default function DeveloperDashboard() {
 
     return () => {
       isMounted = false;
-      clearInterval(pollInterval);
+      if (pollInterval) clearInterval(pollInterval);
       supabase.removeChannel(channel);
     };
-  }, [date, timeframe]);
+  }, [date, timeframe, isAnyPipelineActive]);
 
   // Filtered runs for Runs tab
   const filteredRuns = useMemo(() => {
@@ -521,10 +532,6 @@ export default function DeveloperDashboard() {
   const getHealth = (id) => {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
-
-  // Active states for the two separate triggers
-  const isScanActive = Boolean(botStatus.isScanning || (botStatus.isRunning && !botStatus.isSubmitting && botStatus.stage !== 'submitting'));
-  const isSubmitActive = Boolean(botStatus.isSubmitting || botStatus.stage === 'submitting');
 
   // Handle triggering autonomous 2-worker pipeline (Scan & Resolve)
   // If Submissions is active, automatically terminate it and switch cleanly

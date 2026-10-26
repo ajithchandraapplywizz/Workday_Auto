@@ -35,6 +35,7 @@ import {
   isSupabaseConfigured,
   upsertSupabaseAnswer,
   recordSupabaseAnswerInMemory,
+  getScannedJob,
 } from './supabaseClient.mjs';
 import { explicitSalary } from './questionEngine/profileFacts.mjs';
 import {
@@ -62,6 +63,79 @@ function fieldLabel(field = {}, fallback = '') {
 
 function isAvailabilityTimingQuestion(label = '') {
   return /available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(label);
+}
+
+export function isReferralSourceQuestion(label = '') {
+  return /how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(String(label || ''));
+}
+
+export function pickDeterministicSourceOption(options = []) {
+  const list = (options || []).map((o) => String(o?.text || o || '').trim()).filter(Boolean);
+  if (!list.length) return 'LinkedIn';
+
+  const findOpt = (regex) => list.find((o) => regex.test(o));
+
+  return findOpt(/^linkedin\b/i)
+    || findOpt(/linkedin/i)
+    || findOpt(/company\s*website|corporate\s*website|careers?\s*(page|site|portal)/i)
+    || findOpt(/external\s*career\s*(sites?|sources?|portal|web)/i)
+    || findOpt(/job\s*boards?/i)
+    || findOpt(/^indeed\b/i)
+    || findOpt(/^glassdoor\b/i)
+    || findOpt(/internet|online|website/i)
+    || findOpt(/other/i)
+    || list[0];
+}
+
+export function pickDeterministicRaceOption(requestedRace = '', options = []) {
+  const list = (options || []).map((o) => String(o?.text || o || '').trim()).filter(Boolean);
+  const target = String(requestedRace || 'Asian').trim().toLowerCase();
+
+  if (list.length > 0) {
+    if (target) {
+      const exactOrIncludes = list.find((o) => o.toLowerCase() === target || o.toLowerCase().includes(target));
+      if (exactOrIncludes) return exactOrIncludes;
+    }
+    const asian = list.find((o) => /asian/i.test(o));
+    if (asian) return asian;
+    const decline = list.find((o) => /decline|prefer not|choose not|not wish|two or more/i.test(o));
+    if (decline) return decline;
+    return list[0];
+  }
+  return requestedRace || 'Asian';
+}
+
+export async function lookupScannedJobAnswer(label, profile = {}, opts = {}) {
+  const jobUrl = opts.jobUrl || profile?._jobUrl || profile?._canonicalJobUrl || '';
+  if (!jobUrl) return null;
+
+  if (isPersonalIdentityQuestion(label)) return null;
+  const n = normalizeLabel(label);
+  if (/^(first|last|middle|full|legal)?\s*name$|^email|^phone|^address|postal|zip|^dob\b|date\s*of\s*birth|resume/i.test(n)) {
+    return null;
+  }
+
+  try {
+    let resolvedAnswers = profile?._scannedJobAnswers || null;
+    if (!resolvedAnswers) {
+      const scannedJob = await getScannedJob(jobUrl);
+      if (scannedJob && Array.isArray(scannedJob.resolved_answers)) {
+        resolvedAnswers = scannedJob.resolved_answers;
+        if (profile) profile._scannedJobAnswers = resolvedAnswers;
+      }
+    }
+
+    if (Array.isArray(resolvedAnswers) && resolvedAnswers.length > 0) {
+      const hit = resolvedAnswers.find((item) => {
+        const itemQ = item.question || item.question_normalized || item.label || '';
+        return normalizeLabel(itemQ) === n && item.answer != null && String(item.answer).trim() !== '';
+      });
+      if (hit && hit.answer) {
+        return { answer: String(hit.answer), source: 'scanned_jobs_shared', tier: 1 };
+      }
+    }
+  } catch {}
+  return null;
 }
 
 /**
@@ -500,6 +574,53 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
+  // 1d. Universal General Question: "How Did You Hear About Us?" / Referral Source (NEVER LLM)
+  if (isReferralSourceQuestion(label)) {
+    const fromScannedJob = await lookupScannedJobAnswer(label, profile, opts);
+    let chosenSource = fromScannedJob?.answer || null;
+    if (chosenSource && options.length > 0) {
+      const match = options.find((o) => o.toLowerCase().includes(chosenSource.toLowerCase()));
+      if (match) chosenSource = match;
+    }
+    if (!chosenSource) {
+      chosenSource = pickDeterministicSourceOption(options);
+    }
+    const hit = finish(chosenSource, fromScannedJob ? 'scanned_jobs_shared' : 'deterministic_common_source', 1);
+    if (hit) {
+      console.log(`    📢 [Tier 1 Referral Source] "${label.slice(0, 55)}" ← "${hit.answer}" (${hit.source})`);
+      profile?._onLog?.(currentStep, `[Tier 1 Referral Source] "${label.slice(0, 50)}" ← "${hit.answer}"`);
+      return hit;
+    }
+  }
+
+  // 1e. Protected EEO Demographic Question: Race / Ethnicity (NEVER LLM)
+  if (/\b(race|ethnicity)\b/i.test(label) && !/hispanic|latino/i.test(label)) {
+    const clientRace = profile?.eeo?.race || profileFactForLabel(label, profile);
+    let chosenRace = clientRace;
+    if (!chosenRace) {
+      const fromScannedJob = await lookupScannedJobAnswer(label, profile, opts);
+      if (fromScannedJob?.answer) chosenRace = fromScannedJob.answer;
+    }
+    chosenRace = pickDeterministicRaceOption(chosenRace || 'Asian', options);
+    const hit = finish(chosenRace, clientRace ? 'client_profile_race' : 'deterministic_common_race', 1);
+    if (hit) {
+      console.log(`    🤝 [Tier 1 EEO Race/Ethnicity] "${label.slice(0, 55)}" ← "${hit.answer}" (${hit.source})`);
+      profile?._onLog?.(currentStep, `[Tier 1 Demographic Match] "${label.slice(0, 50)}" ← "${hit.answer}"`);
+      return hit;
+    }
+  }
+
+  // 1f. Shared Non-Personal Answers from scanned_jobs (Lead Blueprint Candidate)
+  const fromScannedJob = await lookupScannedJobAnswer(label, profile, opts);
+  if (fromScannedJob?.answer) {
+    const hit = finish(fromScannedJob.answer, 'scanned_jobs_shared', 1);
+    if (hit) {
+      console.log(`    📋 [Tier 1 scanned_jobs Shared] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Blueprint Shared] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
+      return hit;
+    }
+  }
+
   const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '';
   const tenant = opts.tenant || profile?._tenant || '';
 
@@ -684,6 +805,18 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
 
   // ─── TIER 6: Semantic Analysis & LLM AI with Live Playwright DOM Context ───────────────────
+  // Referral source and demographic questions must NEVER enter LLM tier
+  if (isReferralSourceQuestion(label)) {
+    const fallbackSource = pickDeterministicSourceOption(options);
+    const hit = finish(fallbackSource, 'deterministic_common_source', 1);
+    if (hit) return hit;
+  }
+  if (/\b(race|ethnicity)\b/i.test(label) && !/hispanic|latino/i.test(label)) {
+    const fallbackRace = pickDeterministicRaceOption(profile?.eeo?.race || 'Asian', options);
+    const hit = finish(fallbackRace, 'deterministic_common_race', 1);
+    if (hit) return hit;
+  }
+
   // (4) Tier 4 LLM must never answer work-auth, sponsorship, or EEO questions.
   const isProtectedCompliance = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo/i.test(label);
   if (isProtectedCompliance) {

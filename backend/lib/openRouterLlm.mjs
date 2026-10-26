@@ -101,7 +101,13 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
   const candidateModels = Array.from(new Set([primaryModel, ...OPENROUTER_FALLBACK_MODELS]));
 
   let lastError = null;
-  for (const model of candidateModels) {
+    const safeMessages = (messages || []).map((m) => {
+      if (typeof m?.content === 'string' && m.content.length > 5000) {
+        return { ...m, content: m.content.slice(0, 5000) + '\n...[context clamped]' };
+      }
+      return m;
+    });
+
     try {
       const res = await httpsJsonWithRetry({
         url: OPENROUTER_URL,
@@ -117,13 +123,17 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
           model,
           temperature,
           max_tokens,
-          messages,
+          messages: safeMessages,
         },
       }, { attempts: 2, label: `OpenRouter:${model}` });
 
       if (!res.ok) {
         const errText = String(res.text || '').slice(0, 180);
         lastError = new Error(`OpenRouter [${model}] ${res.status}: ${errText}`);
+        if (res.status === 402) {
+          console.log(`    ⚠️  OpenRouter hit 402 (payment/credits required) — returning null for safe deterministic resolution`);
+          return { choices: [] };
+        }
         if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 404) {
           console.log(`    ⚠️  OpenRouter model ${model} hit ${res.status} — trying fallback model...`);
           continue;
@@ -1088,6 +1098,26 @@ export async function pickNearestSelectOption({
     return null;
   }
 
+  // Referral source / "How Did You Hear About Us?" MUST NEVER use LLM
+  if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(question) || /how\s*did\s*you\s*hear|source/i.test(qNorm)) {
+    const { pickDeterministicSourceOption } = await import('./clientAnswer.mjs');
+    const sourcePick = pickDeterministicSourceOption(list);
+    if (sourcePick) {
+      console.log(`    📢 Nearest-select: Referral source auto-picked "${sourcePick}" without LLM`);
+      return sourcePick;
+    }
+  }
+
+  // Race / Ethnicity MUST NEVER use LLM
+  if (/\b(race|ethnicity)\b/i.test(question) && !/hispanic|latino/i.test(question)) {
+    const { pickDeterministicRaceOption } = await import('./clientAnswer.mjs');
+    const racePick = pickDeterministicRaceOption(profile?.eeo?.race || 'Asian', list);
+    if (racePick) {
+      console.log(`    🤝 Nearest-select: EEO race auto-picked "${racePick}" without LLM`);
+      return racePick;
+    }
+  }
+
   if (isSalaryQuestion(question)) {
     const picked = pickCompensationFromOptions(list, profile, preferred);
     if (picked) return picked;
@@ -1544,7 +1574,12 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
  * @param {object} [opts]
  */
 export async function analyzeUnknownQuestionsBatch(questions = [], profile = {}, opts = {}) {
-  const rows = (questions || []).filter((q) => q?.questionId && q?.label);
+  const rows = (questions || []).filter((q) => {
+    if (!q?.questionId || !q?.label) return false;
+    if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(q.label)) return false;
+    if (/\b(race|ethnicity)\b/i.test(q.label) && !/hispanic|latino/i.test(q.label)) return false;
+    return true;
+  });
   if (!rows.length) return [];
   if (!isOpenRouterEnabled()) {
     return rows.map((q) => ({
@@ -1561,6 +1596,18 @@ export async function analyzeUnknownQuestionsBatch(questions = [], profile = {},
     resumePath: opts.resumePath || profile?._resumePath,
   });
   const applicant = await loadProfileSnapshot(profile);
+  const compactApplicant = {
+    first_name: applicant?.first_name || '',
+    last_name: applicant?.last_name || '',
+    degree: applicant?.degree || applicant?.highest_education || '',
+    skills: (applicant?.skills || []).slice(0, 25),
+    years_experience: applicant?.years_experience || 0,
+    current_title: applicant?.current_title || '',
+    current_company: applicant?.current_company || '',
+    authorized_us: applicant?.authorized_us || 'Yes',
+    sponsorship_needed: applicant?.sponsorship_needed || 'No',
+    willing_to_relocate: applicant?.willing_to_relocate || 'Yes',
+  };
   const dateContext = buildLlmDateContext();
 
   try {
@@ -1589,8 +1636,8 @@ Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0.85,"
         {
           role: 'user',
           content: JSON.stringify({
-            facts: applicant,
-            brief: String(profile?._llmProfileBrief || '').slice(0, 2000),
+            facts: compactApplicant,
+            brief: String(profile?._llmProfileBrief || '').slice(0, 1500),
             calendar_context: dateContext,
             questions: rows.map((q) => {
               const el = q.elementType || q.answerType || '';
