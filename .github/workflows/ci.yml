@@ -1,0 +1,112 @@
+name: CI / CD Integrity Pipeline
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - 'feat/**'
+      - 'feature/**'
+      - 'fix/**'
+  pull_request:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend-validation:
+    name: Backend Syntax & Unit Tests
+    runs-on: ubuntu-latest
+    env:
+      NODE_ENV: test
+      SUPABASE_URL: https://dummy.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: dummy-key-for-ci-check
+      OPENROUTER_API_KEY: dummy-key
+      SERVICE_ROLE: main
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Validate JavaScript Syntax (Critical Entry Points & Libs)
+        run: |
+          echo "Checking JavaScript syntax across critical modules..."
+          node --check index.js
+          node --check backend/cli.mjs
+          node --check backend/scripts/queue_daemon.mjs
+          node --check backend/config/pipelineConfig.mjs
+          node --check backend/lib/workday.mjs
+          node --check backend/lib/discovery.mjs
+          node --check backend/lib/engine.mjs
+          node --check backend/lib/workerPool.mjs
+          node --check backend/lib/resolvingWorkerPool.mjs
+          node --check backend/lib/submissionWorkerPool.mjs
+          node --check backend/lib/supabaseClient.mjs
+          node --check backend/lib/dashboardStats.mjs
+          node --check backend/lib/dashboardApplications.mjs
+          echo "✓ All core backend modules passed syntax check."
+
+      - name: Run Backend Unit Tests
+        run: |
+          echo "Executing test suite..."
+          npm test
+
+  frontend-validation:
+    name: Frontend React / Vite Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+          cache-dependency-path: frontend/package.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Build Frontend (Vite Production Distribution)
+        env:
+          VITE_SUPABASE_URL: https://dummy.supabase.co
+          VITE_SUPABASE_ANON_KEY: dummy-anon-key
+          VITE_BACKEND_URL: http://localhost:8080
+        run: |
+          echo "Compiling and bundling Vite production build..."
+          npm run build
+          echo "✓ Frontend built successfully without errors."
+
+  container-validation:
+    name: Dockerfiles Build Check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Verify Frontend Dockerfile Build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          tags: workday-frontend:test

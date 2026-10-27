@@ -63,9 +63,9 @@ test-tele.js
 **/test-tele.js
 *scratch*
 
-# GitHub Actions workflows (kept local for now)
-.github/
-**/.github/
+# GitHub Actions workflows
+!.github/
+!.github/**
 
 # OS & Logs
 .DS_Store
@@ -91,6 +91,8 @@ workday-cascading-dropdown-master-prompt.md
 !**/*.example.yml
 !**/*.example.yaml
 !render.yaml
+!.github/**/*.yml
+!.github/**/*.yaml
 
 # Generated reports
 reports/
