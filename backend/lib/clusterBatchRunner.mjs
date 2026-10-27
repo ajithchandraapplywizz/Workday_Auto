@@ -1162,16 +1162,11 @@ export async function runClusterBatchRunner({
 } = {}) {
   const startTime = Date.now();
 
-  // Enforce scan_run_id requirement: Scan must REFUSE to start without it!
+  // Ensure scan_run_id is set — auto-generate fallback if not provided
   if (!scanRunId) {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    scanRunId = bc?.scan_run_id || null;
-  }
-
-  if (!scanRunId) {
-    console.error(`❌ [SCAN REFUSAL] Refusing to start scan: no scan_run_id present in bot_control!`);
-    return { success: false, refused: true, error: 'Scan refused: missing scan_run_id in bot_control' };
+    scanRunId = bc?.scan_run_id || `scan_run_${Date.now()}`;
   }
 
   console.log(`\n${'═'.repeat(78)}`);
@@ -1192,12 +1187,12 @@ export async function runClusterBatchRunner({
 
   if (!topClusters.length) {
     console.log(`❌ No tasks found in batch_job_queue! Setting scanning workers to idle.`);
-    const workerLimit = Number(workers) || 2;
+    const workerLimit = Number(workers) || 3;
     for (let slot = 1; slot <= workerLimit; slot++) {
-      await updateWorkerStatus(`worker_${slot}`, {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: `Worker ${slot}`,
+        bot_name: `Scanning Worker ${slot}`,
         current_application_id: 'Ready (0 pending queue items)',
       }).catch(() => { });
     }
@@ -1205,12 +1200,12 @@ export async function runClusterBatchRunner({
   }
 
   // Set active scanning workers to in-flight in Supabase worker_status
-  const activeCount = Math.min(Number(workers) || 2, topClusters.length);
+  const activeCount = Math.min(Number(workers) || 3, topClusters.length);
   for (let slot = 1; slot <= activeCount; slot++) {
-    await updateWorkerStatus(`worker_${slot}`, {
+    await updateWorkerStatus(`scanning_worker_${slot}`, {
       state: 'in_flight',
       stage: 'scanning',
-      bot_name: `Worker ${slot}`,
+      bot_name: `Scanning Worker ${slot}`,
       current_application_id: 'Clustering & preparing link run...',
     }).catch(() => { });
   }
@@ -1228,7 +1223,7 @@ export async function runClusterBatchRunner({
   console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
 
   // Step 2: Launch exactly N Workers in Parallel (concurrency pool, strictly N at a time)
-  const concurrency = Math.min(Number(workers) || 2, topClusters.length);
+  const concurrency = Math.min(Number(workers) || 3, topClusters.length);
   console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
 
   let clusterIndex = 0;
@@ -1238,7 +1233,7 @@ export async function runClusterBatchRunner({
   const clusterResults = [];
 
   async function workerLoop(slot) {
-    const workerId = `worker_${slot}`;
+    const workerId = `scanning_worker_${slot}`;
     while (clusterIndex < topClusters.length) {
       if (await isClusterStopRequested()) {
         console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);
@@ -1252,7 +1247,7 @@ export async function runClusterBatchRunner({
         state: 'in_flight',
         current_application_id: cluster.jobUrl, // Strictly identify by URL in worker_status
         stage: 'scanning',
-        bot_name: `Worker ${slot}`,
+        bot_name: `Scanning Worker ${slot}`,
       }).catch(() => { });
 
       console.log(`\n▶️ [Worker ${slot}] [Batch #${myIndex + 1}/${topClusters.length}] Assigned Job URL: ${cluster.jobUrl}`);
@@ -1306,7 +1301,7 @@ export async function runClusterBatchRunner({
       state: 'idle',
       current_application_id: null,
       stage: 'scanning',
-      bot_name: `Worker ${slot}`,
+      bot_name: `Scanning Worker ${slot}`,
     }).catch(() => { });
   }
 
@@ -1335,11 +1330,11 @@ export async function runClusterBatchRunner({
 
   // Return all scanning workers to idle
   for (let slot = 1; slot <= 10; slot++) {
-    await updateWorkerStatus(`worker_${slot}`, {
+    await updateWorkerStatus(`scanning_worker_${slot}`, {
       state: 'idle',
       current_application_id: null,
       stage: 'scanning',
-      bot_name: `Worker ${slot}`,
+      bot_name: `Scanning Worker ${slot}`,
     }).catch(() => { });
   }
 

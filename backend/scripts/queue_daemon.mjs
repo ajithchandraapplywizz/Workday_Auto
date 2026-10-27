@@ -24,6 +24,7 @@ import http from 'node:http';
 import '../lib/polyfills.mjs';
 import {
   loadLocalEnvOnce,
+  assertRequiredEnv,
   isSupabaseConfigured,
   updateDaemonCaState,
   updateWorkerStatus,
@@ -68,6 +69,7 @@ import {
 } from '../lib/activeClientsSyncService.mjs';
 
 loadLocalEnvOnce();
+assertRequiredEnv();
 
 if (!isSupabaseConfigured()) {
   console.error('[DAEMON FATAL] Supabase not configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY.');

@@ -36,11 +36,11 @@ import {
   verifyMfaJwt,
 } from './mfaAuth.mjs';
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rltnrnqqmufeeqaodsif.supabase.co';
+const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const JWT_SECRET = process.env.JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'applywizz-presence-jwt-secret-2026';
+const JWT_SECRET = process.env.JWT_SECRET || process.env.AUTH_JWT_SECRET;
 
-const supabase = SUPABASE_KEY
+const supabase = (SUPABASE_URL && SUPABASE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_KEY, {
       auth: { persistSession: false },
     })
@@ -53,6 +53,9 @@ const lastHeartbeatWriteMap = new Map();
  * Sign JWT using HS256
  */
 export function signJwt(payload, expiresInSec = SESSION_MAX_AGE_HOURS * 3600) {
+  if (!JWT_SECRET) {
+    throw new Error('[FATAL SECURITY] JWT_SECRET or AUTH_JWT_SECRET is unset. Cannot sign tokens.');
+  }
   const header = { alg: 'HS256', typ: 'JWT' };
   const now = Math.floor(Date.now() / 1000);
   const fullPayload = { ...payload, iat: now, exp: now + expiresInSec };
@@ -67,6 +70,7 @@ export function signJwt(payload, expiresInSec = SESSION_MAX_AGE_HOURS * 3600) {
  */
 export function verifyJwt(token) {
   if (!token || typeof token !== 'string') return null;
+  if (!JWT_SECRET) return verifyMfaJwt(token);
   const parts = token.split('.');
   if (parts.length !== 3) return null;
   const [b64Header, b64Payload, signature] = parts;
@@ -234,8 +238,15 @@ export async function handleDefaultCodeLogin(req, res, body = {}) {
     }));
   }
 
-  // 2. Default Login Code Check from env var
-  const defaultLoginCode = String(process.env.DEFAULT_LOGIN_CODE || '000000').trim();
+  // 2. Default Login Code Check from env var (strict mode: no hardcoded 000000 fallback)
+  const defaultLoginCode = String(process.env.DEFAULT_LOGIN_CODE || '').trim();
+  if (!defaultLoginCode) {
+    res.writeHead(500, corsHeaders);
+    return res.end(JSON.stringify({
+      success: false,
+      error: 'DEFAULT_LOGIN_CODE is unset on server. Emergency login disabled.',
+    }));
+  }
   if (!code || code !== defaultLoginCode) {
     res.writeHead(401, corsHeaders);
     return res.end(JSON.stringify({

@@ -24,9 +24,9 @@ import { SESSION_MAX_AGE_HOURS, presenceConfig } from './presenceConfig.mjs';
 
 loadLocalEnvOnce();
 
-const SUPABASE_URL = process.env.SUPABASE_URL || 'https://rltnrnqqmufeeqaodsif.supabase.co';
+const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const supabase = SUPABASE_KEY
+const supabase = (SUPABASE_URL && SUPABASE_KEY)
   ? createClient(SUPABASE_URL, SUPABASE_KEY, {
       auth: { persistSession: false },
     })
@@ -96,7 +96,10 @@ async function ensureSchema() {
 
 // ── AES-256-GCM Encryption / Decryption Helpers ──
 function getEncryptionKey() {
-  const rawKey = process.env.AUTH_SECRET_ENC_KEY || 'f6943eaa285bc8acd8fe5cf9bf1e11217f3be5ccb81a757c8feaabf4a4dfdc1c';
+  const rawKey = process.env.AUTH_SECRET_ENC_KEY;
+  if (!rawKey) {
+    throw new Error('[FATAL SECURITY] AUTH_SECRET_ENC_KEY is unset. Server refuses to operate with hardcoded encryption keys.');
+  }
   if (rawKey.length === 64 && /^[0-9a-fA-F]+$/.test(rawKey)) {
     return Buffer.from(rawKey, 'hex');
   }
@@ -133,7 +136,11 @@ export function decryptSecret(cipherText) {
 
 // ── JWT Sign & Verify Helpers ──
 function getJwtSecret() {
-  return process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET || process.env.SUPABASE_SERVICE_ROLE_KEY || 'efeb54b23e09bdc28d146051407a23c82e3fe24caaed19779a3315eca8c1e380';
+  const secret = process.env.AUTH_JWT_SECRET || process.env.JWT_SECRET;
+  if (!secret) {
+    throw new Error('[FATAL SECURITY] AUTH_JWT_SECRET or JWT_SECRET is unset. Server refuses to operate without configured JWT secret.');
+  }
+  return secret;
 }
 
 export function signMfaJwt(payload, expiresInSec = SESSION_MAX_AGE_HOURS * 3600) {
@@ -477,8 +484,8 @@ export async function handleMfaLogin(req, res, body = {}) {
     res.writeHead(403, { 'Content-Type': 'application/json' });
     return res.end(JSON.stringify({ success: false, state: 'not_authorised', error: 'This email is not authorised for this portal' }));
   }
-  const defaultCode = process.env.DEFAULT_LOGIN_CODE || '000000';
-  const isDefaultCode = code === defaultCode || code === '000000';
+  const defaultCode = process.env.DEFAULT_LOGIN_CODE ? String(process.env.DEFAULT_LOGIN_CODE).trim() : null;
+  const isDefaultCode = Boolean(defaultCode && code === defaultCode);
 
   if (isDefaultCode) {
     const nowIso = new Date().toISOString();

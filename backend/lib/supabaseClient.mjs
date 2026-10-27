@@ -26,28 +26,23 @@ export function loadLocalEnvOnce() {
     }
   }
 
-  // Cloud Container Fallback Defaults (prevents crash on Railway/Docker if .env is missing)
-  if (!process.env.SUPABASE_URL) {
-    process.env.SUPABASE_URL = 'https://rltnrnqqmufeeqaodsif.supabase.co';
-  }
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) {
-    process.env.SUPABASE_SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJsdG5ybnFxbXVmZWVxYW9kc2lmIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4ODMyOTU1NSwiZXhwIjoyMTAzOTA1NTU1fQ.eNtTpBT0xWtZzySiR_9OnHZVRxSmHgEZJL_pzvyfGwg';
-  }
-  if (!process.env.DEFAULT_LOGIN_CODE) {
-    process.env.DEFAULT_LOGIN_CODE = '000000';
-  }
-  if (!process.env.AUTH_SECRET_ENC_KEY) {
-    process.env.AUTH_SECRET_ENC_KEY = 'f6943eaa285bc8acd8fe5cf9bf1e11217f3be5ccb81a757c8feaabf4a4dfdc1c';
-  }
-  if (!process.env.AUTH_JWT_SECRET) {
-    process.env.AUTH_JWT_SECRET = 'efeb54b23e09bdc28d146051407a23c82e3fe24caaed19779a3315eca8c1e380';
-  }
-
+  // Fail-fast security: No hardcoded fallback secrets or keys allowed.
+  // Required variables (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, etc.) must come from environment.
   if (!process.env.OPENROUTER_MODEL) {
     process.env.OPENROUTER_MODEL = 'openai/gpt-4o-mini';
   }
   if (!process.env.ZOHO_MAIL_READER_HOST) {
     process.env.ZOHO_MAIL_READER_HOST = 'https://zoho-mail-reader.onrender.com';
+  }
+}
+
+export function assertRequiredEnv() {
+  loadLocalEnvOnce();
+  const missing = [];
+  if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (missing.length > 0) {
+    throw new Error(`[FATAL SECURITY] Missing mandatory environment variables: ${missing.join(', ')}. Refusing to boot.`);
   }
 }
 
@@ -1315,18 +1310,34 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
  * Update worker state in Supabase worker_status table.
  * Strictly 10 shared canonical workers (worker_1 through worker_10).
  */
-const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || Array.from({ length: WORKER_COUNT || 2 }, (_, i) => `worker_${i + 1}`);
+const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || [
+  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
+  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3',
+  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3',
+];
 
 export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
 export const CANONICAL_9_WORKERS = CANONICAL_10_WORKERS; // Backward compatibility alias
 
 const WORKER_STAGE_MAP = {};
-CANONICAL_IDS.forEach((id, i) => {
-  WORKER_STAGE_MAP[id] = { stage: 'idle', botName: `Worker ${i + 1}` };
+CANONICAL_IDS.forEach((id) => {
+  let stage = 'idle';
+  let botName = id;
+  if (id.startsWith('scanning_worker_')) {
+    stage = 'scanning';
+    botName = `Scanning Worker ${id.replace('scanning_worker_', '')}`;
+  } else if (id.startsWith('resolving_worker_')) {
+    stage = 'resolving';
+    botName = `Resolving Worker ${id.replace('resolving_worker_', '')}`;
+  } else if (id.startsWith('submitting_worker_')) {
+    stage = 'submitting';
+    botName = `Submitting Worker ${id.replace('submitting_worker_', '')}`;
+  }
+  WORKER_STAGE_MAP[id] = { stage, botName };
 });
 
 /**
- * Normalizes any worker ID alias to one of the canonical database worker IDs (worker_1 .. worker_N).
+ * Normalizes any worker ID alias to one of the canonical database worker IDs.
  */
 export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
   if (!workerId) return null;
@@ -1335,8 +1346,13 @@ export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
   if (CANONICAL_10_WORKERS.has(cleanId)) return cleanId;
 
   const numMatch = cleanId.match(/\d+/);
-  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), CANONICAL_IDS.length) : 1;
-  return `worker_${num}`;
+  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), 3) : 1;
+
+  if (cleanId.includes('scan') || defaultStage === 'scanning') return `scanning_worker_${num}`;
+  if (cleanId.includes('resolv') || defaultStage === 'resolving') return `resolving_worker_${num}`;
+  if (cleanId.includes('submit') || defaultStage === 'submitting') return `submitting_worker_${num}`;
+
+  return `scanning_worker_${num}`;
 }
 
 /**

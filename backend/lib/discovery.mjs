@@ -718,10 +718,12 @@ export async function clickGatewayCreateAccount(page) {
     await page.waitForTimeout(1500);
   }
 
-  const buttons = await page.$$([
-    '[role="dialog"] button[data-automation-id="createAccountLink"]',
+  const buttons = await page.$([
+    '[role="dialog"] [data-automation-id="createAccountLink"]',
+    '[role="dialog"] [data-automation-id="createAccountTab"]',
     '[role="dialog"] button:has-text("Create Account")',
-    'button[data-automation-id="createAccountLink"]',
+    '[role="dialog"] a:has-text("Create Account")',
+    '[data-automation-id="createAccountLink"]',
     '[data-automation-id="createAccountTab"]',
     'button:has-text("Create Account")',
     'a:has-text("Create Account")',

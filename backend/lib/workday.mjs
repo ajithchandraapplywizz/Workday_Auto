@@ -589,14 +589,23 @@ export async function workdayCreateAccount(page, email, givenPassword) {
     await verifyPwdInput.fill(password);
   }
 
-  const termsCheckbox = await page.$('input[type="checkbox"][data-automation-id*="createAccountCheckbox"], input[type="checkbox"][data-automation-id*="agree"], input[type="checkbox"][name*="agree"], label:has-text("agree") input[type="checkbox"]');
-  if (termsCheckbox) {
-    const isChecked = await termsCheckbox.isChecked().catch(() => false);
-    if (!isChecked) await termsCheckbox.click({ force: true }).catch(() => termsCheckbox.evaluate(el => el.click()));
+  // Check all consent/terms checkboxes on Create Account form so submit button is enabled
+  const allCheckboxes = await page.$('input[type="checkbox"]');
+  for (const cb of allCheckboxes) {
+    try {
+      if (await cb.isVisible().catch(() => false)) {
+        const isChecked = await cb.isChecked().catch(() => false);
+        if (!isChecked) {
+          await cb.click({ force: true }).catch(() => cb.evaluate(el => el.click()));
+          await page.waitForTimeout(150);
+        }
+      }
+    } catch {}
   }
 
-  const submitBtns = await page.$$([
+  const submitBtns = await page.$([
     'button[data-automation-id="createAccountSubmitButton"]',
+    '[data-automation-id="createAccountSubmitButton"]',
     'button:has-text("Create Account")',
     'button[type="submit"]'
   ].join(', '));
@@ -785,34 +794,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         }
       }
 
-      // Case 2: Wrong password or account locked on existing account -> run Forgot Password immediately
-      if (loginResult === 'wrong-password-or-locked' || loginResult === 'locked' || await detectWrongPasswordOrLocked(page)) {
-        console.log('   🔐 Invalid password or account locked on existing account — launching automated Forgot Password recovery via Zoho Mail...');
-        const forgotResult = await executeWorkdayForgotPassword(page, {
-          email,
-          password: effectivePassword,
-          company,
-          timeoutMs: 55000,
-        });
-
-        if (forgotResult?.reason === 'mailbox_not_connected') {
-          return 'mailbox_not_connected';
-        }
-
-        if (forgotResult?.success) {
-          if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-          await handleAdaptiveGateway(page, 'signin');
-          const postForgotLogin = await workdayLogin(page, email, effectivePassword);
-          if (postForgotLogin === true || await isWorkdayWizardVisible(page)) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-        }
-      }
-
-      // Case 3: Account not found / needs signup / unknown -> run Create Account fallback
-      console.log(`   ℹ️  Login failed (result="${loginResult}") — running Create Account to register on this tenant...`);
+      // Login did not succeed (Workday returns "Invalid user name or password" for both non-existent accounts and wrong passwords).
+      // Attempt Create Account FIRST: If account is new on this tenant (most common), it registers cleanly.
+      // If account already exists, Workday explicitly notifies us, and fallbackCreateAccountAndLogin automatically triggers Forgot Password!
+      console.log(`   ℹ️  Login failed (result="${loginResult}") — attempting Create Account fallback for this Workday tenant...`);
       return fallbackCreateAccountAndLogin(page, {
         email,
         password: effectivePassword,

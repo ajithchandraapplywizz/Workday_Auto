@@ -26,7 +26,7 @@ export async function askLlmFallback(candidateId, tenant, intentKey, field, live
   }
 
   const anthropic = new Anthropic({
-    apiKey: process.env.ANTHROPIC_API_KEY || process.env.LLM_API_KEY,
+    apiKey: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.LLM_API_KEY,
   });
 
   const prompt = `You are a rigid AI assistant filling out a job application.
