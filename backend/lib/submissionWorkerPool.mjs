@@ -259,10 +259,9 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
         .update({
           status: 'ready_for_review',
           status_actor: 'reaper',
-          possibly_submitted: true,
           worker_id: null,
           worker_leased_at: null,
-          error_message: `Worker lease expired (> ${timeoutMinutes}m). Returned to ready_for_review with possibly_submitted=true.`,
+          error_message: `Worker lease expired (> ${timeoutMinutes}m). Returned to ready_for_review.`,
           updated_at: now,
         })
         .eq('id', exp.id)

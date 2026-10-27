@@ -142,7 +142,7 @@ console.error = function (...args) {
   routeLogEntry('error', args);
 };
 
-const ALL_CANONICAL_WORKERS = PIPELINE_CONFIG.allWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+const ALL_CANONICAL_WORKERS = PIPELINE_CONFIG.allWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
 
 /**
  * Reset all 10 workers in worker_status to idle
@@ -372,27 +372,27 @@ export async function stopAutonomousPool() {
 async function runStage1Scanning() {
   currentStage = 'scanning';
 
-  // Ensure scan_run_id exists in bot_control — refuse to start without it!
+  // Ensure scan_run_id exists in bot_control — auto-generate fallback if not provided
   const bc = await getBotControl().catch(() => null);
+  const scanRunId = bc?.scan_run_id || `scan_run_${Date.now()}`;
   if (!bc?.scan_run_id) {
-    console.error(`❌ [SCAN REFUSAL] Refusing to start Stage 1 Scanning: no scan_run_id in bot_control!`);
-    return;
+    console.log(`ℹ️ [DAEMON] bot_control has no scan_run_id — auto-generated fallback: ${scanRunId}`);
   }
 
   await syncBotControlState({
     stage: 'scanning',
     is_running: true,
-    current_action: `Scanning unique Workday links (Run: ${bc.scan_run_id})`,
-    active_worker_count: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 2),
+    current_action: `Scanning unique Workday links (Run: ${scanRunId})`,
+    active_worker_count: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 3),
   });
 
-  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}) under run ${bc.scan_run_id}...`);
+  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}) under run ${scanRunId}...`);
 
   const { runClusterBatchRunner } = await import('../lib/clusterBatchRunner.mjs');
   await runClusterBatchRunner({
-    scanRunId: bc.scan_run_id,
+    scanRunId,
     topLinks: TEST_MODE ? 1 : 100, // Harvest 50+ unique Workday job links
-    workers: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 2),
+    workers: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 3),
     headless: HEADLESS,
     confirmSubmit: false,
     limitPerLink: TEST_MODE ? 1 : null,
@@ -414,7 +414,7 @@ async function runStage2Resolving() {
     stage: 'resolving',
     is_running: true,
     current_action: 'Pre-resolving candidate answers across 4 tiers into job_distributions',
-    active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+    active_worker_count: PIPELINE_CONFIG.workersCount || 3,
   });
 
   console.log(`\n⚡ [DAEMON] Starting Stage 2: Resolving candidate answers with ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers (${PIPELINE_CONFIG.resolveWorkerIds.join(', ')})...`);
@@ -437,7 +437,7 @@ async function runStage3Submissions() {
   submitStatus = 'running';
   isPoolRunning = true;
 
-  const SUBMIT_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+  const SUBMIT_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
 
   console.log(`\n🚀 [DAEMON] Checking for ready applications to submit across ${SUBMIT_WORKER_IDS.length} parallel workers (${SUBMIT_WORKER_IDS.join(', ')})...`);
 
@@ -503,7 +503,7 @@ async function runStage3Submissions() {
     submit_status: 'running',
     is_running: true,
     current_action: `Submitting ${tasksCount} task(s) across 2 parallel workers on Railway`,
-    active_worker_count: 2,
+    active_worker_count: PIPELINE_CONFIG.workersCount || 3,
   });
 
   console.log(`\n🚀 [DAEMON] Submitting ${tasksCount} application(s) across 2 submitting workers in parallel...`);
@@ -548,7 +548,7 @@ export async function runScanAndResolveParallel() {
     scan_status: 'running',
     scan_stop_requested: false,
     is_running: true,
-    active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+    active_worker_count: PIPELINE_CONFIG.workersCount || 3,
   });
 
   try {
@@ -565,7 +565,7 @@ export async function runScanAndResolveParallel() {
         scan_stop_requested: false,
         is_running: true,
         current_action: `Loop #${loopIteration}: Scanning 50+ unique links & resolving for 20+ clients (Run: ${scanRunId})`,
-        active_worker_count: PIPELINE_CONFIG.workersCount || 2,
+        active_worker_count: PIPELINE_CONFIG.workersCount || 3,
       });
 
       // Run Scanning (Stage 1) and Resolving (Stage 2) in PARALLEL
@@ -596,7 +596,7 @@ export async function runScanAndResolveParallel() {
         is_running: true,
         scan_message: scanCompleteMessage,
         current_action: `Applications reached ready_for_review across 20+ clients. Looping for more links...`,
-        active_worker_count: 2,
+        active_worker_count: PIPELINE_CONFIG.workersCount || 3,
       });
 
       // Brief pause between loops, checking stop signal every second
@@ -1406,7 +1406,7 @@ export async function dispatchQueuedSubmissions() {
  * this daemon's submitting workers to 'failed' with 'Interrupted: daemon restarted'.
  */
 export async function recoverInterruptedSubmissionTasks() {
-  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
   const now = new Date().toISOString();
 
   try {
@@ -1415,10 +1415,9 @@ export async function recoverInterruptedSubmissionTasks() {
       .update({
         status: 'ready_for_review',
         status_actor: 'reaper',
-        possibly_submitted: true,
         worker_id: null,
         worker_leased_at: null,
-        error_message: 'Interrupted: daemon restarted. Returned to ready_for_review with possibly_submitted=true.',
+        error_message: 'Interrupted: daemon restarted. Returned to ready_for_review.',
         updated_at: now,
       })
       .eq('status', 'applying')
@@ -1442,7 +1441,12 @@ export async function recoverInterruptedSubmissionTasks() {
 }
 
 // Startup initialization
+let isInitialized = false;
 export async function initOnStartup() {
+  if (isInitialized) {
+    return;
+  }
+  isInitialized = true;
   console.log(`\n${'═'.repeat(72)}`);
   console.log(`  AUTONOMOUS WORKDAY PIPELINE DAEMON — 2-WORKER SEQUENTIAL ENGINE`);
   console.log(`  Schedule 1: Scanning & Resolving (2 Workers: worker_1, worker_2)`);
@@ -1464,11 +1468,13 @@ export async function initOnStartup() {
     console.warn(`[DAEMON] Startup note:`, err.message);
   }
 
-  server.listen(PORT, '0.0.0.0', () => {
-    console.log(`[DAEMON WEBHOOK SERVER] Listening on http://0.0.0.0:${PORT}`);
-    console.log(`[DAEMON] Worker pool configured with WORKER_COUNT=${PIPELINE_CONFIG.workersCount}: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers, ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers, ${PIPELINE_CONFIG.submitWorkerIds.length} submitting workers (${PIPELINE_CONFIG.allWorkerIds.join(', ')}).`);
-    console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) & Supabase bot_control signals — ${PIPELINE_CONFIG.workersCount}-Worker Pipeline Active.\n`);
-  });
+  if (!server.listening) {
+    server.listen(PORT, '0.0.0.0', () => {
+      console.log(`[DAEMON WEBHOOK SERVER] Listening on http://0.0.0.0:${PORT}`);
+      console.log(`[DAEMON] Worker pool configured with WORKER_COUNT=${PIPELINE_CONFIG.workersCount}: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers, ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers, ${PIPELINE_CONFIG.submitWorkerIds.length} submitting workers (${PIPELINE_CONFIG.allWorkerIds.join(', ')}).`);
+      console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) & Supabase bot_control signals — ${PIPELINE_CONFIG.workersCount}-Worker Pipeline Active.\n`);
+    });
+  }
 
   // ── Dynamic Active Clients Sync Schedule (Daily updates from external API) ──
   syncActiveClientProfiles({ force: false })
@@ -1647,10 +1653,9 @@ import { fileURLToPath } from 'node:url';
 
 const isMainModule = !process.argv[1] ||
   process.argv[1].endsWith('queue_daemon.mjs') ||
-  process.argv[1].endsWith('index.js') ||
   fileURLToPath(import.meta.url).replace(/\\/g, '/') === process.argv[1].replace(/\\/g, '/');
 
-if (isMainModule) {
+if (isMainModule && !process.argv[1]?.endsWith('index.js')) {
   initOnStartup().catch((err) => {
     console.error(`[${new Date().toISOString()}] [DAEMON FATAL]`, err);
     process.exit(1);
