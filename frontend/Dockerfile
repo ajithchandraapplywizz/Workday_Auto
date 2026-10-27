@@ -6,13 +6,13 @@ WORKDIR /app
 # Copy dependency manifests
 COPY package*.json ./
 
-# Install dependencies
-RUN npm install
+# Install dependencies using legacy-peer-deps to prevent React 19 peer resolution failure
+RUN npm install --legacy-peer-deps
 
 # Copy application source code
 COPY . .
 
-# Accept build arguments for environment variables needed during Vite build (e.g. Supabase, Backend URL)
+# Accept build arguments for environment variables needed during Vite build
 ARG VITE_SUPABASE_URL
 ARG VITE_SUPABASE_ANON_KEY
 ARG VITE_BACKEND_URL
