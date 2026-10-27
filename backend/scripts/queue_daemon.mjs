@@ -83,10 +83,12 @@ const args = process.argv.slice(2);
 const HEADLESS = process.env.HEADLESS !== 'false' && !args.includes('--headful') && !args.includes('--headed');
 const TEST_MODE = args.includes('--test');
 const PORT = Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || 3001;
+export const SERVICE_ROLE = (process.env.SERVICE_ROLE || 'all').toLowerCase(); // 'main' | 'scanner' | 'submitter' | 'all'
 
 if (TEST_MODE) {
   console.log('[DAEMON] ⚠️  TEST MODE: Only 1 cluster / 1 client will be processed per Stage 1 run.');
 }
+console.log(`[DAEMON] Active Service Role: "${SERVICE_ROLE.toUpperCase()}" (main = 0 workers, scanner = scan only, submitter = submit only, all = combined).`);
 
 let isPoolRunning = false;
 let isPoolPaused = false;
@@ -1440,7 +1442,7 @@ export async function recoverInterruptedSubmissionTasks() {
 }
 
 // Startup initialization
-async function initOnStartup() {
+export async function initOnStartup() {
   console.log(`\n${'═'.repeat(72)}`);
   console.log(`  AUTONOMOUS WORKDAY PIPELINE DAEMON — 2-WORKER SEQUENTIAL ENGINE`);
   console.log(`  Schedule 1: Scanning & Resolving (2 Workers: worker_1, worker_2)`);
@@ -1527,7 +1529,17 @@ async function initOnStartup() {
       );
 
       if (isScanStartRequested) {
-        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER] Detected start scan signal! Launching 2-worker sequential pipeline (Schedule 1 -> Schedule 2)...`);
+        if (SERVICE_ROLE === 'submitter') {
+          // Submitter service strictly ignores scan triggers
+          return;
+        }
+        if (SERVICE_ROLE === 'main') {
+          console.log(`\n⚡ [MAIN APP] Start scan signal detected. Forwarding to dedicated Scanner Service via Supabase (0 workers spawned in main app).`);
+          await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
+          if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false }).catch(() => {});
+          return;
+        }
+        console.log(`\n⚡ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker scanning cluster...`);
         await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
         if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false }).catch(() => {});
         runScanAndResolveParallel().catch(console.error);
@@ -1541,7 +1553,17 @@ async function initOnStartup() {
       );
 
       if (isSubmitStartRequested) {
-        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
+        if (SERVICE_ROLE === 'scanner') {
+          // Scanner service strictly ignores submit triggers
+          return;
+        }
+        if (SERVICE_ROLE === 'main') {
+          console.log(`\n🚀 [MAIN APP] Start submit signal detected. Forwarding to dedicated Submitter Service via Supabase (0 workers spawned in main app).`);
+          await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'submitting', stop_requested: false });
+          if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false }).catch(() => {});
+          return;
+        }
+        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
         await syncBotControlState({ last_action_requested: null, is_running: true, stage: 'submitting', stop_requested: false });
         if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false }).catch(() => {});
         isPoolRunning = true;
@@ -1623,7 +1645,10 @@ process.on('SIGINT', () => {
 
 import { fileURLToPath } from 'node:url';
 
-const isMainModule = process.argv[1] && fileURLToPath(import.meta.url).replace(/\\/g, '/') === process.argv[1].replace(/\\/g, '/');
+const isMainModule = !process.argv[1] ||
+  process.argv[1].endsWith('queue_daemon.mjs') ||
+  process.argv[1].endsWith('index.js') ||
+  fileURLToPath(import.meta.url).replace(/\\/g, '/') === process.argv[1].replace(/\\/g, '/');
 
 if (isMainModule) {
   initOnStartup().catch((err) => {

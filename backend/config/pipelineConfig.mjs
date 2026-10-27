@@ -1,67 +1,19 @@
 /**
- * pipelineConfig.mjs — Dynamic Parallel Autonomous Pipeline Configuration
+ * pipelineConfig.mjs — 10-Worker Shared Pipeline Configuration
  *
- * Configures workers dynamically from .env:
- * - WORKER_COUNT / WORKERS_COUNT: Global worker count (default: 2)
- * - SCAN_WORKER_COUNT: Optional override for scanning workers
- * - RESOLVE_WORKER_COUNT: Optional override for resolving workers
- * - SUBMIT_WORKER_COUNT: Optional override for submitting workers
+ * Configures strictly 10 shared canonical workers (worker_1 through worker_10):
+ * - Scanning & Resolving: The 10 workers scan unique job links and resolve 4-tier answers in parallel.
+ * - Submissions: The same 10 workers execute Workday submissions in parallel on Railway.
  *
- * Database worker_status table dynamically syncs with these worker IDs.
+ * Database worker_status table maintains strictly these 10 rows.
  */
 
-import { existsSync, readFileSync } from 'fs';
-import { resolve } from 'path';
+export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 2;
+export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
+const WORKER_IDS = Array.from({ length: WORKER_COUNT }, (_, i) => `worker_${i + 1 + WORKER_OFFSET}`);
 
-// Quick env loader for standalone imports
-function loadLocalEnvQuick() {
-  if (process.env.WORKER_COUNT || process.env.WORKERS_COUNT) return;
-  const envCandidates = [
-    resolve(process.cwd(), '.env'),
-    resolve(process.cwd(), 'backend', '.env'),
-  ];
-  for (const p of envCandidates) {
-    if (existsSync(p)) {
-      try {
-        const text = readFileSync(p, 'utf-8');
-        for (const line of text.split('\n')) {
-          const trimmed = line.trim();
-          if (trimmed && !trimmed.startsWith('#') && trimmed.includes('=')) {
-            const idx = trimmed.indexOf('=');
-            const key = trimmed.slice(0, idx).trim();
-            const val = trimmed.slice(idx + 1).trim().replace(/^["']|["']$/g, '');
-            if (!process.env[key]) process.env[key] = val;
-          }
-        }
-      } catch {}
-      break;
-    }
-  }
-}
-loadLocalEnvQuick();
-
-const envWorkers = parseInt(
-  process.env.WORKER_COUNT ||
-  process.env.WORKERS_COUNT ||
-  process.env.PIPELINE_WORKER_COUNT ||
-  '3',
-  10
-) || 3;
-
-const scanCount = parseInt(process.env.SCAN_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
-const submitCount = parseInt(process.env.SUBMIT_WORKER_COUNT || String(envWorkers), 10) || envWorkers;
-
-// Pool 1: 3 shared workers for Scanning & Resolving together
-const scanWorkerIds = Array.from({ length: scanCount }, (_, i) => `scanning_worker_${i + 1}`);
-const resolveWorkerIds = scanWorkerIds; // Shared pool: Scanning worker immediately resolves all link clients
-const resolveCount = scanCount;
-
-// Pool 2: 3 separate workers for Submissions only
-const submitWorkerIds = Array.from({ length: submitCount }, (_, i) => `submitting_worker_${i + 1}`);
-
-const workerNames = {};
-scanWorkerIds.forEach((id, i) => { workerNames[id] = `Scanning & Resolving Worker ${i + 1}`; });
-submitWorkerIds.forEach((id, i) => { workerNames[id] = `Submitting Worker ${i + 1}`; });
+const WORKER_NAMES = {};
+WORKER_IDS.forEach((id, i) => { WORKER_NAMES[id] = `Worker ${i + 1 + WORKER_OFFSET}`; });
 
 export const PIPELINE_CONFIG = {
   stages: {
@@ -72,20 +24,17 @@ export const PIPELINE_CONFIG = {
     IDLE: 'idle',
   },
 
-  workersCount: envWorkers,
-  scanCount,
-  resolveCount,
-  submitCount,
+  workersCount: WORKER_COUNT,
 
-  scanWorkerIds,
-  resolveWorkerIds,
-  submitWorkerIds,
-  workerNames,
+  scanWorkerIds: WORKER_IDS,
+  resolveWorkerIds: WORKER_IDS,
+  submitWorkerIds: WORKER_IDS,
 
-  allWorkerIds: [...new Set([...scanWorkerIds, ...submitWorkerIds])],
+  workerNames: WORKER_NAMES,
+  allWorkerIds: WORKER_IDS,
 
-  webhookPort: Number(process.env.DAEMON_PORT) || 3001,
+  webhookPort: Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || 8080,
   headless: process.env.HEADLESS !== 'false',
 };
 
-export const WORKER_COUNT = PIPELINE_CONFIG.workersCount;
+

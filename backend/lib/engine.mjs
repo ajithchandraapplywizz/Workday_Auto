@@ -22,7 +22,6 @@ import {
   ensureWorkdayApplicationWizard,
   extractWorkdayCompanyName,
   extractJobRoleFromDom,
-  isAlreadyAppliedDetected,
 } from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
@@ -38,14 +37,13 @@ import { isAutoApplyMode } from './openRouterLlm.mjs';
 import { detectWorkdayStep } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,
-  advanceApplicationQuestionsPage,
   countUnfilledMandatoryQuestions,
   acknowledgeAllPageAgreements,
 } from './workdayQuestionFill.mjs';
 import { runStepDomPrep } from './stepDomPrep.mjs';
 import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
 import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -83,7 +81,7 @@ import {
 } from './workdayDom.mjs';
 import { runDynamicFieldLoop, resetPerApplicationSessionState } from './dynamicFieldEngine.mjs';
 import { validatePage } from './interaction/index.mjs';
-import { repairRequiredFieldsFromErrors, parseErrorFieldNames, resolvePostalCodeWithLlm } from './workdayErrorRepair.mjs';
+import { repairRequiredFieldsFromErrors, parseErrorFieldNames } from './workdayErrorRepair.mjs';
 import { bootstrapClientContext } from './profileBootstrap.mjs';
 import { resolvePostalForWorkday, workdayPhoneCodeForCountry } from './clientContact.mjs';
 import { disarmRiskyAddButtons, installScriptOnlyClickGuard, drainBlockedScriptClicks } from './safeClick.mjs';
@@ -440,50 +438,6 @@ export async function promptUserInTerminal(label, fieldType, options = [], { com
 }
 
 // ─── Workday Resume Upload (direct setInputFiles — never open OS file picker) ─
-export async function isResumeRequiredAndMissing(page) {
-  return await page.evaluate(() => {
-    const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-    const hasResumeDropzone = /resume\s*\/\s*cv|\bresume\b.*upload|upload a file\s*\(5mb max\)/i.test(text);
-    if (!hasResumeDropzone) return false;
-
-    // Check if uploaded item exists
-    const uploadedItem = document.querySelector('[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]');
-    const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
-    if (uploadedItem || deleteBtn) return false;
-
-    // Check if required or errored
-    const isRequired = /upload a file.*\*|resume.*\*|error\s*-\s*upload a file|is required and must have a value/i.test(text);
-    return isRequired;
-  }).catch(() => false);
-}
-
-async function uploadResumeViaFileChooser(page, absPath) {
-  try {
-    const selectBtn = page.locator([
-      'button:has-text("Select files")',
-      '[data-automation-id*="select-files"]',
-      'label:has-text("Select files")',
-      'button:has-text("Upload")',
-      '[data-automation-id*="file-upload-drop-zone"]',
-      '[data-automation-id*="dropZone"]',
-      '[data-automation-id*="fileUpload"] button',
-      'button:has-text("Drop files here")'
-    ].join(', ')).first();
-
-    if (await selectBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-      const [fileChooser] = await Promise.all([
-        page.waitForEvent('filechooser', { timeout: 5000 }).catch(() => null),
-        selectBtn.click({ force: true }).catch(() => {}),
-      ]);
-      if (fileChooser) {
-        await fileChooser.setFiles(absPath);
-        return true;
-      }
-    }
-  } catch {}
-  return false;
-}
-
 async function findResumeFileInput(page) {
   const scoreInput = (el) => el.evaluate((node) => {
     let score = 0;
@@ -552,21 +506,20 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
     await page.waitForTimeout(700);
     const state = await page.evaluate((needle) => {
       const item = document.querySelector(
-        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"], [class*="uploaded-file"], [data-automation-id*="fileUploadItem"]'
+        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
       );
-      const deleteBtn = document.querySelector('[data-automation-id="delete-file"], [data-automation-id*="delete" i], [aria-label*="delete" i], [aria-label*="remove" i], [data-automation-id="clear-upload"]');
+      const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
       const itemText = (item?.textContent || '').replace(/\s+/g, ' ').trim();
       const body = document.body?.innerText || '';
       const successBanner = /successfully\s*uploaded/i.test(body);
       const nameHit = needle
         ? itemText.toLowerCase().includes(needle) || (deleteBtn && body.toLowerCase().includes(needle))
         : /\.pdf\b/i.test(itemText);
-      const hasPdfChip = /\.pdf\b/i.test(itemText) || (deleteBtn !== null);
       return {
         hasItem: Boolean(item && (item.offsetParent !== null || item.getClientRects().length > 0)),
         hasDelete: Boolean(deleteBtn),
         successBanner,
-        nameHit: nameHit || hasPdfChip,
+        nameHit,
         itemText: itemText.slice(0, 80),
       };
     }, expectBase).catch(() => ({ hasItem: false, hasDelete: false, successBanner: false, nameHit: false, itemText: '' }));
@@ -587,22 +540,11 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
  * Re-resolves absolute path if the given path is stale/missing.
  */
 async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
-  // Wait 1-3 seconds for dropzone and page to hydrate
-  await page.waitForTimeout(2000);
-
   let absPath = findExistingResumeFile(resumePath)
     || (resumePath && existsSync(resumePath) ? resumePath : null);
 
   if (!absPath) {
     absPath = await getResumePathForApply(profile || {}, { resume: resumePath });
-  }
-
-  // Fallback: If still not found, try direct download from profile / Supabase
-  if (!absPath || !existsSync(absPath)) {
-    try {
-      const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-      absPath = await ensureClientResumeFromApplyWizz(profile || {});
-    } catch {}
   }
   if (!absPath || !existsSync(absPath)) {
     console.log(`    ⚠️  Resume file not found (tried: ${resumePath || '(none)'}). Put a PDF in resumes/`);
@@ -653,15 +595,8 @@ async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
 
     try {
       console.log(`    📎 Uploading resume: ${fileName} (attempt ${attempt}/3)...`);
-      await fileInput.setInputFiles(absPath).catch(async () => {
-        await uploadResumeViaFileChooser(page, absPath);
-      });
-      let ok = await waitForResumeUploadComplete(page, fileName);
-      if (!ok) {
-        // Try file chooser fallback
-        await uploadResumeViaFileChooser(page, absPath);
-        ok = await waitForResumeUploadComplete(page, fileName);
-      }
+      await fileInput.setInputFiles(absPath);
+      const ok = await waitForResumeUploadComplete(page, fileName);
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;
@@ -1011,20 +946,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      const c = profile?.personal?.city || profile?.personal?.City || profile?.qa_answers?.city;
-      if (c && (!pin || pin === '75038' || pin === '500001')) {
-        pin = await resolvePostalCodeWithLlm({
-          city: c,
-          state: profile?.personal?.state || profile?.personal?.State || profile?.qa_answers?.state,
-          country: profile?.personal?.country,
-          profile,
-        }).catch(() => pin);
-      }
-      await interactAndRescan(page, async () => {
-        await postalInput.fill('').catch(() => {});
-        await postalInput.fill(pin);
-      });
+      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
       logFieldTrace({
@@ -1255,20 +1178,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      const c = profile?.personal?.city || profile?.personal?.City || profile?.qa_answers?.city;
-      if (c && (!pin || pin === '75038' || pin === '500001')) {
-        pin = await resolvePostalCodeWithLlm({
-          city: c,
-          state: profile?.personal?.state || profile?.personal?.State || profile?.qa_answers?.state,
-          country: profile?.personal?.country,
-          profile,
-        }).catch(() => pin);
-      }
-      await interactAndRescan(page, async () => {
-        await postalInput.fill('').catch(() => {});
-        await postalInput.fill(pin);
-      });
+      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
     }
@@ -1509,35 +1420,10 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   }
 
   if (stepName === 'My Information') {
-    // 1. Resume check on Step 1 (some Workday tenants place resume upload on Step 1)
-    let resumePath = await getResumePathForApply(profile, plan);
-    const needsResumeOnStep1 = await page.evaluate(() => {
-      const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
-      return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
-    }).catch(() => false);
-    if (needsResumeOnStep1) {
-      if (!resumePath) {
-        const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-        resumePath = await ensureClientResumeFromApplyWizz(profile);
-      }
-      if (resumePath) {
-        await handleWorkdayResumeUpload(page, resumePath, profile);
-      }
-    }
-
-    // 2. Primary contact handler (Name, Address, Phone, Source, Previous Worker)
     await handleStep1MyInformation(page, profile, plan);
-
-    // 3. Full DOM sweep: Resolve any custom/unmapped employer questions on My Information
-    await runStepDomPrep(page, stepName, profile);
-    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
-    await acknowledgeAllPageAgreements(page, profile, stepName);
-
-    // 4. Hard gate: Ensure required resume is not missing
-    if (await isResumeRequiredAndMissing(page)) {
-      console.log('    🛑 Required resume missing on My Information — uploading before advance...');
-      const rPath = resumePath || await getResumePathForApply(profile, plan);
-      if (rPath) await handleWorkdayResumeUpload(page, rPath, profile);
+    const unfilled = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+    if (unfilled > 0) {
+      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
     }
     return;
   }
@@ -1545,43 +1431,29 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   if (stepName === 'My Experience') {
     // Section expansion is owned by handleStep2MyExperience(): it only clicks Add
     // when Workday marks the section required, and never for optional sections.
-    let resumePath = await getResumePathForApply(profile, plan);
+    const resumePath = await getResumePathForApply(profile, plan);
     const needsResume = await page.evaluate(() => {
       const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
       return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
     }).catch(() => false);
-    if (needsResume) {
-      if (!resumePath) {
-        console.log('    📥 Resume required on page — ensuring client resume downloaded...');
-        const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-        resumePath = await ensureClientResumeFromApplyWizz(profile);
+    if (resumePath && needsResume) {
+      let uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+      if (!uploaded) {
+        console.log('    ↻ Resume upload retry after short wait...');
+        await page.waitForTimeout(800);
+        uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
       }
-      if (resumePath) {
-        let uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
-        if (!uploaded) {
-          console.log('    ↻ Resume upload retry after short wait...');
-          await page.waitForTimeout(1000);
-          uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
-        }
-        if (!uploaded) {
-          console.log('    ↻ Resume upload retry 3 (file chooser fallback)...');
-          await page.waitForTimeout(1500);
-          uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
-        }
+      if (!uploaded) {
+        console.log('    ⚠️  Resume still not confirmed — continuing required fields only (check resumes/ PDF)');
       }
+    } else if (needsResume && !resumePath) {
+      console.log('    ⚠️  Resume required but no PDF found in resumes/ folder');
     }
     await handleStep2MyExperience(page, profile);
     await fillWorkdaySkillsSection(page, profile);
     const unfilledExp = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
     if (unfilledExp > 0) {
       await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
-    }
-
-    // Hard gate: Never advance if required resume is missing
-    if (await isResumeRequiredAndMissing(page)) {
-      console.log('    🛑 Required resume missing on My Experience — re-attempting upload before advance...');
-      const rPath = resumePath || await getResumePathForApply(profile, plan);
-      if (rPath) await handleWorkdayResumeUpload(page, rPath, profile);
     }
     return;
   }
@@ -1794,13 +1666,6 @@ async function advanceWorkdayStep(page, currentStep = '') {
     return { hasSaveButton: false };
   }
 
-  // HARD GATE: Never click Save and Continue / Next if a required resume dropzone is empty!
-  const resumeMissing = await isResumeRequiredAndMissing(page);
-  if (resumeMissing) {
-    console.log(`  🛑 HARD GATE: Cannot advance! Required resume upload is empty on "${previousStep || 'current step'}".`);
-    return { hasSaveButton: false, resumeBlocked: true };
-  }
-
   const btnText = (await saveBtn.textContent().catch(() => '')).trim();
   console.log(`\n  ➡️  Clicking "${btnText || 'Save and Continue'}" to advance...`);
   await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
@@ -1825,11 +1690,6 @@ async function advanceWorkdayStep(page, currentStep = '') {
   });
 
   if (errorMessages.length > 0) {
-    const isResumeErr = errorMessages.some(e => /upload a file|resume|cv|file.*5mb/i.test(e));
-    if (isResumeErr && profile) {
-      profile._failedAtStep = 'Resume upload failed';
-      profile._lastValidationError = errorMessages.find(e => /upload a file|resume|cv|file.*5mb/i.test(e)) || 'The field Upload a file (5MB max) is required and must have a value.';
-    }
     console.log(`  ⚠️  ${errorMessages.length} validation error(s) after Save and Continue:`);
     errorMessages.forEach(e => console.log(`    • ${e}`));
     return { hasSaveButton: true, hasErrors: true, errors: errorMessages, transitioned: false };
@@ -1978,34 +1838,18 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       console.log(`     … and ${profile._humanRequired.length - 8} more`);
     }
     if (confirmSubmit && !dryRun) {
-      try {
-        if (page && !page.isClosed()) {
-          const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-          if (buf) {
-            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-            const cleanId = String(profile?.applywizz_id || profile?._applyWizzId || 'CLIENT').trim().toUpperCase();
-            const taskId = profile?._taskId || profile?._distributionId || Date.now();
-            const filename = `${cleanId}_${taskId}_human_required_${Date.now()}.jpg`;
-            const uploadedUrl = await uploadStorageScreenshot('failed-applications', filename, buf, 'image/jpeg');
-            if (uploadedUrl) {
-              profile._submissionScreenshotUrl = uploadedUrl;
-              profile._submissionScreenshotBuffer = buf;
-            }
-          }
-        }
-      } catch {}
       return 'human-required';
     }
     console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
   }
 
-  console.log('  ⏳ Parsing Review page DOM...');
-  await page.waitForLoadState('networkidle', { timeout: 3000 }).catch(() => {});
+  console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
+  await page.waitForLoadState('networkidle').catch(() => {});
   await page.waitForFunction(
     () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
-    { timeout: 8000 }
+    { timeout: 12000 }
   ).catch(() => {});
-  await page.waitForTimeout(400);
+  await page.waitForTimeout(2500);
 
   await takeScreenshot(page, 'workday-review-step');
   await attachFormMutationObserver(page);
@@ -2083,24 +1927,12 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
     try {
       if (page && !page.isClosed()) {
-        console.log('  📸 Capturing mandatory full-page Review & Submit complete page screenshot...');
+        console.log('  📸 Capturing mandatory Review & Submit complete page screenshot...');
         await page.waitForLoadState('domcontentloaded').catch(() => {});
-        await page.waitForTimeout(1000).catch(() => {});
+        await page.waitForTimeout(1500).catch(() => {});
 
-        // Progressive smooth scroll from top to bottom and back to render all lazy-loaded review accordions
-        await page.evaluate(async () => {
-          const scrollStep = 600;
-          const totalHeight = document.body.scrollHeight || 3000;
-          for (let y = 0; y < totalHeight; y += scrollStep) {
-            window.scrollTo(0, y);
-            await new Promise((r) => setTimeout(r, 60));
-          }
-          window.scrollTo(0, 0);
-          await new Promise((r) => setTimeout(r, 200));
-        }).catch(() => {});
-
-        // Level 1: Full-page long screenshot
-        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 20000 }).catch(() => null);
+        // Level 1: Full page screenshot with 8s timeout
+        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
 
         // Level 2: High-resolution viewport screenshot fallback
         if (!reviewBuf) {
@@ -2125,13 +1957,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
             const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
             const cleanAwl = String(profile._applyWizzId || profile?.applywizz_id || 'AWL').trim().toUpperCase();
             const shotUrl = await uploadStorageScreenshot(
-              'submitted-applications',
+              'application-successes',
               `${cleanAwl}_${Date.now()}_review_and_submit.jpg`,
               reviewBuf
             );
             if (shotUrl) {
               profile._submissionScreenshotUrl = shotUrl;
-              console.log(`  📸 Review screenshot uploaded to submitted-applications: ${shotUrl}`);
+              console.log(`  📸 Review & Submit screenshot uploaded to Supabase Storage: ${shotUrl}`);
             }
           } catch (uploadErr) {
             console.log(`  ⚠️ Note uploading review screenshot: ${uploadErr.message}`);
@@ -2144,9 +1976,10 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       console.log(`  ⚠️ Review screenshot capture error: ${ssErr.message}`);
     }
 
-    console.log('  🎯 Reached Review & Submit! Questions and screenshot captured. Advancing immediately...');
-    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Questions and screenshot captured. Moving to candidate resolution.');
-    await page.waitForTimeout(300).catch(() => {});
+    // Stay for 5 seconds at Review & Submit before advancing to next unique link
+    console.log('  ⏳ Reached Review & Submit! Staying on page for 5 seconds before advancing to next unique link...');
+    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 5 seconds, then advancing to next unique link.');
+    await page.waitForTimeout(5000).catch(() => {});
 
     return 'reached-review';
   }
@@ -2172,54 +2005,42 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log('🚀 Clicking final "Submit" button...');
   profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
   await clickSubmitButton(page, { allowSubmit: true });
-  await waitForDomSettled(page, { timeout: 1500 }).catch(() => {});
+  await waitForDomSettled(page);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-  // Responsive polling for Workday confirmation screen / popup
-  let confirmationFound = false;
-  const pollStart = Date.now();
-  while (Date.now() - pollStart < 12000) {
-    confirmationFound = await page.evaluate(() => {
+  // Explicitly wait for Workday confirmation screen to render
+  try {
+    await page.waitForFunction(() => {
       const text = document.body?.innerText || '';
-      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|you.*have.*successfully.*submitted/i.test(text) ||
-             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="submit-confirmation-dialog"]');
-    }).catch(() => false);
-    if (confirmationFound) break;
-    await page.waitForTimeout(400);
-  }
+      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
+             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
+    }, { timeout: 10000 });
+  } catch {}
+  await page.waitForTimeout(1500);
+
+  const confirmationFound = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
+           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
+  });
 
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
   }
 
-  // Capture authentic browser full-page screenshot of the confirmation page/modal & upload directly to bucket
+  // Capture real browser screenshot of the confirmation page
   try {
     if (page && !page.isClosed()) {
-      await page.waitForTimeout(1000).catch(() => {});
-      // Scroll to top so complete confirmation header & body is captured
-      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-      let buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
-      if (!buf) {
-        buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-      }
+      const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
       if (buf) {
         profile._submissionScreenshotBuffer = buf;
-        const cleanId = String(profile?.applywizz_id || profile?.id || 'CLIENT').trim().toUpperCase();
-        const taskId = profile?._taskId || profile?._distributionId || Date.now();
-        const filename = `${cleanId}_${taskId}_submitted_${Date.now()}.jpg`;
-        const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-        const uploadedUrl = await uploadStorageScreenshot('submitted-applications', filename, buf, 'image/jpeg');
-        if (uploadedUrl) {
-          profile._submissionScreenshotUrl = uploadedUrl;
-          console.log(`  ☁️ Full-page confirmation proof uploaded to submitted-applications: ${uploadedUrl}`);
-        }
       }
     }
-  } catch (shotErr) {
-    console.warn('  ⚠️ Full-page confirmation screenshot upload error:', shotErr?.message);
-  }
+  } catch {}
 
   if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');
+    await takeScreenshot(page, 'workday-submitted');
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';
@@ -2321,8 +2142,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
-    if (isGlobalStopRequested() || isSubmitStopRequested()) {
-      console.log('🛑 [Workday Wizard] Stop requested (global/submit)! Terminating wizard loop immediately.');
+    if (isGlobalStopRequested()) {
+      console.log('🛑 [Workday Wizard] Global stop requested! Terminating wizard loop immediately.');
       return 'stopped';
     }
     currentIteration++;
@@ -2401,26 +2222,27 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
               options: hb.options || [],
               step: stepName,
             });
-            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-            const existing = profile._scrapedWizardQuestions.get(qNorm);
-            const existingOpts = existing?.options || [];
-            const newOpts = hb.options || [];
-            const isReq = Boolean(hb.required || hb.is_required);
-            profile._scrapedWizardQuestions.set(qNorm, {
-              question: hb.label,
-              label: hb.label,
-              question_normalized: qNorm,
-              field_type: hb.fieldType || 'text',
-              type: hb.fieldType || 'text',
-              options: newOpts.length ? newOpts : existingOpts,
-              required: isReq,
-              is_required: isReq,
-              step: stepName,
-              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
-            });
+            if (hb.required) {
+              const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+              const existing = profile._scrapedWizardQuestions.get(qNorm);
+              const existingOpts = existing?.options || [];
+              const newOpts = hb.options || [];
+              profile._scrapedWizardQuestions.set(qNorm, {
+                question: hb.label,
+                label: hb.label,
+                question_normalized: qNorm,
+                field_type: hb.fieldType || 'text',
+                type: hb.fieldType || 'text',
+                options: newOpts.length ? newOpts : existingOpts,
+                required: true,
+                is_required: true,
+                step: stepName,
+                value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+              });
+            }
           }
-          const stepTotalCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
-          console.log(`  📋 Scraped ${stepTotalCount} question(s) on "${stepName}" with labels, types & options.`);
+          const stepReqCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
+          console.log(`  📋 Scraped ${stepReqCount} mandatory question(s) on "${stepName}" with types & options.`);
         }
       } catch (hErr) {
         console.log(`  ⚠️  Question scrape notice on "${stepName}": ${hErr.message}`);
@@ -2467,23 +2289,24 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
             options: hb.options || [],
             step: stepName,
           });
-          const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-          const existing = profile._scrapedWizardQuestions.get(qNorm);
-          const existingOpts = existing?.options || [];
-          const newOpts = hb.options || [];
-          const isReq = Boolean(hb.required || hb.is_required);
-          profile._scrapedWizardQuestions.set(qNorm, {
-            question: hb.label,
-            label: hb.label,
-            question_normalized: qNorm,
-            field_type: hb.fieldType || 'text',
-            type: hb.fieldType || 'text',
-            options: newOpts.length ? newOpts : existingOpts,
-            required: isReq,
-            is_required: isReq,
-            step: stepName,
-            value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
-          });
+          if (hb.required) {
+            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+            const existing = profile._scrapedWizardQuestions.get(qNorm);
+            const existingOpts = existing?.options || [];
+            const newOpts = hb.options || [];
+            profile._scrapedWizardQuestions.set(qNorm, {
+              question: hb.label,
+              label: hb.label,
+              question_normalized: qNorm,
+              field_type: hb.fieldType || 'text',
+              type: hb.fieldType || 'text',
+              options: newOpts.length ? newOpts : existingOpts,
+              required: true,
+              is_required: true,
+              step: stepName,
+              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+            });
+          }
         }
       }
     } catch {}
@@ -2595,38 +2418,11 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
   }
-
-  // Mandatory failure screenshot when wizard does not reach review
-  let failShotUrl = null;
-  try {
-    if (page && !page.isClosed()) {
-      const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-      if (buf) {
-        const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-        const cleanId = String(profile?.applywizz_id || profile?._applyWizzId || 'APP').trim().toUpperCase();
-        const shotName = `${cleanId}_${Date.now()}_incomplete.jpg`;
-        failShotUrl = await uploadStorageScreenshot('failed-applications', shotName, buf);
-        if (!failShotUrl) {
-          failShotUrl = await uploadStorageScreenshot('submitted-applications', shotName, buf);
-        }
-        if (profile) {
-          profile._submissionScreenshotUrl = failShotUrl;
-          profile._submissionScreenshotBuffer = buf;
-        }
-      }
-    }
-  } catch {}
-
-  const failureReasonClean = profile._lastValidationError
-    ? `${stoppedTitle}: ${profile._lastValidationError}`
-    : `${stoppedTitle}: Application stopped before reaching Review & Submit`;
-
   await recordClientApplication(profile, {
     url: profile._canonicalJobUrl || plan?.url || page.url(),
     company: profile._company || plan?.company || '',
     status: 'failed',
-    failureReason: failureReasonClean,
-    failureScreenshotUrl: failShotUrl,
+    failureReason: `wizard_did_not_reach_review (stopped at ${stoppedTitle}) [step: ${stoppedTitle}]`,
   }).catch(() => {});
   return 'incomplete';
 }
@@ -2801,8 +2597,8 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
     // Check if on Step 1 "My Information"
     const stepName = await detectWorkdayStep(page);
     if (stepName === 'My Information') {
-      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler & complete question sweep...');
-      await fillWorkdayStep(page, profile, plan, stepName);
+      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler...');
+      await handleStep1MyInformation(page, profile, plan);
       await advanceWorkdayStepWithVerification(page, stepName);
       continue;
     }
@@ -3166,46 +2962,11 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         const hasExpired = /doesn'?t exist|expired|not found|\berror 404\b|closed|filled/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;
       }, { timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(1000);
     }
-    if (await isWorkdayJobPageMissing(page, { waitMs: 1500 })) {
-      console.log('❌ Job page does not exist (dead/expired URL) — capturing screenshot & returning job_expired');
-      let shotUrl = null;
-      try {
-        if (page && !page.isClosed()) {
-          const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-          if (buf) {
-            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-            const applywizzId = profileIn?._applyWizzId || profileIn?.applywizz_id || 'CLIENT';
-            shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
-          }
-        }
-      } catch {}
-      if (ownBrowser) await browser.close().catch(() => {});
-      return {
-        status: 'job_expired',
-        isExpired: true,
-        reason: "Job link expired: The page you are looking for doesn't exist",
-        screenshotUrl: shotUrl,
-      };
-    }
-
-    // Check if page already shows candidate has applied
-    if (await isAlreadyAppliedDetected(page)) {
-      console.log('  ✅ [WorkdayBot] Detected "Already Applied" on initial page load. Capturing proof screenshot...');
-      let shotUrl = null;
-      try {
-        if (page && !page.isClosed()) {
-          const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
-          if (buf) {
-            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-            const applywizzId = profileIn?._applyWizzId || profileIn?.applywizz_id || 'CLIENT';
-            shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
-          }
-        }
-      } catch {}
-      if (ownBrowser) await browser.close().catch(() => {});
-      return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
+    if (await isWorkdayJobPageMissing(page)) {
+      console.log('❌ Job page does not exist (dead/expired URL) — skipping');
+      return 'job_not_found';
     }
 
     const profile = profileIn || await loadProfile().catch(() => ({}));
@@ -3219,71 +2980,18 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
     // Handle Workday multi-step wizard
     if (ats === 'workday') {
-      let effAuthEmail = String(workdayEmail || profile?.personal?.company_email || profile?.personal?.email || profile?.email || '').trim();
-      let effAuthPassword = String(workdayPassword || profile?.workday_password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789').trim();
-
-      if (!effAuthEmail && (profile?._applyWizzId || profile?.applywizz_id)) {
-        const awId = String(profile._applyWizzId || profile.applywizz_id).trim();
-        const rawFirst = profile?.personal?.first_name || '';
-        const rawLast = profile?.personal?.last_name || '';
-        const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || awId.toLowerCase().replace(/[^a-z0-9]/g, '');
-        effAuthEmail = `${rawName}@applywizard.ai`;
-      }
-      if (!effAuthEmail && process.env.WORKDAY_DEFAULT_USERNAME) {
-        effAuthEmail = String(process.env.WORKDAY_DEFAULT_USERNAME).trim();
-      }
-
       if (!await isWorkdayWizardVisible(page)) {
         const wdOk = await handleWorkday(page, {
-          email: effAuthEmail,
-          password: effAuthPassword,
+          email: workdayEmail,
+          password: workdayPassword,
           mode,
           profile,
         });
-
-        if (wdOk === 'already_applied' || await isAlreadyAppliedDetected(page)) {
-          console.log('  ✅ [WorkdayBot] Detected "Already Applied" post-auth. Capturing proof screenshot...');
-          let shotUrl = null;
-          try {
-            if (page && !page.isClosed()) {
-              const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
-              if (buf) {
-                const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-                const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
-                shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
-              }
-            }
-          } catch {}
-          if (ownBrowser) await browser.close().catch(() => {});
-          return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
-        }
-
-        if (!wdOk || wdOk === 'mailbox_not_connected' || wdOk === 'job_expired') {
+        if (!wdOk || wdOk === 'mailbox_not_connected') {
           if (wdOk === 'mailbox_not_connected') {
             console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — skipping client cleanly.');
             if (ownBrowser) await browser.close();
             return 'skipped';
-          }
-          if (wdOk === 'job_expired' || await isWorkdayJobPageMissing(page, { waitMs: 1000 })) {
-            console.log('  ❌ [engine] Job link expired detected during auth check ("The page you are looking for doesn\'t exist").');
-            let shotUrl = null;
-            try {
-              if (page && !page.isClosed()) {
-                const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-                if (buf) {
-                  const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-                  const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
-                  shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
-                }
-              }
-            } catch {}
-            if (ownBrowser) await browser.close().catch(() => {});
-            return {
-              status: 'job_expired',
-              isExpired: true,
-              reason: "Job link expired: The page you are looking for doesn't exist",
-              screenshotUrl: shotUrl,
-            };
           }
           console.log('  ❌ Workday authentication could not be confirmed — aborting wizard loop.');
           if (ownBrowser) await browser.close();
@@ -3291,78 +2999,22 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         }
       }
       if (!await isWorkdayWizardVisible(page)) {
-        if (await isAlreadyAppliedDetected(page)) {
-          console.log('  ✅ [WorkdayBot] Detected "Already Applied" before wizard entry. Capturing proof screenshot...');
-          let shotUrl = null;
-          try {
-            if (page && !page.isClosed()) {
-              const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
-              if (buf) {
-                const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-                const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
-                shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
-              }
-            }
-          } catch {}
-          if (ownBrowser) await browser.close().catch(() => {});
-          return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
-        }
-
         const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
         if (entry.entered) {
           console.log(`  ✅ Entered application wizard via ${entry.method}`);
         }
         if (!await isWorkdayWizardVisible(page)) {
           const wdRetry = await handleWorkday(page, {
-            email: effAuthEmail,
-            password: effAuthPassword,
+            email: workdayEmail,
+            password: workdayPassword,
             mode,
             profile,
           });
-
-          if (wdRetry === 'already_applied' || await isAlreadyAppliedDetected(page)) {
-            console.log('  ✅ [WorkdayBot] Detected "Already Applied" on retry. Capturing proof screenshot...');
-            let shotUrl = null;
-            try {
-              if (page && !page.isClosed()) {
-                const buf = await page.screenshot({ type: 'jpeg', quality: 80 }).catch(() => null);
-                if (buf) {
-                  const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-                  const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
-                  shotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
-                }
-              }
-            } catch {}
-            if (ownBrowser) await browser.close().catch(() => {});
-            return { status: 'already_applied', alreadyApplied: true, screenshotUrl: shotUrl };
-          }
-
           if (wdRetry === 'mailbox_not_connected') {
             if (ownBrowser) await browser.close();
             return 'skipped';
           }
-          if (!wdRetry || wdRetry === 'job_expired') {
-            if (wdRetry === 'job_expired' || await isWorkdayJobPageMissing(page, { waitMs: 1000 })) {
-              console.log('  ❌ [engine] Job link expired detected on retry ("The page you are looking for doesn\'t exist").');
-              let shotUrl = null;
-              try {
-                if (page && !page.isClosed()) {
-                  const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
-                  if (buf) {
-                    const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-                    const applywizzId = profile?._applyWizzId || profile?.applywizz_id || 'CLIENT';
-                    shotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_link_expired.jpg`, buf);
-                  }
-                }
-              } catch {}
-              if (ownBrowser) await browser.close().catch(() => {});
-              return {
-                status: 'job_expired',
-                isExpired: true,
-                reason: "Job link expired: The page you are looking for doesn't exist",
-                screenshotUrl: shotUrl,
-              };
-            }
+          if (!wdRetry) {
             if (ownBrowser) await browser.close();
             return 'auth-failed';
           }
@@ -3809,33 +3461,10 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     const errorUrl = activeProfile?._canonicalJobUrl || activeProfile?._jobUrl || url;
 
     console.error(`\n❌ [${timestamp}] Fill failed on ${errorUrl}: ${err.message}`);
-
-    // Mandatory failure screenshot on uncaught error
-    let failureShotUrl = null;
-    try {
-      if (page && !page.isClosed()) {
-        const buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-        if (buf) {
-          const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-          const cleanId = String(activeProfile?.applywizz_id || activeProfile?._applyWizzId || 'APP').trim().toUpperCase();
-          const shotName = `${cleanId}_${Date.now()}_fill_failed.jpg`;
-          failureShotUrl = await uploadStorageScreenshot('failed-applications', shotName, buf);
-          if (!failureShotUrl) {
-            failureShotUrl = await uploadStorageScreenshot('submitted-applications', shotName, buf);
-          }
-          if (activeProfile) {
-            activeProfile._submissionScreenshotUrl = failureShotUrl;
-            activeProfile._submissionScreenshotBuffer = buf;
-          }
-        }
-      }
-    } catch {}
-
     await recordClientApplication(activeProfile || {}, {
       url: errorUrl,
       status: 'failed',
       failureReason: err.message,
-      failureScreenshotUrl: failureShotUrl,
     }).catch(() => {});
 
     if (!isBatch && page && !page.isClosed()) {

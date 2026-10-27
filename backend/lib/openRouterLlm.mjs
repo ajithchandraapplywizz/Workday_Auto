@@ -42,9 +42,10 @@ import {
 import { parseMonthYear, parseYear } from './experienceDates.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { isApiOnlyAnswerMode } from './apiOnlyProfile.mjs';
-import { isSupabaseConfigured, upsertSupabaseAnswer, upsertQaBankAnswer } from './supabaseClient.mjs';
+import { isSupabaseConfigured, upsertSupabaseAnswer } from './supabaseClient.mjs';
 import { buildLlmDateContext, getTodayISODate } from './date-utils.mjs';
 import { isValidCityName, isValidStateName } from './clientContact.mjs';
+import { recordApplicationTokenUsage } from './tokenUsage.mjs';
 
 /**
  * True for free-text / numeric input controls (not dropdown/radio with options).
@@ -63,9 +64,7 @@ export function isInputLikeField(fieldType = '', options = []) {
 const STORE_PATH = resolve(process.cwd(), 'data', 'llm-qa-store.json');
 const PROFILE_PATH = resolve(process.cwd(), 'config', 'profile.yml');
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/chat/completions';
-const ANTHROPIC_MESSAGES_URL = 'https://api.anthropic.com/v1/messages';
 const DEFAULT_MODEL = 'openai/gpt-4o-mini';
-const DEFAULT_ANTHROPIC_MODEL = 'claude-haiku-5-5';
 const OPENROUTER_FALLBACK_MODELS = [
   'openai/gpt-4o-mini',
   'google/gemini-2.5-flash-lite',
@@ -73,22 +72,6 @@ const OPENROUTER_FALLBACK_MODELS = [
 ];
 
 let storeCache = null;
-
-/** Returns the active Anthropic / Claude API key if configured. */
-function getAnthropicKey() {
-  loadLocalEnvOnce();
-  return String(process.env.ANTHROPIC_API_KEY || process.env.CLAUDE_API_KEY || '').trim();
-}
-
-function getAnthropicWorkspaceId() {
-  loadLocalEnvOnce();
-  return String(process.env.ANTHROPIC_WORKSPACE_ID || process.env.CLAUDE_WORKSPACE_ID || process.env.WORKSPACE_ID || '').trim();
-}
-
-function getAnthropicModel() {
-  loadLocalEnvOnce();
-  return String(process.env.ANTHROPIC_MODEL || process.env.CLAUDE_MODEL || DEFAULT_ANTHROPIC_MODEL).trim() || DEFAULT_ANTHROPIC_MODEL;
-}
 
 /** Returns the active OpenRouter API key. */
 function getApiKey() {
@@ -98,158 +81,27 @@ function getApiKey() {
 
 function getModel() {
   loadLocalEnvOnce();
-  if (getAnthropicKey()) {
-    return getAnthropicModel();
-  }
   return String(process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
 }
 
 export function isOpenRouterEnabled() {
-  return Boolean(getAnthropicKey() || getApiKey());
+  return Boolean(getApiKey());
 }
 
 /**
- * Unified LLM chat function via Anthropic Claude or OpenRouter.
- * Hits Anthropic Claude /messages API when ANTHROPIC_API_KEY / CLAUDE_API_KEY is configured
- * (defaulting to claude-haiku-5-5), or OpenRouter as fallback.
+ * Unified LLM chat function via OpenRouter.
+ * Hits OpenRouter chat/completions API with configured model (defaults to openai/gpt-4o-mini),
+ * with automatic fallback to high-efficiency alternative models on rate-limit or errors.
  * Always returns a response shaped like OpenAI: { choices:[{ message:{ content } }] }
  */
-export async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000 } = {}) {
-  const anthropicKey = getAnthropicKey();
-  const openRouterKey = getApiKey();
+export async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000, applicationContext = null } = {}) {
+  const key = getApiKey();
+  if (!key) throw new Error('No LLM API key configured (set OPENROUTER_API_KEY in .env)');
 
-  if (!anthropicKey && !openRouterKey) {
-    throw new Error('No LLM API key configured (set ANTHROPIC_API_KEY or OPENROUTER_API_KEY in .env)');
-  }
-
-  const safeMessages = (messages || []).map((m) => {
-    if (typeof m?.content === 'string' && m.content.length > 5000) {
-      return { ...m, content: m.content.slice(0, 5000) + '\n...[context clamped]' };
-    }
-    return m;
-  });
-
-  // ── 1. Priority: Anthropic Claude AI (if configured) ─────────────────────────
-  if (anthropicKey) {
-    try {
-      const model = getAnthropicModel();
-      const workspaceId = getAnthropicWorkspaceId();
-
-      const systemMsgs = safeMessages
-        .filter((m) => m?.role === 'system')
-        .map((m) => (typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content || '')))
-        .join('\n\n');
-
-      const nonSystemMsgs = safeMessages
-        .filter((m) => m?.role !== 'system')
-        .map((m) => ({
-          role: m?.role === 'assistant' ? 'assistant' : 'user',
-          content: typeof m?.content === 'string' ? m.content : JSON.stringify(m?.content || ''),
-        }));
-
-      if (nonSystemMsgs.length === 0) {
-        nonSystemMsgs.push({ role: 'user', content: 'Respond with best determination.' });
-      }
-
-      const headers = {
-        'x-api-key': anthropicKey,
-        'anthropic-version': '2023-06-01',
-        'content-type': 'application/json',
-      };
-      if (workspaceId) {
-        headers['anthropic-workspace-id'] = workspaceId;
-      }
-
-      const anthropicBody = {
-        model,
-        max_tokens: max_tokens || 400,
-        ...(systemMsgs ? { system: systemMsgs } : {}),
-        messages: nonSystemMsgs,
-      };
-
-      const res = await httpsJsonWithRetry({
-        url: ANTHROPIC_MESSAGES_URL,
-        method: 'POST',
-        timeoutMs,
-        headers,
-        body: anthropicBody,
-      }, { attempts: 2, label: `Claude:${model}` });
-
-      if (res.ok) {
-        const data = res.json();
-        const textContent = (data.content || [])
-          .filter((c) => c && (c.type === 'text' || typeof c.text === 'string'))
-          .map((c) => c.text || '')
-          .join('\n');
-
-        const inputTokens = data.usage?.input_tokens || 0;
-        const outputTokens = data.usage?.output_tokens || 0;
-
-        if (typeof globalThis !== 'undefined' && globalThis.__activeWorkerProfile) {
-          const prof = globalThis.__activeWorkerProfile;
-          prof._tokenUsage = prof._tokenUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-          prof._tokenUsage.prompt_tokens += inputTokens;
-          prof._tokenUsage.completion_tokens += outputTokens;
-          prof._tokenUsage.total_tokens += (inputTokens + outputTokens);
-          prof._llmModel = data.model || model;
-
-          const awId = prof.applywizz_id || prof._applyWizzId || prof.candidateId;
-          const jUrl = prof._canonicalJobUrl || prof._jobUrl || prof.jobUrl;
-          if (awId && jUrl) {
-            import('./tokenUsage.mjs').then(({ recordApplicationTokenUsage }) => {
-              recordApplicationTokenUsage({
-                applywizz_id: awId,
-                job_url: jUrl,
-                role: prof._jobTitle || prof._roleTitle || 'Workday Application',
-                model: data.model || model,
-                prompt_tokens: inputTokens,
-                completion_tokens: outputTokens,
-                metadata: { caller: 'Claude' },
-              }).catch(() => {});
-            }).catch(() => {});
-          }
-        }
-
-        return {
-          model: data.model || model,
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                content: textContent,
-              },
-              finish_reason: data.stop_reason || 'stop',
-            },
-          ],
-          usage: {
-            prompt_tokens: inputTokens,
-            completion_tokens: outputTokens,
-            total_tokens: inputTokens + outputTokens,
-          },
-        };
-      }
-
-      console.warn(`    ⚠️  Claude API returned ${res.status}: ${String(res.text || '').slice(0, 160)}`);
-      if (!openRouterKey) {
-        throw new Error(`Claude API [${model}] error ${res.status}: ${String(res.text || '').slice(0, 160)}`);
-      }
-    } catch (err) {
-      console.warn(`    ⚠️  Claude API request failed: ${err.message}`);
-      if (!openRouterKey) throw err;
-      console.log('    ℹ️  Falling back to OpenRouter...');
-    }
-  }
-
-  // ── 2. OpenRouter fallback or primary ───────────────────────────────────────
-  const key = openRouterKey;
-  if (!key) throw new Error('No OpenRouter key configured as fallback.');
-
-  const primaryModel = String(process.env.OPENROUTER_MODEL || DEFAULT_MODEL).trim() || DEFAULT_MODEL;
+  const primaryModel = getModel();
   const candidateModels = Array.from(new Set([primaryModel, ...OPENROUTER_FALLBACK_MODELS]));
 
   let lastError = null;
-
   for (const model of candidateModels) {
     try {
       const res = await httpsJsonWithRetry({
@@ -266,17 +118,13 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
           model,
           temperature,
           max_tokens,
-          messages: safeMessages,
+          messages,
         },
       }, { attempts: 2, label: `OpenRouter:${model}` });
 
       if (!res.ok) {
         const errText = String(res.text || '').slice(0, 180);
         lastError = new Error(`OpenRouter [${model}] ${res.status}: ${errText}`);
-        if (res.status === 402) {
-          console.log(`    ⚠️  OpenRouter hit 402 (payment/credits required) — returning null for safe deterministic resolution`);
-          return { choices: [] };
-        }
         if (res.status === 429 || res.status === 502 || res.status === 503 || res.status === 404) {
           console.log(`    ⚠️  OpenRouter model ${model} hit ${res.status} — trying fallback model...`);
           continue;
@@ -285,34 +133,20 @@ export async function openRouterChat({ messages, temperature = 0.1, max_tokens =
       }
 
       const data = res.json();
-      if (data && data.usage) {
-        if (typeof globalThis !== 'undefined' && globalThis.__activeWorkerProfile) {
-          const prof = globalThis.__activeWorkerProfile;
-          prof._tokenUsage = prof._tokenUsage || { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
-          const pTokens = data.usage.prompt_tokens || 0;
-          const cTokens = data.usage.completion_tokens || 0;
-          prof._tokenUsage.prompt_tokens += pTokens;
-          prof._tokenUsage.completion_tokens += cTokens;
-          prof._tokenUsage.total_tokens += (data.usage.total_tokens || (pTokens + cTokens));
-          prof._llmModel = model;
-
-          const awId = prof.applywizz_id || prof._applyWizzId || prof.candidateId;
-          const jUrl = prof._canonicalJobUrl || prof._jobUrl || prof.jobUrl;
-          if (awId && jUrl) {
-            import('./tokenUsage.mjs').then(({ recordApplicationTokenUsage }) => {
-              recordApplicationTokenUsage({
-                applywizz_id: awId,
-                job_url: jUrl,
-                role: prof._jobTitle || prof._roleTitle || 'Workday Application',
-                model,
-                prompt_tokens: pTokens,
-                completion_tokens: cTokens,
-                metadata: { caller: 'OpenRouter' },
-              }).catch(() => {});
-            }).catch(() => {});
-          }
-        }
+      if (applicationContext && applicationContext.applywizz_id && applicationContext.job_url && data?.usage) {
+        recordApplicationTokenUsage({
+          applywizz_id: applicationContext.applywizz_id,
+          job_url: applicationContext.job_url,
+          role: applicationContext.role || 'Candidate',
+          application_id: applicationContext.application_id || null,
+          model: data.model || model,
+          prompt_tokens: data.usage.prompt_tokens || 0,
+          completion_tokens: data.usage.completion_tokens || 0,
+          cache_read_tokens: data.usage.prompt_tokens_details?.cached_tokens || 0,
+          metadata: applicationContext.metadata || {},
+        }).catch((err) => console.error('[TokenUsage Error]', err.message));
       }
+
       return data;
     } catch (err) {
       lastError = err;
@@ -406,7 +240,7 @@ export async function saveLlmAnswer({ label, answer, options = [], fieldType = '
     fieldType: fieldType || '',
     company: company || '',
     model: model || getModel(),
-    source: getAnthropicKey() ? 'claude' : 'openrouter',
+    source: 'openrouter',
     last_used_at: new Date().toISOString(),
   };
   await persistStore();
@@ -907,85 +741,8 @@ export async function gatherPlaywrightFieldContext(page, label, field = {}) {
 }
 
 /**
- * Builds a compact, narrative-style "story" summarizing the candidate
- * using parsed resume facts, profile essentials, and verified Supabase Q&As.
- * Consumes minimal tokens (~150-250 tokens instead of 3,000+ tokens of raw nested JSON).
- */
-export function buildCompactCandidateStory(profile = {}, applicant = {}) {
-  if (profile?._candidateStory) return profile._candidateStory;
-
-  const p = profile?.personal || applicant || {};
-  const expCtx = buildExperienceContext(profile || {});
-
-  const name = [p.first_name || applicant.first_name, p.last_name || applicant.last_name].filter(Boolean).join(' ') || applicant.name || 'Candidate';
-  const location = [p.city || applicant.city, p.state || applicant.state, p.country || applicant.country].filter(Boolean).join(', ');
-  const auth = applicant.authorized_us ? 'Authorized to work in US' : (profile?.work_auth?.authorized_us ? 'Authorized' : 'Legally authorized');
-  const sponsor = applicant.sponsorship_needed === 'Yes' || profile?.work_auth?.sponsorship_needed === 'Yes'
-    ? 'Will require sponsorship'
-    : 'No visa sponsorship required';
-
-  // Work and skills from parsed resume
-  const title = applicant.job_title || expCtx.role || 'Software Professional';
-  const totalYears = applicant.years_experience || expCtx.yearsText || '5+';
-  const rawSkills = Array.isArray(applicant.skills) && applicant.skills.length
-    ? applicant.skills
-    : (expCtx.skills || []);
-  const topSkills = rawSkills.slice(0, 15).join(', ');
-
-  // Education from parsed resume
-  const degree = applicant.degree || 'Bachelor';
-  const major = applicant.major ? `in ${applicant.major}` : '';
-  const university = applicant.university ? `from ${applicant.university}` : '';
-  const gradYear = applicant.graduation_year ? `(${applicant.graduation_year})` : '';
-  const eduStr = [degree, major, university, gradYear].filter(Boolean).join(' ');
-
-  // Preferences & Compensation
-  const salary = applicant.compensation || profile.compensation || profile.salary || 'Negotiable';
-  const start = applicant.desired_start_date || profile._desiredStartDate || 'Immediately';
-  const relocate = applicant.willing_to_relocate || profile?.work_auth?.willing_to_relocate || 'Yes';
-
-  // Key Supabase Client Q&A Answers (compact story bullets)
-  const qaMap = profile?._supabaseQa || applicant?.apply_wizz_answers || {};
-  const qaHighlights = [];
-  const importantKeywords = ['relocat', 'travel', 'license', 'clearance', 'notice', 'visa', 'citizen', 'hybrid', 'remote', 'felony', 'misconduct'];
-  for (const [k, v] of Object.entries(qaMap)) {
-    if (qaHighlights.length >= 6) break;
-    const lowerK = String(k).toLowerCase();
-    if (importantKeywords.some(kw => lowerK.includes(kw)) && v != null && String(v).length < 50) {
-      qaHighlights.push(`  - ${k}: ${v}`);
-    }
-  }
-
-  const storyLines = [
-    `Candidate Story (Resume & Verified Facts):`,
-    `- Identity: ${name} | Location: ${location || 'USA'}`,
-    `- Work Experience: ${title} with ${totalYears} years of experience.`,
-    `- Core Technical Skills: ${topSkills || 'Engineering & development'}`,
-    `- Education: ${eduStr || 'University Graduate'}`,
-    `- Work Authorization: ${auth} | ${sponsor}`,
-    `- Preferences: Desired Salary: ${salary} | Availability: ${start} | Relocation: ${relocate}`,
-  ];
-
-  if (expCtx.summary && expCtx.summary.length > 20) {
-    storyLines.push(`- Resume Summary: ${expCtx.summary.slice(0, 180)}`);
-  }
-
-  if (qaHighlights.length > 0) {
-    storyLines.push(`- Key Verified Q&A Facts:\n${qaHighlights.join('\n')}`);
-  }
-
-  const story = storyLines.join('\n');
-  if (profile && typeof profile === 'object') {
-    profile._candidateStory = story;
-    profile._llmProfileBrief = story;
-    profile._llmProfileAnalyzed = true;
-  }
-  return story;
-}
-
-/**
- * Prepares the compact candidate story once per process.
- * Eliminates redundant LLM profile analysis roundtrips to consume minimal tokens.
+ * Analyse the full client profile with the LLM once per process.
+ * Later unknown fields reuse this brief instead of re-explaining the whole profile.
  * @param {object} profile
  * @param {{ resumePath?: string }} [opts]
  * @returns {Promise<string>}
@@ -994,10 +751,81 @@ export async function analyzeClientProfileOnce(profile = {}, opts = {}) {
   if (profile?._llmProfileAnalyzed && profile._llmProfileBrief) {
     return profile._llmProfileBrief;
   }
+
   const applicant = await loadProfileSnapshot(profile);
-  const story = buildCompactCandidateStory(profile, applicant);
-  console.log(`  🧠 Candidate story prepared (${story.length} chars, minimal tokens) — cached for worst-case unknown fields`);
-  return story;
+  let resumeExcerpt = '';
+  try {
+    const resumePath = opts.resumePath || profile?._resumePath;
+    if (resumePath) {
+      const { loadResumeText } = await import('./resumeParser.mjs');
+      resumeExcerpt = String(await loadResumeText(resumePath) || '').slice(0, 3500);
+    }
+  } catch { /* resume optional */ }
+
+  if (!isOpenRouterEnabled()) {
+    const offline = [
+      `Name: ${applicant.name}`,
+      `Contact: ${applicant.email} | ${applicant.phone} | ${applicant.city}, ${applicant.state}`,
+      `Work: ${applicant.job_title} @ ${applicant.company} (${applicant.from_date}–${applicant.to_date})`,
+      `Education: ${applicant.university} / ${applicant.degree} / ${applicant.major}`,
+      `Work auth: ${applicant.authorized_us}; sponsorship: ${applicant.sponsorship_needed}`,
+      `Skills: ${(applicant.skills || []).join(', ')}`,
+    ].filter(Boolean).join('\n');
+    if (profile) {
+      profile._llmProfileBrief = offline;
+      profile._llmProfileAnalyzed = true;
+    }
+    console.log('  🧠 Client profile brief built offline (no OPENROUTER_API_KEY) — used for unknown fields');
+    return offline;
+  }
+
+  try {
+    console.log(`  🧠 Analysing client profile once via LLM (${getModel()}) — give this time; reused for all unknown fields...`);
+    const data = await openRouterChat({
+      max_tokens: 600,
+      timeoutMs: 60000,
+      messages: [
+        {
+          role: 'system',
+          content: `You analyse a job applicant for Workday form auto-fill.
+SOURCE OF TRUTH HIERARCHY:
+1. RESUME FACTS (PRIMARY TRUTH): Work history, job titles, exact dates, technical skills, tools, programming languages, and degrees MUST be grounded in the Resume Excerpt.
+2. CRM API DETAILS (FALLBACK ONLY): Use API answers/preferences ONLY if the resume excerpt does not contain the information (e.g. general questionnaire or contact details). Never let API assumptions contradict resume facts.
+
+Return a compact plain-text brief (no markdown) with short bullets covering:
+- identity/contact & location
+- work history from resume: roles, companies, exact years/dates
+- education: highest completed degree & major from resume
+- technical skills & tools: extracted directly from resume
+- work authorization / visa facts
+- experience answering instructions:
+  * domain years questions: use resume years if candidate worked in domain; else 0
+  * describe-experience prompts: honest sentences reflecting resume projects/roles
+  * standard employer questions: No unless resume/facts explicitly state otherwise.
+Do not invent phone, email, name, salary, degree, or work-auth facts not in the input.`,
+        },
+        {
+          role: 'user',
+          content: `Applicant facts JSON:\n${JSON.stringify(applicant, null, 2)}\n\nResume excerpt:\n${resumeExcerpt || '(none)'}`,
+        },
+      ],
+    });
+    const brief = String(data?.choices?.[0]?.message?.content || '').replace(/\s+/g, ' ').trim().slice(0, 2500);
+    if (profile) {
+      profile._llmProfileBrief = brief || JSON.stringify(applicant).slice(0, 2000);
+      profile._llmProfileAnalyzed = true;
+    }
+    console.log(`  ✓ Client profile analysed once (${(profile._llmProfileBrief || '').length} chars) — Playwright will use this for unknown labels`);
+    return profile._llmProfileBrief;
+  } catch (err) {
+    const fallback = JSON.stringify(applicant).slice(0, 2000);
+    if (profile) {
+      profile._llmProfileBrief = fallback;
+      profile._llmProfileAnalyzed = true;
+    }
+    console.log(`  ⚠️  Profile LLM analysis skipped: ${err.message?.slice(0, 100) || err}`);
+    return fallback;
+  }
 }
 
 async function callOpenRouter({
@@ -1011,46 +839,82 @@ async function callOpenRouter({
   domContext = null,
   profile = null,
 }) {
-  const openRouterKey = getApiKey();
-  const anthropicKey = getAnthropicKey();
-  if (!openRouterKey && !anthropicKey) return null;
-
+  const key = getApiKey();
+  if (!key) return null;
+  const model = getModel();
   const optionBlock = options.length
-    ? `Allowed options (pick ONE exact option text):\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
-    : 'No option list. Provide a short, direct answer.';
+    ? `Allowed options (pick the closest one; copy the option text exactly):\n${options.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
+    : 'No option list. Type a short realistic answer.';
 
+  const expCtx = buildExperienceContext(profile || {});
+  const dateContext = buildLlmDateContext(domContext?.timeZone || 'Asia/Kolkata');
   const typeCode = fieldTypeToCode(fieldType || domContext?.fieldType || 'text');
   const typeDesc = describeFieldTypeCode(typeCode);
-  const candidateStory = buildCompactCandidateStory(profile || {}, applicant || {});
-
-  const domBlock = domContext
-    ? `Live field: label="${domContext.label || question}", type=${domContext.fieldType || fieldType || 'text'}, required=${domContext.required ? 'yes' : 'no'}`
-    : '';
-
-  const system = `You answer ONE Workday job application field for this applicant.
-Return ONLY valid JSON with no markdown:
+  const system = `You fill one Workday job application field for this applicant.
+Return ONLY valid JSON, with no markdown:
 {"answer":"exact value or text","confidence":0.0,"grounded":true}
 For MULTI_CHECKBOX, answer must be an array of exact option strings.
-Rules:
-- FIELD TYPE CODE: ${typeDesc}
-- Code 1 INPUT: type a number or short text. Years questions → numeric years or 0. Describe → concise fact or N/A.
-- Code 2 DROPDOWN / 3 RADIO: copy one listed option EXACTLY.
-- Code 4/5 CHECKBOX: only true facts for this applicant.
-- Default to No for prior-employer / relatives / misconduct / unlisted skills.
-- Never invent a different name, phone, email, salary, degree, or work-auth fact.`;
+Set grounded=false when the answer is not supported by the supplied applicant facts.
 
-  const user = `Question: ${question}
-Field type code: ${typeCode} (${fieldType || domContext?.fieldType || 'text'})
-Company: ${company || 'unknown'}
+FIELD TYPE CODE (must honour): ${typeDesc}
+- Code 1 INPUT: type a number or short human text. Years questions → number or 0. Describe → short fact or NA. Do NOT answer Yes for everything.
+- Code 2 DROPDOWN / 3 RADIO: copy one listed option EXACTLY.
+- Code 4 CHECKBOX: Yes/check only if true for this applicant; otherwise No.
+- Code 5 MULTI_CHECKBOX: only options that truly apply — never select all by default.
+
+SOURCE OF TRUTH HIERARCHY:
+1) RESUME FACTS (PRIMARY SOURCE OF TRUTH):
+   - All work history, roles, skills, tools, technologies, and experience claims MUST be grounded in the applicant's resume.
+2) CRM API DETAILS (FALLBACK CONTEXT):
+   - Use CRM API context ONLY if the resume lacks the information. Do not contradict resume facts with API assumptions.
+3) Playwright DOM context (label, type code, live options). If options are listed, copy one EXACTLY.
+4) Never invent a different name, phone, email, salary, degree, school, or work-auth fact.
+5) NEVER default to Yes for every question. If unsure and options include No, prefer No for prior-employer / relatives / misconduct; for skills not in resume/profile use No or 0 / NA as appropriate.
+
+Rules:
+- REQUIRED field — never return UNKNOWN or empty.
+- DATE / AVAILABILITY: ${dateContext}
+- Years of experience in domain X: years if resume supports X, else 0. Never Yes/No for years inputs.
+- Describe / tell-us / why-looking / which-areas essays: 2–4 honest sentences from the resume. If the domain is not in the resume, state so honestly. Never leave empty and do not answer Yes/No.
+- Salary: compensation from facts or Negotiable.
+- Age 16/18+: Yes. Terms/consent: Yes.`;
+
+  const domBlock = domContext
+    ? `Playwright live field:
+- On-screen label: ${domContext.label || question}
+- Field type: ${domContext.fieldType || fieldType || 'text'}
+- Required: ${domContext.required ? 'yes' : 'no'}
+- Current value: ${domContext.currentValue || '(empty)'}
+- Nearby labels: ${(domContext.nearbyLabels || []).slice(0, 8).join(' | ') || '(none)'}`
+    : 'Playwright live field: (not available)';
+
+  const user = `Company: ${company || 'unknown'}
+Field type code: ${typeCode}
+Field type: ${fieldType || domContext?.fieldType || 'text'}
+Question: ${question}
+
 ${domBlock}
+
+Calendar context:
+${dateContext}
 
 ${optionBlock}
 
-${candidateStory}`;
+Primary Experience Analysis (grounded in Resume):
+- Total years: ${expCtx.yearsText}
+- Role: ${expCtx.role || '(none)'}
+- Skills: ${(expCtx.skills || []).join(', ') || '(none)'}
+- Summary: ${expCtx.summary || '(none)'}
+
+Client profile brief (analysed once, resume prioritized):
+${profileBrief || '(use JSON facts below)'}
+
+Complete applicant profile (RESUME FACTS PRIMARY, CRM API FALLBACK):
+${JSON.stringify(applicant, null, 2)}`;
 
   const data = await openRouterChat({
-    max_tokens: nearest ? 80 : 250,
-    timeoutMs: 40000,
+    max_tokens: nearest ? 120 : 400,
+    timeoutMs: 45000,
     messages: [
       { role: 'system', content: system },
       { role: 'user', content: user },
@@ -1063,8 +927,8 @@ ${candidateStory}`;
 }
 
 /**
- * Analyse an INPUT / textarea question with the LLM against the minimal candidate story.
- * Only invoked at worst case when offline resolution and concepts cannot answer.
+ * Analyse an INPUT / textarea question with the LLM against the full client profile
+ * (Resume primary + Apply Wizz fallback). Used for years, describe-experience, and other free-text fields.
  * @param {object} args
  * @returns {Promise<string|null>}
  */
@@ -1078,46 +942,78 @@ export async function answerInputFieldWithLlm({
   applicant = null,
   options = [],
 } = {}) {
-  const openRouterKey = getApiKey();
-  const anthropicKey = getAnthropicKey();
-  if (!openRouterKey && !anthropicKey) return null;
+  const key = getApiKey();
+  if (!key) return null;
 
   const label = String(question || '').trim();
   if (!label) return null;
 
   const snap = applicant || await loadProfileSnapshot(profile);
-  const typeCode = fieldTypeToCode(fieldType);
-  const candidateStory = buildCompactCandidateStory(profile || {}, snap || {});
+  const expCtx = buildExperienceContext(profile || {});
+  const brief = profileBrief || profile?._llmProfileBrief || '';
+  const dateContext = buildLlmDateContext(domContext?.timeZone || 'Asia/Kolkata');
+
+  const system = `You answer ONE Workday application field for this applicant.
+Return ONLY valid JSON, with no markdown:
+{"answer":"value to type","confidence":0.0,"grounded":true}
+Set grounded=false when the answer is not supported by the supplied applicant facts.
+
+SOURCE OF TRUTH HIERARCHY:
+1. RESUME FACTS (PRIMARY): All work experience, skills, tools, and technical tenure MUST come from the resume.
+2. CRM API DETAILS (FALLBACK): Only use CRM API context if the resume is silent. Never contradict resume facts.
+
+FIELD TYPE CODE: ${describeFieldTypeCode(fieldTypeToCode(fieldType))}
+Be humanic: read the resume facts. Do NOT answer Yes to everything.
+
+Rules:
+0) DATE / AVAILABILITY: ${dateContext}
+1) Code 1 / years INPUT: if domain matches resume role/skills → years (${expCtx.yearsText}); else 0. Never Yes/No.
+2) Describe / tell-us / why-looking / which-areas: 2–4 honest sentences from the resume. If the domain is not in the resume, say so and describe the actual role. Never Yes/No and never empty.
+3) Dropdown/radio: exact option text only.
+4) Checkbox/multi: only what is true for this applicant from their resume/facts.
+5) Other inputs: matching facts only — never invent identity/salary/work-auth.
+
+Applicant total years: ${expCtx.yearsText}
+Role: ${expCtx.role || '(none)'}
+Skills: ${(expCtx.skills || []).join(', ') || '(none)'}
+Summary: ${expCtx.summary || '(none)'}`;
 
   const domBlock = domContext
-    ? `On-screen field: label="${domContext.label || label}", type=${domContext.fieldType || fieldType}, required=${domContext.required ? 'yes' : 'no'}`
-    : '';
-
-  const system = `You answer ONE Workday text or numeric input field for this applicant.
-Return ONLY valid JSON with no markdown:
-{"answer":"value to type","confidence":0.0,"grounded":true}
-Rules:
-- Years questions → numeric years (e.g. 5) if candidate has experience in that domain, else 0. Never answer Yes/No for years inputs.
-- Describe experience prompts → 1-2 concise sentences grounded in the candidate story. If candidate has no experience in that topic, answer "N/A" or "No direct experience".
-- Never invent facts not present in the candidate story.`;
-
-  const user = `Question: ${label}
-Field type: ${fieldType} (Code ${typeCode})
-Company: ${company || 'unknown'}
-${domBlock}
-
-${candidateStory}`;
+    ? `On-screen label: ${domContext.label || label}
+Field type: ${domContext.fieldType || fieldType}
+Required: ${domContext.required ? 'yes' : 'no'}`
+    : `Field type: ${fieldType}`;
 
   const optionList = (options.length ? options : (domContext?.options || []))
     .map((o) => String(o || '').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
+  const optionBlock = optionList.length
+    ? `Allowed options (copy one exactly):\n${optionList.map((o, i) => `${i + 1}. ${o}`).join('\n')}`
+    : 'No option list — type a number or a short human sentence.';
 
   const data = await openRouterChat({
-    max_tokens: isDescribeExperienceQuestion(label) ? 250 : 120,
-    timeoutMs: 40000,
+    max_tokens: isDescribeExperienceQuestion(label) ? 700 : 400,
+    timeoutMs: 45000,
     messages: [
       { role: 'system', content: system },
-      { role: 'user', content: user },
+      {
+        role: 'user',
+        content: `Company: ${company || 'unknown'}
+${domBlock}
+${optionBlock}
+
+Calendar context:
+${dateContext}
+
+Question to analyse and answer:
+${label}
+
+Client profile brief (Resume prioritized):
+${brief || '(see JSON)'}
+
+Complete applicant profile JSON (RESUME FACTS PRIMARY, API FALLBACK):
+${JSON.stringify(snap, null, 2)}`,
+      },
     ],
   });
   const text = String(data?.choices?.[0]?.message?.content || '');
@@ -1197,26 +1093,6 @@ export async function pickNearestSelectOption({
     return null;
   }
 
-  // Referral source / "How Did You Hear About Us?" MUST NEVER use LLM
-  if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(question) || /how\s*did\s*you\s*hear|source/i.test(qNorm)) {
-    const { pickDeterministicSourceOption } = await import('./clientAnswer.mjs');
-    const sourcePick = pickDeterministicSourceOption(list);
-    if (sourcePick) {
-      console.log(`    📢 Nearest-select: Referral source auto-picked "${sourcePick}" without LLM`);
-      return sourcePick;
-    }
-  }
-
-  // Race / Ethnicity MUST NEVER use LLM
-  if (/\b(race|ethnicity)\b/i.test(question) && !/hispanic|latino/i.test(question)) {
-    const { pickDeterministicRaceOption } = await import('./clientAnswer.mjs');
-    const racePick = pickDeterministicRaceOption(profile?.eeo?.race || 'Asian', list);
-    if (racePick) {
-      console.log(`    🤝 Nearest-select: EEO race auto-picked "${racePick}" without LLM`);
-      return racePick;
-    }
-  }
-
   if (isSalaryQuestion(question)) {
     const picked = pickCompensationFromOptions(list, profile, preferred);
     if (picked) return picked;
@@ -1234,31 +1110,8 @@ export async function pickNearestSelectOption({
 
   const computedAvailability = computeAvailabilityOption(question, preferred, list);
 
-  // Check Yes/No exact match against preferred
-  if (preferred && isYesNoQuestionLabel(question)) {
-    const yn = extractYesNoAnswer(preferred);
-    if (yn) {
-      const hit = list.find((opt) => extractYesNoAnswer(opt) === yn);
-      if (hit) return hit;
-    }
-  }
-
-  // Check Supabase Client Q&A matching options directly without LLM
-  const supAnswer = profile?._supabaseQa?.[qNorm] || profile?._applyWizzQa?.[qNorm];
-  if (supAnswer) {
-    const directHit = list.find((opt) => opt.toLowerCase() === String(supAnswer).toLowerCase());
-    if (directHit) return directHit;
-    const ynSup = extractYesNoAnswer(supAnswer);
-    if (ynSup) {
-      const ynHit = list.find((opt) => extractYesNoAnswer(opt) === ynSup);
-      if (ynHit) return ynHit;
-    }
-    const supLocal = localNearestOption(supAnswer, list);
-    if (supLocal && supLocal.score >= 0.65) return supLocal.option;
-  }
-
   const local = localNearestOption(preferred, list);
-  if (local && local.score >= 0.65) return local.option;
+  if (local && local.score >= 0.8) return local.option;
 
   if (isOpenRouterEnabled()) {
     try {
@@ -1551,37 +1404,50 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
   }
 
   // Profile heuristic for experience Qs — only when LLM is off OR field is not a free-text input.
-  // 1. ALWAYS try offline experience resolution FIRST (years, topics, roles, projects)
-  const fromExperience = resolveExperienceQuestionAnswer(effectiveLabel, opts.profile, {
-    options,
-    fieldType,
-  });
-  if (fromExperience?.answer != null) {
-    console.log(`    📊 [Offline Experience Match] "${effectiveLabel.slice(0, 55)}" ← "${String(fromExperience.answer).slice(0, 40)}" (topic ${fromExperience.matched ? 'matched' : 'no match'})`);
-    return finish(fromExperience.answer, fromExperience.source);
+  // Input fields: LLM analyses the question against the full Apply Wizz profile first.
+  const inputLike = isInputLikeField(fieldType, options)
+    || isYearsQuantityQuestion(effectiveLabel)
+    || isDescribeExperienceQuestion(effectiveLabel);
+
+  if (!inputLike || !isOpenRouterEnabled()) {
+    const fromExperience = resolveExperienceQuestionAnswer(effectiveLabel, opts.profile, {
+      options,
+      fieldType,
+    });
+    if (fromExperience?.answer != null) {
+      console.log(`    📊 [experience/${fromExperience.source}] "${effectiveLabel.slice(0, 55)}" ← "${String(fromExperience.answer).slice(0, 40)}" (topic ${fromExperience.matched ? 'matched' : 'no match'})`);
+      return finish(fromExperience.answer, fromExperience.source);
+    }
   }
 
   if (isApiOnlyAnswerMode()) {
     if (!isOpenRouterEnabled()) return null;
   } else {
-    // 2. ALWAYS try concept synonyms FIRST (education ↔ graduation, salary ↔ compensation, etc.)
-    try {
-      const { resolveByConcept } = await import('./answerConcepts.mjs');
-      const fromConcept = resolveByConcept(effectiveLabel, opts.profile);
-      if (fromConcept?.answer) {
-        console.log(`    🔎 [Concept Match/${fromConcept.concept}] "${effectiveLabel.slice(0, 55)}" ← "${String(fromConcept.answer).slice(0, 40)}"`);
+  // Concept synonyms before fuzzy/LLM (education ↔ graduation, salary ↔ compensation, …)
+  try {
+    const { resolveByConcept } = await import('./answerConcepts.mjs');
+    // Skip broad years concept for domain years input — LLM handles those.
+    const fromConcept = resolveByConcept(effectiveLabel, opts.profile);
+    if (fromConcept?.answer) {
+      if (isYearsQuantityQuestion(effectiveLabel) && inputLike && isOpenRouterEnabled()) {
+        /* fall through to LLM input analysis */
+      } else {
+        console.log(`    🔎 [LLM→concept/${fromConcept.concept}] "${effectiveLabel.slice(0, 55)}" ← "${String(fromConcept.answer).slice(0, 40)}"`);
         return finish(fromConcept.answer, fromConcept.source);
       }
-    } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
 
-    // 3. ALWAYS try Supabase client Q&A & Semantic DB FIRST
-    const tenant = opts.tenant || '';
-    const semanticDb = await lookupSemanticAnswer(effectiveLabel, opts.profile, tenant, { threshold: 0.52 });
-    if (semanticDb?.answer) {
-      if (!(isYearsQuantityQuestion(effectiveLabel) && isInvalidYearsAnswer(semanticDb.answer))) {
-        console.log(`    🔎 [Semantic DB Match/${semanticDb.source}] "${effectiveLabel.slice(0, 55)}" ← "${String(semanticDb.answer).slice(0, 40)}"`);
-        return finish(semanticDb.answer, semanticDb.source || 'semantic_db');
-      }
+  const tenant = opts.tenant || '';
+  const semanticDb = await lookupSemanticAnswer(effectiveLabel, opts.profile, tenant, { threshold: 0.52 });
+  if (semanticDb?.answer) {
+    if (isYearsQuantityQuestion(effectiveLabel) && isInvalidYearsAnswer(semanticDb.answer)) {
+      console.log(`    ⛔ [LLM→DB] rejected Yes/No for years input "${effectiveLabel.slice(0, 50)}"`);
+    } else if (inputLike && isOpenRouterEnabled() && (isYearsQuantityQuestion(effectiveLabel) || isDescribeExperienceQuestion(effectiveLabel))) {
+      /* prefer live LLM analysis for experience input fields */
+    } else {
+      console.log(`    🔎 [LLM→DB/${semanticDb.source}] "${effectiveLabel.slice(0, 55)}" ← "${String(semanticDb.answer).slice(0, 40)}"`);
+      return finish(semanticDb.answer, semanticDb.source || 'semantic_db');
     }
   }
 
@@ -1598,6 +1464,7 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
       console.log(`    ♻️  LLM cache: "${effectiveLabel.slice(0, 55)}" ← "${String(cached).slice(0, 50)}"`);
       return finish(cached, 'cache');
     }
+  }
   }
 
   if (options.length) {
@@ -1626,13 +1493,9 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
   const company = opts.company || opts.tenant || '';
   const profileBrief = opts.profile?._llmProfileBrief || '';
 
-  const inputLike = isInputLikeField(fieldType, options)
-    || isYearsQuantityQuestion(effectiveLabel)
-    || isDescribeExperienceQuestion(effectiveLabel);
-
   try {
     if (inputLike) {
-      console.log(`    🤖 [Worst-Case LLM] Analysing new INPUT question with minimal story context: "${effectiveLabel.slice(0, 70)}"`);
+      console.log(`    🤖 LLM analysing INPUT question vs full profile: "${effectiveLabel.slice(0, 70)}"`);
       const inputAnswer = await answerInputFieldWithLlm({
         question: effectiveLabel,
         fieldType,
@@ -1686,12 +1549,7 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
  * @param {object} [opts]
  */
 export async function analyzeUnknownQuestionsBatch(questions = [], profile = {}, opts = {}) {
-  const rows = (questions || []).filter((q) => {
-    if (!q?.questionId || !q?.label) return false;
-    if (/how\s*did\s*you\s*hear|where\s*did\s*you\s*(hear|find)|referral\s*source|^source$/i.test(q.label)) return false;
-    if (/\b(race|ethnicity)\b/i.test(q.label) && !/hispanic|latino/i.test(q.label)) return false;
-    return true;
-  });
+  const rows = (questions || []).filter((q) => q?.questionId && q?.label);
   if (!rows.length) return [];
   if (!isOpenRouterEnabled()) {
     return rows.map((q) => ({
@@ -1708,18 +1566,6 @@ export async function analyzeUnknownQuestionsBatch(questions = [], profile = {},
     resumePath: opts.resumePath || profile?._resumePath,
   });
   const applicant = await loadProfileSnapshot(profile);
-  const compactApplicant = {
-    first_name: applicant?.first_name || '',
-    last_name: applicant?.last_name || '',
-    degree: applicant?.degree || applicant?.highest_education || '',
-    skills: (applicant?.skills || []).slice(0, 25),
-    years_experience: applicant?.years_experience || 0,
-    current_title: applicant?.current_title || '',
-    current_company: applicant?.current_company || '',
-    authorized_us: applicant?.authorized_us || 'Yes',
-    sponsorship_needed: applicant?.sponsorship_needed || 'No',
-    willing_to_relocate: applicant?.willing_to_relocate || 'Yes',
-  };
   const dateContext = buildLlmDateContext();
 
   try {
@@ -1748,8 +1594,8 @@ Return JSON only: {"answers":[{"questionId":"","answer":null,"confidence":0.85,"
         {
           role: 'user',
           content: JSON.stringify({
-            facts: compactApplicant,
-            brief: String(profile?._llmProfileBrief || '').slice(0, 1500),
+            facts: applicant,
+            brief: String(profile?._llmProfileBrief || '').slice(0, 2000),
             calendar_context: dateContext,
             questions: rows.map((q) => {
               const el = q.elementType || q.answerType || '';

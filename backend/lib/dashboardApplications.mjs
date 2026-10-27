@@ -69,7 +69,7 @@ export async function getApplicationsList({
   // 2. Fetch submission_tasks
   const { data: subTasks, error: stErr } = await supabase
     .from('submission_tasks')
-    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, error_message, created_at, started_at, completed_at, updated_at, application_submitted_screenshot_url');
+    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, error_message, created_at, started_at, completed_at, updated_at, screenshot_path');
 
   if (stErr) throw stErr;
 
@@ -159,7 +159,7 @@ export async function getApplicationsList({
     const failureCategory = effectiveStatus === 'failed' ? classifyFailure(rawError) : null;
     const errorSnippet = rawError ? String(rawError).slice(0, 120) : '';
 
-    const screenshotLink = task?.application_submitted_screenshot_url ||
+    const screenshotLink = task?.screenshot_path ||
       jd.application_submitted_screenshot_url ||
       null;
     const hasScreenshot = Boolean(screenshotLink);
@@ -181,55 +181,14 @@ export async function getApplicationsList({
       has_screenshot: hasScreenshot,
       screenshot_link: screenshotLink,
       job_url: jd.job_url || task?.job_url || null,
-      client_count: 1,
     });
   }
 
-  // If viewing failed jobs, aggregate by unique job_url and calculate client_count
-  let outputApps = matchedApps;
-  if (normStatus === 'failed') {
-    const urlMap = new Map();
-    for (const app of matchedApps) {
-      const rawUrl = app.job_url || '';
-      const normKey = rawUrl ? rawUrl.split('?')[0].trim().toLowerCase() : `unknown_${app.id}`;
-      if (!urlMap.has(normKey)) {
-        urlMap.set(normKey, {
-          ...app,
-          client_count: 1,
-          client_ids: app.applywizz_id ? [app.applywizz_id] : [],
-        });
-      } else {
-        const existing = urlMap.get(normKey);
-        if (app.applywizz_id && !existing.client_ids.includes(app.applywizz_id)) {
-          existing.client_ids.push(app.applywizz_id);
-          existing.client_count = existing.client_ids.length;
-        } else {
-          existing.client_count = (existing.client_count || 1) + 1;
-        }
-        // Keep the latest timestamp and preferred screenshot
-        if (new Date(app.status_time).getTime() > new Date(existing.status_time).getTime()) {
-          existing.status_time = app.status_time;
-          if (app.screenshot_link) {
-            existing.screenshot_link = app.screenshot_link;
-            existing.has_screenshot = true;
-          }
-          if (app.error_message) {
-            existing.error_message = app.error_message;
-          }
-        } else if (!existing.screenshot_link && app.screenshot_link) {
-          existing.screenshot_link = app.screenshot_link;
-          existing.has_screenshot = true;
-        }
-      }
-    }
-    outputApps = Array.from(urlMap.values());
-  }
-
   // Order: Newest first
-  outputApps.sort((a, b) => new Date(b.status_time).getTime() - new Date(a.status_time).getTime());
+  matchedApps.sort((a, b) => new Date(b.status_time).getTime() - new Date(a.status_time).getTime());
 
-  const total = outputApps.length;
-  const paged = outputApps.slice(offset, offset + pageSize);
+  const total = matchedApps.length;
+  const paged = matchedApps.slice(offset, offset + pageSize);
   const nextCursor = (offset + pageSize < total) ? String(offset + pageSize) : null;
 
   return {

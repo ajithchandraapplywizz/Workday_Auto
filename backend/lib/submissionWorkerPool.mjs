@@ -7,20 +7,19 @@
  * - Isolated Context: each task runs in its own fresh Playwright browser context
  */
 
-import { loadLocalEnvOnce } from './supabaseClient.mjs';
+import { loadLocalEnvOnce, updateWorkerStatus, getWorkerControls } from './supabaseClient.mjs';
 import { createClient } from '@supabase/supabase-js';
-import { updateWorkerStatus } from './supabaseClient.mjs';
-import { getWorkerContext } from './browserLifecycle.mjs';
+import { getWorkerContext, isGlobalStopRequested } from './browserLifecycle.mjs';
+
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
 loadLocalEnvOnce();
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
-export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG?.submitWorkerIds || [
-  'submitting_worker_1',
-  'submitting_worker_2',
-  'submitting_worker_3',
-];
+export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+
 
 /**
  * B1 Helper: Updates submission_tasks, checks { data, error },
@@ -35,22 +34,25 @@ export async function updateSubmissionTaskWithCheck({
   let lastErr = null;
   const cleanTaskId = String(taskId).trim();
 
+  const cleanPatch = { ...patch };
+  if ('application_submitted_screenshot_url' in cleanPatch) {
+    if (!cleanPatch.screenshot_path && cleanPatch.application_submitted_screenshot_url) {
+      cleanPatch.screenshot_path = cleanPatch.application_submitted_screenshot_url;
+    }
+    delete cleanPatch.application_submitted_screenshot_url;
+  }
+
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { data, error } = await supabase
         .from('submission_tasks')
-        .update(patch)
+        .update(cleanPatch)
         .eq('id', cleanTaskId)
         .eq('status', 'applying')
         .eq('worker_id', workerId)
         .select('*');
 
       if (error) {
-        if (error.code === '23514' && patch.status === 'already_applied') {
-          console.warn(`[${workerId}] Warning: 'already_applied' check constraint pending migration. Falling back to status='submitted'.`);
-          patch = { ...patch, status: 'submitted', error_message: patch.error_message || 'The application is already submitted' };
-          continue;
-        }
         lastErr = new Error(`Supabase update error: ${error.message} (code: ${error.code || 'unknown'})`);
         console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} failed: ${error.message}`);
         if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
@@ -58,25 +60,7 @@ export async function updateSubmissionTaskWithCheck({
       }
 
       if (!data || data.length === 0) {
-        // Fallback: update by ID directly in case lease/status was altered during submission
-        const { data: fallbackData, error: fbErr } = await supabase
-          .from('submission_tasks')
-          .update(patch)
-          .eq('id', cleanTaskId)
-          .select('*');
-
-        if (fbErr?.code === '23514' && patch.status === 'already_applied') {
-          console.warn(`[${workerId}] Warning: 'already_applied' check constraint pending migration. Falling back to status='submitted'.`);
-          patch = { ...patch, status: 'submitted', error_message: patch.error_message || 'The application is already submitted' };
-          continue;
-        }
-
-        if (!fbErr && fallbackData && fallbackData.length > 0) {
-          console.log(`[${workerId}] task row updated via fallback (rows=${fallbackData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
-          return { success: true, data: fallbackData[0], rowsCount: fallbackData.length };
-        }
-
-        lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} not found or update rejected: ${fbErr?.message || 'not matched'}`);
+        lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} was not in 'applying' state or worker_id mismatch (expected ${workerId})`);
         console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} matched 0 rows for task #${cleanTaskId}`);
         if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
         continue;
@@ -107,18 +91,11 @@ export async function updateJobDistributionWithCheck({
   if (!distributionId) return { success: false, error: new Error('No distributionId provided') };
   let lastErr = null;
 
-  // Sanitize patch: job_distributions does NOT have failure_reason column
-  const cleanPatch = { ...patch };
-  if (!cleanPatch.error_message && cleanPatch.failure_reason) {
-    cleanPatch.error_message = cleanPatch.failure_reason;
-  }
-  delete cleanPatch.failure_reason;
-
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
       const { data, error } = await supabase
         .from('job_distributions')
-        .update(cleanPatch)
+        .update(patch)
         .eq('id', distributionId)
         .select('*');
 
@@ -150,46 +127,76 @@ export async function updateJobDistributionWithCheck({
 }
 
 /**
- * Atomic Task Claim (FOR UPDATE SKIP LOCKED)
- * Sets applying, worker_id, started_at, worker_leased_at in the exact same statement.
+ * Move ready_for_review rows to queued (up to limit, R4 / Phase 2)
+ * Phase 1 Guard (R1, R3b): Submit is fully disabled until Phase 2.
+ * Nothing may move ready_for_review -> queued automatically.
+ */
+export async function moveReadyTasksToQueued(limit = Number(process.env.WORKER_COUNT) || 2) {
+  // Phase 1: Submit is fully disabled until Phase 2 manual Submit toggle is active.
+  return 0;
+}
+
+/**
+ * R4: Max concurrent applying rows parameterized by WORKER_COUNT from env.
+ * The claim is ONE atomic call (FOR UPDATE SKIP LOCKED) that takes exactly one `queued` row
+ * and refuses when WORKER_COUNT rows are applying.
  */
 export async function claimNextTask(workerId) {
-  if (!workerId) return null;
+  if (!workerId || !supabase) return null;
+  const { isSubmitStopRequested } = await import('./browserLifecycle.mjs');
+  if (isGlobalStopRequested() || isSubmitStopRequested()) return null;
+  const controls = await getWorkerControls().catch(() => null);
+  if (controls?.submit?.stop_requested) return null;
   const now = new Date().toISOString();
+  const maxConcurrent = Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
 
-  // 1. Try PostgreSQL RPC (guarantees DB-level FOR UPDATE SKIP LOCKED)
+  // R4 Rule: Refuse immediately if WORKER_COUNT rows are already applying
+  try {
+    const { count: applyingCount } = await supabase
+      .from('submission_tasks')
+      .select('*', { count: 'exact', head: true })
+      .eq('status', 'applying');
+
+    if (typeof applyingCount === 'number' && applyingCount >= maxConcurrent) {
+      return null;
+    }
+  } catch {}
+
+  // 1. Try PostgreSQL RPC (guarantees DB-level FOR UPDATE SKIP LOCKED & refusal when maxConcurrent applying)
   try {
     const { data: rpcRows, error: rpcErr } = await supabase
-      .rpc('claim_next_submission_task', { p_worker_id: workerId });
+      .rpc('claim_next_submission_task', { p_worker_id: workerId, p_max_concurrent: maxConcurrent });
 
     if (!rpcErr && Array.isArray(rpcRows) && rpcRows.length > 0) {
       return rpcRows[0];
     }
   } catch { }
 
-  // 2. Direct atomic claim (CAS: Compare-And-Swap on oldest ready_for_review, queued, or approved tasks)
+  // 2. Direct atomic fallback (CAS: Compare-And-Swap on oldest strictly queued row)
   try {
     const { data: candidates } = await supabase
       .from('submission_tasks')
       .select('id, status')
-      .in('status', ['queued', 'approved_for_submission', 'ready_for_review'])
+      .eq('status', 'queued')
       .order('created_at', { ascending: true })
       .limit(10);
 
     if (!candidates || candidates.length === 0) return null;
 
     for (const cand of candidates) {
+      // Atomic claim on queued row
       const { data: claimed, error: claimErr } = await supabase
         .from('submission_tasks')
         .update({
           status: 'applying',
+          status_actor: 'system',
           worker_id: workerId,
           started_at: now,
           worker_leased_at: now,
           updated_at: now,
         })
         .eq('id', cand.id)
-        .eq('status', cand.status)
+        .eq('status', 'queued')
         .select('*');
 
       if (!claimErr && claimed && claimed.length > 0) {
@@ -227,55 +234,48 @@ export async function sendTaskHeartbeat(taskId, workerId) {
 }
 
 /**
- * Reaper: Marks tasks with expired lease (> timeoutMinutes) as 'failed'.
- * Never auto re-queues, preserving safety against duplicate submissions.
+ * Reaper (R6, R14, Amendment C): Reverts tasks with expired lease (> timeoutMinutes) back to 'ready_for_review'
+ * with possibly_submitted = true. NEVER sets 'failed'. NEVER touches ready_for_review or queued.
  */
 export async function reapExpiredLeases(timeoutMinutes = 10) {
-  // 1. Try PostgreSQL RPC
-  try {
-    const { data: reaped, error: rpcErr } = await supabase
-      .rpc('reap_expired_submission_leases', { p_timeout_minutes: timeoutMinutes });
-
-    if (!rpcErr && Array.isArray(reaped) && reaped.length > 0) {
-      console.log(`🧹 [REAPER] Reaped ${reaped.length} expired task(s) via RPC.`);
-      return reaped;
-    }
-  } catch { }
-
-  // 2. Fallback direct query
+  if (!supabase) return [];
   try {
     const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
     const now = new Date().toISOString();
 
-    const { data: expired } = await supabase
+    const { data: expired, error: selErr } = await supabase
       .from('submission_tasks')
       .select('id, worker_id, applywizz_id')
       .eq('status', 'applying')
       .lt('worker_leased_at', cutoff);
 
-    if (!expired || expired.length === 0) return [];
+    if (selErr || !expired || expired.length === 0) return [];
 
     const reapedRows = [];
     for (const exp of expired) {
-      const { data: updated } = await supabase
+      // Single-ID CAS update checking previous status 'applying' (R5, R6)
+      const { data: updated, error: updErr } = await supabase
         .from('submission_tasks')
         .update({
-          status: 'failed',
-          error_message: `Worker lease expired (> ${timeoutMinutes} minutes). Possible worker process crash. Requires admin inspection.`,
-          completed_at: now,
+          status: 'ready_for_review',
+          status_actor: 'reaper',
+          possibly_submitted: true,
+          worker_id: null,
+          worker_leased_at: null,
+          error_message: `Worker lease expired (> ${timeoutMinutes}m). Returned to ready_for_review with possibly_submitted=true.`,
           updated_at: now,
         })
         .eq('id', exp.id)
         .eq('status', 'applying')
         .select('*');
 
-      if (updated && updated.length > 0) {
+      if (!updErr && updated && updated.length > 0) {
         reapedRows.push(updated[0]);
       }
     }
 
     if (reapedRows.length > 0) {
-      console.log(`🧹 [REAPER] Reaped ${reapedRows.length} expired task(s):`, reapedRows.map(r => r.id));
+      console.log(`🧹 [REAPER] Safely reverted ${reapedRows.length} expired task(s) to ready_for_review with possibly_submitted=true:`, reapedRows.map(r => r.id));
     }
     return reapedRows;
   } catch (err) {
@@ -293,65 +293,15 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
 export async function processClaimedTask({ task, workerId, headless = true, runnerFn = null, options = {} }) {
   if (!task || !workerId) return { success: false, error: 'Invalid task or workerId' };
 
-  // Hard stop check: Abort immediately before doing any work or launching browsers
-  const { isGlobalStopRequested, isSubmitStopRequested } = await import('./browserLifecycle.mjs');
-  if (isGlobalStopRequested() || isSubmitStopRequested()) {
-    console.log(`🛑 [${workerId}] Stop signal active! Aborting task #${task.id} immediately and reverting to ready_for_review.`);
-    await supabase
-      .from('submission_tasks')
-      .update({ status: 'ready_for_review', worker_id: null, updated_at: new Date().toISOString() })
-      .eq('id', task.id);
-    await updateWorkerStatus(workerId, {
-      state: 'idle',
-      stage: 'idle',
-      current_application_id: null,
-      updated_at: new Date().toISOString(),
-    }).catch(() => {});
-    return { status: 'stopped', error: 'Stopped by user' };
-  }
-
   console.log(`\n🚀 [${workerId}] Processing task #${task.id} (${task.applywizz_id} @ ${task.company || 'Company'})...`);
 
-  // Pre-flight check: Has candidate already submitted to this company?
-  const cleanComp = String(task.company || '').trim();
-  const cleanId = String(task.applywizz_id || '').trim().toUpperCase();
-  if (cleanId && cleanComp && cleanComp !== 'Workday Employer' && cleanComp !== 'Workday') {
-    const { hasClientAppliedToCompany } = await import('./supabaseClient.mjs');
-    const alreadyApplied = await hasClientAppliedToCompany(cleanId, cleanComp, { excludeTaskId: task.id });
-    if (alreadyApplied) {
-      console.log(`⚡ [${workerId}] Pre-flight guard: Candidate ${cleanId} has ALREADY submitted an application to company "${cleanComp}". Skipping browser launch and marking already_applied.`);
-      const now = new Date().toISOString();
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
-        workerId,
-        patch: {
-          status: 'already_applied',
-          error_message: `Candidate has already submitted an application to ${cleanComp}`,
-          completed_at: now,
-          updated_at: now,
-        },
-      });
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'already_applied',
-            error_message: `Candidate has already submitted an application to ${cleanComp}`,
-            updated_at: now,
-          },
-        });
-      }
-      return { status: 'already_applied', success: true };
-    }
-  }
-
   // Update worker_status table
+  const workerNum = String(workerId).replace('worker_', '');
   await updateWorkerStatus(workerId, {
     state: 'in_flight',
     stage: 'submitting',
     current_application_id: task.id,
-    bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+    bot_name: `Worker ${workerNum}`,
     updated_at: new Date().toISOString(),
   }).catch(() => { });
 
@@ -418,23 +368,16 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             if (buf) {
               const cleanId = String(task.applywizz_id).trim().toUpperCase();
               const timestamp = Date.now();
-              shotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
-              let upRes = await supabase.storage
-                .from('failed-applications')
+              shotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
+              const { error: upErr } = await supabase.storage
+                .from('submitted-applications')
                 .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
-              let bucketUsed = 'failed-applications';
-              if (upRes.error) {
-                upRes = await supabase.storage
-                  .from('submitted-applications')
-                  .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
-                bucketUsed = 'submitted-applications';
-              }
-              if (!upRes.error) {
+              if (!upErr) {
                 const { data: urlData } = supabase.storage
-                  .from(bucketUsed)
+                  .from('submitted-applications')
                   .getPublicUrl(shotPath);
                 shotUrl = urlData?.publicUrl || null;
-                console.log(`[${workerId}] screenshot uploaded to ${bucketUsed}: ${shotPath}`);
+                console.log(`[${workerId}] screenshot uploaded: ${shotPath}`);
               }
             }
           }
@@ -466,48 +409,19 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     let finalStoragePath = result?.screenshotPath || null;
     if (!finalStoragePath && finalShotUrl) {
       const cleanId = String(task.applywizz_id).trim().toUpperCase();
-      finalStoragePath = `${cleanId}_${task.id}.png`;
+      finalStoragePath = `${cleanId}/${task.id}.png`;
     }
 
     if (isSuccess) {
-      // Mandatorily ensure success screenshot is captured if page is still open and shot is missing
-      if (!finalShotUrl) {
-        try {
-          const ctx = getWorkerContext(workerId);
-          if (ctx?.page && !ctx.page.isClosed()) {
-            await ctx.page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-            let buf = await ctx.page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
-            if (!buf) {
-              buf = await ctx.page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-            }
-            if (buf) {
-              const cleanId = String(task.applywizz_id).trim().toUpperCase();
-              const timestamp = Date.now();
-              const succShotPath = `${cleanId}_${task.id}_submitted_${timestamp}.jpg`;
-              const upRes = await supabase.storage
-                .from('submitted-applications')
-                .upload(succShotPath, buf, { contentType: 'image/jpeg', upsert: true });
-              if (!upRes.error) {
-                const { data: urlData } = supabase.storage
-                  .from('submitted-applications')
-                  .getPublicUrl(succShotPath);
-                finalShotUrl = urlData?.publicUrl || null;
-                console.log(`[${workerId}] mandatory full-page success screenshot uploaded to submitted-applications: ${succShotPath}`);
-              }
-            }
-          }
-        } catch (succShotErr) {
-          console.warn(`[${workerId}] Notice capturing success screenshot:`, succShotErr?.message);
-        }
-      }
-
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
         patch: {
           status: 'submitted',
+          status_actor: 'system',
           completed_at: now,
-          application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
+          application_submitted_screenshot_url: finalShotUrl,
+          screenshot_path: finalStoragePath,
           updated_at: now,
         },
       });
@@ -518,186 +432,24 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           workerId,
           patch: {
             status: 'submitted',
-            application_submitted_screenshot_url: finalShotUrl || finalStoragePath,
-            screenshot_path: finalShotUrl || finalStoragePath,
+            application_submitted_screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
-      }
-
-      // Clean up local cached resume immediately after successful submission
-      try {
-        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
-        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
-      } catch {}
-    } else if (result?.status === 'already_applied' || result?.alreadyApplied) {
-      console.log(`✅ [${workerId}] Candidate ${task.applywizz_id} has ALREADY APPLIED to this job (${task.company}). Recording proof screenshot and setting status to 'already_applied'.`);
-      const proofUrl = result?.screenshotUrl || finalShotUrl || finalStoragePath;
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
-        workerId,
-        patch: {
-          status: 'already_applied',
-          completed_at: now,
-          application_submitted_screenshot_url: proofUrl,
-          error_message: null,
-          updated_at: now,
-        },
-      });
-
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'already_applied',
-            application_submitted_screenshot_url: proofUrl,
-            screenshot_path: proofUrl,
-            error_message: null,
-            updated_at: now,
-          },
-        });
-      }
-
-      try {
-        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
-        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
-      } catch {}
-    } else if (result?.status === 'job_expired' || result?.isExpired || result?.status === 'job_not_found') {
-      const expiredReason = "Job link expired";
-      console.log(`❌ [${workerId}] Job link expired for task #${task.id} (${task.company}): ${expiredReason}`);
-      let expiredShot = result?.screenshotUrl || finalShotUrl || finalStoragePath;
-      if (!expiredShot) {
-        try {
-          const ctx = getWorkerContext(workerId);
-          if (ctx?.page && !ctx.page.isClosed()) {
-            const { captureAndUploadFailureScreenshot } = await import('./workerPool.mjs');
-            expiredShot = await captureAndUploadFailureScreenshot(ctx.page, {
-              applywizzId: task.applywizz_id,
-              taskId: task.id,
-              stepName: 'job_link_expired',
-            });
-          }
-        } catch {}
-      }
-
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
-        workerId,
-        patch: {
-          status: 'failed',
-          error_message: expiredReason,
-          completed_at: now,
-          application_submitted_screenshot_url: expiredShot,
-          updated_at: now,
-        },
-      });
-
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'failed',
-            error_message: expiredReason,
-            stopped_at_step: 'Job link expired',
-            application_submitted_screenshot_url: expiredShot,
-            screenshot_path: expiredShot,
-            updated_at: now,
-          },
-        });
-      }
-
-      try {
-        const { recordFailedJob } = await import('./supabaseClient.mjs');
-        await recordFailedJob({
-          applywizzId: task.applywizz_id,
-          jobId: task.job_id || null,
-          jobUrl: task.job_url,
-          company: task.company,
-          roleTitle: task.role_title,
-          failureReason: expiredReason,
-          failedAtStep: 'Job link expired',
-          screenshotPath: expiredShot,
-        });
-      } catch {}
-
-      try {
-        const { cleanupClientResume } = await import('./applyWizzResume.mjs');
-        await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
-      } catch {}
-    } else if (
-      result?.status === 'stopped' ||
-      isGlobalStopRequested() ||
-      isSubmitStopRequested() ||
-      String(result?.error || result?.reason || '').toLowerCase().includes('closed') ||
-      String(result?.error || result?.reason || '').toLowerCase().includes('abort') ||
-      String(result?.error || result?.reason || '').toLowerCase().includes('target')
-    ) {
-      // User requested stop: Revert cleanly to ready_for_review so no work is corrupted and it can resume cleanly
-      console.log(`🛑 [${workerId}] Task #${task.id} aborted due to stop request. Reverting status to ready_for_review.`);
-      await supabase
-        .from('submission_tasks')
-        .update({ status: 'ready_for_review', worker_id: null, updated_at: now })
-        .eq('id', task.id);
-      if (task.distribution_id) {
-        await supabase
-          .from('job_distributions')
-          .update({ status: 'ready_for_review', worker_id: null, updated_at: now })
-          .eq('id', task.distribution_id);
       }
     } else {
-      let errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
-      let failShot = result?.screenshotUrl || finalShotUrl || finalStoragePath || null;
-      let failedStep = result?.stoppedAtStep || result?.failedAtStep || null;
-
-      try {
-        const ctx = getWorkerContext(workerId);
-        if (ctx?.page && !ctx.page.isClosed()) {
-          const { extractUniqueFailureReason, captureAndUploadFailureScreenshot } = await import('./workerPool.mjs');
-          const failureDiag = await extractUniqueFailureReason(ctx.page, null, failedStep || 'Review & Submit', errMsg);
-          failedStep = failureDiag.step;
-          errMsg = failureDiag.reason;
-
-          if (!failShot) {
-            failShot = await captureAndUploadFailureScreenshot(ctx.page, {
-              applywizzId: task.applywizz_id,
-              taskId: task.id,
-              stepName: failedStep,
-            });
-          }
-        }
-      } catch (diagErr) {
-        console.warn(`[${workerId}] Notice during failure diagnosis/screenshot:`, diagErr.message);
-      }
-
-      if (!failedStep) {
-        const raw = String(errMsg).toLowerCase();
-        if (raw.includes('expired') || raw.includes("doesn't exist") || raw.includes('not exist') || raw.includes('404')) {
-          failedStep = 'Job link expired';
-        } else if (raw.includes('auth') || raw.includes('password') || raw.includes('credential') || raw.includes('sign in') || raw.includes('create account')) {
-          failedStep = 'Auth Gateway (Sign In / Sign Up)';
-        } else if (raw.includes('zoho') || raw.includes('mailbox') || raw.includes('verification') || raw.includes('otp')) {
-          failedStep = 'Verification: Zoho Mail';
-        } else if (raw.includes('resume') || raw.includes('experience') || raw.includes('work history')) {
-          failedStep = 'Step 2: My Experience';
-        } else if (raw.includes('voluntary') || raw.includes('eeo') || raw.includes('disclosure') || raw.includes('self identify')) {
-          failedStep = 'Step 4: Voluntary Disclosures';
-        } else if (raw.includes('timed out') || raw.includes('timeout') || raw.includes('watchdog')) {
-          failedStep = 'Session Closed / Watchdog Timeout';
-        } else {
-          failedStep = 'Step 5: Review & Submit';
-        }
-      }
-
+      const errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
         patch: {
           status: 'failed',
+          status_actor: 'system',
           error_message: errMsg,
           completed_at: now,
-          application_submitted_screenshot_url: failShot,
+          application_submitted_screenshot_url: finalShotUrl,
+          screenshot_path: finalStoragePath,
+          review_flag: (!finalShotUrl && !finalStoragePath) ? 'screenshot_capture_failed' : null,
           updated_at: now,
         },
       });
@@ -709,32 +461,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'failed',
             error_message: errMsg,
-            stopped_at_step: failedStep,
-            application_submitted_screenshot_url: failShot,
-            screenshot_path: failShot,
+            application_submitted_screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
-      }
-
-      try {
-        const { recordFailedJob } = await import('./supabaseClient.mjs');
-        const failAnswers = (Array.isArray(result?.resolvedAnswers) && result.resolvedAnswers.length)
-          ? result.resolvedAnswers
-          : (Array.isArray(task.resolved_answers) ? task.resolved_answers : []);
-        await recordFailedJob({
-          applywizzId: task.applywizz_id,
-          jobId: task.job_id || null,
-          jobUrl: task.job_url,
-          company: task.company,
-          roleTitle: task.role_title,
-          failureReason: errMsg,
-          failedAtStep: failedStep,
-          screenshotPath: failShot,
-          resolvedAnswers: failAnswers,
-        });
-      } catch (recErr) {
-        console.warn(`[${workerId}] Warning: recordFailedJob recording notice:`, recErr?.message);
       }
     }
   } catch (err) {
@@ -757,23 +487,16 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         if (buf) {
           const cleanId = String(task.applywizz_id).trim().toUpperCase();
           const timestamp = Date.now();
-          errShotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
-          let upRes = await supabase.storage
-            .from('failed-applications')
+          errShotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
+          const { error: upErr } = await supabase.storage
+            .from('submitted-applications')
             .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
-          let bucketUsed = 'failed-applications';
-          if (upRes.error) {
-            upRes = await supabase.storage
-              .from('submitted-applications')
-              .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
-            bucketUsed = 'submitted-applications';
-          }
-          if (!upRes.error) {
+          if (!upErr) {
             const { data: urlData } = supabase.storage
-              .from(bucketUsed)
+              .from('submitted-applications')
               .getPublicUrl(errShotPath);
             errShotUrl = urlData?.publicUrl || null;
-            console.log(`[${workerId}] screenshot uploaded to ${bucketUsed}: ${errShotPath}`);
+            console.log(`[${workerId}] screenshot uploaded: ${errShotPath}`);
           }
         }
       }
@@ -784,29 +507,17 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     result.screenshotUrl = errShotUrl;
     result.screenshotPath = errShotPath;
 
-    const catchShot = errShotUrl || errShotPath || null;
-    const catchErr = err?.message || 'Execution error';
-
-    let catchStep = 'Runtime Exception';
-    const rawCatch = String(catchErr).toLowerCase();
-    if (rawCatch.includes('timeout') || rawCatch.includes('watchdog')) {
-      catchStep = 'Session Closed / Watchdog Timeout';
-    } else if (rawCatch.includes('auth') || rawCatch.includes('password')) {
-      catchStep = 'Auth Gateway (Sign In / Sign Up)';
-    } else if (rawCatch.includes('zoho')) {
-      catchStep = 'Verification: Zoho Mail';
-    } else if (rawCatch.includes('target') || rawCatch.includes('closed') || rawCatch.includes('browser')) {
-      catchStep = 'Session Closed / Watchdog Timeout';
-    }
-
     await updateSubmissionTaskWithCheck({
       taskId: task.id,
       workerId,
       patch: {
         status: 'failed',
-        error_message: catchErr,
+        status_actor: 'system',
+        error_message: err?.message || 'Execution error',
         completed_at: now,
-        application_submitted_screenshot_url: catchShot,
+        application_submitted_screenshot_url: errShotUrl,
+        screenshot_path: errShotPath,
+        review_flag: (!errShotUrl && !errShotPath) ? 'screenshot_capture_failed' : null,
         updated_at: now,
       },
     });
@@ -817,47 +528,22 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         workerId,
         patch: {
           status: 'failed',
-          error_message: catchErr,
-          stopped_at_step: catchStep,
-          application_submitted_screenshot_url: catchShot,
-          screenshot_path: catchShot,
+          error_message: err?.message || 'Execution error',
+          application_submitted_screenshot_url: errShotUrl,
           updated_at: now,
         },
       });
     }
-
-    try {
-      const { recordFailedJob } = await import('./supabaseClient.mjs');
-      const failAnswers = (Array.isArray(result?.resolvedAnswers) && result.resolvedAnswers.length)
-        ? result.resolvedAnswers
-        : (Array.isArray(task.resolved_answers) ? task.resolved_answers : []);
-      await recordFailedJob({
-        applywizzId: task.applywizz_id,
-        jobId: task.job_id || null,
-        jobUrl: task.job_url,
-        company: task.company,
-        roleTitle: task.role_title,
-        failureReason: catchErr,
-        failedAtStep: catchStep,
-        screenshotPath: catchShot,
-        resolvedAnswers: failAnswers,
-      });
-    } catch (recCatchErr) {
-      console.warn(`[${workerId}] Warning: recordFailedJob recording notice in catch block:`, recCatchErr?.message);
-    }
   } finally {
     stopHeartbeat();
     if (watchdogTimer) clearTimeout(watchdogTimer);
-    try {
-      const { cleanupClientResume } = await import('./applyWizzResume.mjs');
-      await cleanupClientResume({ _applyWizzId: task.applywizz_id, applywizz_id: task.applywizz_id });
-    } catch {}
     // Release worker back to idle
+    const workerNum = String(workerId).replace('worker_', '');
     await updateWorkerStatus(workerId, {
       state: 'idle',
       stage: 'submitting',
       current_application_id: null,
-      bot_name: `Submitting Worker ${workerId.slice(-1)}`,
+      bot_name: `Worker ${workerNum}`,
       updated_at: new Date().toISOString(),
     }).catch(() => { });
   }

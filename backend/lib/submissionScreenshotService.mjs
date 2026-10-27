@@ -14,7 +14,9 @@ import { loadLocalEnvOnce } from './supabaseClient.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 loadLocalEnvOnce();
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
 export const BUCKET_NAME = 'submitted-applications';
 
@@ -35,7 +37,7 @@ export async function recordTaskSubmissionProof({
 
   const cleanTaskId = String(taskId).trim();
   const cleanId = String(applywizzId).trim().toUpperCase();
-  const storagePath = `${cleanId}_${cleanTaskId}.png`;
+  const storagePath = `${cleanId}/${cleanTaskId}.png`;
 
   // 1. Verify path contains the exact task ID before upload
   if (!storagePath.includes(cleanTaskId)) {
@@ -79,14 +81,16 @@ export async function recordTaskSubmissionProof({
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     const now = new Date().toISOString();
     try {
+      const patch = {
+        status: 'submitted',
+        status_actor: 'system',
+        screenshot_path: publicUrl || storagePath,
+        completed_at: now,
+        updated_at: now,
+      };
       const { data: rows, error: updateErr } = await supabase
         .from('submission_tasks')
-        .update({
-          status: 'submitted',
-          application_submitted_screenshot_url: publicUrl,
-          completed_at: now,
-          updated_at: now,
-        })
+        .update(patch)
         .eq('id', cleanTaskId)
         .eq('status', 'applying')
         .eq('worker_id', workerId)

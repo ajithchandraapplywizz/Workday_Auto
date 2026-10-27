@@ -8,7 +8,9 @@ import { loadLocalEnvOnce } from './supabaseClient.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 loadLocalEnvOnce();
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
+const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
+  : null;
 
 /**
  * Check whether a CA is assigned to a specific client.
@@ -115,6 +117,7 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
     .from('submission_tasks')
     .update({
       status: 'queued',
+      status_actor: 'system',
       reviewed_by: caNameOrEmail,
       updated_at: now,
     })

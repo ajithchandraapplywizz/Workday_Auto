@@ -893,3 +893,4 @@ export async function handleManagerDashboardRequest(req, res, searchParams = new
     return res.end(JSON.stringify({ success: false, error: err.message || 'Internal server error' }));
   }
 }
+

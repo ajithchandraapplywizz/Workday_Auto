@@ -83,10 +83,6 @@ export const MODEL_PRICING = {
 export function getModelPricing(model = '') {
   const normalized = String(model || '').toLowerCase().trim();
 
-  if (normalized.endsWith(':free') || normalized.includes(':free')) {
-    return { prompt: 0.0, completion: 0.0, cache_read: 0.0, cache_write: 0.0 };
-  }
-
   if (MODEL_PRICING[normalized]) {
     return MODEL_PRICING[normalized];
   }
@@ -264,11 +260,7 @@ export async function recordApplicationTokenUsage({
       },
     }, { attempts: 2, label: `InsertTokenUsage:${tableName}` });
 
-    if (insertRes.ok) {
-      console.log(`📊 [TokenUsage] Inserted ${calculated.total_tokens} tokens ($${calculated.total_cost}) for ${applywizz_id} on "${job_url}" into ${tableName}`);
-      return insertRes.json();
-    }
-    return null;
+    return insertRes.ok ? insertRes.json() : null;
   } catch (err) {
     console.error(`[TokenUsage ERROR] Failed to record token usage in ${tableName}:`, err.message);
     return null;

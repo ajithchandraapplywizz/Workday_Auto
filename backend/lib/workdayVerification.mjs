@@ -241,7 +241,7 @@ export async function isWorkdayPasswordResetSetPage(page) {
  * @returns {Promise<boolean>} True if password setup form was detected and submitted
  */
 export async function completeWorkdayPasswordResetForm(page, email, password) {
-  const targetPassword = password || process.env.WORKDAY_PASSWORD || '';
+  const targetPassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
   const targetEmail = email || process.env.WORKDAY_EMAIL || '';
   if (!page) return false;
 
@@ -501,7 +501,7 @@ async function checkIfAlreadyOnApplicationWizard(page) {
   }).catch(() => false);
 }
 
-export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 60000 }) {
+export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 50000 }) {
   // Fast path: if the page is already on the application form (e.g. My Information), skip polling immediately!
   if (await checkIfAlreadyOnApplicationWizard(page)) {
     console.log('   🎉 [WorkdayBot] Application Wizard / My Information is ALREADY ACTIVE! Skipping email verification polling.');
@@ -630,7 +630,7 @@ export async function resolveWorkdayVerification(page, { email, password, compan
  * @param {number} [options.timeoutMs=75000]
  * @returns {Promise<{ success: boolean, url?: string, reason?: string }>}
  */
-export async function executeWorkdayForgotPassword(page, { email, password, company, timeoutMs = 75000 }) {
+export async function executeWorkdayForgotPassword(page, { email, password, company, timeoutMs = 55000 }) {
   console.log(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
 
   // 1. Locate and click "Forgot your password?" link/button

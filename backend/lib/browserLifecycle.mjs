@@ -13,7 +13,12 @@ let submitStopRequested = false;
 export function setGlobalStop(val) {
   globalStopRequested = Boolean(val);
   if (globalStopRequested) {
+    scanStopRequested = true;
+    submitStopRequested = true;
     abortAllActiveBrowsers();
+  } else {
+    scanStopRequested = false;
+    submitStopRequested = false;
   }
 }
 
@@ -23,24 +28,18 @@ export function isGlobalStopRequested() {
 
 export function setScanStop(val) {
   scanStopRequested = Boolean(val);
-  if (scanStopRequested) {
-    abortAllActiveBrowsers();
-  }
 }
 
 export function isScanStopRequested() {
-  return scanStopRequested;
+  return scanStopRequested || globalStopRequested;
 }
 
 export function setSubmitStop(val) {
   submitStopRequested = Boolean(val);
-  if (submitStopRequested) {
-    abortAllActiveBrowsers();
-  }
 }
 
 export function isSubmitStopRequested() {
-  return submitStopRequested;
+  return submitStopRequested || globalStopRequested;
 }
 
 export function registerActiveBrowser(browser) {
@@ -74,47 +73,22 @@ export function getWorkerContext(workerId) {
 }
 
 /**
- * Forcefully and immediately close all open Playwright browser instances and contexts.
+ * Forcefully and immediately close all open Playwright browser instances.
  * Terminates active pages, network connections, and visible windows in <500ms.
  */
 export async function abortAllActiveBrowsers() {
-  const browserCount = activeBrowsers.size;
-  const ctxCount = activeWorkerContexts.size;
-  console.log(`\n🛑 [LIFECYCLE] Hard-Aborting ${browserCount} active Playwright browser(s) and ${ctxCount} worker context(s)...`);
-
-  // 1. Immediately close registered worker contexts and pages
-  for (const [wId, ctx] of Array.from(activeWorkerContexts.entries())) {
-    try {
-      if (ctx.page && !ctx.page.isClosed()) {
-        ctx.page.close().catch(() => {});
-      }
-      if (ctx.context) {
-        ctx.context.close().catch(() => {});
-      }
-      if (ctx.browser && ctx.browser.isConnected()) {
-        ctx.browser.close().catch(() => {});
-      }
-    } catch {}
-    activeWorkerContexts.delete(wId);
-  }
-
-  // 2. Immediately close all registered browser instances
+  console.log(`\n🛑 [LIFECYCLE] Aborting ${activeBrowsers.size} active Playwright browser(s)...`);
   const closePromises = [];
   for (const browser of Array.from(activeBrowsers)) {
     try {
-      if (browser) {
-        // Close all open contexts inside browser first
-        const contexts = browser.contexts?.() || [];
-        for (const c of contexts) {
-          c.close().catch(() => {});
-        }
-        closePromises.push(
-          browser.close().catch(() => {})
-        );
-      }
+      closePromises.push(
+        browser.close().catch((err) => {
+          // Ignore close errors if browser already closed
+        })
+      );
     } catch {}
     activeBrowsers.delete(browser);
   }
   await Promise.allSettled(closePromises);
-  console.log(`✅ [LIFECYCLE] All browser instances and contexts destroyed.`);
+  console.log(`✅ [LIFECYCLE] All browser instances closed cleanly.`);
 }

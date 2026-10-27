@@ -4,15 +4,7 @@
  */
 
 import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured } from '../applyWizzClient.mjs';
-import {
-  peekClientAnswer,
-  acceptClientValue,
-  resolveClientAnswer,
-  isReferralSourceQuestion,
-  pickDeterministicSourceOption,
-  pickDeterministicRaceOption,
-  lookupScannedJobAnswer,
-} from '../clientAnswer.mjs';
+import { peekClientAnswer, acceptClientValue, resolveClientAnswer } from '../clientAnswer.mjs';
 import { lookupSupabaseAnswerSync, upsertSupabaseAnswer, recordSupabaseAnswerInMemory } from '../supabaseClient.mjs';
 import { resolveMinimumAgeAnswer } from '../minimumAge.mjs';
 import { isMandatoryField } from '../scanFieldFilter.mjs';
@@ -223,17 +215,6 @@ function deterministicSpecial(field, profile) {
     // professional_license: needs review
     return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
   }
-  if (intent === 'referral_source' || isReferralSourceQuestion(label)) {
-    let shared = null;
-    if (Array.isArray(profile?._scannedJobAnswers)) {
-      const hit = profile._scannedJobAnswers.find((item) => isReferralSourceQuestion(item.question || item.question_normalized || item.label || ''));
-      if (hit?.answer) shared = hit.answer;
-    }
-    const opts = optionsOf(field);
-    const chosen = shared ? (opts.length ? (opts.find((o) => o.toLowerCase().includes(shared.toLowerCase())) || shared) : shared) : pickDeterministicSourceOption(opts);
-    return finish(field, 'referral_source', chosen, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.99);
-  }
-
   const eeoKind = {
     eeo_gender: 'gender',
     eeo_hispanic: 'hispanic',
@@ -245,22 +226,6 @@ function deterministicSpecial(field, profile) {
     let val = explicitEeo(profile, eeoKind);
     if (!val && eeoKind === 'veteran') {
       val = profile?.eeo?.veteran_status || 'I am not a veteran';
-    }
-    if (!val && eeoKind === 'race') {
-      if (Array.isArray(profile?._scannedJobAnswers)) {
-        const hit = profile._scannedJobAnswers.find((item) => /\b(race|ethnicity)\b/i.test(item.question || item.question_normalized || item.label || '') && !/hispanic/i.test(item.question || ''));
-        if (hit?.answer) val = hit.answer;
-      }
-      if (!val) {
-        val = pickDeterministicRaceOption('Asian', optionsOf(field));
-      }
-    }
-    if (val && eeoKind === 'race') {
-      val = pickDeterministicRaceOption(val, optionsOf(field));
-    } else if (val && optionsOf(field).length > 0) {
-      const opts = optionsOf(field);
-      const matched = opts.find((o) => o.toLowerCase() === String(val).toLowerCase() || o.toLowerCase().includes(String(val).toLowerCase()));
-      if (matched) val = matched;
     }
     if (!val) return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType: answerTypeFromField(field) });
     return finish(field, intent, val, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.97);
@@ -529,11 +494,6 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
     }
     if (record && record.requiresReview && (isHighRiskIntent(intent) || isComplianceSensitive(field.label))) {
       answers.push(record);
-      continue;
-    }
-    if (isReferralSourceQuestion(field.label)) {
-      const fallbackSource = pickDeterministicSourceOption(optionsOf(field));
-      answers.push(finish(field, 'referral_source', fallbackSource, SOURCE.DETERMINISTIC, REASON.OPTION_MATCH, 0.99));
       continue;
     }
     unknown.push({

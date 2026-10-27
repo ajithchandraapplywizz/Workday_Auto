@@ -16,7 +16,8 @@
  */
 
 import crypto from 'node:crypto';
-// otplib and qrcode removed — TOTP MFA is replaced by default login code flow
+import { generateSecret, generateURI, generateSync, verifySync } from 'otplib';
+import QRCode from 'qrcode';
 import { createClient } from '@supabase/supabase-js';
 import { loadLocalEnvOnce } from './supabaseClient.mjs';
 import { SESSION_MAX_AGE_HOURS, presenceConfig } from './presenceConfig.mjs';
@@ -308,11 +309,24 @@ function verifyTotpCode(secret, code) {
   const cleanCode = String(code || '').trim();
   if (!cleanCode || cleanCode.length !== 6) return { valid: false };
 
-  const defaultLoginCode = String(process.env.DEFAULT_LOGIN_CODE || '000000').trim();
-  if (cleanCode === defaultLoginCode || cleanCode === '000000' || cleanCode === '123456') {
-    const currentStep = Math.floor(Date.now() / 1000 / 30);
-    return { valid: true, step: currentStep };
+  // Emergency test codes support when ALLOW_EMERGENCY_AUTH_CODES=true in non-production
+  if (process.env.ALLOW_EMERGENCY_AUTH_CODES === 'true' && process.env.NODE_ENV !== 'production') {
+    if (cleanCode === '000000' || cleanCode === '123456') {
+      const currentStep = Math.floor(Date.now() / 1000 / 30);
+      return { valid: true, step: currentStep };
+    }
   }
+
+  try {
+    const currentEpoch = Math.floor(Date.now() / 1000);
+    for (const offsetSec of [0, -30, 30]) {
+      const expectedToken = generateSync({ secret, epoch: currentEpoch + offsetSec });
+      if (expectedToken === cleanCode) {
+        const step = Math.floor((currentEpoch + offsetSec) / 30);
+        return { valid: true, step };
+      }
+    }
+  } catch { }
 
   return { valid: false };
 }
@@ -351,10 +365,36 @@ export async function handleCheckEmail(req, res, body = {}) {
  * Allowed ONLY if mfa_enrolled=false AND setup_allowed=true
  */
 export async function handleSetupStart(req, res, body = {}) {
+  const email = String(body.email || '').trim().toLowerCase();
+  const user = await getStaffUser(email);
+
+  if (!user || user.isClient) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({ success: false, error: 'Unauthorized email' }));
+  }
+
+  if (user.mfa_enrolled || !user.setup_allowed) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    return res.end(JSON.stringify({
+      success: false,
+      error: user.mfa_enrolled ? 'MFA is already enrolled for this account' : 'Setup not allowed. Please contact an administrator.',
+    }));
+  }
+
+  // Generate 160-bit (20 bytes) base32 secret
+  const plainSecret = generateSecret();
+  const otpauthUri = generateURI({ label: email, issuer: 'ApplyWizz', secret: plainSecret });
+  const qrDataUrl = await QRCode.toDataURL(otpauthUri, { errorCorrectionLevel: 'M', margin: 2 });
+
+  // Store encrypted in totp_pending_enc
+  const totp_pending_enc = encryptSecret(plainSecret);
+  await updateMfaFields(email, { totp_pending_enc });
+
   res.writeHead(200, { 'Content-Type': 'application/json' });
   return res.end(JSON.stringify({
     success: true,
-    message: 'MFA setup is disabled. Please sign in with your default login code.',
+    otpauthUri,
+    qrDataUrl,
   }));
 }
 

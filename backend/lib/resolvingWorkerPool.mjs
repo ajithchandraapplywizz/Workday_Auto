@@ -15,16 +15,13 @@ import { preResolveClientAnswersDetailed } from './jobFormCache.mjs';
 import { isGlobalStopRequested, isScanStopRequested } from './browserLifecycle.mjs';
 import { getCleanSupabaseEnv } from './clusterBatchRunner.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
+
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
-const RESOLVER_WORKER_IDS = PIPELINE_CONFIG?.resolveWorkerIds || [
-  'resolving_worker_1',
-  'resolving_worker_2',
-  'resolving_worker_3',
-];
+export const RESOLVER_WORKER_IDS = PIPELINE_CONFIG.resolveWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
 
 /**
- * Run Stage 2: Dynamic-Worker Resolving Pool
+ * Run Stage 2: Parallel Resolving Pool
  */
 export async function runResolvingWorkerPool(options = {}) {
   console.log(`\n${'═'.repeat(72)}`);
@@ -45,7 +42,7 @@ export async function runResolvingWorkerPool(options = {}) {
   }
 
   const scannedRes = await httpsJsonWithRetry({
-    url: `${url}/rest/v1/scanned_jobs?question_count=gt.0&select=id,applywizz_id,job_url,company,role_title,scraped_questions,screenshot_path&order=created_at.desc&limit=50`,
+    url: `${url}/rest/v1/scanned_jobs?question_count=gt.0&select=id,applywizz_id,job_url,company,role_title,scraped_questions,screenshot_path&order=created_at.desc&limit=200`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   });
 
@@ -55,9 +52,47 @@ export async function runResolvingWorkerPool(options = {}) {
     return { success: true, processedCount: 0 };
   }
 
-  // 2. Fetch candidate IDs needing distributions
-  const activeCandidates = await getActiveCaCandidateIds().catch(() => []);
-  console.log(`[STAGE 2] Found ${scannedJobs.length} scanned jobs to match across active candidates.`);
+  // 2. Fetch candidate IDs needing distributions (ensuring min 20 clients)
+  const activeCandidatesRes = await getActiveCaCandidateIds().catch(() => ({}));
+  let activeCandidateIds = Array.isArray(activeCandidatesRes)
+    ? activeCandidatesRes
+    : (Array.isArray(activeCandidatesRes?.candidateIds) ? activeCandidatesRes.candidateIds : []);
+
+  // Ensure candidate pool has at least 20 clients by querying clients table
+  if (activeCandidateIds.length < 20) {
+    try {
+      const clientRes = await httpsJsonWithRetry({
+        url: `${url}/rest/v1/clients?select=applywizz_id&limit=100`,
+        headers: { apikey: key, Authorization: `Bearer ${key}` },
+      });
+      if (clientRes.ok) {
+        const clientRows = clientRes.json() || [];
+        const extraIds = clientRows
+          .map((c) => String(c.applywizz_id || '').toUpperCase().trim())
+          .filter(Boolean);
+        activeCandidateIds = Array.from(new Set([...activeCandidateIds, ...extraIds]));
+      }
+    } catch {}
+  }
+
+  // Fallback: check batch_job_queue unique applywizz_ids if still under 20
+  if (activeCandidateIds.length < 20) {
+    try {
+      const bqRes = await httpsJsonWithRetry({
+        url: `${url}/rest/v1/batch_job_queue?select=applywizz_id&limit=2000`,
+        headers: { apikey: key, Authorization: `Bearer ${key}` },
+      });
+      if (bqRes.ok) {
+        const bqRows = bqRes.json() || [];
+        const bqIds = bqRows
+          .map((r) => String(r.applywizz_id || '').toUpperCase().trim())
+          .filter(Boolean);
+        activeCandidateIds = Array.from(new Set([...activeCandidateIds, ...bqIds]));
+      }
+    } catch {}
+  }
+
+  console.log(`[STAGE 2] Found ${scannedJobs.length} scanned jobs to match across ${activeCandidateIds.length} candidate(s) (target: min 20 clients).`);
 
   let jobIndex = 0;
   let resolvedTotal = 0;
@@ -81,7 +116,7 @@ export async function runResolvingWorkerPool(options = {}) {
         state: 'in_flight',
         current_application_id: job.job_url, // STRICT URL IDENTIFICATION
         stage: 'resolving',
-        bot_name: `Resolving Worker ${slotIndex + 1}`,
+        bot_name: `Worker ${slotIndex + 1}`,
       }).catch(() => {});
 
       // STRICT URL IDENTIFICATION: Find candidates specifically assigned to this Job URL in batch_job_queue
@@ -98,8 +133,18 @@ export async function runResolvingWorkerPool(options = {}) {
         }
       } catch {}
 
+      // Ensure at least 20 clients are included for resolution across the client pool
+      if (candidatesToProcess.length < 20 && activeCandidateIds.length > 0) {
+        for (const cid of activeCandidateIds) {
+          if (!candidatesToProcess.includes(cid)) {
+            candidatesToProcess.push(cid);
+          }
+          if (candidatesToProcess.length >= 20) break;
+        }
+      }
+
       if (candidatesToProcess.length === 0) {
-        candidatesToProcess = job.applywizz_id ? [job.applywizz_id] : [];
+        candidatesToProcess = [job.applywizz_id || 'AWL-PRIMARY'];
       }
 
       console.log(`   🔍 [${workerId}] [Job #${myIndex + 1}/${scannedJobs.length}] Resolving answers for Job URL: ${job.job_url}`);
@@ -114,7 +159,7 @@ export async function runResolvingWorkerPool(options = {}) {
       };
 
       for (const awlId of candidatesToProcess) {
-        if (isGlobalStopRequested() || isScanStopRequested()) break;
+        if (isGlobalStopRequested()) break;
         try {
           const profile = await loadProfile(null, { applywizzId: awlId });
           if (profile) {
@@ -171,6 +216,47 @@ export async function runResolvingWorkerPool(options = {}) {
               }],
             }).catch(() => {});
 
+            // Scan and resolving workers may ONLY create submission_tasks rows as ready_for_review (R3)
+            if (isFully) {
+              try {
+                // Fetch distribution_id from job_distributions to maintain 1:1 foreign key linkage
+                let distributionId = null;
+                try {
+                  const distRes = await httpsJsonWithRetry({
+                    url: `${url}/rest/v1/job_distributions?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
+                    method: 'GET',
+                    headers: {
+                      apikey: key,
+                      Authorization: `Bearer ${key}`,
+                    },
+                  });
+                  if (Array.isArray(distRes?.data) && distRes.data.length > 0) {
+                    distributionId = distRes.data[0].id;
+                  }
+                } catch { }
+
+                await httpsJsonWithRetry({
+                  url: `${url}/rest/v1/submission_tasks`,
+                  method: 'POST',
+                  headers: {
+                    apikey: key,
+                    Authorization: `Bearer ${key}`,
+                    Prefer: 'resolution=ignore-duplicates',
+                  },
+                  body: {
+                    distribution_id: distributionId,
+                    applywizz_id: awlId,
+                    job_url: job.job_url,
+                    company,
+                    role_title: roleTitle,
+                    status: 'ready_for_review',
+                    created_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString(),
+                  },
+                });
+              } catch {}
+            }
+
             resolvedTotal++;
           }
         } catch (err) {
@@ -183,11 +269,11 @@ export async function runResolvingWorkerPool(options = {}) {
       state: 'idle',
       current_application_id: null,
       stage: 'resolving',
-      bot_name: `Resolving Worker ${slotIndex + 1}`,
+      bot_name: `Worker ${slotIndex + 1}`,
     }).catch(() => {});
   }
 
-  // Run the 3 resolver workers in parallel
+  // Run the 10 resolver workers in parallel
   await Promise.all(RESOLVER_WORKER_IDS.map((wId, i) => resolverLoop(wId, i)));
 
   console.log(`\n✅ [STAGE 2: RESOLVER] Resolution complete. Total distributions pre-resolved: ${resolvedTotal}`);

@@ -13,7 +13,7 @@
  *   3. Launches 3 parallel workers on 3 different links simultaneously in HEADED browser mode.
  *   4. For each assigned link:
  *      - PHASE 1 (Blueprint Inspection):
- *        • Candidate 1 (first queued client sorted by ascending AWL ID) runs FIRST in a visible browser.
+ *        • Candidate 1 (lowest numeric AWL ID, e.g. AWL-1568) runs FIRST in a visible browser.
  *        • Fills 4-tier application (with strict 2-digit date formatting: 04, 16, 2026).
  *        • At Review & Submit DOM, scrapes all required Q&A into JSONB.
  *        • Captures mandatory screenshot -> saved to Supabase screenshot_path.
@@ -33,8 +33,7 @@ import { resolve } from 'path';
 import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
-import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
-import { isGlobalStopRequested, setGlobalStop, isScanStopRequested, setScanStop } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
 
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
@@ -85,7 +84,7 @@ export async function isClusterStopRequested() {
   try {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    if (bc?.stop_requested || bc?.scan_stop_requested) {
+    if (bc?.stop_requested || bc?.scan_stop_requested || bc?.scan_status === 'off' || bc?.scan_status === 'stopping') {
       return true;
     }
   } catch { }
@@ -192,7 +191,7 @@ async function queueDbRequest(path, { method = 'GET', query = '', body = null, p
 /**
  * Fetch and cluster all queue tasks using canonical job keys.
  * Merges messy link variations (?source=LinkedIn, /en-US/, etc.) into single clusters.
- * Tasks inside each cluster are sorted numerically ascending by AWL ID.
+ * Tasks inside each cluster are sorted numerically ascending by AWL ID (AWL-1568 first).
  */
 export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId = null } = {}) {
   const { configured } = getCleanSupabaseEnv();
@@ -294,7 +293,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
 
   const clusters = Array.from(clusterMap.values());
 
-  // Sort tasks within each cluster numerically ascending by AWL ID
+  // Sort tasks within each cluster numerically ascending by AWL ID (AWL-1568 first)
   for (const c of clusters) {
     c.tasks.sort((a, b) => {
       const numA = parseInt(String(a.applywizz_id || '').replace(/\D/g, '') || '0', 10);
@@ -305,17 +304,10 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   }
 
   // Filter clusters by minClients and sort descending by clientCount
-  const sortedClusters = clusters
+  return clusters
     .filter((c) => c.clientCount >= minClients)
     .sort((a, b) => b.clientCount - a.clientCount)
     .slice(0, limit);
-
-  // Allocate a clean unique ID for every unique link
-  sortedClusters.forEach((c, idx) => {
-    c.linkId = `LINK-${String(idx + 1).padStart(3, '0')}`;
-  });
-
-  return sortedClusters;
 }
 
 /**
@@ -490,7 +482,7 @@ export async function fetchFreshTasksByIds(taskIds = []) {
 
 /**
  * Worker dedicated to processing a single link cluster end-to-end:
- *   1. Blueprint Leader (First Candidate) -> Form fill in HEADED browser -> Review DOM Q&A Scrape -> Screenshot
+ *   1. Blueprint Leader (AWL-1568) -> Form fill in HEADED browser -> Review DOM Q&A Scrape -> Screenshot
  *   2. Copy-paste JSON to all other client rows in Supabase by their task IDs
  *   3. Fast-fill followers using pre_resolved_answers in HEADED browser
  */
@@ -499,7 +491,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     headless = false, // HEADED by default!
     confirmSubmit = false,
     limitPerLink = null,
-    defaultPassword = process.env.WORKDAY_PASSWORD || '',
+    defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026',
     scanRunId = null,
   } = options;
 
@@ -509,12 +501,11 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const allTasks = cluster.tasks;
   const allTaskIds = allTasks.map((t) => t.id);
 
-  const linkId = cluster.linkId || `LINK-${cluster.reqId || '001'}`;
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`🚀 [${workerId}] ASSIGNED UNIQUE LINK ID: [${linkId}]`);
-  console.log(`   Job URL:       ${jobUrl}`);
-  console.log(`   Total Clients: ${cluster.clientCount} tasks generated`);
+  console.log(`🚀 [${workerId}] ASSIGNED CLUSTER: ${company.toUpperCase()} — ${role}`);
+  console.log(`   Canonical URL: ${jobUrl}`);
   console.log(`   Job Req ID:    ${cluster.reqId || 'N/A'}`);
+  console.log(`   Total Clients: ${cluster.clientCount} (clustered across ${cluster.rawUrls.size} messy link variations)`);
   console.log(`   Browser Mode:  ${headless ? 'Headless' : 'HEADED (Visible Browser Window)'}`);
   console.log(`${'═'.repeat(72)}`);
 
@@ -541,10 +532,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const maxLeadAttempts = Math.min(3, activeTasks.length);
 
   for (let attemptIdx = 0; attemptIdx < maxLeadAttempts; attemptIdx++) {
-    if (await isClusterStopRequested()) {
-      console.log(`🛑 [${workerId}] Stop signal active! Halting lead candidate attempts immediately.`);
-      break;
-    }
     const candidateTask = activeTasks[attemptIdx];
     console.log(`\n📍 [${workerId}] PHASE 1: Testing Lead Candidate #${attemptIdx + 1} (${candidateTask.applywizz_id}) for Unique Link...`);
     console.log(`   (Strictly 1 browser run per unique link; Followers will NOT run in browsers)`);
@@ -568,11 +555,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         isScanOnly: true,
       },
     });
-
-    if (result?.status === 'stopped' || await isClusterStopRequested()) {
-      console.log(`🛑 [${workerId}] Execution stopped by user. Aborting cluster candidate loop.`);
-      break;
-    }
 
     const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
     const success = result && (
@@ -612,10 +594,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     // Candidate-specific failure (e.g. auth_failed, missing credentials, locked account)
     console.log(`\n⚠️ [${workerId}] Lead Candidate ${candidateTask.applywizz_id} stopped (${result?.failureReason || result?.error || result?.status || 'Failed'}).`);
     if (attemptIdx + 1 < maxLeadAttempts) {
-      if (await isClusterStopRequested()) {
-        console.log(`🛑 [${workerId}] Stop signal active! Not attempting next candidate.`);
-        break;
-      }
       console.log(`   🔄 Trying next candidate in cluster (#${attemptIdx + 2}: ${activeTasks[attemptIdx + 1].applywizz_id}) to scan job...`);
     } else {
       leadProofShot = result?.screenshotUrl || null;
@@ -653,6 +631,64 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         }
       } catch {}
 
+      // Record failed clients directly into job_distributions
+      const failedAwlIds = allTasks.map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
+      const failNow = new Date().toISOString();
+      try {
+        const failedDistRows = allTasks.map((t) => ({
+          applywizz_id: String(t.applywizz_id).trim().toUpperCase(),
+          job_id: t.job_id || cluster.reqId || null,
+          job_url: t.job_url || jobUrl,
+          company: company || 'Workday Partner',
+          role_title: role || 'Role',
+          status: 'failed',
+          error_message: `Job expired / closed on Workday (${skipReason})`,
+          scraped_questions: [],
+          question_count: 0,
+          resolved_answers: [],
+          unanswered_questions: [],
+          unanswered_count: 0,
+          is_fully_answered: false,
+          application_submitted_screenshot_url: proofShot || null,
+          created_at: failNow,
+          updated_at: failNow,
+        }));
+        await queueDbRequest('job_distributions', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id,job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: failedDistRows,
+        });
+        console.log(`   📋 [job_distributions] Recorded ${failedDistRows.length} client(s) with status 'failed' into job_distributions.`);
+      } catch (fDistErr) {
+        console.log(`   ⚠️ [job_distributions] Note on recording failed clients: ${fDistErr?.message?.slice(0, 140)}`);
+      }
+
+      // Record into job_link_distribution_summaries table
+      try {
+        await queueDbRequest('job_link_distribution_summaries', {
+          method: 'POST',
+          query: '?on_conflict=job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: [{
+            job_url: jobUrl,
+            company,
+            role_title: role,
+            total_clients: allTasks.length,
+            success_count: 0,
+            success_awl_ids: [],
+            failed_count: failedAwlIds.length,
+            failed_awl_ids: failedAwlIds,
+            status: 'failed',
+            failure_reason: `Job expired / closed on Workday (${skipReason})`,
+            screenshot_url: proofShot || null,
+            updated_at: failNow,
+          }],
+        });
+      } catch (sumErr) {
+        console.log(`   ⚠️ [job_link_distribution_summaries] Note: ${sumErr?.message?.slice(0, 140)}`);
+      }
+
       if (allTaskIds.length > 0) {
         await failClusterTasksByIds(allTaskIds, `Job expired / closed on Workday (confirmed dead URL)`);
         console.log(`   ✓ Marked ${allTaskIds.length} tasks as expired in batch_job_queue.`);
@@ -670,7 +706,58 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         expired: true,
       };
     } else {
-      // NOT expired: Candidates encountered auth or login issues. DO NOT mark remaining followers as expired!
+      // NOT expired: Candidates encountered auth or login issues.
+      const failedAwlIds = activeTasks.slice(0, maxLeadAttempts).map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
+      const failNow = new Date().toISOString();
+
+      try {
+        const failedDistRows = activeTasks.slice(0, maxLeadAttempts).map((t) => ({
+          applywizz_id: String(t.applywizz_id).trim().toUpperCase(),
+          job_id: t.job_id || cluster.reqId || null,
+          job_url: t.job_url || jobUrl,
+          company: company || 'Workday Partner',
+          role_title: role || 'Role',
+          status: 'failed',
+          error_message: leadFailReason || 'Lead candidate auth/form run failed',
+          scraped_questions: [],
+          question_count: 0,
+          resolved_answers: [],
+          unanswered_questions: [],
+          unanswered_count: 0,
+          is_fully_answered: false,
+          created_at: failNow,
+          updated_at: failNow,
+        }));
+        await queueDbRequest('job_distributions', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id,job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: failedDistRows,
+        });
+      } catch {}
+
+      try {
+        await queueDbRequest('job_link_distribution_summaries', {
+          method: 'POST',
+          query: '?on_conflict=job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: [{
+            job_url: jobUrl,
+            company,
+            role_title: role,
+            total_clients: allTasks.length,
+            success_count: 0,
+            success_awl_ids: [],
+            failed_count: failedAwlIds.length,
+            failed_awl_ids: failedAwlIds,
+            status: 'failed',
+            failure_reason: leadFailReason || 'Lead candidate auth/form run failed',
+            screenshot_url: leadProofShot || null,
+            updated_at: failNow,
+          }],
+        });
+      } catch {}
+
       console.log(`\n⚠️ [${workerId}] Link is NOT expired, but attempted lead candidate(s) encountered auth/login errors.`);
       console.log(`   ⏭️  Leaving remaining ${allTasks.length - maxLeadAttempts} follower tasks as pending in queue for retry.`);
       return {
@@ -688,7 +775,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   }
 
   const reviewShotUrl = blueprintResult?.screenshotUrl || blueprintResult?.reviewScreenshotUrl || null;
-  let harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
+  const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
   console.log(`\n${'═'.repeat(72)}`);
   console.log(`🎉 [${workerId}] PHASE 1: SCANNING IS DONE!`);
@@ -714,29 +801,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           is_answered: true,
         });
       }
-    }
-  }
-
-  // Ensure harvestedQuestions is populated from lead candidate answers or baseline fields if wizard questions were empty
-  if (!harvestedQuestions || harvestedQuestions.length === 0) {
-    if (leadAnswers.length > 0) {
-      harvestedQuestions = leadAnswers.map(a => ({
-        question: a.question || a.label,
-        label: a.question || a.label,
-        field_type: a.field_type || 'text',
-        type: a.field_type || 'text',
-        required: true,
-        is_required: true,
-        options: a.options || [],
-        value: a.answer || '',
-      }));
-      console.log(`ℹ️ [${workerId}] Harvested questions synthesized from lead candidate answers (${harvestedQuestions.length} fields).`);
-    } else {
-      harvestedQuestions = [
-        { question: 'Full Name', label: 'Full Name', field_type: 'text', type: 'text', required: true, is_required: true },
-        { question: 'Email Address', label: 'Email Address', field_type: 'email', type: 'email', required: true, is_required: true },
-      ];
-      console.log(`ℹ️ [${workerId}] Using baseline schema for distribution of "${company} - ${role}".`);
     }
   }
 
@@ -769,6 +833,21 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     console.log(`⚠️ [${workerId}] Phase 2 note on saving scanned_jobs: ${scanSaveErr.message}\n`);
   }
 
+  // STRICT FLOW: Only proceed with distributing to job_distributions if scanned questions are present!
+  if (!harvestedQuestions || harvestedQuestions.length === 0) {
+    console.log(`⛔ [${workerId}] Skipping distribution to job_distributions: 0 questions were harvested for "${company} - ${role}".`);
+    return {
+      workerId,
+      jobUrl,
+      company,
+      role,
+      succeeded: 0,
+      failed: 0,
+      total: allTasks.length,
+      scrapedQaCount: 0,
+    };
+  }
+
   // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!
   console.log(`📍 [${workerId}] PHASE 3: Resolving answers & distributing into job_distributions table in PARALLEL...`);
   console.log(`   Target: ${allTasks.length} candidates allotted to this unique link`);
@@ -776,15 +855,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const { loadProfile } = await import('./planner.mjs');
   const { preResolveClientAnswersDetailed } = await import('./jobFormCache.mjs');
 
-  const leadHearAbout = leadAnswers.find(a => /how\s*did\s*you\s*hear|source/i.test(a.question || a.question_normalized || ''))?.answer;
-
   const schema = {
     id: scannedJobId,
     fields_schema: harvestedQuestions,
     company,
     role_title: role,
     tenant: cluster.tenant,
-    blueprintHearAbout: leadHearAbout || null,
   };
 
   // Deduplicate allTasks strictly: exactly 1 candidate task per unique applywizz_id
@@ -800,10 +876,6 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const distributionRows = [];
   const RESOLVE_CHUNK = 8;
   for (let cIdx = 0; cIdx < dedupedAllTasks.length; cIdx += RESOLVE_CHUNK) {
-    if (await isClusterStopRequested()) {
-      console.log(`🛑 [${workerId}] Stop signal active! Aborting Phase 3 client distribution loop.`);
-      break;
-    }
     const chunk = dedupedAllTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
     const chunkRows = await Promise.all(chunk.map(async (task, offset) => {
       const idx = cIdx + offset;
@@ -824,27 +896,25 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
       const structuredAnswers = detailed?.structuredAnswers || [];
       const answersMap = detailed?.answersMap || {};
-
-      // Propagate lead candidate's "How did you hear about us" answer to all clients with this job
-      const leadHearAbout = leadAnswers.find(a => /how\s*did\s*you\s*hear|source/i.test(a.question || a.question_normalized || ''))?.answer;
-      if (leadHearAbout) {
-        for (const item of structuredAnswers) {
-          if (/how\s*did\s*you\s*hear|source/i.test(item.question || item.question_normalized || '') && !item.is_answered) {
-            item.answer = leadHearAbout;
-            item.is_answered = true;
-            item.source = 'Lead Candidate Shared (scanned_jobs)';
-            item.tier = 1;
-            answersMap[item.question_normalized || item.question] = leadHearAbout;
-          }
-        }
-      }
-
       const answeredCount = structuredAnswers.filter(q => q.is_answered).length;
-      const rawUnanswered = (Array.isArray(detailed?.unansweredQuestions) ? detailed.unansweredQuestions : [])
-        .filter(q => !(/how\s*did\s*you\s*hear|source/i.test(q.question || q.label || '') && leadHearAbout));
+      const rawUnanswered = Array.isArray(detailed?.unansweredQuestions)
+        ? detailed.unansweredQuestions
+        : structuredAnswers.filter(q => !q.is_answered && q.is_required).map(q => ({
+          question: q.question,
+          field_type: q.field_type || 'text',
+          step: q.step || 'Application Questions',
+          options: q.options || [],
+          is_required: true,
+          reason: 'missing_required_answer',
+        }));
 
-      // All mandatory fields (including personal, contact, address, and job questions) are tracked
-      const unansweredQuestions = rawUnanswered;
+      // Filter out standard personal info and voluntary EEO disclosures so unanswered questions are strictly actionable job questions!
+      const unansweredQuestions = rawUnanswered.filter((q) => {
+        const lbl = String(q.question || q.label || '').toLowerCase();
+        if (/first name|last name|email|phone|mobile|address|street|city|state|postal|zip|country/i.test(lbl)) return false;
+        if (/voluntary|disclosure|self identify|eeo|veteran|disability|gender|race|ethnicity|hispanic/i.test(lbl)) return false;
+        return true;
+      });
 
       const unansweredCount = unansweredQuestions.length;
       const isFullyAnswered = (unansweredCount === 0);
@@ -866,7 +936,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         unansweredQuestions,
         unansweredCount,
         isFullyAnswered,
-        screenshotUrl: reviewShotUrl,
+        screenshotUrl: null,
         status: clientStatus,
         answersMap,
       };
@@ -884,8 +954,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       company,
       roleTitle: role,
       scrapedQuestions: harvestedQuestions,
-      screenshotUrl: reviewShotUrl,
-      screenshotPath: reviewShotUrl,
+      screenshotUrl: null,
       status: 'distributed',
       clients: distributionRows,
     });
@@ -909,10 +978,31 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       console.log(`💾 [${workerId}] PHASE 2 REFINED: Updated scanned_jobs with ${leadRow.resolvedAnswers.length} master resolved answers from lead blueprint candidate.`);
     }
 
-    // PHASE 4: job_distributions with is_fully_answered = true already automatically
-    // generates the corresponding submission_tasks row with status 'ready_for_review' and distribution_id via DB trigger!
+    // PHASE 4: Populate submission_tasks table with status 'ready_for_review' and STOP HERE
     const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_for_review');
-    console.log(`\n📋 [${workerId}] PHASE 4 RECORDED: ${readyToReviewRows.length} client application(s) entered submission_tasks at ready_for_review via job_distributions trigger. Stopped here.`);
+    if (readyToReviewRows.length > 0) {
+      try {
+        const submissionPayloads = readyToReviewRows.map((r) => ({
+          applywizz_id: r.applywizzId,
+          job_url: r.jobUrl,
+          company: r.company || company,
+          role_title: r.roleTitle || role,
+          status: 'ready_for_review',
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        }));
+
+        await queueDbRequest('submission_tasks', {
+          method: 'POST',
+          query: '?on_conflict=applywizz_id,job_url',
+          prefer: 'resolution=ignore-duplicates,return=minimal',
+          body: submissionPayloads,
+        });
+        console.log(`\n📋 [${workerId}] PHASE 4 RECORDED: ${submissionPayloads.length} client application(s) entered submission_tasks at ready_for_review. Stopped here.`);
+      } catch (stErr) {
+        console.log(`⚠️ [${workerId}] Phase 4 note on submission_tasks: ${stErr.message}`);
+      }
+    }
   } catch (distErr) {
     console.log(`⚠️ [${workerId}] Phase 3 note on job_distributions / scanned_jobs: ${distErr.message}`);
   }
@@ -991,13 +1081,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
   }
 
-  // Clean up lead blueprint candidate's local cached resume immediately
-  try {
-    const { cleanupClientResume } = await import('./applyWizzResume.mjs');
-    await cleanupClientResume({ _applyWizzId: blueprintTask?.applywizz_id, applywizz_id: blueprintTask?.applywizz_id });
-  } catch (_) {}
-
-  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: Tested Lead (${blueprintTask.applywizz_id}) & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
+  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: ${company} — Tested Lead (${blueprintTask.applywizz_id}) in Browser & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
   return {
     workerId,
     jobUrl,
@@ -1069,32 +1153,31 @@ export function print10BatchMilestoneReport({
  */
 export async function runClusterBatchRunner({
   topLinks = 10,
-  workers = PIPELINE_CONFIG?.workersCount || Number(process.env.WORKER_COUNT) || 2,
-  minClients = Number(process.env.MIN_CLIENTS_THRESHOLD) || 1,
+  workers = Number(process.env.WORKER_COUNT) || 2,
   headless = process.env.HEADLESS !== 'false',
   confirmSubmit = false,
   limitPerLink = null,
-  defaultPassword = process.env.WORKDAY_PASSWORD || '',
+  defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026789',
   scanRunId = null,
 } = {}) {
   const startTime = Date.now();
 
-  // Auto-generate or retrieve scan_run_id
+  // Enforce scan_run_id requirement: Scan must REFUSE to start without it!
   if (!scanRunId) {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    scanRunId = bc?.scan_run_id || `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    scanRunId = bc?.scan_run_id || null;
   }
 
-  // Ensure stop flags are reset cleanly for new batch run
-  setClusterStop(false);
-  setScanStop(false);
-  setGlobalStop(false);
+  if (!scanRunId) {
+    console.error(`❌ [SCAN REFUSAL] Refusing to start scan: no scan_run_id present in bot_control!`);
+    return { success: false, refused: true, error: 'Scan refused: missing scan_run_id in bot_control' };
+  }
 
   console.log(`\n${'═'.repeat(78)}`);
   console.log(`⚡ CLUSTER BATCH RUNNER — ${workers} PARALLEL SCANNING WORKERS (HEADLESS: ${headless})`);
   console.log(`   Scan Run ID:   ${scanRunId}`);
-  console.log(`   Top Links:     ${topLinks} highest client-count clusters (minClients: ${minClients})`);
+  console.log(`   Top Links:     ${topLinks} highest client-count clusters`);
   console.log(`   Workers:       ${workers} parallel scanning workers running simultaneously`);
   console.log(`   Browser Mode:  ${headless ? 'HEADLESS (Production Mode)' : 'HEADED (Visible GUI)'}`);
   console.log(`   Submission:    ${confirmSubmit ? 'Auto-Submit' : 'Halt at Review (Screenshots & Scrapes Only)'}`);
@@ -1105,50 +1188,47 @@ export async function runClusterBatchRunner({
 
   // Step 1: Cluster links canonically and select top N
   console.log(`🔍 Canonicalizing & clustering URLs from Supabase batch_job_queue...`);
-  const topClusters = await fetchQueueClusters({ minClients, limit: topLinks, scanRunId });
+  const topClusters = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId });
 
   if (!topClusters.length) {
     console.log(`❌ No tasks found in batch_job_queue! Setting scanning workers to idle.`);
-    const workerLimit = Number(workers) || (PIPELINE_CONFIG.scanCount || 3);
+    const workerLimit = Number(workers) || 2;
     for (let slot = 1; slot <= workerLimit; slot++) {
-      const wId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
-      await updateWorkerStatus(wId, {
+      await updateWorkerStatus(`worker_${slot}`, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: `Scanning Worker ${slot}`,
+        bot_name: `Worker ${slot}`,
         current_application_id: 'Ready (0 pending queue items)',
       }).catch(() => { });
     }
     return;
   }
 
-  // Step 2: Determine concurrency (strictly N workers at a time)
-  const concurrency = Math.min(Number(workers) || (PIPELINE_CONFIG.scanCount || 3), topClusters.length);
-
   // Set active scanning workers to in-flight in Supabase worker_status
-  const activeCount = Math.min(concurrency, topClusters.length);
+  const activeCount = Math.min(Number(workers) || 2, topClusters.length);
   for (let slot = 1; slot <= activeCount; slot++) {
-    const wId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
-    await updateWorkerStatus(wId, {
+    await updateWorkerStatus(`worker_${slot}`, {
       state: 'in_flight',
       stage: 'scanning',
-      bot_name: `Scanning Worker ${slot}`,
-      current_application_id: null,
+      bot_name: `Worker ${slot}`,
+      current_application_id: 'Clustering & preparing link run...',
     }).catch(() => { });
   }
 
-  console.log(`\n📋 Selected Top ${topClusters.length} Unique Job Links for Parallel Execution:\n`);
-  console.log(` Link ID    │ Worker   │ Job URL                                                                     │ Clients`);
-  console.log(`────────────┼──────────┼─────────────────────────────────────────────────────────────────────────────┼────────`);
+  console.log(`\n📋 Selected Top ${topClusters.length} Unique Job URLs for Parallel Execution:\n`);
+  console.log(` Worker   │ Job URL (Strict URL Identification)                                            │ Clients │ Links`);
+  console.log(`──────────┼────────────────────────────────────────────────────────────────────────────────┼─────────┼──────`);
   topClusters.forEach((c, idx) => {
-    const linkIdDisplay = (c.linkId || `LINK-${String(idx + 1).padStart(3, '0')}`).padEnd(10, ' ');
-    const workerLabel = `Worker ${((idx % concurrency) + 1)}`.padEnd(8, ' ');
-    const urlDisplay = (c.jobUrl || '').slice(0, 75).padEnd(75, ' ');
-    const count = `${c.clientCount} tasks`.padStart(8, ' ');
-    console.log(` ${linkIdDisplay} │ ${workerLabel} │ ${urlDisplay} │ ${count}`);
+    const workerLabel = `Worker ${idx + 1}`.padEnd(8, ' ');
+    const urlDisplay = (c.jobUrl || '').slice(0, 78).padEnd(78, ' ');
+    const count = String(c.clientCount).padStart(7, ' ');
+    const variations = String(c.rawUrls.size).padStart(5, ' ');
+    console.log(` ${workerLabel} │ ${urlDisplay} │ ${count} │ ${variations}`);
   });
-  console.log(`────────────┴──────────┴─────────────────────────────────────────────────────────────────────────────┴────────\n`);
+  console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
 
+  // Step 2: Launch exactly N Workers in Parallel (concurrency pool, strictly N at a time)
+  const concurrency = Math.min(Number(workers) || 2, topClusters.length);
   console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
 
   let clusterIndex = 0;
@@ -1158,7 +1238,7 @@ export async function runClusterBatchRunner({
   const clusterResults = [];
 
   async function workerLoop(slot) {
-    const workerId = PIPELINE_CONFIG?.scanWorkerIds?.[slot - 1] || `worker_${slot}`;
+    const workerId = `worker_${slot}`;
     while (clusterIndex < topClusters.length) {
       if (await isClusterStopRequested()) {
         console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);
@@ -1170,13 +1250,13 @@ export async function runClusterBatchRunner({
 
       await updateWorkerStatus(workerId, {
         state: 'in_flight',
-        current_application_id: null,
+        current_application_id: cluster.jobUrl, // Strictly identify by URL in worker_status
         stage: 'scanning',
         bot_name: `Worker ${slot}`,
       }).catch(() => { });
 
-      console.log(`\n▶️ [Worker ${slot}] [Batch #${myIndex + 1}/${topClusters.length}] Assigned Unique Link [${cluster.linkId || `LINK-${myIndex + 1}`}]: ${cluster.jobUrl}`);
-      console.log(`   Task Queue: ${cluster.clientCount} client tasks generated for this link`);
+      console.log(`\n▶️ [Worker ${slot}] [Batch #${myIndex + 1}/${topClusters.length}] Assigned Job URL: ${cluster.jobUrl}`);
+      console.log(`   Job Metadata: ${cluster.company} — ${cluster.roleTitle} (${cluster.clientCount} clients)`);
 
       let res = null;
       try {
@@ -1188,10 +1268,10 @@ export async function runClusterBatchRunner({
           scanRunId,
         });
       } catch (err) {
-        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.jobUrl || cluster.canonicalKey}): ${err.message}`);
+        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
         res = {
           workerId,
-          jobUrl: cluster.jobUrl || cluster.canonicalKey,
+          jobUrl: cluster.canonicalUrl,
           company: cluster.company,
           role: cluster.roleTitle,
           total: cluster.clientCount,
@@ -1253,15 +1333,13 @@ export async function runClusterBatchRunner({
     current10BatchCycle = [];
   }
 
-  // Return all canonical scanning workers to idle
-  const scanWorkerIds = PIPELINE_CONFIG?.scanWorkerIds || ['scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3'];
-  for (let slot = 0; slot < scanWorkerIds.length; slot++) {
-    const wId = scanWorkerIds[slot];
-    await updateWorkerStatus(wId, {
+  // Return all scanning workers to idle
+  for (let slot = 1; slot <= 10; slot++) {
+    await updateWorkerStatus(`worker_${slot}`, {
       state: 'idle',
       current_application_id: null,
       stage: 'scanning',
-      bot_name: `Scanning Worker ${slot + 1}`,
+      bot_name: `Worker ${slot}`,
     }).catch(() => { });
   }
 

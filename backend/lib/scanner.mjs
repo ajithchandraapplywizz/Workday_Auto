@@ -490,19 +490,10 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           await page.waitForSelector('input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
         } catch {}
       } else {
-        let effEmail = String(workdayEmail || profile?.personal?.company_email || profile?.personal?.email || profile?.email || '').trim();
-        let effPassword = String(workdayPassword || profile?.workday_password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789').trim();
-        if (!effEmail && (profile?._applyWizzId || profile?.applywizz_id)) {
-          const awId = String(profile._applyWizzId || profile.applywizz_id).trim();
-          const rawFirst = profile?.personal?.first_name || '';
-          const rawLast = profile?.personal?.last_name || '';
-          const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || awId.toLowerCase().replace(/[^a-z0-9]/g, '');
-          effEmail = `${rawName}@applywizard.ai`;
-        }
         console.log(`   Authenticating on Workday (${mode} mode) before scanning form fields...`);
         const authOk = await handleWorkday(page, {
-          email: effEmail,
-          password: effPassword,
+          email: workdayEmail,
+          password: workdayPassword,
           mode,
           profile,
         });
