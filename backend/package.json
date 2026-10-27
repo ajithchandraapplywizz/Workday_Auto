@@ -70,9 +70,12 @@
     "dotenv": "^18.0.1",
     "fuzzball": "^2.2.6",
     "js-yaml": "^4.1.1",
+    "otplib": "^13.5.0",
     "p-limit": "^7.3.3",
     "pdf-parse": "^2.4.5",
-    "playwright": "^1.64.1",
+    "pg": "^8.23.1",
+    "playwright": "^1.63.0",
+    "qrcode": "^1.5.4",
     "yaml": "^2.9.1",
     "zod": "^4.6.5"
   },

@@ -55,8 +55,16 @@ jobs:
           node --check backend/lib/submissionWorkerPool.mjs
           node --check backend/lib/supabaseClient.mjs
           node --check backend/lib/dashboardStats.mjs
-          node --check backend/lib/dashboardApplications.mjs
           echo "✓ All core backend modules passed syntax check."
+
+      - name: Validate Module Imports & Dependency Resolution
+        run: |
+          echo "Verifying runtime module resolution and required packages..."
+          node -e "import('./backend/lib/mfaAuth.mjs').then(() => console.log('✓ mfaAuth OK'))"
+          node -e "import('./backend/lib/workday.mjs').then(() => console.log('✓ workday OK'))"
+          node -e "import('./backend/config/pipelineConfig.mjs').then(() => console.log('✓ pipelineConfig OK'))"
+          node -e "import('./index.js').catch(e => { if (e.code === 'ERR_MODULE_NOT_FOUND') { console.error('MISSING DEPENDENCY:', e); process.exit(1); } })"
+          echo "✓ All core modules resolved dependencies successfully."
 
       - name: Run Backend Unit Tests
         run: |

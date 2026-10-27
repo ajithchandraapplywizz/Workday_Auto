@@ -7,8 +7,7 @@
   "main": "index.js",
   "workspaces": [
     "backend",
-    "frontend",
-    "workday-auto-apply"
+    "frontend"
   ],
   "scripts": {
     "start": "node index.js",
@@ -30,7 +29,9 @@
     "typecheck": "node --check backend/cli.mjs"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.116.0",
     "dotenv": "^17.4.2",
+    "otplib": "^13.5.0",
     "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0",
     "vite": "^8.3.0"
