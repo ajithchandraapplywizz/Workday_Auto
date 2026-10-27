@@ -209,11 +209,8 @@ export async function getWorkdayAuthErrorMessage(page) {
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
  */
-export async function isWorkdayJobPageMissing(page, { waitMs = 0 } = {}) {
+export async function isWorkdayJobPageMissing(page) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
-  if (waitMs > 0) {
-    await page.waitForTimeout(waitMs).catch(() => {});
-  }
   return await page.evaluate(() => {
     // 1. If an Apply or Continue Application button is visible in the DOM, it is 100% NOT missing/expired
     const hasApply = Boolean(
@@ -235,7 +232,7 @@ export async function isWorkdayJobPageMissing(page, { waitMs = 0 } = {}) {
     if (hasWizard) return false;
 
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!text || text.length < 15) return false; // Still empty / loading, do not jump to conclusion
+    if (!text || text.length < 20) return false; // Still empty / loading, do not jump to conclusion
 
     const hasNotExist = /the page you are looking for doesn'?t exist/i.test(text)
       || /page (?:you are looking for )?doesn'?t exist/i.test(text)
@@ -463,53 +460,11 @@ export async function isInNavOrHeader(el) {
   }).catch(() => false);
 }
 
-// ─── Detect if page indicates candidate has already applied ─────────────────
-export async function isAlreadyAppliedDetected(page) {
-  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
-  return await page.evaluate(() => {
-    const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-    const hasAppliedText = (
-      bodyText.includes("you've already applied for this job") ||
-      bodyText.includes("you have already applied for this job") ||
-      bodyText.includes("you've already applied for this position") ||
-      bodyText.includes("you have already applied for this position") ||
-      bodyText.includes("you have already submitted an application") ||
-      bodyText.includes("you've already submitted an application") ||
-      bodyText.includes("already applied for this job") ||
-      bodyText.includes("already applied for this role")
-    );
-    const hasViewMyAppsLink = Boolean(
-      document.querySelector('a[href*="my-applications" i], [data-automation-id="viewMyApplications"]') ||
-      Array.from(document.querySelectorAll('a, button')).some(el => /view my applications/i.test((el.textContent || '').trim()))
-    );
-    return hasAppliedText || (hasAppliedText && hasViewMyAppsLink);
-  }).catch(() => false);
-}
-
 // ─── Pre-scan page & modal elements to detect gateway state ────────────────
 export async function prescanGatewayElements(page) {
   return await page.evaluate(() => {
     const modal = document.querySelector('[role="dialog"], .modal, [data-automation-id*="modal"], [data-automation-id*="dialog"]');
     const root = modal || document;
-
-    const bodyText = (document.body ? document.body.innerText : '').toLowerCase();
-    const hasAlreadyApplied = (
-      bodyText.includes("you've already applied for this job") ||
-      bodyText.includes("you have already applied for this job") ||
-      bodyText.includes("already applied for this job") ||
-      Boolean(document.querySelector('a[href*="my-applications" i], [data-automation-id="viewMyApplications"]'))
-    );
-
-    const hasJobExpired = (
-      bodyText.includes("the page you are looking for doesn't exist") ||
-      bodyText.includes("page you are looking for doesn't exist") ||
-      bodyText.includes("this job is no longer available") ||
-      bodyText.includes("this job has expired") ||
-      bodyText.includes("job posting has expired") ||
-      bodyText.includes("position has been filled") ||
-      bodyText.includes("we couldn't find the page") ||
-      (Boolean(document.querySelector('button[data-automation-id="searchForJobs"], a[data-automation-id="searchForJobs"]')) && !document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i]'))
-    );
 
     const inputs = Array.from(root.querySelectorAll('input:not([type="hidden"]), textarea'));
     const buttons = Array.from(root.querySelectorAll('button, a, [role="button"]'));
@@ -611,8 +566,6 @@ export async function prescanGatewayElements(page) {
       hasSignInUnderCreateAccount,
       hasForgotPasswordBtn,
       hasResetPasswordBtn,
-      hasAlreadyApplied,
-      hasJobExpired,
     };
   }).catch(() => ({}));
 }
@@ -683,15 +636,8 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
       console.log('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
       return;
     }
-
-    // 0. If Sign In form (password input visible and NO verifyPassword) is ALREADY active, do not touch anything!
-    if (await isSignInFormVisible(page)) {
-      console.log('   ✅ Pre-scan: Sign-in form already active and ready (password input visible).');
-      return;
-    }
-
-    // If verifyPassword or create account tab is present, click "Sign In" tab/link
-    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasSignInUnderCreateAccount)) {
+    // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
+    if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
       console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
       await clickGatewaySignIn(page);
     }
@@ -724,22 +670,16 @@ export async function isSignInFormVisible(page) {
 
 // ─── Click the gateway "Sign In" link (below Create Account, not nav bar) ───
 export async function clickGatewaySignIn(page) {
-  // If Sign In form is already visible, do not click anything!
-  if (await isSignInFormVisible(page)) {
-    return true;
-  }
-
-  // Try tab/link candidates inside modal dialog first, then main document (links/tabs ONLY, never submit buttons)
+  // Try candidates inside modal dialog first, then main document
   const candidates = await page.$$([
     '[role="dialog"] [data-automation-id="signInLink"]',
     '[role="dialog"] [data-automation-id="signInTab"]',
+    '[role="dialog"] button:has-text("Sign In")',
     '[role="dialog"] a:has-text("Sign In")',
     '[data-automation-id="signInLink"]',
     '[data-automation-id="signInTab"]',
+    'button:has-text("Sign In")',
     'a:has-text("Sign In")',
-    '[role="tab"]:has-text("Sign In")',
-    'button[data-automation-id="signInTab"]',
-    'button[data-automation-id="signInLink"]',
   ].join(', '));
 
   for (const el of candidates) {
@@ -764,7 +704,7 @@ export async function clickGatewaySignIn(page) {
 
 // ─── Click the gateway "Create Account" button/tab (not nav bar) ───────────
 export async function clickGatewayCreateAccount(page) {
-  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id*="verify" i]:visible, input[name*="verify" i]:visible').catch(() => null);
+  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
   if (verifyPwd) {
     console.log('   Create Account form is already visible.');
     return true;
@@ -779,14 +719,12 @@ export async function clickGatewayCreateAccount(page) {
   }
 
   const buttons = await page.$$([
-    '[role="dialog"] [data-automation-id="createAccountLink"]',
+    '[role="dialog"] button[data-automation-id="createAccountLink"]',
     '[role="dialog"] button:has-text("Create Account")',
-    '[role="dialog"] a:has-text("Create Account")',
-    '[data-automation-id="createAccountLink"]',
+    'button[data-automation-id="createAccountLink"]',
     '[data-automation-id="createAccountTab"]',
     'button:has-text("Create Account")',
     'a:has-text("Create Account")',
-    '[role="tab"]:has-text("Create Account")',
   ].join(', '));
 
   for (const btn of buttons) {
@@ -794,14 +732,12 @@ export async function clickGatewayCreateAccount(page) {
     const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
     const type = await btn.getAttribute('type').catch(() => '');
 
-    // Skip submit buttons
-    if (autoId === 'createAccountSubmitButton' || autoId === 'createAccountButton' || type === 'submit') continue;
+    if (autoId === 'createAccountSubmitButton' || type === 'submit') continue;
     if (await isInNavOrHeader(btn)) continue;
 
     console.log('   Clicking gateway "Create Account" button (not nav bar)...');
     await btn.click({ force: true }).catch(() => btn.evaluate(e => e.click()));
-    await page.waitForTimeout(2000);
-    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+    await page.waitForTimeout(1500);
     return true;
   }
 
@@ -894,7 +830,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         (document.querySelector('[data-automation-id="jobPostingPage"], [data-automation-id="jobPostingHeader"], main, h1, h2') || text.length > 80) &&
         !/loading\.\.\./i.test(text)
       );
-      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page (?:you are looking for )?doesn'?t exist|we couldn'?t find the page|page not found|404\b/i.test(text);
+      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|page not found|404\b/i.test(text);
 
       return hasApply || hasWizard || hasJobContent || isExpired;
     }, { timeout: 30000 }).catch(() => null);
@@ -920,7 +856,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       const text = (document.body?.innerText || '').trim();
       const lower = text.toLowerCase();
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page not found|404\b/i.test(lower);
-      if (isExpired) return { expired: true, reason: 'Job link expired' };
+      if (isExpired) return { expired: true, reason: 'job_expired' };
       return { expired: false };
     }).catch(() => ({ expired: false }));
 

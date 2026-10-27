@@ -96,8 +96,8 @@ export default function DeveloperDashboard() {
   }, [timeframe]);
 
   // Active states for the two separate triggers
-  const isScanActive = Boolean(botStatus.isScanning || (botStatus.isRunning && !botStatus.isSubmitting && botStatus.stage !== 'submitting'));
-  const isSubmitActive = Boolean(botStatus.isSubmitting || botStatus.stage === 'submitting');
+  const isScanActive = Boolean(botStatus.isScanning);
+  const isSubmitActive = Boolean(botStatus.isSubmitting);
   const isAnyPipelineActive = isScanActive || isSubmitActive;
 
   // Periodic Backend Ping to check connectivity

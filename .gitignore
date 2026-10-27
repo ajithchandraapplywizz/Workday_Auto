@@ -113,3 +113,6 @@ sync_ids.txt
 **/sync_ids.txt
 workday-auto-apply/data/
 **/workday-auto-apply/data/**
+# OneDrive sync conflict duplicate files
+*AjithchandraPC*
+**/*AjithchandraPC*

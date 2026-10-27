@@ -2688,7 +2688,7 @@ export async function triggerAutonomousBot() {
           stop_requested: false,
           trigger_requested: true,
           last_action_requested: 'start_scan',
-          current_action: 'Scanning unique job links...',
+          current_action: 'Scanning unique job links across 3 dedicated workers...',
           updated_at: now,
         })
         .eq('id', 'primary');
@@ -2769,7 +2769,7 @@ export async function triggerAutonomousBot() {
 
     return {
       success: true,
-      message: 'Autonomous 2-Worker Pipeline (Scan & Resolve) successfully triggered across Worker 1 and Worker 2!',
+      message: 'Autonomous 3-Worker Pipeline (Scan & Resolve) successfully triggered across 3 dedicated workers!',
     };
   } catch (err) {
     console.error('Failed to trigger autonomous bot:', err);
@@ -2823,7 +2823,7 @@ export async function stopAutonomousBot() {
           stage: 'idle',
           is_running: false,
           stop_requested: true,
-          trigger_requested: true,
+          trigger_requested: false,
           last_action_requested: 'stop_scan',
           current_action: 'Scan & Resolve stopped by user.',
           updated_at: now,
@@ -2894,7 +2894,7 @@ export async function triggerSubmissionStage() {
         stop_requested: false,
         trigger_requested: true,
         last_action_requested: 'start_submit',
-        current_action: 'Submitting approved applications...',
+        current_action: 'Submitting approved applications across 3 dedicated workers...',
         updated_at: now,
       })
       .eq('id', 'primary');
@@ -2938,13 +2938,13 @@ export async function triggerSubmissionStage() {
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions triggered for all approved applications.' };
+        return { success: true, message: 'Stage 3 Submissions triggered across 3 dedicated submitting workers!' };
       }
     } catch { }
   }
 
   if (supabaseSuccess) {
-    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge!' };
+    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge across 3 submitting workers!' };
   }
   return { success: false, error: 'Could not reach daemon webhook server or cloud bridge.' };
 }
@@ -2963,7 +2963,7 @@ export async function stopSubmissionStage() {
         stage: 'idle',
         is_running: false,
         stop_requested: true,
-        trigger_requested: true,
+        trigger_requested: false,
         last_action_requested: 'stop_submit',
         current_action: 'Submissions stopped by user.',
         updated_at: now,
@@ -3075,16 +3075,19 @@ export async function fetchBotDaemonStatus() {
     const isScanStopped = Boolean(botControl?.scan_stop_requested || botControl?.stop_requested);
     const isSubmitStopped = Boolean(botControl?.submit_stop_requested || botControl?.stop_requested);
 
+    const hasActiveScanWorkers = workers.some((w) => (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id.includes('scan') || w.worker_id.includes('resolv')) && (w.state === 'in_flight' || w.state === 'busy'));
+    const hasActiveSubmitWorkers = workers.some((w) => (w.stage === 'submitting' || w.worker_id.includes('submit')) && (w.state === 'in_flight' || w.state === 'busy'));
+
     const isScanning = !isScanStopped && Boolean(
+      hasActiveScanWorkers ||
       botControl?.scan_status === 'running' ||
-      ((botControl?.stage === 'scanning' || botControl?.stage === 'resolving') && botControl?.is_running) ||
-      workers.some((w) => (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id.includes('scan') || w.worker_id.includes('resolv')) && (w.state === 'in_flight' || w.state === 'busy'))
+      ((botControl?.stage === 'scanning' || botControl?.stage === 'resolving') && botControl?.is_running && (hasActiveScanWorkers || botControl?.trigger_requested))
     );
 
     const isSubmitting = !isSubmitStopped && Boolean(
+      hasActiveSubmitWorkers ||
       botControl?.submit_status === 'running' ||
-      (botControl?.stage === 'submitting' && botControl?.is_running) ||
-      workers.some((w) => (w.stage === 'submitting' || w.worker_id.includes('submit')) && (w.state === 'in_flight' || w.state === 'busy'))
+      (botControl?.stage === 'submitting' && botControl?.is_running && (hasActiveSubmitWorkers || botControl?.trigger_requested))
     );
 
     const isRunning = isScanning || isSubmitting || (daemonApiRunning && !botControl?.stop_requested);
