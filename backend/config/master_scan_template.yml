@@ -1,0 +1,41 @@
+title: Workday Auto Master Question & Answer Reference Bank
+description: Consolidated, deduplicated form questions, types, and sample
+  answers captured by Blueprint Workers
+version: 1.0.0
+last_updated: 2026-10-27T17:48:28.095Z
+total_unique_questions: 3
+questions:
+  are you legally authorized to work in the united states:
+    question: Are you legally authorized to work in the United States?
+    field_type: radio
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    first_seen_company: Berkadia
+    first_seen_role: Senior Machine Learning Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-10-27T17:48:28.094Z
+  will you now or in the future require sponsorship:
+    question: Will you now or in the future require sponsorship?
+    field_type: radio
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    first_seen_company: Berkadia
+    first_seen_role: Senior Machine Learning Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-10-27T17:48:28.095Z
+  years of experience with python:
+    question: Years of Experience with Python?
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: "4"
+    first_seen_company: Berkadia
+    first_seen_role: Senior Machine Learning Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-10-27T17:48:28.095Z

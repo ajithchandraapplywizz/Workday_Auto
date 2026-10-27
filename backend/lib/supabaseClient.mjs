@@ -939,73 +939,57 @@ export async function upsertJobFormSchema({
  */
 export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}) {
   if (!isSupabaseConfigured() || !Array.isArray(items) || !items.length) return { inserted: 0 };
-  const rows = items
-    .filter((it) => (it?.applywizzId || it?.applywizz_id) && (it?.jobUrl || it?.job_url))
-    .map((it) => ({
-      applywizz_id: String(it.applywizzId || it.applywizz_id).trim(),
-      job_url: String(it.jobUrl || it.job_url).trim(),
-      company: it.company || null,
-      role_title: it.role_title || it.roleTitle || null,
-      job_id: it.job_id || it.jobId || null,
-      status: 'pending',
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    }));
+
+  // Group all items by unique job_url so each unique link has EXACTLY 1 row in batch_job_queue
+  const urlMap = new Map();
+  for (const it of items) {
+    const rawUrl = String(it.jobUrl || it.job_url || '').trim();
+    const rawAwl = String(it.applywizzId || it.applywizz_id || '').trim().toUpperCase();
+    if (!rawUrl || !rawAwl) continue;
+
+    if (!urlMap.has(rawUrl)) {
+      urlMap.set(rawUrl, {
+        job_url: rawUrl,
+        company: it.company || null,
+        role_title: it.role_title || it.roleTitle || null,
+        job_id: it.job_id || it.jobId || null,
+        clientIds: new Set(),
+      });
+    }
+    const entry = urlMap.get(rawUrl);
+    if (rawAwl.includes(',')) {
+      rawAwl.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean).forEach((id) => entry.clientIds.add(id));
+    } else {
+      entry.clientIds.add(rawAwl);
+    }
+  }
+
+  const now = new Date().toISOString();
+  const rows = Array.from(urlMap.values()).map((entry) => ({
+    applywizz_id: Array.from(entry.clientIds).join(', '),
+    job_url: entry.job_url,
+    company: entry.company,
+    role_title: entry.role_title,
+    job_id: entry.job_id,
+    status: 'pending',
+    created_at: now,
+    updated_at: now,
+  }));
 
   if (!rows.length) return { inserted: 0 };
 
-  // Fetch existing items in batch_job_queue to prevent duplicates if no DB constraint
-  const existingSet = new Set();
-  try {
-    const existing = await request('batch_job_queue', { query: '?select=applywizz_id,job_url' });
-    if (Array.isArray(existing)) {
-      for (const row of existing) {
-        existingSet.add(`${row.applywizz_id}::${row.job_url}`);
-      }
-    }
-  } catch (e) {
-    // ignore
-  }
-
-  // Deduplicate unique pairs
-  const dedupedRows = [];
-  const seenInBatch = new Set();
-  for (const r of rows) {
-    const k = `${r.applywizz_id}::${r.job_url}`;
-    if (!seenInBatch.has(k) && !existingSet.has(k)) {
-      seenInBatch.add(k);
-      dedupedRows.push(r);
-    }
-  }
-
-  if (!dedupedRows.length) return { inserted: 0 };
-
   let totalInserted = 0;
-  for (let i = 0; i < dedupedRows.length; i += chunkSize) {
-    const chunk = dedupedRows.slice(i, i + chunkSize);
+  for (let i = 0; i < rows.length; i += chunkSize) {
+    const chunk = rows.slice(i, i + chunkSize);
     try {
-      try {
-        await request('batch_job_queue', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id%2Cjob_url',
-          prefer: 'resolution=ignore-duplicates,return=minimal',
-          body: chunk,
-        });
-      } catch (err) {
-        if (err.message && err.message.includes('42P10')) {
-          // No unique constraint on remote DB, insert directly
-          await request('batch_job_queue', {
-            method: 'POST',
-            prefer: 'return=minimal',
-            body: chunk,
-          });
-        } else {
-          throw err;
-        }
-      }
+      await request('batch_job_queue', {
+        method: 'POST',
+        prefer: 'return=minimal',
+        body: chunk,
+      });
       totalInserted += chunk.length;
     } catch (err) {
-      console.log(`  ⚠️  ingestCsvToBatchQueue chunk error: ${err.message?.slice(0, 100)}`);
+      console.log('  ⚠️  ingestCsvToBatchQueue chunk error:', err?.message?.slice(0, 100));
     }
   }
 

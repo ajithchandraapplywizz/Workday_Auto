@@ -671,13 +671,41 @@ export function resolvePostalForWorkday(profile = {}, indiaFallback) {
     const state = String(profile?.personal?.state || profile?.qa_answers?.state || '').toLowerCase();
     const city = String(profile?.personal?.city || profile?.qa_answers?.city || '').toLowerCase();
 
-    if (state.includes('tx') || state.includes('texas') || city.includes('irving') || city.includes('dallas') || city.includes('austin') || city.includes('houston')) return '75038';
-    if (state.includes('ma') || state.includes('massachusetts') || city.includes('boston')) return '02108';
-    if (state.includes('ca') || state.includes('california') || city.includes('san francisco')) return '94102';
+    // Accurate city-to-zip mappings
+    if (city.includes('dallas')) return '75201';
+    if (city.includes('austin')) return '78701';
+    if (city.includes('houston')) return '77002';
+    if (city.includes('irving')) return '75038';
+    if (city.includes('san antonio')) return '78201';
+    if (city.includes('fort worth')) return '76102';
+    if (city.includes('boston')) return '02108';
+    if (city.includes('san francisco')) return '94102';
+    if (city.includes('los angeles')) return '90012';
+    if (city.includes('san jose')) return '95113';
+    if (city.includes('new york') || city.includes('brooklyn') || city.includes('manhattan')) return '10001';
+    if (city.includes('seattle')) return '98101';
+    if (city.includes('chicago')) return '60601';
+    if (city.includes('atlanta')) return '30303';
+    if (city.includes('denver')) return '80202';
+    if (city.includes('detroit')) return '48226';
+    if (city.includes('nashville')) return '37201';
+    if (city.includes('charlotte')) return '28202';
+    if (city.includes('portland')) return '97201';
+    if (city.includes('philadelphia')) return '19102';
+    if (city.includes('phoenix')) return '85001';
+    if (city.includes('miami')) return '33101';
+
+    if (state.includes('tx') || state.includes('texas')) return '75201';
+    if (state.includes('ma') || state.includes('massachusetts')) return '02108';
+    if (state.includes('ca') || state.includes('california')) return '94102';
     if (state.includes('ny') || state.includes('new york')) return '10001';
-    if (state.includes('wa') || state.includes('washington') || city.includes('seattle')) return '98101';
-    if (state.includes('il') || state.includes('illinois') || city.includes('chicago')) return '60601';
-    return '75038';
+    if (state.includes('wa') || state.includes('washington')) return '98101';
+    if (state.includes('il') || state.includes('illinois')) return '60601';
+    if (state.includes('fl') || state.includes('florida')) return '33101';
+    if (state.includes('tn') || state.includes('tennessee')) return '37201';
+    if (state.includes('nc') || state.includes('north carolina')) return '28202';
+    if (state.includes('or') || state.includes('oregon')) return '97201';
+    return '75201';
   }
 
   if (typeof indiaFallback === 'function') return indiaFallback(profile);

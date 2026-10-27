@@ -10,7 +10,7 @@
  * - Updates batch_job_queue and applications tables in Supabase in real-time.
  */
 
-import { chromium } from 'playwright';
+import { chromium } from './stealthBrowser.mjs';
 import { resolve, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { existsSync } from 'fs';
@@ -775,7 +775,7 @@ export async function executeWorkerTask({
               : `${applywizzId}_${task.id || Date.now()}_submitted_confirmation.jpg`;
             storagePath = filename;
           } else if (status === 'reached-review' || status === 'reached_review') {
-            bucket = 'application-successes';
+            bucket = 'submitted-applications';
             filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
             storagePath = filename;
           }

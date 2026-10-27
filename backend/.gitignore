@@ -16,6 +16,7 @@ package-lock.json
 **/*.yaml
 !**/*.example.yml
 !**/*.example.yaml
+!config/master_scan_template.yml
 
 targets.txt
 sync_ids.txt

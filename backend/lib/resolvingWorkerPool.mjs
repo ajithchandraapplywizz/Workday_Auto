@@ -229,13 +229,26 @@ export async function runResolvingWorkerPool(options = {}) {
                       apikey: key,
                       Authorization: `Bearer ${key}`,
                     },
-                  });
-                  if (Array.isArray(distRes?.data) && distRes.data.length > 0) {
-                    distributionId = distRes.data[0].id;
+                    });
+                  const distRows = (distRes && distRes.ok) ? distRes.json() : [];
+                  if (Array.isArray(distRows) && distRows.length > 0) {
+                    distributionId = distRows[0].id;
                   }
                 } catch { }
 
-                await httpsJsonWithRetry({
+                let alreadyExists = false;
+                try {
+                  const existCheck = await httpsJsonWithRetry({
+                    url: `${url}/rest/v1/submission_tasks?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
+                    method: 'GET',
+                    headers: { apikey: key, Authorization: `Bearer ${key}` },
+                    });
+                  const existRows = (existCheck && existCheck.ok) ? existCheck.json() : [];
+                  if (Array.isArray(existRows) && existRows.length > 0) alreadyExists = true;
+                } catch { }
+
+                if (!alreadyExists) {
+                  await httpsJsonWithRetry({
                   url: `${url}/rest/v1/submission_tasks`,
                   method: 'POST',
                   headers: {
@@ -253,7 +266,8 @@ export async function runResolvingWorkerPool(options = {}) {
                     created_at: new Date().toISOString(),
                     updated_at: new Date().toISOString(),
                   },
-                });
+                  });
+                }
               } catch {}
             }
 

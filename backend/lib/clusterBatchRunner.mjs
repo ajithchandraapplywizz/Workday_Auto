@@ -281,7 +281,20 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
     }
 
     const c = clusterMap.get(canonicalKey);
-    c.tasks.push(row);
+    const rawAwl = String(row.applywizz_id || '').trim();
+    const awlList = rawAwl.includes(',')
+      ? rawAwl.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+      : (Array.isArray(row.client_ids) && row.client_ids.length > 0
+          ? row.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
+          : [rawAwl]);
+
+    for (const singleAwl of awlList) {
+      c.tasks.push({
+        ...row,
+        id: `${singleAwl}:::${rawUrl}`,
+        applywizz_id: singleAwl,
+      });
+    }
     c.rawUrls.add(rawUrl);
     if ((!c.company || c.company === 'Workday Company') && row.company && row.company !== 'Workday Company') {
       c.company = row.company;
@@ -529,10 +542,15 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   let leadFailReason = null;
   let leadFailStep = null;
 
-  const maxLeadAttempts = Math.min(3, activeTasks.length);
+  const MOCK_SCAN_CLIENT_ID = String(process.env.MOCK_SCAN_CLIENT_ID || 'AWL-1568').trim().toUpperCase();
+  const mockTask = activeTasks.find((t) => String(t.applywizz_id).trim().toUpperCase() === MOCK_SCAN_CLIENT_ID);
+  const scanCandidateList = mockTask
+    ? [mockTask, ...activeTasks.filter((t) => t !== mockTask)]
+    : activeTasks;
+  const maxLeadAttempts = Math.min(3, scanCandidateList.length);
 
   for (let attemptIdx = 0; attemptIdx < maxLeadAttempts; attemptIdx++) {
-    const candidateTask = activeTasks[attemptIdx];
+    const candidateTask = scanCandidateList[attemptIdx];
     console.log(`\n📍 [${workerId}] PHASE 1: Testing Lead Candidate #${attemptIdx + 1} (${candidateTask.applywizz_id}) for Unique Link...`);
     console.log(`   (Strictly 1 browser run per unique link; Followers will NOT run in browsers)`);
 
@@ -774,7 +792,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
   }
 
-  const reviewShotUrl = blueprintResult?.screenshotUrl || blueprintResult?.reviewScreenshotUrl || null;
+  const rawReviewShot = blueprintResult?.reviewScreenshotUrl || blueprintResult?.screenshotUrl || null;
+  const reviewShotUrl = (rawReviewShot && !rawReviewShot.includes('fail') && !rawReviewShot.includes('application-failures')) ? rawReviewShot : null;
   const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
   console.log(`\n${'═'.repeat(72)}`);
@@ -784,6 +803,17 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   console.log(`   Job Posting: ${company} — ${role}`);
   console.log(`   📸 Blueprint Review Screenshot: ${reviewShotUrl || 'Uploaded to Supabase'}`);
   console.log(`   📋 Harvested Questions Count: ${harvestedQuestions.length} fields`);
+  try {
+    const { saveMasterYamlTemplate } = await import('./masterYamlManager.mjs');
+    saveMasterYamlTemplate(harvestedQuestions, {
+      company,
+      roleTitle: role,
+      mockAwlId: blueprintTask.applywizz_id,
+      jobUrl,
+    });
+  } catch (yamlErr) {
+    console.warn(`⚠️ [${workerId}] Master YAML template notice: ${yamlErr.message}`);
+  }
   console.log(`${'═'.repeat(72)}\n`);
 
   // PHASE 2: Dump row into scanned_jobs with Candidate 1's AWL ID, review screenshot, and total client count!
