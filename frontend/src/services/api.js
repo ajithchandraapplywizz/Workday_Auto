@@ -2741,10 +2741,7 @@ export async function triggerAutonomousBot() {
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
     const endpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
-      '/api/bot/start',
-      '/api/bot/trigger',
-      '/api/bot/webhook',
+      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook']),
       ...(isLocal ? [
         'http://localhost:3005/api/bot/start',
         'http://localhost:3005/api/bot/trigger',
@@ -2792,10 +2789,7 @@ export async function stopAutonomousBot() {
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
     const stopEndpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
-      '/api/bot/scan/stop',
-      '/api/bot/stop',
-      '/api/bot/webhook',
+      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : ['/api/bot/scan/stop', '/api/bot/stop', '/api/bot/webhook']),
       ...(isLocal ? [
         'http://localhost:3005/api/bot/scan/stop',
         'http://localhost:3005/api/bot/stop',
@@ -2916,10 +2910,7 @@ export async function triggerSubmissionStage() {
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
   const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
-    '/api/bot/submit/start',
-    '/api/bot/submit',
-    '/api/bot/webhook',
+    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : ['/api/bot/submit/start', '/api/bot/submit', '/api/bot/webhook']),
     ...(isLocal ? [
       'http://localhost:3005/api/bot/submit/start',
       'http://localhost:3005/api/bot/submit',
@@ -2986,10 +2977,7 @@ export async function stopSubmissionStage() {
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
   const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
-    '/api/bot/submit/stop',
-    '/api/bot/stop',
-    '/api/bot/webhook',
+    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : ['/api/bot/submit/stop', '/api/bot/stop', '/api/bot/webhook']),
     ...(isLocal ? [
       'http://localhost:3005/api/bot/submit/stop',
       'http://localhost:3005/api/bot/stop',

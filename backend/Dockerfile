@@ -1,5 +1,5 @@
 # Official Microsoft Playwright image with all Linux system dependencies pre-installed
-FROM mcr.microsoft.com/playwright:v1.63.0-noble
+FROM mcr.microsoft.com/playwright:v1.64.1-noble
 
 WORKDIR /app
 

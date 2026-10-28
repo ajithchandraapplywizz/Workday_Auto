@@ -1,5 +1,5 @@
-# Official Microsoft Playwright image matching installed playwright 1.63.0
-FROM mcr.microsoft.com/playwright:v1.63.0-noble
+# Official Microsoft Playwright image matching installed playwright 1.64.1
+FROM mcr.microsoft.com/playwright:v1.64.1-noble
 
 WORKDIR /app
 

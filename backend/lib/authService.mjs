@@ -115,6 +115,18 @@ export function authenticateStaffRole(req, res, allowedRoles = ['admin', 'develo
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-staff-email',
   };
 
+  // 1. Allow dashboard staff authenticated via valid Supabase keys
+  const apikey = req.headers['apikey'];
+  if (apikey && (apikey === process.env.SUPABASE_SERVICE_ROLE_KEY || apikey === process.env.SUPABASE_ANON_KEY)) {
+    const email = req.headers['x-staff-email'] || 'developer@applywizz.ai';
+    return { id: 'supabase-staff', email, role: 'developer' };
+  }
+
+  if (token && (token === process.env.SUPABASE_SERVICE_ROLE_KEY || token === process.env.SUPABASE_ANON_KEY)) {
+    const email = req.headers['x-staff-email'] || 'developer@applywizz.ai';
+    return { id: 'supabase-staff', email, role: 'developer' };
+  }
+
   if (!token) {
     const isLocal = !process.env.NODE_ENV || process.env.NODE_ENV !== 'production' ||
       req.socket?.remoteAddress === '127.0.0.1' || req.socket?.remoteAddress === '::1';
