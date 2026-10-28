@@ -18,7 +18,7 @@ import { httpsJsonWithRetry } from './httpClient.mjs';
 
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
-export const RESOLVER_WORKER_IDS = PIPELINE_CONFIG.resolveWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+export const RESOLVER_WORKER_IDS = (PIPELINE_CONFIG.resolveWorkerIds || Array.from({ length: 2 }, (_, i) => `resolving_worker_${i + 1}`)).slice(0, 2);
 
 /**
  * Run Stage 2: Parallel Resolving Pool

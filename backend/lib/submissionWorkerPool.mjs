@@ -18,7 +18,7 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
-export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `worker_${i + 1}`);
+export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`)).slice(0, 2);
 
 
 /**

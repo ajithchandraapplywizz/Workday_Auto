@@ -23,7 +23,7 @@ import { inferStandardOptions } from './workdayScanHarvest.mjs';
 import { resolveCompanyEmail } from './applyWizzClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -289,7 +289,8 @@ export async function executeWorkerTask({
     }
   }
 
-  // 5. Launch isolated Playwright browser context
+  // 5. Launch isolated Playwright browser context (strictly max 2 active browsers)
+  await acquireBrowserSlot(workerId, 2);
   appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
   const browser = await chromium.launch({
     headless: Boolean(headless),
@@ -1362,9 +1363,12 @@ export async function executeWorkerTask({
     try { unregisterWorkerContext(workerId); } catch {}
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
     try {
-      unregisterActiveBrowser(browser);
-      await browser.close();
+      if (browser) {
+        unregisterActiveBrowser(browser, workerId);
+        await browser.close().catch(() => {});
+      }
     } catch {}
+    try { releaseBrowserSlot(workerId); } catch {}
   }
 }
 

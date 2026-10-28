@@ -385,16 +385,16 @@ async function runStage1Scanning() {
     stage: 'scanning',
     is_running: true,
     current_action: `Scanning unique Workday links (Run: ${scanRunId})`,
-    active_worker_count: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 3),
+    active_worker_count: TEST_MODE ? 1 : Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
   });
 
-  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}) under run ${scanRunId}...`);
+  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with 2 scanning workers (${PIPELINE_CONFIG.scanWorkerIds.slice(0, 2).join(', ')}) under run ${scanRunId}...`);
 
   const { runClusterBatchRunner } = await import('../lib/clusterBatchRunner.mjs');
   await runClusterBatchRunner({
     scanRunId,
     topLinks: TEST_MODE ? 1 : 100, // Harvest 50+ unique Workday job links
-    workers: TEST_MODE ? 1 : (PIPELINE_CONFIG.workersCount || 3),
+    workers: TEST_MODE ? 1 : Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
     headless: HEADLESS,
     confirmSubmit: false,
     limitPerLink: TEST_MODE ? 1 : null,
@@ -439,7 +439,7 @@ async function runStage3Submissions() {
   submitStatus = 'running';
   isPoolRunning = true;
 
-  const SUBMIT_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
+  const SUBMIT_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`)).slice(0, 2);
 
   console.log(`\n🚀 [DAEMON] Checking for ready applications to submit across ${SUBMIT_WORKER_IDS.length} parallel workers (${SUBMIT_WORKER_IDS.join(', ')})...`);
 
@@ -505,7 +505,7 @@ async function runStage3Submissions() {
     submit_status: 'running',
     is_running: true,
     current_action: `Submitting ${tasksCount} task(s) across 2 parallel workers on Railway`,
-    active_worker_count: PIPELINE_CONFIG.workersCount || 3,
+    active_worker_count: Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
   });
 
   console.log(`\n🚀 [DAEMON] Submitting ${tasksCount} application(s) across 2 submitting workers in parallel...`);
@@ -517,6 +517,10 @@ async function runStage3Submissions() {
  * Parallel Pipeline: Scanning & Resolving run concurrently across the 10 shared workers
  */
 export async function runScanAndResolveParallel() {
+  if (SERVICE_ROLE === 'submitter') {
+    console.log(`[DAEMON] Submitter service ignoring scan pipeline request.`);
+    return { success: false, refused: true, reason: 'SERVICE_ROLE is submitter' };
+  }
   if (scanStatus === 'running' && isPoolRunning) {
     console.log(`[DAEMON] Scan pipeline is already running.`);
     return { success: true, message: 'Scan pipeline already running.' };
@@ -550,7 +554,7 @@ export async function runScanAndResolveParallel() {
     scan_status: 'running',
     scan_stop_requested: false,
     is_running: true,
-    active_worker_count: PIPELINE_CONFIG.workersCount || 3,
+    active_worker_count: Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
   });
 
   try {
@@ -564,7 +568,7 @@ export async function runScanAndResolveParallel() {
       scan_stop_requested: false,
       is_running: true,
       current_action: `Scanning unique links & resolving candidate answers (Run: ${scanRunId})`,
-      active_worker_count: PIPELINE_CONFIG.workersCount || 3,
+      active_worker_count: Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
     });
 
     // Run Scanning (Stage 1) and Resolving (Stage 2) in PARALLEL
@@ -1325,6 +1329,10 @@ export function print10SubmissionMilestoneReport({ cycleIndex, cycleStartNum, cy
 }
 
 export async function dispatchQueuedSubmissions() {
+  if (SERVICE_ROLE === 'scanner') {
+    // Scanner service strictly ignores submission dispatching
+    return;
+  }
   if (isGlobalStopRequested() || isPoolPaused || isSubmitStopRequested()) return;
   // R11: Submit runs only when Developer turns Submit toggle ON
   if (submitStatus !== 'running') return;
@@ -1332,23 +1340,25 @@ export async function dispatchQueuedSubmissions() {
   try {
     const { SUBMISSION_WORKER_IDS, claimNextTask, processClaimedTask, moveReadyTasksToQueued, print10SubmissionMilestoneReport } = await import('../lib/submissionWorkerPool.mjs');
 
-    // (c) Submit ON: only ready_for_review rows move up to available worker slots, and scan state is untouched
-    const maxConcurrency = SUBMISSION_WORKER_IDS.length || 2;
+    // Strictly 2 submitting workers batch-wise
+    const submitWorkers = (SUBMISSION_WORKER_IDS || []).slice(0, 2);
+    const maxConcurrency = Math.min(submitWorkers.length, 2);
     const availableSlots = Math.max(0, maxConcurrency - activeSubmittingWorkers.size);
     if (availableSlots > 0 && typeof moveReadyTasksToQueued === 'function') {
       await moveReadyTasksToQueued(availableSlots);
     }
 
     let claimedAny = false;
-    for (const workerId of SUBMISSION_WORKER_IDS) {
+    for (const workerId of submitWorkers) {
       if (activeSubmittingWorkers.has(workerId)) continue;
+      if (activeSubmittingWorkers.size >= maxConcurrency) break;
       if (isGlobalStopRequested() || isPoolPaused || isSubmitStopRequested() || submitStatus !== 'running') break;
 
       const claimedTask = await claimNextTask(workerId);
       if (claimedTask) {
         claimedAny = true;
         activeSubmittingWorkers.add(workerId);
-        console.log(`\n🚀 [${maxConcurrency}-WORKER DISPATCHER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+        console.log(`\n🚀 [2-WORKER SUBMISSION BATCH] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
 
         // Process asynchronously so workers run in parallel!
         processClaimedTask({

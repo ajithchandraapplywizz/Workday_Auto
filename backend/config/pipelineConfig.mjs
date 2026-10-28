@@ -1,15 +1,13 @@
 /**
- * pipelineConfig.mjs — 9-Worker Canonical Pipeline Configuration
+ * pipelineConfig.mjs — 2-Worker Per Service Canonical Pipeline Configuration
  *
- * Configures strictly 9 canonical workers:
- * - Scanning (3): scanning_worker_1, scanning_worker_2, scanning_worker_3
- * - Resolving (3): resolving_worker_1, resolving_worker_2, resolving_worker_3
- * - Submitting (3): submitting_worker_1, submitting_worker_2, submitting_worker_3
- *
- * Database worker_status table maintains strictly these rows.
+ * Configures strictly 2 dedicated workers per service:
+ * - Scanning/Resolving: scanning_worker_1, scanning_worker_2
+ * - Resolving: resolving_worker_1, resolving_worker_2
+ * - Submitting: submitting_worker_1, submitting_worker_2
  */
 
-export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 3;
+export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 2;
 export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
 
 export const SCAN_WORKER_IDS = Array.from({ length: WORKER_COUNT }, (_, i) => `scanning_worker_${i + 1 + WORKER_OFFSET}`);

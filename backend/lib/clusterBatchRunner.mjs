@@ -1266,8 +1266,8 @@ export async function runClusterBatchRunner({
   });
   console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
 
-  // Step 2: Launch exactly N Workers in Parallel (concurrency pool, strictly N at a time)
-  const concurrency = Math.min(Number(workers) || 3, topClusters.length);
+  // Step 2: Launch strictly 2 Workers in Parallel (concurrency pool, strictly 2 at a time)
+  const concurrency = Math.min(Number(workers) || 2, topClusters.length, 2);
   console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
 
   let clusterIndex = 0;
