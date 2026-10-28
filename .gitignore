@@ -118,3 +118,8 @@ workday-auto-apply/data/
 # OneDrive sync conflict duplicate files
 *AjithchandraPC*
 **/*AjithchandraPC*
+
+# Precheck gate reports
+.precheck/
+**/.precheck/
+

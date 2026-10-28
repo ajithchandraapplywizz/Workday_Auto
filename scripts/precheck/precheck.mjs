@@ -201,11 +201,18 @@ function checkGitState() {
     }
   }
 
-  // Check uncommitted changes in branch mode
+  // Check uncommitted changes in branch mode (ignoring precheck's own generated report)
   if (mode === 'branch' && !process.env.CI) {
     const status = runGit('status --porcelain', true);
     if (status) {
-      issues.push('Working tree has uncommitted changes. Stash or commit before pushing to ensure clean evaluation.');
+      const dirtyFiles = status
+        .split('\n')
+        .filter(Boolean)
+        .map((l) => l.slice(3).trim())
+        .filter((f) => !f.startsWith('.precheck') && !f.includes('/.precheck'));
+      if (dirtyFiles.length > 0) {
+        issues.push(`Working tree has uncommitted changes (${dirtyFiles.slice(0, 3).join(', ')}${dirtyFiles.length > 3 ? '...' : ''}). Stash or commit before pushing to ensure clean evaluation.`);
+      }
     }
   }
 
