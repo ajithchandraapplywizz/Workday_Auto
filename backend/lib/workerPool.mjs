@@ -1816,7 +1816,6 @@ export async function executeSingleTargetedSubmission({
 
     await supabase.from('submission_tasks').update({
       status: 'applying',
-      status_actor: 'system',
       worker_id: workerId,
       started_at: now,
       updated_at: now,
@@ -1882,7 +1881,6 @@ export async function executeSingleTargetedSubmission({
 
       await supabase.from('submission_tasks').update({
         status: 'submitted',
-        status_actor: 'system',
         application_submitted_screenshot_url: finalProofShot,
         completed_at: completionTimestamp,
         updated_at: completionTimestamp,
@@ -1904,10 +1902,8 @@ export async function executeSingleTargetedSubmission({
       await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
       await supabase.from('submission_tasks').update({
         status: 'failed',
-        status_actor: 'system',
         error_message: result?.failureReason || result?.error || 'Submission failed',
         application_submitted_screenshot_url: finalProofShot,
-        review_flag: !finalProofShot ? 'screenshot_capture_failed' : null,
         completed_at: completionTimestamp,
         updated_at: completionTimestamp,
       }).eq('distribution_id', distributionId).catch(() => {});

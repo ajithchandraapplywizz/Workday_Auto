@@ -189,7 +189,6 @@ export async function claimNextTask(workerId) {
         .from('submission_tasks')
         .update({
           status: 'applying',
-          status_actor: 'system',
           worker_id: workerId,
           started_at: now,
           worker_leased_at: now,
@@ -258,7 +257,6 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
         .from('submission_tasks')
         .update({
           status: 'ready_for_review',
-          status_actor: 'reaper',
           worker_id: null,
           worker_leased_at: null,
           error_message: `Worker lease expired (> ${timeoutMinutes}m). Returned to ready_for_review.`,
@@ -417,7 +415,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         workerId,
         patch: {
           status: 'submitted',
-          status_actor: 'system',
           completed_at: now,
           application_submitted_screenshot_url: finalShotUrl,
           screenshot_path: finalStoragePath,
@@ -443,12 +440,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         workerId,
         patch: {
           status: 'failed',
-          status_actor: 'system',
           error_message: errMsg,
           completed_at: now,
           application_submitted_screenshot_url: finalShotUrl,
           screenshot_path: finalStoragePath,
-          review_flag: (!finalShotUrl && !finalStoragePath) ? 'screenshot_capture_failed' : null,
           updated_at: now,
         },
       });
@@ -511,12 +506,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       workerId,
       patch: {
         status: 'failed',
-        status_actor: 'system',
         error_message: err?.message || 'Execution error',
         completed_at: now,
         application_submitted_screenshot_url: errShotUrl,
         screenshot_path: errShotPath,
-        review_flag: (!errShotUrl && !errShotPath) ? 'screenshot_capture_failed' : null,
         updated_at: now,
       },
     });

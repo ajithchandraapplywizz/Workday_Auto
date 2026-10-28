@@ -1436,7 +1436,6 @@ export async function recoverInterruptedSubmissionTasks() {
       .from('submission_tasks')
       .update({
         status: 'ready_for_review',
-        status_actor: 'reaper',
         worker_id: null,
         worker_leased_at: null,
         error_message: 'Interrupted: daemon restarted. Returned to ready_for_review.',

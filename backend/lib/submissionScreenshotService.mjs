@@ -83,7 +83,6 @@ export async function recordTaskSubmissionProof({
     try {
       const patch = {
         status: 'submitted',
-        status_actor: 'system',
         screenshot_path: publicUrl || storagePath,
         completed_at: now,
         updated_at: now,

@@ -117,7 +117,6 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
     .from('submission_tasks')
     .update({
       status: 'queued',
-      status_actor: 'system',
       reviewed_by: caNameOrEmail,
       updated_at: now,
     })
