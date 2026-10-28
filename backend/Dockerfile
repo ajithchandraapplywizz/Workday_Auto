@@ -1,4 +1,4 @@
-# Official Microsoft Playwright image with all Linux system dependencies (libglib-2.0, libnss3, etc.) pre-installed
+# Official Microsoft Playwright image with all Linux system dependencies pre-installed
 FROM mcr.microsoft.com/playwright:v1.63.0-noble
 
 WORKDIR /app
@@ -6,9 +6,14 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-COPY . .
+# 1. Copy dependency manifests first for layer caching
+COPY package*.json ./
 
-RUN npm install
+# 2. Clean production dependency installation (omits devDependencies like vitest to save memory)
+RUN npm install --omit=dev --legacy-peer-deps
+
+# 3. Copy application source (.dockerignore excludes host node_modules, runs, screenshots, and logs)
+COPY . .
 
 ENV PORT=8080
 EXPOSE 8080

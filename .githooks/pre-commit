@@ -1,0 +1,10 @@
+#!/usr/bin/env sh
+# Pre-commit hook: Runs fast static precheck on staged files
+node scripts/precheck/precheck.mjs --mode=staged
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+  echo "❌ [PRE-COMMIT] Validation checks failed. Commit rejected."
+  echo "   Inspect details in .precheck/report.md"
+  exit $EXIT_CODE
+fi
+exit 0

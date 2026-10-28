@@ -57,7 +57,7 @@ export function isSupabaseConfigured() {
   return config().configured;
 }
 
-async function request(path, { method = 'GET', query = '', body = null, prefer = '' } = {}) {
+export async function request(path, { method = 'GET', query = '', body = null, prefer = '' } = {}) {
   const { url, key } = config();
   if (!url || !key) return null;
   const res = await httpsJsonWithRetry({

@@ -1,6 +1,0 @@
-{
-  "$schema": "https://railpack.com/config.schema.json",
-  "deploy": {
-    "startCommand": "node index.js"
-  }
-}

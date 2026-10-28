@@ -1,0 +1,11 @@
+#!/usr/bin/env sh
+# Pre-push hook: Runs precheck evaluation gate against the branch
+echo "🔍 [PRE-PUSH] Evaluating branch against base..."
+node scripts/precheck/precheck.mjs
+EXIT_CODE=$?
+if [ $EXIT_CODE -ne 0 ]; then
+  echo "❌ [PRE-PUSH] Gate evaluation failed. Push rejected."
+  echo "   Inspect details in .precheck/report.md"
+  exit $EXIT_CODE
+fi
+exit 0

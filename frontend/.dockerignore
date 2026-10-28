@@ -1,4 +1,19 @@
+# ==========================================
+# Frontend Docker Ignore
+# ==========================================
+
 node_modules
+**/node_modules
 dist
+**/dist
 .git
+**/.git
+.github
+**/.github
 *.local
+.env
+.env.*
+**/.env
+**/.env.*
+*.log
+**/*.log

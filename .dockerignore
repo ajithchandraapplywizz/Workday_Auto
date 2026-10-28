@@ -1,28 +1,71 @@
+# ==========================================
+# Root Workspace Docker Ignore
+# Exclude heavy binaries, traces, data, and logs across all subtrees
+# ==========================================
+
 # Dependencies
 node_modules
 **/node_modules
+**/node_modules/**
 
 # Version Control
 .git
+**/.git
 .github
+**/.github
 
 # Build Artifacts
 dist
+**/dist
 frontend/dist
 
-# Runtime & Local Logs / Traces
+# Runtime & Local Logs / Traces (CRITICAL: exclude in root AND all subdirs)
 runs
+**/runs
+**/runs/**
 screenshots
+**/screenshots
+**/screenshots/**
 *.log
+**/*.log
+backend.log
+**/backend.log
+latest-trace.jsonl
+**/*.jsonl
 
 # Sensitive Environment Files
 .env
 .env.*
+**/.env
+**/.env.*
 
 # Local Data, Resumes, and Non-Production Dirs
 data
+**/data
+**/data/**
 Data
+**/Data
+**/Data/**
 resumes
+**/resumes
+**/resumes/**
 docs
+**/docs
+**/docs/**
 workday-auto-apply
+**/workday-auto-apply
 .ai
+**/.ai
+.claude
+**/.claude
+.gemini
+**/.gemini
+scratch
+**/scratch
+scratch_*
+
+# Test Fixtures & Reports
+tests/fixtures
+**/tests/fixtures
+reports
+**/reports

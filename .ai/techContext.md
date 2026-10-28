@@ -8,7 +8,7 @@
 | **Automation Engine** | Playwright Chromium | Headless & headed browser orchestration, DOM inspection, network interception |
 | **Frontend Framework** | React 18, Vite | SPA dashboard for real-time queue monitoring, client management, and analytics |
 | **Database & Auth** | Supabase (PostgreSQL) | Candidate profiles, queue tables, Q&A memory, in-memory screenshot bucket storage |
-| **LLM Provider** | OpenRouter API | Models: `openai/gpt-4o-mini`, `google/gemini-2.5-flash` for question answering |
+| **LLM Provider** | Anthropic Claude API (`@anthropic-ai/sdk`) | Model: `claude-haiku-5-5` (Rule E: strict single LLM provider, no temperature) |
 | **2FA / OTP** | `otplib`, `qrcode-terminal` | TOTP generation and terminal QR rendering for Workday accounts requiring 2FA |
 | **Containerization** | Docker, Multi-stage builds | Production containers for backend daemon and frontend static serving |
 | **Hosting & CI** | Railway, Render, GitHub Actions | Continuous integration for node tests, frontend builds, and Docker image validation |
@@ -50,8 +50,8 @@
 |---|---|---|
 | `SUPABASE_URL` | **Yes** | Supabase Project URL (`https://xyz.supabase.co`) |
 | `SUPABASE_SERVICE_ROLE_KEY` | **Yes** | Supabase service-role secret (strictly backend/CI only; fail-fast if absent) |
-| `OPENROUTER_API_KEY` | **Yes** | OpenRouter API token for Tier 4 question analysis |
-| `OPENROUTER_MODEL` | No | Target model (default: `openai/gpt-4o-mini`) |
+| `CLAUDE_API_KEY` / `ANTHROPIC_API_KEY` | **Yes** | Anthropic API key for Tier 4 Claude question analysis |
+| `ANTHROPIC_MODEL` | No | Target model (default: `claude-haiku-5-5`) |
 | `APPLYWIZZ_ID` | Optional | Fallback client candidate ID (e.g. `AWL-12345`) when not passed via CLI/DB |
 | `WORKDAY_PASSWORD` | Optional | Default password for new/existing Workday candidate accounts |
 | `HEADLESS` | No | Set `true` to run Playwright in headless mode (default: `false` for debugging) |

@@ -1,0 +1,57 @@
+# ==========================================
+# Backend Docker Ignore
+# Exclude heavy binaries, traces, data, and logs
+# ==========================================
+
+# Dependencies
+node_modules
+**/node_modules
+
+# Runtime Logs, Traces & Screenshots (Prevents BuildKit OOM crash)
+runs
+**/runs
+**/runs/**
+screenshots
+**/screenshots
+**/screenshots/**
+*.log
+**/*.log
+backend.log
+latest-trace.jsonl
+**/*.jsonl
+
+# Local Data, Resumes, and Non-Production Dirs
+data
+**/data
+**/data/**
+Data
+**/Data
+**/Data/**
+resumes
+**/resumes
+**/resumes/**
+docs
+**/docs
+**/docs/**
+
+# Sensitive Environment Files
+.env
+.env.*
+
+# Version Control & CI
+.git
+**/.git
+.github
+**/.github
+
+# Build and Cache Artifacts
+dist
+**/dist
+.cache
+**/cache
+scratch
+**/scratch
+
+# Non-essential markdown and docs
+*.md
+!README.md

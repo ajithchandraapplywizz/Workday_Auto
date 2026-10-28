@@ -31,7 +31,7 @@
     "test": "node --test lib/**/*.test.mjs tests/**/*.test.mjs",
     "test:lib": "node --test lib/**/*.test.mjs",
     "test:agent": "node tests/run-report.mjs",
-    "postinstall": "true"
+    "postinstall": "node --version > nul 2>&1 || true"
   },
   "keywords": [
     "job-application",

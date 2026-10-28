@@ -11,7 +11,7 @@
   ],
   "scripts": {
     "start": "node index.js",
-    "postinstall": "true",
+    "postinstall": "node --version > nul 2>&1 || true",
     "setup": "node backend/cli.mjs setup",
     "scan": "node backend/cli.mjs scan",
     "fill": "node backend/cli.mjs fill",

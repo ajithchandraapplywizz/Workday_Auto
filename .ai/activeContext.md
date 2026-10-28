@@ -11,6 +11,11 @@ Implemented centralized architectural fixes for Workday automation pipeline:
 7. Added 10-batch milestone reporting in scanning and 10-client milestone reporting in submissions.
 8. Replaced legacy local disk `takeScreenshot` in `reporter.mjs` with in-memory streaming to Supabase Storage and automatic table updates in `submission_tasks`, `job_distributions`, `client_job_applications`, and `scanned_jobs`.
 9. Fixed Workday Self-Identify (CC-305) Date spinbutton commitment error (`The field Date is required and must have a value`).
+10. Dropped duplicate column `failure_screenshot_url` via migration `043_cleanup_failed_jobs_columns.sql` and standardized on `screenshot_path` as the single canonical proof column in `failed_jobs`.
+11. Standardized all failure screenshots across `workerPool.mjs`, `submissionWorkerPool.mjs`, and `reporter.mjs` to strictly stream to the `failed-applications` bucket.
+12. Implemented strict 2-attempt per-link retry policy (MAX_ATTEMPTS = 2): Attempt 1 failure re-queues without writing to failed_jobs; Attempt 2 failure upserts with all client_ids. Expired links skip retries and upsert directly.
+13. Enforced Enter and Tab commitment on all text inputs (phone, postal code, city, address line 1, legal names) in `engine.mjs` and `workdayQuestionFill.mjs`.
+14. Added Address Line 1 fallback to satisfy Workday required constraint, and added resume error detection in `workdayErrorRepair.mjs`.
 
 ## Recent Decisions in Flight
 - **Prevent Automatic Daemon Execution on Deployment**: Initialized `initOnStartup()` to explicitly reset all Supabase `bot_control` and `worker_control` states to `off`/`idle` with `last_action_requested: null` and `trigger_requested: false`, preventing any automatic execution upon Railway container startup.
@@ -28,6 +33,16 @@ Implemented centralized architectural fixes for Workday automation pipeline:
   - Relaxed distribution gate in `recordJobDistributions` to safely handle nullable `scannedJobRecord?.id`.
 - **Zero Local Screenshots Enforcement**: Formally codified that all Playwright screenshots must be kept as in-memory buffers and uploaded directly to Supabase Storage (`submitted-applications` and `failed-applications`), ensuring zero disk pollution and strict candidate PII protection.
 - **Strict Manual Git Control**: Enforced guardrail that automated agents never stage or commit code (`git add/commit/push` forbidden).
+- **Railway BuildKit Daemon Failure Resolved**: Diagnosed and resolved the fatal `/run/buildkit/buildkitd.sock: use of closed network connection` error affecting scanning/resolver and admin services:
+  1. Identified that `backend/.dockerignore` was completely missing; Railway's backend service build context was uploading 385MB (11,322 files including 158MB `backend/node_modules`, 135MB `backend/runs` traces, 71.5MB `backend/screenshots`), triggering BuildKit daemon OOM-kill. Created `backend/.dockerignore`.
+  2. Root `.dockerignore` previously used shallow names (`runs`, `screenshots`, `data`) that failed to match nested folders (`backend/runs`, etc.). Hardened root and frontend `.dockerignore` with recursive `**/` patterns.
+  3. Optimized `backend/Dockerfile` to copy `package*.json` first, run `npm install --omit=dev --legacy-peer-deps` for layer caching, and avoid copying host Windows node_modules before install.
+  4. Removed conflicting `railpack.json` and explicitly declared `"dockerfilePath": "Dockerfile"` across `railway.json`, `backend/railway.json`, and created `frontend/railway.json`.
+- **Pre-Push Evaluation Gate Installed**: Implemented a 2-layer branch evaluation gate:
+  - Local hooks (`.githooks/pre-push` and `.githooks/pre-commit`) via `scripts/precheck/install-hooks.mjs`.
+  - Required CI gate (`.github/workflows/precheck.yml`) enforcing status check `precheck`.
+  - Comprehensive 12-check validation suite in `scripts/precheck/precheck.mjs` verifying git-state, paths-and-size, secrets, code-patterns, syntax, imports, migrations, dependencies, smoke-import, lint, tests, and build, writing full Markdown report to `.precheck/report.md`.
+  - Configurable via `scripts/precheck/precheck.config.json` with documented guide in `docs/ci-precheck.md`.
 
 ## Immediate Blockers & Risks
 - **OneDrive Sync Collisions**: Working inside OneDrive (`C:\Users\ajith\OneDrive\Desktop\Workday_Auto`) can create file locks or sync duplicate files during rapid local file generation or temp builds.

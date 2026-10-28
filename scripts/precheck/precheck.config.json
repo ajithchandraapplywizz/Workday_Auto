@@ -1,0 +1,36 @@
+{
+  "strictMissingScripts": false,
+  "defaultBase": "origin/main",
+  "maxFileSizeMB": 5,
+  "workspaces": [
+    {
+      "name": "root",
+      "dir": ".",
+      "scripts": {
+        "lint": "npm run lint",
+        "test": "npm test"
+      }
+    },
+    {
+      "name": "frontend",
+      "dir": "frontend",
+      "scripts": {
+        "build": "npm run build"
+      }
+    }
+  ],
+  "smokeImportPrefixes": [
+    "backend/lib"
+  ],
+  "smokeImportExclude": [
+    "backend/lib/clusterBatchRunner.mjs",
+    "backend/lib/workerPool.mjs",
+    "backend/lib/submissionWorkerPool.mjs",
+    "backend/lib/resolvingWorkerPool.mjs",
+    "backend/lib/scanner.mjs"
+  ],
+  "blockedBranches": [
+    "main",
+    "master"
+  ]
+}

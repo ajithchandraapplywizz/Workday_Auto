@@ -1,0 +1,64 @@
+name: precheck
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - '**'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+concurrency:
+  group: precheck-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  precheck:
+    name: precheck
+    runs-on: ubuntu-latest
+    env:
+      CI: 'true'
+      NODE_ENV: test
+      HEADLESS: 'true'
+      SCANNER_RUN: 'false'
+      SUBMIT_RUN: 'false'
+      SUPABASE_URL: https://dummy.supabase.co
+      SUPABASE_SERVICE_ROLE_KEY: dummy-service-role-key-for-ci
+      CLAUDE_API_KEY: dummy-claude-key-for-ci
+      ANTHROPIC_API_KEY: dummy-anthropic-key-for-ci
+    steps:
+      - name: Checkout Full History
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Node.js (v20)
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Workspace Dependencies
+        run: npm ci --legacy-peer-deps || npm install --legacy-peer-deps
+
+      - name: Run Pre-Push Evaluation Gate
+        run: node scripts/precheck/precheck.mjs
+
+      - name: Post Gate Summary to GitHub Actions
+        if: always()
+        run: |
+          if [ -f .precheck/report.md ]; then
+            cat .precheck/report.md >> $GITHUB_STEP_SUMMARY
+          fi
+
+      - name: Upload Precheck Report Artifact
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: precheck-report
+          path: .precheck/report.md
+          if-no-files-found: ignore
