@@ -1132,10 +1132,25 @@ export async function updateQueueTaskStatus(taskId, {
   
   if (workerId !== undefined) body.worker_id = workerId;
   if (screenshotPath !== undefined) body.screenshot_path = screenshotPath;
+  if (preResolvedAnswers !== undefined) body.pre_resolved_answers = preResolvedAnswers;
+
+  let query = '';
+  const taskIdStr = String(taskId).trim();
+  if (taskIdStr.includes(':::')) {
+    const [awlId, ...rest] = taskIdStr.split(':::');
+    const jUrl = rest.join(':::');
+    query = `?applywizz_id=eq.${encode(awlId)}&job_url=eq.${encode(jUrl)}`;
+  } else if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(taskIdStr)) {
+    query = `?id=eq.${encode(taskIdStr)}`;
+  } else {
+    // Fallback: match by applywizz_id to avoid 22P02 invalid UUID error
+    query = `?applywizz_id=eq.${encode(taskIdStr)}`;
+  }
+
   try {
     await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?id=eq.${encode(taskId)}`,
+      query,
       prefer: 'return=minimal',
       body,
     });
