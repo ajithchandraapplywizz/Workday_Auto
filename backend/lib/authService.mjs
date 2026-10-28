@@ -112,7 +112,7 @@ export function authenticateStaffRole(req, res, allowedRoles = ['admin', 'develo
     'Content-Type': 'application/json',
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-staff-email',
   };
 
   if (!token) {
@@ -604,7 +604,7 @@ export async function handleOperatorsRequest(req, res, queryParams = {}) {
       'Content-Type': 'application/json',
       'Access-Control-Allow-Origin': '*',
       'Access-Control-Allow-Methods': 'GET, POST, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-staff-email',
     });
     return res.end(JSON.stringify({
       success: true,

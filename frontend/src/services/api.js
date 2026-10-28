@@ -3024,9 +3024,7 @@ export async function fetchBotDaemonStatus() {
 
     // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
     const statusUrls = [
-      ...(backendBase ? [`${backendBase}/health`, `${backendBase}/api/bot/status`, `${backendBase}/`] : []),
-      '/health',
-      '/api/bot/status',
+      ...(backendBase ? [`${backendBase}/health`, `${backendBase}/api/bot/status`] : ['/health', '/api/bot/status']),
       ...(isLocal ? [
         'http://localhost:3005/health',
         'http://localhost:3005/api/bot/status',
@@ -3037,7 +3035,7 @@ export async function fetchBotDaemonStatus() {
     for (const u of statusUrls) {
       try {
         const res = await fetch(u, {
-          headers: getStaffAuthHeaders({ 'Accept': 'application/json' }),
+          headers: { 'Accept': 'application/json' },
           signal: AbortSignal.timeout(2000),
         });
         const contentType = res.headers.get('content-type') || '';
