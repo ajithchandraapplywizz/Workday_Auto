@@ -27,7 +27,9 @@
     "backend/lib/workerPool.mjs",
     "backend/lib/submissionWorkerPool.mjs",
     "backend/lib/resolvingWorkerPool.mjs",
-    "backend/lib/scanner.mjs"
+    "backend/lib/scanner.mjs",
+    "backend/lib/engine.mjs",
+    "backend/lib/workdayRapidAdvance.mjs"
   ],
   "blockedBranches": [
     "main",

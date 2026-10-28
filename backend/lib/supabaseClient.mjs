@@ -2539,11 +2539,35 @@ export async function findQueueTasksForJobUrl(jobUrl) {
   if (!isSupabaseConfigured() || !jobUrl) return [];
   try {
     const cleanUrl = String(jobUrl).trim();
+
+    function expandTasks(taskList) {
+      if (!Array.isArray(taskList)) return [];
+      const out = [];
+      for (const t of taskList) {
+        const raw = String(t.applywizz_id || '').trim();
+        const ids = raw.includes(',')
+          ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+          : (Array.isArray(t.client_ids) && t.client_ids.length > 0
+              ? t.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
+              : [raw.toUpperCase()]);
+        for (const singleId of ids) {
+          if (!singleId) continue;
+          out.push({
+            ...t,
+            id: `${singleId}:::${t.job_url || cleanUrl}`,
+            applywizz_id: singleId,
+            applywizzId: singleId,
+          });
+        }
+      }
+      return out;
+    }
+
     // 1. Direct query matching job_url exactly
     const exact = await request('batch_job_queue', {
       query: `?job_url=eq.${encode(cleanUrl)}&select=id,applywizz_id,job_id,job_url,company,role_title&limit=2000`,
     });
-    if (Array.isArray(exact) && exact.length > 0) return exact;
+    if (Array.isArray(exact) && exact.length > 0) return expandTasks(exact);
 
     // 2. Query matching base URL without tracking query parameters
     const urlObj = new URL(cleanUrl);
@@ -2551,7 +2575,7 @@ export async function findQueueTasksForJobUrl(jobUrl) {
     const cleanNoQuery = await request('batch_job_queue', {
       query: `?job_url=ilike.*${encode(originAndPath)}*&select=id,applywizz_id,job_id,job_url,company,role_title&limit=2000`,
     });
-    if (Array.isArray(cleanNoQuery) && cleanNoQuery.length > 0) return cleanNoQuery;
+    if (Array.isArray(cleanNoQuery) && cleanNoQuery.length > 0) return expandTasks(cleanNoQuery);
 
     // 3. Fallback: match by the unique job segment / reqId
     const pathParts = urlObj.pathname.split('/').filter(Boolean);
@@ -2560,7 +2584,7 @@ export async function findQueueTasksForJobUrl(jobUrl) {
       const bySlug = await request('batch_job_queue', {
         query: `?job_url=ilike.*${encode(lastSeg)}*&select=id,applywizz_id,job_id,job_url,company,role_title&limit=2000`,
       });
-      if (Array.isArray(bySlug) && bySlug.length > 0) return bySlug;
+      if (Array.isArray(bySlug) && bySlug.length > 0) return expandTasks(bySlug);
     }
     return [];
   } catch {
@@ -2659,6 +2683,20 @@ export async function recordJobDistributions({
       } catch {}
     }
 
+    // Expand any comma-separated applywizzId in targetClients so EVERY client has an authentic row
+    const expandedClients = [];
+    for (const c of targetClients) {
+      const raw = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim();
+      const ids = raw.includes(',')
+        ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+        : [raw.toUpperCase()];
+      for (const singleId of ids) {
+        if (!singleId) continue;
+        expandedClients.push(typeof c === 'object' ? { ...c, applywizzId: singleId, applywizz_id: singleId } : singleId);
+      }
+    }
+    targetClients = expandedClients;
+
     // Always ensure the lead client is included
     if (cleanLead && !targetClients.some(c => (c.applywizzId || c.applywizz_id || '').toUpperCase() === cleanLead)) {
       targetClients.unshift({
@@ -2716,7 +2754,8 @@ export async function recordJobDistributions({
         ? Number(c.unansweredCount)
         : clientUnanswered.length;
       const clientIsFully = (clientCountUnanswered === 0);
-      let clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
+      // Per user instruction: all clients distributed with blueprint master/5-tier answers are marked ready_for_review!
+      let clientStatus = 'ready_for_review';
       if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
         clientStatus = c.status;
       }
@@ -2878,6 +2917,7 @@ export async function recordFailedJob({
   applywizzId = '',
   clientIds = [],
   failedClientCount = 1,
+  clientCount = null,
   jobId = '',
   jobUrl = '',
   company = '',
@@ -2895,9 +2935,10 @@ export async function recordFailedJob({
     const cleanStep = String(failedAtStep || 'Unknown').trim();
     const now = new Date().toISOString();
     const parsedClientIds = Array.isArray(clientIds) && clientIds.length > 0
-      ? clientIds
+      ? clientIds.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
       : [cleanId];
-    const totalCount = failedClientCount || parsedClientIds.length;
+    const totalCount = Number(clientCount || failedClientCount || parsedClientIds.length || 1);
+    const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
 
     const payload = {
       applywizz_id: cleanId,
@@ -2909,6 +2950,7 @@ export async function recordFailedJob({
       failed_at_step: cleanStep,
       screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
       client_ids: parsedClientIds,
+      client_count: totalCount,
       failed_client_count: totalCount,
       created_at: now,
       updated_at: now,
@@ -2948,6 +2990,8 @@ export async function recordFailedJob({
       console.log(`   • Job URL:              ${cleanUrl}`);
       console.log(`   • Failed at Step:       ${cleanStep}`);
       console.log(`   • Failure Reason:       ${cleanReason}`);
+      console.log(`   • Total Clients:        ${totalCount}`);
+      console.log(`   • Client IDs:           ${JSON.stringify(parsedClientIds)}`);
       console.log(`   • Partial Q&A Saved:    ${answersArr.length} resolved questions preserved`);
       console.log(`   • Proof Screenshot:     ${screenshotPath || 'None'}`);
       console.log(`   • Ingestion Time:       ${now}\n`);

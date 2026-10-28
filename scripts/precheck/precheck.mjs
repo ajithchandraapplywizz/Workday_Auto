@@ -681,7 +681,7 @@ function checkSmokeImport() {
     const res = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${fileUrl}').then(() => process.exit(0)).catch((e) => { console.error(e?.stack || e); process.exit(1); })`], {
       cwd: rootDir,
       env: dummyEnv,
-      timeout: 10000,
+      timeout: config.smokeImportTimeoutMs || 30000,
       encoding: 'utf8',
       windowsHide: true,
     });

@@ -1,11 +1,11 @@
 # Pre-Push Evaluation Gate Report
 
-- **Date**: 2026-10-28T11:14:35.657Z
+- **Date**: 2026-10-28T15:49:20.268Z
 - **Branch**: `ajithchandralatestworkdaycompleteupdation`
 - **Evaluation Mode**: `branch`
 - **Merge Base**: `ef5794bbbc6709e9105cb10d133903dfdf3af427`
-- **Files Checked**: `403`
-- **Duration**: `284.51s`
+- **Files Checked**: `407`
+- **Duration**: `464.45s`
 - **Overall Status**: **FAILED ❌**
 
 ## Evaluation Summary
@@ -28,7 +28,7 @@
 ## Detailed Findings
 
 ### GIT-STATE (FAIL)
-- Working tree has uncommitted changes (gitignore, precheck/report.md, cripts/precheck/precheck.mjs). Stash or commit before pushing to ensure clean evaluation.
+- Working tree has uncommitted changes (M scripts/precheck/precheck.config.json, M scripts/precheck/precheck.mjs). Stash or commit before pushing to ensure clean evaluation.
 
 ### MIGRATIONS (WARN)
 - Duplicate migration number prefix '029' in backend/supabase-migrations: 029_add_client_count_to_failed_jobs.sql and 029_ca_submission_tasks_phase1_migration.sql

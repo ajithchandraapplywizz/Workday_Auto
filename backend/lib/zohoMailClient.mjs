@@ -143,8 +143,8 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '') {
   const hrefMatches = Array.from(cleanHtml.matchAll(/href=["'](https?:\/\/[^"'>]+)["']/gi))
     .map((m) => unescapeHtml(m[1]).trim());
 
-  // 2. Extract plain text URLs
-  const textMatches = Array.from(combined.matchAll(/https?:\/\/[^\s"'<>]+/gi))
+  // 2. Extract plain text URLs (excluding whitespace, quotes, and markdown delimiters [ ] ( ))
+  const textMatches = Array.from(combined.matchAll(/https?:\/\/[^\s"'<>[\]()]+/gi))
     .map((m) => unescapeHtml(m[0]).trim());
 
   const allCandidates = [...new Set([...hrefMatches, ...textMatches])];

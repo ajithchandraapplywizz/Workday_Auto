@@ -21,8 +21,8 @@ export function sanitizeWorkdayUrl(raw) {
   let url = raw.trim();
   // Strip any wrapping quotes, brackets, angle brackets
   url = url.replace(/^["'`<\(\[\{]+|["'`>\)\]\}]+$/g, '');
-  // Extract strictly the http/https URL part if unwanted leading/trailing text exists
-  const match = url.match(/https?:\/\/[^\s"'<>]+/i);
+  // Extract strictly the http/https URL part, excluding whitespace, quotes, angle brackets, and markdown delimiters [ ] ( )
+  const match = url.match(/https?:\/\/[^\s"'<>[\]()]+/i);
   if (!match) return null;
   url = match[0];
   // Iteratively strip trailing punctuation often attached in plain text emails
@@ -79,8 +79,14 @@ export async function isWorkdayVerificationPage(page) {
         bodyText.includes('check your spam') ||
         bodyText.includes('we sent an email') ||
         bodyText.includes('we sent a verification') ||
+        bodyText.includes('we have sent you a verification') ||
+        bodyText.includes('we have sent a verification') ||
+        bodyText.includes("we've sent a verification") ||
+        bodyText.includes('sent you a verification') ||
+        bodyText.includes('verification link') ||
         bodyText.includes('an email has been sent') ||
         bodyText.includes("we've sent an email") ||
+        bodyText.includes('we have sent an email') ||
         bodyText.includes('email was sent') ||
         bodyText.includes('a message has been sent') ||
         bodyText.includes('instructions have been sent') ||

@@ -729,6 +729,8 @@ export async function clickGatewayCreateAccount(page) {
     '[data-automation-id="createAccountTab"]',
     'button:has-text("Create Account")',
     'a:has-text("Create Account")',
+    'a[href*="createAccount" i]',
+    'button[aria-label*="Create Account" i]',
   ].join(', '));
 
   for (const btn of buttons) {
@@ -740,6 +742,7 @@ export async function clickGatewayCreateAccount(page) {
     if (await isInNavOrHeader(btn)) continue;
 
     console.log('   Clicking gateway "Create Account" button (not nav bar)...');
+    await btn.scrollIntoViewIfNeeded().catch(() => {});
     await btn.click({ force: true }).catch(() => btn.evaluate(e => e.click()));
     await page.waitForTimeout(1500);
     return true;

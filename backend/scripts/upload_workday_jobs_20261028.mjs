@@ -178,59 +178,51 @@ async function run() {
 
   console.log(`\n👥 Total unique candidate applications across ${uniqueJobs.size} jobs: ${totalCandidates}`);
 
-  // Flatten into distinct batch_job_queue rows
-  const taskRows = [];
-  const seenPair = new Set();
+  // Clear batch_job_queue and scanned_jobs first to ensure clean state
+  console.log(`\n🧹 Clearing existing records in batch_job_queue & scanned_jobs...`);
+  await supabase.from('batch_job_queue').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+  await supabase.from('scanned_jobs').delete().neq('id', '00000000-0000-0000-0000-000000000000');
+
+  // Format exactly 1 row per unique job link with client IDs in JSON array format
+  const queueRows = [];
   const now = new Date().toISOString();
 
   for (const [url, info] of uniqueJobs.entries()) {
-    for (const clientId of info.clientIds) {
-      const pairKey = `${clientId}::${url}`;
-      if (!seenPair.has(pairKey)) {
-        seenPair.add(pairKey);
-        taskRows.push({
-          applywizz_id: clientId,
-          job_url: url,
-          company: info.company,
-          role_title: info.roleTitle,
-          job_id: info.jobId,
-          status: 'pending',
-          created_at: now,
-          updated_at: now,
-        });
-      }
-    }
+    const clientIdsArray = Array.from(info.clientIds);
+    queueRows.push({
+      applywizz_id: JSON.stringify(clientIdsArray),
+      job_url: url,
+      company: info.company,
+      role_title: info.roleTitle,
+      job_id: info.jobId,
+      status: 'pending',
+      attempt_count: 0,
+      created_at: now,
+      updated_at: now,
+    });
   }
 
-  console.log(`\n⏳ Ingesting ${taskRows.length} tasks into public.batch_job_queue in batches of 100...\n`);
+  console.log(`\n⏳ Inserting ${queueRows.length} unique job rows into public.batch_job_queue...\n`);
 
-  const BATCH_SIZE = 100;
+  const { data, error } = await supabase
+    .from('batch_job_queue')
+    .insert(queueRows)
+    .select('id');
+
   let insertedCount = 0;
   let errorCount = 0;
 
-  for (let i = 0; i < taskRows.length; i += BATCH_SIZE) {
-    const chunk = taskRows.slice(i, i + BATCH_SIZE);
-    const { data, error } = await supabase
-      .from('batch_job_queue')
-      .upsert(chunk, {
-        onConflict: 'applywizz_id,job_url',
-        ignoreDuplicates: false,
-      })
-      .select('id');
-
-    if (error) {
-      console.error(`❌ Batch error [${i} - ${i + chunk.length}]:`, error.message);
-      errorCount += chunk.length;
-    } else {
-      insertedCount += (data ? data.length : chunk.length);
-      process.stdout.write(`⏳ Uploaded ${insertedCount} / ${taskRows.length} tasks...\r`);
-    }
+  if (error) {
+    console.error(`❌ Insert error:`, error.message);
+    errorCount = queueRows.length;
+  } else {
+    insertedCount = data ? data.length : queueRows.length;
+    console.log(`✅ Successfully inserted ${insertedCount} unique job rows!`);
   }
 
-  console.log(`\n\n══════════════════════════════════════════════════════════════════════`);
+  console.log(`\n══════════════════════════════════════════════════════════════════════`);
   console.log(`🎉 INGESTION COMPLETE!`);
-  console.log(`   Unique Jobs Uploaded:  ${uniqueJobs.size}`);
-  console.log(`   Tasks Uploaded:        ${insertedCount} / ${taskRows.length}`);
+  console.log(`   Unique Jobs Uploaded:  ${insertedCount} / ${queueRows.length}`);
   console.log(`   Errors Encountered:    ${errorCount}`);
   console.log(`══════════════════════════════════════════════════════════════════════\n`);
 

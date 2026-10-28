@@ -71,6 +71,11 @@ async function detectLoginFailureReason(page) {
       text.includes('check your email') ||
       text.includes('we sent a verification link') ||
       text.includes('we sent a verification code') ||
+      text.includes('we have sent you a verification') ||
+      text.includes('we have sent a verification') ||
+      text.includes("we've sent a verification") ||
+      text.includes('sent you a verification') ||
+      text.includes('verification link') ||
       text.includes('need to be verified') ||
       text.includes('needs to be verified') ||
       text.includes('need to be activated') ||
@@ -608,14 +613,14 @@ export async function workdayCreateAccount(page, email, givenPassword) {
   const pwdInputs = await page.$$('input[data-automation-id="password"], input[type="password"]');
   for (const inp of pwdInputs) {
     if (await inp.isVisible().catch(() => false)) {
-      const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
-      if (autoId === 'verifyPassword') continue;
+      const autoId = (await inp.getAttribute('data-automation-id').catch(() => '') || '').toLowerCase();
+      if (autoId.includes('verify') || autoId.includes('confirm')) continue;
       await inp.fill(password);
       break;
     }
   }
 
-  const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]');
+  const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id="confirmPassword"]:visible, input[name="verifyPassword"]:visible, input[name="confirmPassword"]:visible, input[placeholder*="verify" i]:visible, input[placeholder*="confirm" i]:visible');
   if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) {
     await verifyPwdInput.fill(password);
   }

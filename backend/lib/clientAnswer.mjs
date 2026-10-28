@@ -638,6 +638,16 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         company: opts.company || profile._company || '',
       }).catch((e) => console.log(`    ⚠️  Supabase write error: ${e.message?.slice(0, 80)}`));
       recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
+      import('./masterYamlManager.mjs').then(({ saveMasterYamlTemplate }) => {
+        saveMasterYamlTemplate([{
+          question: label,
+          field_type: fieldType,
+          step: currentStep,
+          options,
+          value: llmHit.answer,
+          source: 'llm',
+        }], { tenant, company: opts.company, mockAwlId: awlId || 'AWL-1568' }).catch(() => {});
+      }).catch(() => {});
     }
     console.log(`    🤖 [LLM Tier 4${opts.dryRun ? ' (dry-run)' : ' → Supabase saved'}] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
     return llmHit;
