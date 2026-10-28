@@ -1,4 +1,4 @@
-name: CI / CD Integrity Pipeline
+name: End-to-End CI/CD Pipeline
 
 on:
   push:
@@ -12,23 +12,35 @@ on:
     branches:
       - main
       - master
+  workflow_dispatch:
+    inputs:
+      trigger_deploy:
+        description: 'Manually trigger deployment after validation checks pass'
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  backend-validation:
-    name: Backend Syntax & Unit Tests
+  # ───────────────────────────────────────────────────────────────────────────
+  # STAGE 1: Backend Syntax, Module Resolution, and Unit Test Gates
+  # ───────────────────────────────────────────────────────────────────────────
+  backend-ci:
+    name: Backend Validation & Unit Tests
     runs-on: ubuntu-latest
     env:
       NODE_ENV: test
       SUPABASE_URL: https://dummy.supabase.co
-      SUPABASE_SERVICE_ROLE_KEY: dummy-key-for-ci-check
-      OPENROUTER_API_KEY: dummy-key
+      SUPABASE_SERVICE_ROLE_KEY: dummy-service-role-key-for-ci
+      CLAUDE_API_KEY: dummy-claude-key-for-ci
+      ANTHROPIC_API_KEY: dummy-anthropic-key-for-ci
+      ANTHROPIC_MODEL: claude-haiku-5-5
       SERVICE_ROLE: main
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Node.js (v20)
@@ -37,16 +49,19 @@ jobs:
           node-version: 20
           cache: 'npm'
 
-      - name: Install dependencies
+      - name: Install Root & Backend Dependencies
         run: npm ci
 
-      - name: Validate JavaScript Syntax (Critical Entry Points & Libs)
+      - name: Verify JavaScript Syntax across Critical Modules
         run: |
           echo "Checking JavaScript syntax across critical modules..."
           node --check index.js
           node --check backend/cli.mjs
           node --check backend/scripts/queue_daemon.mjs
           node --check backend/config/pipelineConfig.mjs
+          node --check backend/lib/claudeLlm.mjs
+          node --check backend/lib/masterYamlManager.mjs
+          node --check backend/lib/clusterBatchRunner.mjs
           node --check backend/lib/workday.mjs
           node --check backend/lib/discovery.mjs
           node --check backend/lib/engine.mjs
@@ -54,31 +69,38 @@ jobs:
           node --check backend/lib/resolvingWorkerPool.mjs
           node --check backend/lib/submissionWorkerPool.mjs
           node --check backend/lib/supabaseClient.mjs
-          node --check backend/lib/dashboardStats.mjs
+          node --check backend/lib/clientAnswer.mjs
           echo "✓ All core backend modules passed syntax check."
 
-      - name: Validate Module Imports & Dependency Resolution
+      - name: Validate Module Imports & Dynamic Dependencies
         run: |
-          echo "Verifying runtime module resolution and required packages..."
+          echo "Verifying runtime module resolution..."
+          node -e "import('./backend/lib/claudeLlm.mjs').then(() => console.log('✓ claudeLlm OK'))"
+          node -e "import('./backend/lib/masterYamlManager.mjs').then(() => console.log('✓ masterYamlManager OK'))"
           node -e "import('./backend/lib/mfaAuth.mjs').then(() => console.log('✓ mfaAuth OK'))"
           node -e "import('./backend/lib/workday.mjs').then(() => console.log('✓ workday OK'))"
           node -e "import('./backend/config/pipelineConfig.mjs').then(() => console.log('✓ pipelineConfig OK'))"
           node -e "import('./index.js').catch(e => { if (e.code === 'ERR_MODULE_NOT_FOUND') { console.error('MISSING DEPENDENCY:', e); process.exit(1); } })"
           echo "✓ All core modules resolved dependencies successfully."
 
-      - name: Run Backend Unit Tests
+      - name: Run Backend Unit Test Suite
         run: |
           echo "Executing test suite..."
           npm test
+          node --test backend/lib/claudeLlm.test.mjs
+          echo "✓ All unit tests passed cleanly."
 
-  frontend-validation:
-    name: Frontend React / Vite Build
+  # ───────────────────────────────────────────────────────────────────────────
+  # STAGE 2: Frontend Compilation & Asset Packaging
+  # ───────────────────────────────────────────────────────────────────────────
+  frontend-ci:
+    name: Frontend React & Vite Production Build
     runs-on: ubuntu-latest
     defaults:
       run:
         working-directory: frontend
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Setup Node.js (v20)
@@ -88,10 +110,10 @@ jobs:
           cache: 'npm'
           cache-dependency-path: frontend/package.json
 
-      - name: Install frontend dependencies
+      - name: Install Frontend Dependencies
         run: npm ci
 
-      - name: Build Frontend (Vite Production Distribution)
+      - name: Build Frontend Distribution (Vite)
         env:
           VITE_SUPABASE_URL: https://dummy.supabase.co
           VITE_SUPABASE_ANON_KEY: dummy-anon-key
@@ -101,20 +123,86 @@ jobs:
           npm run build
           echo "✓ Frontend built successfully without errors."
 
-  container-validation:
-    name: Dockerfiles Build Check
+      - name: Archive Production Assets
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          retention-days: 3
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STAGE 3: Docker Container Build & Layer Validation
+  # ───────────────────────────────────────────────────────────────────────────
+  container-ci:
+    name: Docker Container Build Checks
     runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci]
     steps:
-      - name: Checkout repository
+      - name: Checkout Code
         uses: actions/checkout@v4
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Verify Frontend Dockerfile Build
+      - name: Build Backend Production Docker Container
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./Dockerfile
+          push: false
+          tags: workday-backend:ci-check
+
+      - name: Build Frontend Production Docker Container
         uses: docker/build-push-action@v5
         with:
           context: ./frontend
           file: ./frontend/Dockerfile
           push: false
-          tags: workday-frontend:test
+          tags: workday-frontend:ci-check
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # STAGE 4: Continuous Deployment (CD Trigger Gate)
+  # ───────────────────────────────────────────────────────────────────────────
+  cd-deploy:
+    name: Continuous Deployment (CD)
+    runs-on: ubuntu-latest
+    needs: [backend-ci, frontend-ci, container-ci]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' || github.event.inputs.trigger_deploy == 'true'
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Trigger Railway Production Deployment Webhook
+        env:
+          RAILWAY_WEBHOOK: ${{ secrets.RAILWAY_DEPLOY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$RAILWAY_WEBHOOK" ]; then
+            echo "Triggering Railway deployment via webhook..."
+            curl -s -X POST "$RAILWAY_WEBHOOK"
+            echo "✓ Railway deployment webhook triggered successfully."
+          else
+            echo "ℹ️  RAILWAY_DEPLOY_WEBHOOK_URL secret not configured. Skipping webhook trigger."
+          fi
+
+      - name: Trigger Render Deployment Webhook (Optional)
+        env:
+          RENDER_WEBHOOK: ${{ secrets.RENDER_DEPLOY_WEBHOOK_URL }}
+        run: |
+          if [ -n "$RENDER_WEBHOOK" ]; then
+            echo "Triggering Render deployment via webhook..."
+            curl -s -X POST "$RENDER_WEBHOOK"
+            echo "✓ Render deployment webhook triggered successfully."
+          else
+            echo "ℹ️  RENDER_DEPLOY_WEBHOOK_URL secret not configured. Skipping webhook trigger."
+          fi
+
+      - name: Deployment Gate Summary
+        run: |
+          echo "=========================================================="
+          echo "🚀 CI/CD PIPELINE COMPLETE & READY FOR PRODUCTION"
+          echo "• Branch: ${{ github.ref }}"
+          echo "• Commit: ${{ github.sha }}"
+          echo "• Backend Status: Passed (Syntax, Modules, Tests)"
+          echo "• Frontend Status: Passed (Vite Bundle Built)"
+          echo "• Docker Containers: Validated (Root Playwright & Frontend)"
+          echo "=========================================================="

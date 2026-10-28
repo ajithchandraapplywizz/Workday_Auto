@@ -143,64 +143,52 @@ async function run() {
 
   console.log(`🔗 Successfully isolated first ${targetLinks.length} unique links from CSV.\n`);
 
-  // Flatten into taskRows
+  // Store each unique link as EXACTLY 1 row, with all client AWL IDs in a single cell
   const taskRows = [];
-  const seenPair = new Set();
   const now = new Date().toISOString();
 
   for (const item of targetLinks) {
-    for (const clientId of item.clientIds) {
-      const pairKey = `${clientId}::${item.jobUrl}`;
-      if (!seenPair.has(pairKey)) {
-        seenPair.add(pairKey);
-        taskRows.push({
-          applywizz_id: clientId,
-          job_url: item.jobUrl,
-          company: item.company,
-          role_title: item.roleTitle,
-          job_id: item.jobId,
-          status: 'pending',
-          created_at: now,
-          updated_at: now,
-        });
-      }
-    }
+    const allClientIds = Array.from(item.clientIds);
+    taskRows.push({
+      applywizz_id: allClientIds.join(', '),
+      job_url: item.jobUrl,
+      company: item.company,
+      role_title: item.roleTitle,
+      job_id: item.jobId,
+      status: 'pending',
+      created_at: now,
+      updated_at: now,
+    });
   }
 
-  console.log(`👥 Total Candidate Application Tasks across the 20 links: ${taskRows.length}`);
+  console.log(`👥 Total Unique Link Rows to Insert: ${taskRows.length} (Each containing all candidate AWL IDs in a single cell)`);
 
-  // Clean batch_job_queue first to guarantee ONLY these 20 links exist
-  console.log(`🧹 Clearing any previous records from batch_job_queue...`);
+  // Clean batch_job_queue first to guarantee ONLY these 20 unique links exist
+  console.log(`🧹 Clearing previous records from batch_job_queue...`);
   await supabase.from('batch_job_queue').delete().neq('id', '00000000-0000-0000-0000-000000000000');
 
-  // Insert in chunks of 100
-  const BATCH_SIZE = 100;
+  // Insert exactly 20 unique link rows
   let insertedCount = 0;
   let errorCount = 0;
 
-  for (let i = 0; i < taskRows.length; i += BATCH_SIZE) {
-    const chunk = taskRows.slice(i, i + BATCH_SIZE);
+  for (const row of taskRows) {
     const { data, error } = await supabase
       .from('batch_job_queue')
-      .upsert(chunk, {
-        onConflict: 'applywizz_id,job_url',
-        ignoreDuplicates: false,
-      })
+      .insert([row])
       .select('id');
 
     if (error) {
-      console.error(`❌ Batch error [${i} - ${i + chunk.length}]:`, error.message);
-      errorCount += chunk.length;
+      console.error(`❌ Insert error for ${row.company}:`, error.message);
+      errorCount++;
     } else {
-      insertedCount += (data ? data.length : chunk.length);
-      process.stdout.write(`⏳ Uploaded ${insertedCount} / ${taskRows.length} tasks...\r`);
+      insertedCount += (data ? data.length : 1);
     }
   }
 
   console.log(`\n\n${'═'.repeat(78)}`);
   console.log(`🎉 UPLOAD COMPLETE:`);
-  console.log(`   Unique Links Uploaded: ${targetLinks.length}`);
-  console.log(`   Total Client Tasks:    ${insertedCount}`);
+  console.log(`   Unique Links Uploaded: ${insertedCount} rows (1 row per link)`);
+  console.log(`   Candidates per link:   All AWL IDs combined into single 'applywizz_id' cell`);
   console.log(`   Errors Encountered:    ${errorCount}`);
   console.log(`${'═'.repeat(78)}\n`);
 

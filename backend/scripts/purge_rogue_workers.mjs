@@ -15,7 +15,7 @@ async function purgeRogueWorkerRows() {
     return;
   }
 
-  const validIds = new Set(['worker-1', 'worker-2', 'worker-3']);
+  const validIds = new Set(Array.from({ length: 10 }, (_, i) => `worker_${i + 1}`));
   const rogueRows = allRows.filter((r) => !validIds.has(r.worker_id));
 
   console.log(`Found ${rogueRows.length} rogue rows to delete:`, rogueRows.map(r => r.worker_id));
@@ -29,10 +29,13 @@ async function purgeRogueWorkerRows() {
     }
   }
 
-  // Ensure worker-1, worker-2, worker-3 exist and are idle
-  for (const wid of ['worker-1', 'worker-2', 'worker-3']) {
+  // Ensure worker_1 through worker_10 exist and are idle
+  for (let i = 1; i <= 10; i++) {
+    const wid = `worker_${i}`;
     await sb.from('worker_status').upsert({
       worker_id: wid,
+      bot_name: `Worker ${i}`,
+      stage: 'idle',
       state: 'idle',
       current_application_id: null,
       updated_at: new Date().toISOString(),
@@ -41,7 +44,7 @@ async function purgeRogueWorkerRows() {
 
   // Print final table
   const { data: finalRows } = await sb.from('worker_status').select('*').order('worker_id');
-  console.log('\nFINAL STRICT 3 ROWS:');
+  console.log('\nFINAL STRICT 10 ROWS:');
   console.table(finalRows);
 }
 

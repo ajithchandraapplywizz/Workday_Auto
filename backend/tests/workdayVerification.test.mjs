@@ -29,19 +29,47 @@ describe('Workday Email Verification (workdayVerification.mjs)', () => {
       goto: async (url) => { visitedUrl = url; },
     };
 
-    // Mock global fetch
+    // Mock global fetch for Zoho Mail endpoints
     const originalFetch = globalThis.fetch;
     globalThis.fetch = async (url) => {
-      const u = new URL(url);
-      assert.equal(u.searchParams.get('email'), 'candidate@applywizz.com');
-      assert.equal(u.searchParams.get('company'), 'workday');
-      return {
-        ok: true,
-        json: async () => ({
-          found: true,
-          verificationLink: 'https://workday.wd5.myworkdayjobs.com/verify?token=abc123xyz',
-        }),
-      };
+      const u = String(url);
+      if (u.includes('/api/zoho/ui/users')) {
+        return {
+          ok: true,
+          json: async () => ({
+            users: [{ email: 'candidate@applywizz.com', accountId: 'acc1', connected: true }],
+          }),
+        };
+      }
+      if (u.includes('/api/zoho/ui/inbox')) {
+        return {
+          ok: true,
+          json: async () => ({
+            accountId: 'acc1',
+            messages: [
+              {
+                folderId: 'f1',
+                messageId: 'm1',
+                receivedTime: Date.now(),
+                from: 'workday@myworkday.com',
+                subject: 'Activate your Workday Account',
+              },
+            ],
+          }),
+        };
+      }
+      if (u.includes('/api/zoho/ui/message')) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              htmlContent: '<a href="https://workday.wd5.myworkdayjobs.com/verify?token=abc123xyz">Activate Account</a>',
+              textContent: 'https://workday.wd5.myworkdayjobs.com/verify?token=abc123xyz',
+            },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
     };
 
     try {
@@ -88,13 +116,46 @@ describe('Workday Email Verification (workdayVerification.mjs)', () => {
     };
 
     const originalFetch = globalThis.fetch;
-    globalThis.fetch = async () => ({
-      ok: true,
-      json: async () => ({
-        found: true,
-        verificationCode: '748291',
-      }),
-    });
+    globalThis.fetch = async (url) => {
+      const u = String(url);
+      if (u.includes('/api/zoho/ui/users')) {
+        return {
+          ok: true,
+          json: async () => ({
+            users: [{ email: 'candidate@applywizz.com', accountId: 'acc1', connected: true }],
+          }),
+        };
+      }
+      if (u.includes('/api/zoho/ui/inbox')) {
+        return {
+          ok: true,
+          json: async () => ({
+            accountId: 'acc1',
+            messages: [
+              {
+                folderId: 'f1',
+                messageId: 'm2',
+                receivedTime: Date.now(),
+                from: 'workday@myworkday.com',
+                subject: 'Your verification code is 748291',
+              },
+            ],
+          }),
+        };
+      }
+      if (u.includes('/api/zoho/ui/message')) {
+        return {
+          ok: true,
+          json: async () => ({
+            message: {
+              htmlContent: '<p>Your verification code is 748291</p>',
+              textContent: 'Your verification code is 748291',
+            },
+          }),
+        };
+      }
+      return { ok: true, json: async () => ({}) };
+    };
 
     try {
       const result = await resolveWorkdayVerification(mockPage, {
