@@ -15,7 +15,7 @@ import { resolveField } from './planner.mjs';
 import { resolveDynamicAnswer } from './questionEngine/index.mjs';
 import { createQAStore, isComplianceSensitive, normalizeLabel } from './qaStore.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
-import { pickNearestSelectOption } from './openRouterLlm.mjs';
+import { pickNearestSelectOption } from './claudeLlm.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
 import { fillEducationFieldOfStudy } from './workdayExperience.mjs';
 import { lookupSupabaseAnswerSync } from './supabaseClient.mjs';

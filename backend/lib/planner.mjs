@@ -23,7 +23,7 @@ import { resolveDynamicAnswer } from './questionEngine/index.mjs';
 import { buildCurrentDateAction, getTodayMMDDYYYY } from './date-utils.mjs';
 import { getWorkdayPlatform, getWorkdayTenant } from './discovery.mjs';
 import { collectLiveFieldOptions } from './workdayDom.mjs';
-import { resolveUnknownWithLlm } from './openRouterLlm.mjs';
+import { resolveUnknownWithLlm } from './claudeLlm.mjs';
 import { shouldIncludeInScan, isSkippableUnimportantLabel, isMandatoryField, shouldSkipOptionalFill } from './scanFieldFilter.mjs';
 import { resolveMinimumAgeAnswer } from './minimumAge.mjs';
 import { ensureUsWorkdayContact } from './clientContact.mjs';

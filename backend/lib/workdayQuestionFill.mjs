@@ -22,7 +22,7 @@ import {
   collectLiveFieldOptions,
 } from './workdayDom.mjs';
 import { mapLabelToProfileValue, resolveField } from './planner.mjs';
-import { pickNearestSelectOption, resolveUnknownWithLlm, isPersonalIdentityQuestion } from './openRouterLlm.mjs';
+import { pickNearestSelectOption, resolveUnknownWithLlm, isPersonalIdentityQuestion } from './claudeLlm.mjs';
 import { pickCompensationFromOptions, compensationInputValue } from './compensationPick.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
 import { peekClientAnswer, resolveClientAnswer } from './clientAnswer.mjs';

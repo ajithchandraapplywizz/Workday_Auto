@@ -10,7 +10,7 @@
  */
 
 import { loadLocalEnvOnce, isSupabaseConfigured } from '../lib/supabaseClient.mjs';
-import { openRouterChat } from '../lib/openRouterLlm.mjs';
+import { openRouterChat } from '../lib/claudeLlm.mjs';
 import { httpsJsonWithRetry } from '../lib/httpClient.mjs';
 
 loadLocalEnvOnce();

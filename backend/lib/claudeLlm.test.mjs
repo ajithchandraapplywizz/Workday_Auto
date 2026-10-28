@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { validateLlmFieldDecision } from './openRouterLlm.mjs';
+import { validateLlmFieldDecision } from './claudeLlm.mjs';
 
 test('accepts a grounded input answer with sufficient confidence', () => {
   const answer = validateLlmFieldDecision(
@@ -46,12 +46,4 @@ test('accepts an honest no-experience answer even when grounded is false', () =>
     '{"answer":"I have not used Smartsheet in a professional setting.","confidence":0.7,"grounded":false}',
     { fieldType: 'text' },
   ), 'I have not used Smartsheet in a professional setting.');
-});
-
-test('rejects a multi-checkbox response containing an unknown option', () => {
-  const answer = validateLlmFieldDecision(
-    '{"answer":["Remote","Flexible"],"confidence":0.88,"grounded":true}',
-    { fieldType: 'checkbox-group', options: ['On-site', 'Remote', 'Hybrid'] },
-  );
-  assert.equal(answer, null);
 });

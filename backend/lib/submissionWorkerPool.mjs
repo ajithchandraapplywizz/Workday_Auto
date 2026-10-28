@@ -367,11 +367,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
               const timestamp = Date.now();
               shotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
               const { error: upErr } = await supabase.storage
-                .from('submitted-applications')
+                .from('failed-applications')
                 .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
               if (!upErr) {
                 const { data: urlData } = supabase.storage
-                  .from('submitted-applications')
+                  .from('failed-applications')
                   .getPublicUrl(shotPath);
                 shotUrl = urlData?.publicUrl || null;
                 console.log(`[${workerId}] screenshot uploaded: ${shotPath}`);
@@ -483,11 +483,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           const timestamp = Date.now();
           errShotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
           const { error: upErr } = await supabase.storage
-            .from('submitted-applications')
+            .from('failed-applications')
             .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
           if (!upErr) {
             const { data: urlData } = supabase.storage
-              .from('submitted-applications')
+              .from('failed-applications')
               .getPublicUrl(errShotPath);
             errShotUrl = urlData?.publicUrl || null;
             console.log(`[${workerId}] screenshot uploaded: ${errShotPath}`);
@@ -543,3 +543,23 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
   return result;
 }
 
+/**
+ * 10-client milestone report for submissions with untruncated values.
+ */
+export function print10ClientSubmissionMilestoneReport({ cycleIndex, cycleStartNum, cycleEndNum, items = [] }) {
+  console.log(`\n${'═'.repeat(120)}`);
+  console.log(`🚀 10-CLIENT SUBMISSION MILESTONE REPORT (SUBMISSIONS #${cycleStartNum} TO #${cycleEndNum})`);
+  console.log(`${'─'.repeat(120)}`);
+  console.log(`Job Link | Company | AWL-ID | Status | Reason | Screenshot URL`);
+  console.log(`${'─'.repeat(120)}`);
+  items.forEach((item) => {
+    const jobLink = item.job_url || item.jobUrl || 'N/A';
+    const comp = item.company || 'Workday Partner';
+    const awlId = item.applywizz_id || item.applywizzId || 'AWL';
+    const st = item.status === 'submitted' ? 'SUBMITTED' : 'FAILED';
+    const reason = item.reason || item.error || (item.status === 'submitted' ? 'Application Submitted' : 'Failed');
+    const shot = item.screenshotUrl || item.screenshotPath || 'None';
+    console.log(`${jobLink} | ${comp} | ${awlId} | ${st} | ${reason} | ${shot}`);
+  });
+  console.log(`${'═'.repeat(120)}\n`);
+}

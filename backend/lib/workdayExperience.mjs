@@ -11,7 +11,7 @@ import { resolveField, mapLabelToProfileValue, getNestedValue } from './planner.
 import { createQAStore, saveAnswerToYaml } from './qaStore.mjs';
 import { lookupDefaultAnswer, leadingYesNo, selectionMatchesAnswer } from './workdayDefaults.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
-import { hydrateExperienceFromLlm, pickNearestSelectOption, resolveUnknownWithLlm } from './openRouterLlm.mjs';
+import { hydrateExperienceFromLlm, pickNearestSelectOption, resolveUnknownWithLlm } from './claudeLlm.mjs';
 import { collectLiveFieldOptions } from './workdayDom.mjs';
 import { inferFromResumeFile, getResumePathForApply } from './resumeParser.mjs';
 import {

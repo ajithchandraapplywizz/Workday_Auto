@@ -19,7 +19,7 @@ import {
   isWorkEligibilityQuestion,
   matchDegreeToOptions,
 } from '../workdayDefaults.mjs';
-import { analyzeUnknownQuestionsBatch, isOpenRouterEnabled, openRouterChat } from '../openRouterLlm.mjs';
+import { analyzeUnknownQuestionsBatch, isOpenRouterEnabled, openRouterChat } from '../claudeLlm.mjs';
 import { resolveExperienceQuestionAnswer } from '../experienceAnswer.mjs';
 import { normalizeDiscoveredField } from '../interaction/fieldSchema.mjs';
 import {

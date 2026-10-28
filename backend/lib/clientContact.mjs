@@ -285,7 +285,7 @@ export function resolveLocationAndCountry(stateOrLoc = '', city = '', contextBlo
  */
 export async function analyzeLocationWithAi(locationStr = '', contextText = '') {
   try {
-    const { openRouterChat, isOpenRouterEnabled } = await import('./openRouterLlm.mjs');
+    const { openRouterChat, isOpenRouterEnabled } = await import('./claudeLlm.mjs');
     if (!isOpenRouterEnabled() || !locationStr.trim()) return null;
     const res = await openRouterChat({
       messages: [

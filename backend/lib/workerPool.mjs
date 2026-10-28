@@ -370,7 +370,7 @@ export async function executeWorkerTask({
             await page.waitForTimeout(300);
             const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
             if (buf) {
-              expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
+              expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
             }
           }
         } catch {}
@@ -543,7 +543,7 @@ export async function executeWorkerTask({
               await page.waitForTimeout(400);
               const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
               if (buf) {
-                authShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
+                authShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_gateway_fail.jpg`, buf);
               }
             }
           } catch {}
@@ -646,7 +646,7 @@ export async function executeWorkerTask({
         if (page && !page.isClosed()) {
           const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
           if (buf) {
-            expiredShotUrl = await uploadStorageScreenshot('application-failures', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
+            expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_link_expired.jpg`, buf);
           }
         }
       } catch {}
@@ -780,8 +780,8 @@ export async function executeWorkerTask({
             filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
             storagePath = filename;
           } else {
-            // Upload every failure screenshot to application-failures
-            bucket = 'application-failures';
+            // Upload every failure screenshot to failed-applications
+            bucket = 'failed-applications';
             const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
             filename = taskId
               ? `${applywizzId}/${taskId}_failed_${effectiveStep}_${Date.now()}.jpg`
@@ -1253,7 +1253,7 @@ export async function executeWorkerTask({
           const timestamp = Date.now();
           const effectiveTaskId = taskId || task.id || timestamp;
           const failStoragePath = `${applywizzId}/${effectiveTaskId}_failed_${timestamp}.png`;
-          errShotUrl = await uploadStorageScreenshot('submitted-applications', failStoragePath, buf);
+          errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf);
           if (errShotUrl) {
             console.log(`[${workerId}] screenshot uploaded: ${failStoragePath}`);
           }

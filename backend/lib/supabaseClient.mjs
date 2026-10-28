@@ -361,9 +361,9 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
 
       const errText = await res.text().catch(() => '');
       console.warn(`[Supabase Storage] Upload to ${bucketName} failed (${res.status}): ${errText}`);
-      if (bucketName !== 'application-failures') {
-        console.log(`[Supabase Storage] Retrying upload to application-failures fallback bucket...`);
-        return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
+      if (bucketName !== 'failed-applications') {
+        console.log(`[Supabase Storage] Retrying upload to failed-applications fallback bucket...`);
+        return uploadStorageScreenshot('failed-applications', filename, buffer, contentType);
       }
       return null;
     }
@@ -371,8 +371,8 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
     return publicUrl;
   } catch (err) {
     console.warn(`[Supabase Storage] Upload exception: ${err.message}`);
-    if (bucketName !== 'application-failures') {
-      return uploadStorageScreenshot('application-failures', filename, buffer, contentType);
+    if (bucketName !== 'failed-applications') {
+      return uploadStorageScreenshot('failed-applications', filename, buffer, contentType);
     }
     return null;
   }
@@ -2007,6 +2007,7 @@ export async function saveScannedJob({
   if (clientCount) payload.client_count = clientCount;
 
   let savedRow = null;
+  let lastError = null;
   try {
     const res = await request('scanned_jobs', {
       method: 'POST',
@@ -2019,11 +2020,12 @@ export async function saveScannedJob({
       if (row?.id) savedRow = row;
     }
   } catch (err) {
+    lastError = err;
     console.log(`   ⚠️ [scanned_jobs] Initial upsert error: ${err.message?.slice(0, 140)}`);
     if (err?.message?.includes('PGRST204') || err?.message?.includes('column')) {
       delete payload.screenshot_path;
       delete payload.client_count;
-      delete payload.resolved_answers;
+      delete payload.scan_run_id;
     }
   }
 
@@ -2038,6 +2040,7 @@ export async function saveScannedJob({
       });
       if (Array.isArray(patched) && patched.length > 0) savedRow = patched[0];
     } catch (patchErr) {
+      lastError = patchErr;
       console.log(`   ⚠️ [scanned_jobs] Fallback PATCH error: ${patchErr.message?.slice(0, 140)}`);
     }
   }
@@ -2052,6 +2055,7 @@ export async function saveScannedJob({
       });
       if (inserted) savedRow = Array.isArray(inserted) ? inserted[0] : inserted;
     } catch (postErr) {
+      lastError = postErr;
       console.log(`   ⚠️ [scanned_jobs] Fallback POST error: ${postErr.message?.slice(0, 140)}`);
     }
   }
@@ -2070,6 +2074,7 @@ export async function saveScannedJob({
     return savedRow;
   }
 
+  console.error('[scanned_jobs] Failed to persist scanned job for ' + cleanUrl + '. Last error:', lastError?.message || lastError);
   return null;
 }
 
@@ -2871,6 +2876,8 @@ export async function purgeOrphanedJobDistributions() {
  */
 export async function recordFailedJob({
   applywizzId = '',
+  clientIds = [],
+  failedClientCount = 1,
   jobId = '',
   jobUrl = '',
   company = '',
@@ -2880,55 +2887,58 @@ export async function recordFailedJob({
   screenshotPath = '',
   resolvedAnswers = [],
 } = {}) {
-  if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
+  if (!isSupabaseConfigured() || !jobUrl) return false;
   try {
-    const cleanId = String(applywizzId).trim().toUpperCase();
+    const cleanId = String(applywizzId || clientIds?.[0] || 'AWL-1568').trim().toUpperCase();
     const cleanUrl = String(jobUrl).trim();
     const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
     const cleanStep = String(failedAtStep || 'Unknown').trim();
     const now = new Date().toISOString();
-    const answersArr = Array.isArray(resolvedAnswers) ? resolvedAnswers : [];
+    const parsedClientIds = Array.isArray(clientIds) && clientIds.length > 0
+      ? clientIds
+      : [cleanId];
+    const totalCount = failedClientCount || parsedClientIds.length;
 
-    // 1. Insert into failed_jobs table with screenshot_path and failed_at_step
+    const payload = {
+      applywizz_id: cleanId,
+      job_id: jobId ? String(jobId).trim() : null,
+      job_url: cleanUrl,
+      company: company ? String(company).trim() : null,
+      role_title: roleTitle ? String(roleTitle).trim() : null,
+      failure_reason: cleanReason,
+      failed_at_step: cleanStep,
+      screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
+      client_ids: parsedClientIds,
+      failed_client_count: totalCount,
+      created_at: now,
+      updated_at: now,
+    };
+
     let insertOk = false;
     try {
       await request('failed_jobs', {
         method: 'POST',
-        prefer: 'return=minimal',
-        body: {
-          applywizz_id: cleanId,
-          job_id: jobId ? String(jobId).trim() : null,
-          job_url: cleanUrl,
-          company: company ? String(company).trim() : null,
-          role_title: roleTitle ? String(roleTitle).trim() : null,
-          failure_reason: cleanReason,
-          failed_at_step: cleanStep,
-          screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
-          created_at: now,
-          updated_at: now,
-        },
+        query: '?on_conflict=job_url',
+        prefer: 'resolution=merge-duplicates,return=minimal',
+        body: payload,
       });
       insertOk = true;
     } catch (err) {
-      console.log(`   ⚠️ [failed_jobs] Initial insert error: ${err.message?.slice(0, 140)}`);
-      // Fallback
-      await request('failed_jobs', {
-        method: 'POST',
-        prefer: 'return=minimal',
-        body: {
-          applywizz_id: cleanId,
-          job_id: jobId ? String(jobId).trim() : null,
-          job_url: cleanUrl,
-          company: company ? String(company).trim() : null,
-          role_title: roleTitle ? String(roleTitle).trim() : null,
-          failure_reason: `${cleanReason} (stopped at ${cleanStep})`,
-          screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
-          created_at: now,
-          updated_at: now,
-        },
-      }).then(() => { insertOk = true; }).catch((subErr) => {
-        console.log(`   ⚠️ [failed_jobs] Fallback insert error: ${subErr.message?.slice(0, 140)}`);
-      });
+      console.error(`❌ [failed_jobs] Upsert error body for ${cleanUrl}:`, err.message || err);
+      // Fallback without new columns if migration is pending
+      delete payload.client_ids;
+      delete payload.failed_client_count;
+      try {
+        await request('failed_jobs', {
+          method: 'POST',
+          query: '?on_conflict=job_url',
+          prefer: 'resolution=merge-duplicates,return=minimal',
+          body: payload,
+        });
+        insertOk = true;
+      } catch (fallbackErr) {
+        console.error(`❌ [failed_jobs] Fallback upsert failed:`, fallbackErr.message || fallbackErr);
+      }
     }
 
     if (insertOk) {

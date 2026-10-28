@@ -57,7 +57,7 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
 
   // Cloud Storage Mode: stream buffer directly to Supabase Storage bucket
   const isFailure = /fail|error/i.test(safeLabel);
-  const bucketName = isFailure ? 'application-failures' : 'submitted-applications';
+  const bucketName = isFailure ? 'failed-applications' : 'submitted-applications';
   const filename = taskId
     ? `${applywizzId}/${taskId}_${safeLabel}_${ts}.png`
     : `${applywizzId}/${safeLabel}_${ts}.png`;

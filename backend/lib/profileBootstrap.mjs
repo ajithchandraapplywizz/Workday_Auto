@@ -6,7 +6,7 @@
 
 import { hydrateProfileFromApplyWizz } from './applyWizzClient.mjs';
 import { getResumePathForApply } from './resumeParser.mjs';
-import { analyzeClientProfileOnce } from './openRouterLlm.mjs';
+import { analyzeClientProfileOnce } from './claudeLlm.mjs';
 import { ensureWorkdayContactFromClient, mergeResumeContactIntoProfile } from './clientContact.mjs';
 import { normalizePersonalNames } from './personName.mjs';
 import { applyApiOnlyProfileGuards } from './apiOnlyProfile.mjs';

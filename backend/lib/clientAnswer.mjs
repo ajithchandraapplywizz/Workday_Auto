@@ -12,7 +12,7 @@
 
 import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured, saveApplyWizzClientAnswer } from './applyWizzClient.mjs';
 import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
-import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './openRouterLlm.mjs';
+import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './claudeLlm.mjs';
 import {
   resolveExperienceQuestionAnswer,
   sanitizeExperienceAnswer,
@@ -482,6 +482,26 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
   trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
 
+  // ─── TIER 2.5: Universal YAML / qa_bank Reference Bank ───────────────────────
+  try {
+    const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
+    const qaBankAnswer = await findAnswerFromQaBank({
+      questionLabel: label,
+      options,
+      tenant,
+      isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
+    });
+    if (qaBankAnswer) {
+      const qaHit = finish(qaBankAnswer, 'qa_bank');
+      if (qaHit) {
+        trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
+        console.log(`    🏦 [qa_bank Reference Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
+        profile?._onLog?.(currentStep, `[Universal QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
+        return qaHit;
+      }
+    }
+  } catch {}
+
   // ─── TIER 3: CRM API (Apply Wizz Fallback) ────────────────────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
     options,
@@ -633,8 +653,42 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), Tier 3 (CRM API), Tier 4 (LLM) for "${label.slice(0, 55)}"`);
-  return null;
+  // Rule A (Scanning fills anything and records everything):
+  if (opts.isScanOnly || profile?._isScanOnly || opts.dryRun) {
+    let placeholder = 'N/A';
+    if (/number|numeric|spin/i.test(fieldType)) {
+      placeholder = '1';
+    } else if (/date/i.test(fieldType)) {
+      placeholder = '01/15/2020';
+    } else if (/check/i.test(fieldType)) {
+      placeholder = 'true';
+    } else if (options.length > 0) {
+      placeholder = options.find((o) => /^yes\b/i.test(o)) || options[0];
+    } else {
+      const pFact = profileFactForLabel(label, profile);
+      if (pFact) placeholder = String(pFact);
+    }
+
+    const placeholderHit = finish(placeholder, 'scan_placeholder');
+    if (placeholderHit) {
+      console.log(`    🛠️  [Scan Placeholder Rule A] "${label.slice(0, 55)}" ← "${placeholderHit.answer}"`);
+      import('./masterYamlManager.mjs').then(({ saveMasterYamlTemplate }) => {
+        saveMasterYamlTemplate([{
+          question: label,
+          field_type: fieldType,
+          step: currentStep,
+          options,
+          value: placeholderHit.answer,
+          source: 'scan_placeholder',
+        }], { tenant, company: opts.company, mockAwlId: profile?._applyWizzId || 'AWL-1568' }).catch(() => {});
+      }).catch(() => {});
+      return placeholderHit;
+    }
+  }
+
+  // At submission, an unanswerable non-scan field returns { answer: null, requiresReview: true }
+  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), qa_bank, Tier 3 (CRM), Tier 4 (Claude) for "${label.slice(0, 55)}"`);
+  return { answer: null, requiresReview: true, status: 'needs_answers' };
 }
 
 /**

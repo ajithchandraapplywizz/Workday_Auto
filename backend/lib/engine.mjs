@@ -33,7 +33,7 @@ import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mj
 import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
-import { isAutoApplyMode } from './openRouterLlm.mjs';
+import { isAutoApplyMode } from './claudeLlm.mjs';
 import { detectWorkdayStep } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,

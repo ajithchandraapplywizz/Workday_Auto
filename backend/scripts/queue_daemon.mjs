@@ -1307,23 +1307,21 @@ let submissionCycleResults = [];
 let totalSubmissionsCompleted = 0;
 
 export function print10SubmissionMilestoneReport({ cycleIndex, cycleStartNum, cycleEndNum, items }) {
-  const succCount = items.filter(it => it.status === 'submitted').length;
-  const failCount = items.filter(it => it.status !== 'submitted').length;
-  console.log(`\n${'╔' + '═'.repeat(94) + '╗'}`);
-  console.log(`║ 🚀 10-CLIENT SUBMISSION MILESTONE REPORT (SUBMISSIONS #${cycleStartNum} TO #${cycleEndNum})`.padEnd(95, ' ') + '║');
-  console.log(`║    Success: ${succCount} / ${items.length} | Failed: ${failCount} / ${items.length}`.padEnd(95, ' ') + '║');
-  console.log(`╠${'═'.repeat(94)}╣`);
-  console.log(`║ #   │ Client AWL   │ Company                            │ Status    │ Proof Screenshot       ║`);
-  console.log(`║─────┼──────────────┼────────────────────────────────────┼───────────┼────────────────────────║`);
-  items.forEach((item, i) => {
-    const num = `#${cycleStartNum + i}`.padEnd(4, ' ');
-    const awl = String(item.applywizz_id || 'AWL').padEnd(12, ' ');
-    const comp = `${item.company || 'Workday'}`.slice(0, 34).padEnd(34, ' ');
-    const st = (item.status === 'submitted' ? '✅ SUBMITTED' : '❌ FAILED   ').padEnd(9, ' ');
-    const shot = (item.screenshotUrl ? '📸 Proof Attached' : 'None            ').padEnd(22, ' ');
-    console.log(`║ ${num}│ ${awl} │ ${comp} │ ${st} │ ${shot} ║`);
+  console.log(`\n${'═'.repeat(120)}`);
+  console.log(`🚀 10-CLIENT SUBMISSION MILESTONE REPORT (SUBMISSIONS #${cycleStartNum} TO #${cycleEndNum})`);
+  console.log(`${'─'.repeat(120)}`);
+  console.log(`Job Link | Company | AWL-ID | Status | Reason | Screenshot URL`);
+  console.log(`${'─'.repeat(120)}`);
+  items.forEach((item) => {
+    const jobLink = item.job_url || 'N/A';
+    const comp = item.company || 'Workday Partner';
+    const awlId = item.applywizz_id || 'AWL';
+    const st = item.status === 'submitted' ? 'SUBMITTED' : 'FAILED';
+    const reason = item.reason || (item.status === 'submitted' ? 'Application Submitted' : 'Failed');
+    const shot = item.screenshotUrl || 'None';
+    console.log(`${jobLink} | ${comp} | ${awlId} | ${st} | ${reason} | ${shot}`);
   });
-  console.log(`╚${'═'.repeat(94)}╝\n`);
+  console.log(`${'═'.repeat(120)}\n`);
 }
 
 export async function dispatchQueuedSubmissions() {
@@ -1361,9 +1359,11 @@ export async function dispatchQueuedSubmissions() {
           .then((res) => {
             console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
             submissionCycleResults.push({
+              job_url: claimedTask.job_url,
               applywizz_id: claimedTask.applywizz_id,
               company: claimedTask.company,
               status: res?.status || 'submitted',
+              reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
               screenshotUrl: res?.screenshotUrl || null,
             });
             totalSubmissionsCompleted++;
@@ -1723,8 +1723,12 @@ process.on('unhandledRejection', (reason, promise) => {
 process.on('SIGTERM', () => {
   server.close();
   abortAllActiveBrowsers();
-  console.log(`[${new Date().toISOString()}] [DAEMON] SIGTERM received. Shutting down gracefully.`);
+  console.log(`[${new Date().toISOString()}] [DAEMON] SIGTERM received. Flushing state and shutting down gracefully.`);
   process.exit(0);
+});
+
+process.on('beforeExit', () => {
+  console.log(`[${new Date().toISOString()}] [DAEMON] Event loop empty. Flushing logs before exit.`);
 });
 
 process.on('SIGINT', () => {

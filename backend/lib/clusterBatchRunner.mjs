@@ -548,54 +548,56 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   let leadFailStep = null;
 
   const MOCK_SCAN_CLIENT_ID = String(process.env.MOCK_SCAN_CLIENT_ID || 'AWL-1568').trim().toUpperCase();
-  const mockTask = activeTasks.find((t) => String(t.applywizz_id).trim().toUpperCase() === MOCK_SCAN_CLIENT_ID);
-  const scanCandidateList = mockTask
-    ? [mockTask, ...activeTasks.filter((t) => t !== mockTask)]
-    : activeTasks;
-  const maxLeadAttempts = Math.min(3, scanCandidateList.length);
+  const leadTask = activeTasks[0] || {};
+  const currentAttempts = Number(leadTask.attempt_count || 0);
 
-  for (let attemptIdx = 0; attemptIdx < maxLeadAttempts; attemptIdx++) {
-    const candidateTask = scanCandidateList[attemptIdx];
-    console.log(`\n📍 [${workerId}] PHASE 1: Testing Lead Candidate #${attemptIdx + 1} (${candidateTask.applywizz_id}) for Unique Link...`);
-    console.log(`   (Strictly 1 browser run per unique link; Followers will NOT run in browsers)`);
+  // Parse all sibling AWL IDs
+  const allSiblingAwlIds = Array.from(new Set(
+    allTasks.flatMap((t) => String(t.applywizz_id || '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))
+  ));
 
-    const result = await executeWorkerTask({
-      task: {
-        ...candidateTask,
-        queueTaskId: candidateTask.id,
-        applywizzId: candidateTask.applywizz_id,
-        jobUrl: candidateTask.job_url || jobUrl,
-      },
-      workerId,
-      taskIndex: attemptIdx + 1,
-      totalTasks: 1,
-      options: {
-        headless: Boolean(headless),
-        dryRun: true,
-        confirmSubmit: false,
-        defaultPassword,
-        isClusterBlueprint: true,
-        isScanOnly: true,
-      },
-    });
+  const candidateTask = {
+    ...leadTask,
+    queueTaskId: leadTask.id,
+    applywizz_id: MOCK_SCAN_CLIENT_ID,
+    applywizzId: MOCK_SCAN_CLIENT_ID,
+    jobUrl: leadTask.job_url || jobUrl,
+  };
 
-    const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
-    const success = result && (
-      result.status === 'submitted' ||
-      result.status === 'reached-review' ||
-      result.status === 'reached_review' ||
-      result.status === 'ready_for_review' ||
-      (result.status === 'human-required' && reachedReviewStep) ||
-      reachedReviewStep
-    );
+  console.log(`\n📍 [${workerId}] PHASE 1: Scanning Unique Link with Mock Candidate ${MOCK_SCAN_CLIENT_ID} (Attempt ${currentAttempts + 1}/2)...`);
+  console.log(`   Link: ${jobUrl}`);
+  console.log(`   Cluster Representing: ${allSiblingAwlIds.length} candidate(s)`);
 
-    if (success) {
-      blueprintTask = candidateTask;
-      blueprintResult = result;
-      bpSuccess = true;
-      break;
-    }
+  const result = await executeWorkerTask({
+    task: candidateTask,
+    workerId,
+    taskIndex: 1,
+    totalTasks: 1,
+    options: {
+      headless: Boolean(headless),
+      dryRun: true,
+      confirmSubmit: false,
+      defaultPassword,
+      isClusterBlueprint: true,
+      isScanOnly: true,
+    },
+  });
 
+  const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
+  const success = result && (
+    result.status === 'submitted' ||
+    result.status === 'reached-review' ||
+    result.status === 'reached_review' ||
+    result.status === 'ready_for_review' ||
+    (result.status === 'human-required' && reachedReviewStep) ||
+    reachedReviewStep
+  );
+
+  if (success) {
+    blueprintTask = candidateTask;
+    blueprintResult = result;
+    bpSuccess = true;
+  } else {
     // Check if the job itself is genuinely expired / closed / 404
     const deadJob = result?.status === 'job_expired' ||
       String(result?.reason || '').includes('expired') ||
@@ -603,118 +605,31 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       String(result?.reason || '').includes('empty_page') ||
       result?.stoppedAtStep === 'Job Discovery / Link Expired';
 
+    leadProofShot = result?.screenshotUrl || null;
+    leadFailReason = result?.failureReason || result?.error || result?.reason || result?.status || 'Scan stopped before review';
+    leadFailStep = result?.stoppedAtStep || 'Form Wizard';
+
     if (deadJob) {
-      isExpired = true;
-      leadProofShot = result?.screenshotUrl || null;
-      leadFailReason = 'Job Expired / Closed / No Apply button';
-      leadFailStep = result?.stoppedAtStep || 'Job Discovery / Link Expired';
-      blueprintTask = candidateTask;
-      blueprintResult = result;
-      console.log(`\n❌ [${workerId}] Genuine job expiration confirmed on Workday for link. Stopping cluster.`);
-      break;
-    }
+      // RULE C: Expired link -> no retry, direct single-row upsert into failed_jobs
+      console.log(`\n❌ [${workerId}] Genuine job expiration confirmed for "${company}" (${jobUrl}). Upserting single row to failed_jobs...`);
+      const { recordFailedJob } = await import('./supabaseClient.mjs');
+      await recordFailedJob({
+        applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+        clientIds: allSiblingAwlIds,
+        failedClientCount: allSiblingAwlIds.length,
+        jobId: leadTask.job_id || cluster.reqId || null,
+        jobUrl,
+        company,
+        roleTitle: role,
+        failureReason: 'expired',
+        failedAtStep: 'Job Discovery / Link Expired',
+        screenshotPath: leadProofShot,
+      }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
 
-    // Candidate-specific failure (e.g. auth_failed, missing credentials, locked account)
-    console.log(`\n⚠️ [${workerId}] Lead Candidate ${candidateTask.applywizz_id} stopped (${result?.failureReason || result?.error || result?.status || 'Failed'}).`);
-    if (attemptIdx + 1 < maxLeadAttempts) {
-      console.log(`   🔄 Trying next candidate in cluster (#${attemptIdx + 2}: ${activeTasks[attemptIdx + 1].applywizz_id}) to scan job...`);
-    } else {
-      leadProofShot = result?.screenshotUrl || null;
-      leadFailReason = result?.failureReason || result?.error || result?.status || 'Lead candidate auth/form run failed';
-      leadFailStep = result?.stoppedAtStep || 'Form Wizard';
-      blueprintTask = candidateTask;
-      blueprintResult = result;
-    }
-  }
-
-  // Handle failure if none of the candidate attempts reached review
-  if (!bpSuccess) {
-    if (isExpired) {
-      const skipReason = leadFailReason || 'Job Expired / Closed / No Apply button';
-      const failStep = leadFailStep || 'Job Discovery / Link Expired';
-      const proofShot = leadProofShot;
-      const allFollowers = allTasks.filter((t) => t.id !== blueprintTask?.id);
-      const allFollowerIds = allFollowers.map((t) => t.id);
-
-      console.log(`\n⚠️ [${workerId}] Link confirmed expired on Workday. Skipping all ${allFollowerIds.length} follower candidate(s) for this job!`);
-
-      try {
-        const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
-        for (const t of allTasks) {
-          await recordFailedJob({
-            applywizzId: t.applywizz_id,
-            jobId: t.job_id || cluster.reqId || null,
-            jobUrl: t.job_url || jobUrl,
-            company,
-            roleTitle: role,
-            failureReason: `Job expired/closed on Workday (${skipReason})`,
-            failedAtStep: failStep,
-            screenshotPath: proofShot,
-          }).catch(() => {});
-        }
-      } catch {}
-
-      // Record failed clients directly into job_distributions
-      const failedAwlIds = allTasks.map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
-      const failNow = new Date().toISOString();
-      try {
-        const failedDistRows = allTasks.map((t) => ({
-          applywizz_id: String(t.applywizz_id).trim().toUpperCase(),
-          job_id: t.job_id || cluster.reqId || null,
-          job_url: t.job_url || jobUrl,
-          company: company || 'Workday Partner',
-          role_title: role || 'Role',
-          status: 'failed',
-          error_message: `Job expired / closed on Workday (${skipReason})`,
-          scraped_questions: [],
-          question_count: 0,
-          resolved_answers: [],
-          unanswered_questions: [],
-          unanswered_count: 0,
-          is_fully_answered: false,
-          application_submitted_screenshot_url: proofShot || null,
-          created_at: failNow,
-          updated_at: failNow,
-        }));
-        await queueDbRequest('job_distributions', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: failedDistRows,
-        });
-        console.log(`   📋 [job_distributions] Recorded ${failedDistRows.length} client(s) with status 'failed' into job_distributions.`);
-      } catch (fDistErr) {
-        console.log(`   ⚠️ [job_distributions] Note on recording failed clients: ${fDistErr?.message?.slice(0, 140)}`);
-      }
-
-      // Record into job_link_distribution_summaries table
-      try {
-        await queueDbRequest('job_link_distribution_summaries', {
-          method: 'POST',
-          query: '?on_conflict=job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: [{
-            job_url: jobUrl,
-            company,
-            role_title: role,
-            total_clients: allTasks.length,
-            success_count: 0,
-            success_awl_ids: [],
-            failed_count: failedAwlIds.length,
-            failed_awl_ids: failedAwlIds,
-            status: 'failed',
-            failure_reason: `Job expired / closed on Workday (${skipReason})`,
-            screenshot_url: proofShot || null,
-            updated_at: failNow,
-          }],
-        });
-      } catch (sumErr) {
-        console.log(`   ⚠️ [job_link_distribution_summaries] Note: ${sumErr?.message?.slice(0, 140)}`);
-      }
-
+      // Mark the queue row failed. All siblings are covered by this one row.
       if (allTaskIds.length > 0) {
-        await failClusterTasksByIds(allTaskIds, `Job expired / closed on Workday (confirmed dead URL)`);
-        console.log(`   ✓ Marked ${allTaskIds.length} tasks as expired in batch_job_queue.`);
+        await failClusterTasksByIds(allTaskIds, 'expired');
+        console.log(`   ✓ Marked queue row as expired for all ${allSiblingAwlIds.length} candidate(s).`);
       }
 
       return {
@@ -723,105 +638,83 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         company,
         role,
         succeeded: 0,
-        failed: allTasks.length,
-        total: allTasks.length,
+        failed: allSiblingAwlIds.length,
+        total: allSiblingAwlIds.length,
         scrapedQaCount: 0,
         expired: true,
       };
     } else {
-      // NOT expired: Candidates encountered auth or login issues.
-      const attemptedTasks = activeTasks.slice(0, maxLeadAttempts);
-      const failedAwlIds = attemptedTasks.map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
-      const attemptedTaskIds = attemptedTasks.map((t) => t.id).filter(Boolean);
-      const failNow = new Date().toISOString();
-
-      try {
-        const { recordFailedJob } = await import('./supabaseClient.mjs');
-        for (const t of attemptedTasks) {
-          await recordFailedJob({
-            applywizzId: t.applywizz_id,
-            jobId: t.job_id || cluster.reqId || null,
-            jobUrl: t.job_url || jobUrl,
-            company,
-            roleTitle: role,
-            failureReason: leadFailReason || 'Lead candidate auth/form run failed',
-            failedAtStep: leadFailStep || 'Form Wizard',
-            screenshotPath: leadProofShot,
-          }).catch(() => {});
+      // Non-expired failure: Check retry policy (MAX_ATTEMPTS = 2)
+      if (currentAttempts < 1) {
+        // Attempt 1 failed -> RULE B: Exact log line and re-queue without writing to failed_jobs
+        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt 1/2 failed at "${leadFailStep}": ${leadFailReason}. This link will get a SECOND CHANCE.`);
+        try {
+          await queueDbRequest('batch_job_queue', {
+            method: 'PATCH',
+            query: `?id=in.(${allTaskIds.join(',')})`,
+            prefer: 'return=minimal',
+            body: {
+              status: 'pending',
+              attempt_count: 1,
+              worker_id: null,
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+            },
+          });
+        } catch (rqErr) {
+          console.warn(`⚠️ [${workerId}] Failed to update attempt_count for retry: ${rqErr.message}`);
         }
-      } catch {}
 
-      try {
-        const failedDistRows = attemptedTasks.map((t) => ({
-          applywizz_id: String(t.applywizz_id).trim().toUpperCase(),
-          job_id: t.job_id || cluster.reqId || null,
-          job_url: t.job_url || jobUrl,
-          company: company || 'Workday Partner',
-          role_title: role || 'Role',
-          status: 'failed',
-          error_message: leadFailReason || 'Lead candidate auth/form run failed',
-          scraped_questions: [],
-          question_count: 0,
-          resolved_answers: [],
-          unanswered_questions: [],
-          unanswered_count: 0,
-          is_fully_answered: false,
-          created_at: failNow,
-          updated_at: failNow,
-        }));
-        await queueDbRequest('job_distributions', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: failedDistRows,
-        });
-      } catch {}
+        return {
+          workerId,
+          jobUrl,
+          company,
+          role,
+          succeeded: 0,
+          failed: 0,
+          total: allSiblingAwlIds.length,
+          scrapedQaCount: 0,
+          retrying: true,
+        };
+      } else {
+        // Attempt 2 failed -> Upsert into failed_jobs
+        console.log(`❌ [scan] ${company} | ${jobUrl} — attempt 2/2 failed at "${leadFailStep}": ${leadFailReason}. Max attempts reached.`);
+        const { recordFailedJob } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+          clientIds: allSiblingAwlIds,
+          failedClientCount: allSiblingAwlIds.length,
+          jobId: leadTask.job_id || cluster.reqId || null,
+          jobUrl,
+          company,
+          roleTitle: role,
+          failureReason: leadFailReason,
+          failedAtStep: leadFailStep,
+          screenshotPath: leadProofShot,
+        }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
 
-      try {
-        await queueDbRequest('job_link_distribution_summaries', {
-          method: 'POST',
-          query: '?on_conflict=job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: [{
-            job_url: jobUrl,
-            company,
-            role_title: role,
-            total_clients: allTasks.length,
-            success_count: 0,
-            success_awl_ids: [],
-            failed_count: failedAwlIds.length,
-            failed_awl_ids: failedAwlIds,
-            status: 'failed',
-            failure_reason: leadFailReason || 'Lead candidate auth/form run failed',
-            screenshot_url: leadProofShot || null,
-            updated_at: failNow,
-          }],
-        });
-      } catch {}
+        if (allTaskIds.length > 0) {
+          await failClusterTasksByIds(allTaskIds, leadFailReason);
+          console.log(`   ✓ Marked queue row as failed after 2 attempts.`);
+        }
 
-      if (attemptedTaskIds.length > 0) {
-        await failClusterTasksByIds(attemptedTaskIds, leadFailReason || 'Lead candidate auth/form run failed');
-        console.log(`   ✓ Marked ${attemptedTaskIds.length} attempted task(s) as failed in batch_job_queue.`);
+        return {
+          workerId,
+          jobUrl,
+          company,
+          role,
+          succeeded: 0,
+          failed: allSiblingAwlIds.length,
+          total: allSiblingAwlIds.length,
+          scrapedQaCount: 0,
+          expired: false,
+        };
       }
-
-      console.log(`\n⚠️ [${workerId}] Link is NOT expired, but attempted lead candidate(s) encountered auth/login errors.`);
-      console.log(`   ⏭️  Leaving remaining ${allTasks.length - maxLeadAttempts} follower tasks as pending in queue for retry.`);
-      return {
-        workerId,
-        jobUrl,
-        company,
-        role,
-        succeeded: 0,
-        failed: maxLeadAttempts,
-        total: allTasks.length,
-        scrapedQaCount: 0,
-        expired: false,
-      };
     }
   }
 
   const rawReviewShot = blueprintResult?.reviewScreenshotUrl || blueprintResult?.screenshotUrl || null;
-  const reviewShotUrl = (rawReviewShot && !rawReviewShot.includes('fail') && !rawReviewShot.includes('application-failures')) ? rawReviewShot : null;
+  const reviewShotUrl = (rawReviewShot && !rawReviewShot.includes('fail') && !rawReviewShot.includes('application-failures') && !rawReviewShot.includes('failed-applications')) ? rawReviewShot : null;
   const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
   console.log(`\n${'═'.repeat(72)}`);
@@ -878,9 +771,23 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       stepNames: ['My Information', 'My Experience', 'Application Questions', 'Voluntary Disclosures', 'Review'],
       scanStatus: 'completed',
     });
-    scannedJobId = saved?.id || null;
+    if (!saved || !saved.id) {
+      console.error(`❌ [${workerId}] ERROR: Failed to persist scanned_jobs row for "${company} - ${role}". Aborting distribution.`);
+      return {
+        workerId,
+        jobUrl,
+        company,
+        role,
+        succeeded: 0,
+        failed: allTasks.length,
+        total: allTasks.length,
+        scrapedQaCount: 0,
+        error: 'Failed to persist scanned_jobs row',
+      };
+    }
+    scannedJobId = saved.id;
     console.log(`✅ [${workerId}] PHASE 2 COMPLETE: 1 unique job inserted to scanned_jobs!`);
-    console.log(`   • ID: ${scannedJobId || 'Generated'}`);
+    console.log(`   • ID: ${scannedJobId}`);
     console.log(`   • Company: ${company} | Role: ${role}`);
     console.log(`   • Harvested Questions: ${harvestedQuestions.length} mandatory question(s) with types & options`);
     console.log(`   • Blueprint Candidate: ${blueprintTask.applywizz_id}`);
@@ -888,7 +795,18 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     console.log(`   • Review Screenshot: ${reviewShotUrl || 'None'}`);
     console.log(`   • Client Queue Size: ${allTasks.length} candidates\n`);
   } catch (scanSaveErr) {
-    console.log(`⚠️ [${workerId}] Phase 2 note on saving scanned_jobs: ${scanSaveErr.message}\n`);
+    console.error(`❌ [${workerId}] ERROR: Exception saving scanned_jobs: ${scanSaveErr.message}\n`);
+    return {
+      workerId,
+      jobUrl,
+      company,
+      role,
+      succeeded: 0,
+      failed: allTasks.length,
+      total: allTasks.length,
+      scrapedQaCount: 0,
+      error: scanSaveErr.message,
+    };
   }
 
   // STRICT FLOW: Only proceed with distributing to job_distributions if scanned questions are present!
@@ -1164,42 +1082,25 @@ export function print10BatchMilestoneReport({
   totalCumulativeBatches,
   totalClustersTarget,
 }) {
-  const cycleTotalClients = batchesInCycle.reduce((acc, b) => acc + (b.total || 0), 0);
-  const cycleSucceeded = batchesInCycle.reduce((acc, b) => acc + (b.succeeded || 0), 0);
-  const cycleFailed = batchesInCycle.reduce((acc, b) => acc + (b.failed || 0), 0);
-  const cycleScrapedQa = batchesInCycle.reduce((acc, b) => acc + (b.scrapedQaCount || 0), 0);
-  const blueprintsCreated = batchesInCycle.filter((b) => b.succeeded > 0).length;
-  const expiredOrFailed = batchesInCycle.filter((b) => b.succeeded === 0).length;
-  const successRate = cycleTotalClients > 0 ? ((cycleSucceeded / cycleTotalClients) * 100).toFixed(1) : '0.0';
+  console.log(`\n${'═'.repeat(120)}`);
+  console.log(`📊 10-BATCH PIPELINE MILESTONE REPORT (BATCHES #${cycleStartBatch} TO #${cycleEndBatch})`);
+  console.log(`Cycle #${cycleIndex} Complete | Duration: ${elapsedSec}s | Total Cumulative: ${totalCumulativeBatches}/${totalClustersTarget}`);
+  console.log(`${'─'.repeat(120)}`);
+  console.log(`Job Link | Company | AWL-ID | Status | Reason | Screenshot URL`);
+  console.log(`${'─'.repeat(120)}`);
 
-  console.log(`\n${'╔' + '═'.repeat(94) + '╗'}`);
-  console.log(`║ 📊 10-BATCH PIPELINE MILESTONE REPORT (BATCHES #${cycleStartBatch} TO #${cycleEndBatch})`.padEnd(95, ' ') + '║');
-  console.log(`║    Status: Cycle #${cycleIndex} Complete | 3 Parallel Workers Active | Cycle Duration: ${elapsedSec}s`.padEnd(95, ' ') + '║');
-  console.log(`╠${'═'.repeat(94)}╣`);
-  console.log(`║ 📦 SUPABASE DATABASE INGESTION TOTALS FOR THIS 10-BATCH CYCLE:`.padEnd(95, ' ') + '║');
-  console.log(`║    • Unique Job Blueprints (scanned_jobs):     ${String(blueprintsCreated).padEnd(4, ' ')} jobs inserted with master review screenshots`.padEnd(95, ' ') + '║');
-  console.log(`║    • Client Applications (job_distributions):   ${String(cycleSucceeded).padEnd(4, ' ')} candidates pre-resolved & distributed`.padEnd(95, ' ') + '║');
-  console.log(`║    • Failed Applications (failed_jobs):        ${String(cycleFailed).padEnd(4, ' ')} candidate rows recorded (${expiredOrFailed} batches expired/failed)`.padEnd(95, ' ') + '║');
-  console.log(`║    • Mandatory Questions Harvested & Typed:    ${String(cycleScrapedQa).padEnd(4, ' ')} form fields across unique job blueprints`.padEnd(95, ' ') + '║');
-  console.log(`║    • Overall Candidate Pass Rate:              ${successRate}%`.padEnd(95, ' ') + '║');
-  console.log(`╟${'─'.repeat(94)}╢`);
-  console.log(`║ 📋 DETAILED BATCH-BY-BATCH APPLICATIONS BREAKDOWN:`.padEnd(95, ' ') + '║');
-  console.log(`║ Batch │ Worker   │ Company & Role                     │ Clients │ Status    │ Questions │ Proof Shot ║`);
-  console.log(`║───────┼──────────┼────────────────────────────────────┼─────────┼───────────┼───────────┼────────────║`);
-
-  batchesInCycle.forEach((b, i) => {
-    const bNum = `#${cycleStartBatch + i}`.padEnd(5, ' ');
-    const wId = (b.workerId || 'worker').padEnd(8, ' ');
-    const compRole = `${b.company || 'Job'} — ${b.role || 'Role'}`.slice(0, 34).padEnd(34, ' ');
-    const clients = String(b.total || 0).padStart(7, ' ');
+  batchesInCycle.forEach((b) => {
+    const jobLink = b.jobUrl || 'N/A';
+    const comp = b.company || 'Workday Partner';
+    const awlId = b.applywizzId || 'AWL-1568';
     const isOk = b.succeeded > 0;
-    const st = (isOk ? '✅ SUCCESS' : '❌ FAILED ').padEnd(9, ' ');
-    const qa = String(b.scrapedQaCount || 0).padStart(9, ' ');
-    const shot = (b.reviewScreenshotUrl || b.screenshotUrl ? '📸 Saved  ' : 'None      ');
-    console.log(`║ ${bNum} │ ${wId} │ ${compRole} │ ${clients} │ ${st} │ ${qa} │ ${shot} ║`);
+    const st = isOk ? 'SUCCESS' : (b.expired ? 'EXPIRED' : 'FAILED');
+    const reason = b.error || (isOk ? 'Reached Review & Submit' : (b.expired ? 'Job Expired / Closed' : 'Scan stopped before review'));
+    const shot = b.reviewScreenshotUrl || b.screenshotUrl || 'None';
+    console.log(`${jobLink} | ${comp} | ${awlId} | ${st} | ${reason} | ${shot}`);
   });
 
-  console.log(`╚${'═'.repeat(94)}╝\n`);
+  console.log(`${'═'.repeat(120)}\n`);
 }
 
 /**
