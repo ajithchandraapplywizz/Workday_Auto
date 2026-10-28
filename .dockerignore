@@ -1,11 +1,28 @@
+# Dependencies
 node_modules
 **/node_modules
+
+# Version Control
 .git
+.github
+
+# Build Artifacts
 dist
 frontend/dist
+
+# Runtime & Local Logs / Traces
 runs
 screenshots
-data
+*.log
+
+# Sensitive Environment Files
 .env
 .env.*
-*.log
+
+# Local Data, Resumes, and Non-Production Dirs
+data
+Data
+resumes
+docs
+workday-auto-apply
+.ai
