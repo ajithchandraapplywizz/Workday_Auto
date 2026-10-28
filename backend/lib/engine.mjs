@@ -1653,6 +1653,7 @@ async function advanceWorkdayStep(page, currentStep = '') {
   }
 
   const saveBtnSelectors = [
+    'button[data-automation-id="pageFooterNextButton"]',
     'button:has-text("Save and Continue")',
     'button:has-text("Save & Continue")',
     'button[data-automation-id="bottom-navigation-next-button"]',
@@ -1663,6 +1664,15 @@ async function advanceWorkdayStep(page, currentStep = '') {
   ];
 
   await page.keyboard.press('Escape').catch(() => {});
+
+  // Dismiss cookie banner or floating overlay if present
+  try {
+    const cookieBtn = await page.$('button[data-automation-id="legalNoticeAcceptButton"], button:has-text("Accept Cookies"), button:has-text("Accept all"), button:has-text("Accept"), button:has-text("Decline")');
+    if (cookieBtn && await cookieBtn.isVisible().catch(() => false)) {
+      await cookieBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(200);
+    }
+  } catch {}
 
   let saveBtn = null;
   for (const sel of saveBtnSelectors) {
@@ -1679,11 +1689,20 @@ async function advanceWorkdayStep(page, currentStep = '') {
   }
 
   if (!saveBtn) {
+    const hasSubmit = await page.evaluate(() => {
+      const btn = document.querySelector('button[data-automation-id*="submit" i], button:has-text("Submit"), [data-automation-id="pageFooterSubmitButton"]');
+      return Boolean(btn);
+    }).catch(() => false);
+    if (hasSubmit) {
+      console.log('  🛑 Submit button detected on page — Review & Submit reached.');
+      return { hasSaveButton: false, submitBlocked: true };
+    }
     return { hasSaveButton: false };
   }
 
   const btnText = (await saveBtn.textContent().catch(() => '')).trim();
   console.log(`\n  ➡️  Clicking "${btnText || 'Save and Continue'}" to advance...`);
+  await saveBtn.scrollIntoViewIfNeeded().catch(() => {});
   await saveBtn.click({ force: true }).catch(() => saveBtn.evaluate(el => el.click()));
 
   try {
@@ -2976,7 +2995,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         const hasWizard = Boolean(
           document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
         );
-        const hasExpired = /doesn'?t exist|expired|not found|\berror 404\b|closed|filled/i.test(t);
+        const hasExpired = /(?:doesn'?t|does not) exist|expired|not found|\b(?:error\s*)?404\b|closed|filled|no longer available/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;
       }, { timeout: 20000 }).catch(() => {});
       await page.waitForTimeout(1000);

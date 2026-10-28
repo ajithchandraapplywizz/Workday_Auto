@@ -48,7 +48,17 @@ export async function detectWorkdayStep(page) {
       if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
     }
 
+    // 3. Direct Review & Submit page detection (must precede bodyText because Review contains full text of all previous steps)
+    const hasSubmitButton = Boolean(document.querySelector('button[data-automation-id*="submit" i], button:has-text("Submit"), [data-automation-id="pageFooterSubmitButton"]'));
+    if (hasSubmitButton && (/review/i.test(document.title) || /review\s*(?:and|&)\s*submit/i.test(document.body?.innerText || ''))) {
+      return 'Review';
+    }
+
     const bodyText = document.body?.innerText || '';
+    if (hasSubmitButton || (/Review/i.test(bodyText) && /Review/i.test(document.title))) {
+      return 'Review';
+    }
+
     if (/How Did You Hear About Us/i.test(bodyText) || /Country\s*\/\s*Territory\s*Phone\s*Code/i.test(bodyText) || Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"]'))) {
       return 'My Information';
     }
@@ -56,7 +66,6 @@ export async function detectWorkdayStep(page) {
     if (/Conflict of Interest/i.test(bodyText)) return 'Application Questions';
     if (/Voluntary Self-Identification of Disability/i.test(bodyText) || /CC-305/i.test(bodyText) || /OMB Control Number 1250-0005/i.test(bodyText)) return 'Self Identify';
     if (/Voluntary Disclosures|Equal Employment Opportunity|Veteran Status|Race\/Ethnicity/i.test(bodyText)) return 'Voluntary Disclosures';
-    if (/Review/i.test(bodyText) && (document.querySelector('button[data-automation-id*="submit"], button:has-text("Submit")') || /Review/i.test(document.title))) return 'Review';
 
     return 'Unknown';
   });

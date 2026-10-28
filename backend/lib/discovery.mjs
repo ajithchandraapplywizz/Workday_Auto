@@ -234,17 +234,19 @@ export async function isWorkdayJobPageMissing(page) {
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
     if (!text || text.length < 20) return false; // Still empty / loading, do not jump to conclusion
 
-    const hasNotExist = /the page you are looking for doesn'?t exist/i.test(text)
-      || /page (?:you are looking for )?doesn'?t exist/i.test(text)
+    const hasNotExist = /the page you are looking (?:for )?(?:doesn'?t|does not) exist/i.test(text)
+      || /page (?:you are looking (?:for )?)?(?:doesn'?t|does not) exist/i.test(text)
+      || /(?:doesn'?t|does not) exist/i.test(text)
       || /we couldn'?t find the page/i.test(text)
       || /page not found/i.test(text)
-      || /\berror 404\b/i.test(text);
-    const hasFilledOrExpired = /this job (?:posting )?has (?:been )?(?:filled|closed|expired|removed)/i.test(text)
+      || /\b(?:error\s*)?404\b/i.test(text);
+    const hasFilledOrExpired = /this job (?:posting )?(?:has (?:been )?)?(?:filled|closed|expired|removed|inactive)/i.test(text)
       || /job (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
       || /position (?:has been )?filled/i.test(text)
       || /no longer accepting applications/i.test(text)
       || /posting has expired/i.test(text)
-      || /job has expired/i.test(text);
+      || /job has expired/i.test(text)
+      || /job (?:is no longer|has expired|not found|does not exist)/i.test(text);
 
     return hasNotExist || hasFilledOrExpired;
   }).catch(() => false);
@@ -718,7 +720,7 @@ export async function clickGatewayCreateAccount(page) {
     await page.waitForTimeout(1500);
   }
 
-  const buttons = await page.$([
+  const buttons = await page.$$([
     '[role="dialog"] [data-automation-id="createAccountLink"]',
     '[role="dialog"] [data-automation-id="createAccountTab"]',
     '[role="dialog"] button:has-text("Create Account")',
@@ -857,7 +859,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
 
       const text = (document.body?.innerText || '').trim();
       const lower = text.toLowerCase();
-      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking for doesn'?t exist|page not found|404\b/i.test(lower);
+      const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking (?:for )?(?:doesn'?t|does not) exist|page (?:you are looking (?:for )?)?(?:doesn'?t|does not) exist|(?:doesn'?t|does not) exist|page not found|\b(?:error\s*)?404\b/i.test(lower);
       if (isExpired) return { expired: true, reason: 'job_expired' };
       return { expired: false };
     }).catch(() => ({ expired: false }));

@@ -547,10 +547,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
  * 10-client milestone report for submissions with untruncated values.
  */
 export function print10ClientSubmissionMilestoneReport({ cycleIndex, cycleStartNum, cycleEndNum, items = [] }) {
+  const isTen = items.length >= 10;
   console.log(`\n${'═'.repeat(120)}`);
-  console.log(`🚀 10-CLIENT SUBMISSION MILESTONE REPORT (SUBMISSIONS #${cycleStartNum} TO #${cycleEndNum})`);
+  console.log(`🚀 10-COMPLETED SUBMISSIONS MILESTONE REPORT (${isTen ? '10-completed' : `${items.length}-completed`} | TOTAL COUNT: ${cycleEndNum})`);
+  console.log(`Submission #${cycleStartNum} to #${cycleEndNum} Completed | Cycle #${cycleIndex} | Total Submissions: ${cycleEndNum}`);
   console.log(`${'─'.repeat(120)}`);
-  console.log(`Job Link | Company | AWL-ID | Status | Reason | Screenshot URL`);
+  console.log(`Job Link | Company | Candidate AWL-ID | Status | Reason | Screenshot URL`);
   console.log(`${'─'.repeat(120)}`);
   items.forEach((item) => {
     const jobLink = item.job_url || item.jobUrl || 'N/A';
@@ -563,3 +565,5 @@ export function print10ClientSubmissionMilestoneReport({ cycleIndex, cycleStartN
   });
   console.log(`${'═'.repeat(120)}\n`);
 }
+
+export const print10SubmissionMilestoneReport = print10ClientSubmissionMilestoneReport;

@@ -1330,7 +1330,7 @@ export async function dispatchQueuedSubmissions() {
   if (submitStatus !== 'running') return;
 
   try {
-    const { SUBMISSION_WORKER_IDS, claimNextTask, processClaimedTask, moveReadyTasksToQueued } = await import('../lib/submissionWorkerPool.mjs');
+    const { SUBMISSION_WORKER_IDS, claimNextTask, processClaimedTask, moveReadyTasksToQueued, print10SubmissionMilestoneReport } = await import('../lib/submissionWorkerPool.mjs');
 
     // (c) Submit ON: only ready_for_review rows move up to available worker slots, and scan state is untouched
     const maxConcurrency = SUBMISSION_WORKER_IDS.length || 2;

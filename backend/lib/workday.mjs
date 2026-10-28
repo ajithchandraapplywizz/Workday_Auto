@@ -483,27 +483,58 @@ export async function workdayLogin(page, email, password) {
     return false;
   }
 
+  // Dismiss cookie notice if present
+  try {
+    const cookieBtn = await page.$('button[data-automation-id="legalNoticeAcceptButton"], button:has-text("Accept Cookies"), button:has-text("Accept all"), button:has-text("Accept"), button:has-text("Decline")');
+    if (cookieBtn && await cookieBtn.isVisible().catch(() => false)) {
+      await cookieBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  } catch {}
+
   // 5. Click visible Sign In submit button with force: true (excluding nav header)
   const signInButtons = await page.$$([
     'button[data-automation-id="signInSubmitButton"]',
     'button[type="submit"]',
-    'button:has-text("Sign In")'
+    'button:has-text("Sign In")',
+    'button:has-text("Sign in")',
+    'button:has-text("Log In")',
+    'button:has-text("Log in")',
   ].join(', '));
+  let clickedSignIn = false;
   for (const btn of signInButtons) {
     if (await btn.isVisible().catch(() => false)) {
       if (await isInNavOrHeader(btn)) continue;
+      const text = (await btn.textContent().catch(() => '')).trim();
       const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
       const type = await btn.getAttribute('type').catch(() => '');
-      if (autoId === 'signInSubmitButton' || type === 'submit') {
+      if (autoId === 'signInSubmitButton' || type === 'submit' || /sign\s*in|log\s*in/i.test(text)) {
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
         await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        clickedSignIn = true;
         break;
       }
     }
   }
 
+  if (!clickedSignIn) {
+    await page.keyboard.press('Enter');
+  }
+
   await page.waitForTimeout(4000);
   try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
   await page.waitForTimeout(2000);
+
+  if (await isStillOnSignInForm(page)) {
+    // Retry pressing Enter on password field in case button click was intercepted
+    const pwdInput = await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible');
+    if (pwdInput) {
+      await pwdInput.focus().catch(() => {});
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+    }
+  }
 
   if (await isStillOnSignInForm(page)) {
     const reason = await detectLoginFailureReason(page);

@@ -204,14 +204,29 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
 
   let rows = [];
   try {
-    rows = await queueDbRequest('batch_job_queue', {
-      query: '?select=id,applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=10000',
-    });
+    let offset = 0;
+    while (true) {
+      const chunk = await queueDbRequest('batch_job_queue', {
+        query: `?select=id,applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=1000&offset=${offset}`,
+      });
+      if (!Array.isArray(chunk) || chunk.length === 0) break;
+      rows.push(...chunk);
+      if (chunk.length < 1000) break;
+      offset += chunk.length;
+    }
   } catch (err) {
     if (String(err?.message || '').includes('42703') || String(err?.message || '').includes('batch_job_queue.id')) {
-      rows = await queueDbRequest('batch_job_queue', {
-        query: '?select=applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=10000',
-      });
+      let offset = 0;
+      rows = [];
+      while (true) {
+        const chunk = await queueDbRequest('batch_job_queue', {
+          query: `?select=applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=1000&offset=${offset}`,
+        });
+        if (!Array.isArray(chunk) || chunk.length === 0) break;
+        rows.push(...chunk);
+        if (chunk.length < 1000) break;
+        offset += chunk.length;
+      }
     } else {
       throw err;
     }
@@ -603,7 +618,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       String(result?.reason || '').includes('expired') ||
       String(result?.reason || '').includes('apply_not_found') ||
       String(result?.reason || '').includes('empty_page') ||
-      result?.stoppedAtStep === 'Job Discovery / Link Expired';
+      result?.stoppedAtStep === 'Job Discovery / Link Expired' ||
+      /(?:doesn'?t|does not) exist|page not found|\b(?:error\s*)?404\b/i.test(String(result?.failureReason || '')) ||
+      /(?:doesn'?t|does not) exist|page not found|\b(?:error\s*)?404\b/i.test(String(result?.screenshotUrl || ''));
 
     leadProofShot = result?.screenshotUrl || null;
     leadFailReason = result?.failureReason || result?.error || result?.reason || result?.status || 'Scan stopped before review';
@@ -637,6 +654,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         jobUrl,
         company,
         role,
+        applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+        screenshotUrl: leadProofShot,
         succeeded: 0,
         failed: allSiblingAwlIds.length,
         total: allSiblingAwlIds.length,
@@ -644,10 +663,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         expired: true,
       };
     } else {
-      // Non-expired failure: Check retry policy (MAX_ATTEMPTS = 2)
-      if (currentAttempts < 1) {
-        // Attempt 1 failed -> RULE B: Exact log line and re-queue without writing to failed_jobs
-        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt 1/2 failed at "${leadFailStep}": ${leadFailReason}. This link will get a SECOND CHANCE.`);
+      // Non-expired failure: Check retry policy (MAX_ATTEMPTS = 3)
+      const MAX_ATTEMPTS = 3;
+      if (currentAttempts < 2) {
+        const nextAttempt = currentAttempts + 1;
+        // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
+        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
         try {
           await queueDbRequest('batch_job_queue', {
             method: 'PATCH',
@@ -655,7 +676,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
             prefer: 'return=minimal',
             body: {
               status: 'pending',
-              attempt_count: 1,
+              attempt_count: nextAttempt,
               worker_id: null,
               locked_at: null,
               updated_at: new Date().toISOString(),
@@ -670,6 +691,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           jobUrl,
           company,
           role,
+          applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+          screenshotUrl: leadProofShot,
           succeeded: 0,
           failed: 0,
           total: allSiblingAwlIds.length,
@@ -677,8 +700,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           retrying: true,
         };
       } else {
-        // Attempt 2 failed -> Upsert into failed_jobs
-        console.log(`❌ [scan] ${company} | ${jobUrl} — attempt 2/2 failed at "${leadFailStep}": ${leadFailReason}. Max attempts reached.`);
+        // Attempt 3 failed -> Upsert into failed_jobs
+        console.log(`❌ [scan] ${company} | ${jobUrl} — attempt ${MAX_ATTEMPTS}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. Max 3 attempts reached.`);
         const { recordFailedJob } = await import('./supabaseClient.mjs');
         await recordFailedJob({
           applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
@@ -695,7 +718,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
         if (allTaskIds.length > 0) {
           await failClusterTasksByIds(allTaskIds, leadFailReason);
-          console.log(`   ✓ Marked queue row as failed after 2 attempts.`);
+          console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
         }
 
         return {
@@ -703,6 +726,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           jobUrl,
           company,
           role,
+          applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+          screenshotUrl: leadProofShot,
           succeeded: 0,
           failed: allSiblingAwlIds.length,
           total: allSiblingAwlIds.length,
@@ -726,7 +751,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   console.log(`   📋 Harvested Questions Count: ${harvestedQuestions.length} fields`);
   try {
     const { saveMasterYamlTemplate } = await import('./masterYamlManager.mjs');
-    saveMasterYamlTemplate(harvestedQuestions, {
+    await saveMasterYamlTemplate(harvestedQuestions, {
       company,
       roleTitle: role,
       mockAwlId: blueprintTask.applywizz_id,
@@ -1063,6 +1088,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     jobUrl,
     company,
     role,
+    applywizzId: allSiblingAwlIds[0] || blueprintTask.applywizz_id || MOCK_SCAN_CLIENT_ID,
+    reviewScreenshotUrl: reviewShotUrl,
+    screenshotUrl: reviewShotUrl,
     total: allTasks.length,
     succeeded: allTasks.length,
     failed: 0,
@@ -1082,11 +1110,12 @@ export function print10BatchMilestoneReport({
   totalCumulativeBatches,
   totalClustersTarget,
 }) {
+  const isTen = batchesInCycle.length >= 10;
   console.log(`\n${'═'.repeat(120)}`);
-  console.log(`📊 10-BATCH PIPELINE MILESTONE REPORT (BATCHES #${cycleStartBatch} TO #${cycleEndBatch})`);
-  console.log(`Cycle #${cycleIndex} Complete | Duration: ${elapsedSec}s | Total Cumulative: ${totalCumulativeBatches}/${totalClustersTarget}`);
+  console.log(`📊 10-COMPLETED MILESTONE REPORT (${isTen ? '10-completed' : `${batchesInCycle.length}-completed`} | TOTAL COUNT: ${totalCumulativeBatches})`);
+  console.log(`Batch #${cycleStartBatch} to #${cycleEndBatch} Completed | Cycle #${cycleIndex} | Total Cumulative: ${totalCumulativeBatches}/${totalClustersTarget} | Duration: ${elapsedSec}s`);
   console.log(`${'─'.repeat(120)}`);
-  console.log(`Job Link | Company | AWL-ID | Status | Reason | Screenshot URL`);
+  console.log(`Job Link | Company | Reference AWL-ID | Status | Reason | Screenshot URL`);
   console.log(`${'─'.repeat(120)}`);
 
   batchesInCycle.forEach((b) => {

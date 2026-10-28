@@ -438,7 +438,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
         const hasWizard = Boolean(
           document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
         );
-        const hasExpired = /doesn'?t exist|expired|not found|\berror 404\b|closed|filled/i.test(t);
+        const hasExpired = /(?:doesn'?t|does not) exist|expired|not found|\b(?:error\s*)?404\b|closed|filled|no longer available/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;
       }, { timeout: 20000 }).catch(() => {});
       await page.waitForTimeout(1000);

@@ -66,7 +66,11 @@ export async function clickFooterAdvanceButton(page) {
         || aid.includes('pagefooternext');
     });
     const btn = targets[targets.length - 1];
-    if (!btn) return { clicked: null };
+    if (!btn) {
+      const hasSubmit = buttons.some(b => isVisible(b) && (/submit|apply\s*now|send\s*application|complete\s*application/i.test((b.textContent || '').trim()) || (b.getAttribute('data-automation-id') || '').toLowerCase().includes('submit')));
+      if (hasSubmit) return { clicked: null, submitBlocked: true };
+      return { clicked: null };
+    }
     const text = (btn.textContent || '').replace(/\s+/g, ' ').trim();
     if (/submit|apply\s*now|send\s*application|complete\s*application/i.test(text)) {
       return { clicked: null, submitBlocked: true };
