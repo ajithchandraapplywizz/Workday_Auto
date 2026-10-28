@@ -47,12 +47,10 @@ Output strict JSON matching this schema:
   callCount++;
   
   let resultStr = '';
-  try {
     const msg = await anthropic.messages.create({
       model: process.env.LLM_FALLBACK_MODEL || 'claude-3-haiku-20240307',
       max_tokens: 300,
-      temperature: 0,
-      messages: [{ role: 'user', content: prompt }]
+      messages: [{ role: 'user', content: prompt }],
     });
     
     resultStr = msg.content[0].text;

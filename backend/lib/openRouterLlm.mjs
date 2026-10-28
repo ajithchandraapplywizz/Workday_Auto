@@ -95,32 +95,34 @@ export function isOpenRouterEnabled() {
  * Always returns a response shaped like OpenAI: { choices:[{ message:{ content } }] }
  */
 export async function openRouterChat({ messages, temperature = 0.1, max_tokens = 400, timeoutMs = 45000, applicationContext = null } = {}) {
-  const key = getApiKey();
-  if (!key && (process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY)) {
+  const claudeKey = process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY;
+  if (claudeKey) {
     try {
       const { Anthropic } = await import('@anthropic-ai/sdk');
-      const anthropic = new Anthropic({
-        apiKey: process.env.CLAUDE_API_KEY || process.env.ANTHROPIC_API_KEY,
-      });
+      const anthropic = new Anthropic({ apiKey: claudeKey });
       const systemMsg = messages.find((m) => m.role === 'system')?.content || '';
       const nonSystemMsgs = messages
         .filter((m) => m.role !== 'system')
         .map((m) => ({ role: m.role === 'assistant' ? 'assistant' : 'user', content: String(m.content || '') }));
-      const resp = await anthropic.messages.create({
+      
+      const payload = {
         model: process.env.CLAUDE_MODEL || 'claude-3-haiku-20240307',
         max_tokens: max_tokens || 400,
-        temperature: temperature ?? 0.1,
         ...(systemMsg ? { system: systemMsg } : {}),
         messages: nonSystemMsgs.length ? nonSystemMsgs : [{ role: 'user', content: 'Hello' }],
-      });
+      };
+
+      const resp = await anthropic.messages.create(payload);
       const text = resp.content?.[0]?.text || '';
       return { choices: [{ message: { content: text } }] };
     } catch (cErr) {
-      console.warn('  ⚠️ [ClaudeFallback] Error invoking Anthropic SDK:', cErr.message);
+      console.warn('  ⚠️ [Claude] Error invoking Anthropic SDK:', cErr.message);
       throw cErr;
     }
   }
-  if (!key) throw new Error('No LLM API key configured (set OPENROUTER_API_KEY or CLAUDE_API_KEY in .env)');
+
+  const key = getApiKey();
+  if (!key) throw new Error('No LLM API key configured (set CLAUDE_API_KEY or ANTHROPIC_API_KEY in .env)');
 
   const primaryModel = getModel();
   const candidateModels = Array.from(new Set([primaryModel, ...OPENROUTER_FALLBACK_MODELS]));
