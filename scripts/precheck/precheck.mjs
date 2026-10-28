@@ -207,9 +207,9 @@ function checkGitState() {
     if (status) {
       const dirtyFiles = status
         .split('\n')
+        .map((l) => l.trim())
         .filter(Boolean)
-        .map((l) => l.slice(3).trim())
-        .filter((f) => !f.startsWith('.precheck') && !f.includes('/.precheck'));
+        .filter((l) => !l.includes('.precheck') && !l.includes('report.md'));
       if (dirtyFiles.length > 0) {
         issues.push(`Working tree has uncommitted changes (${dirtyFiles.slice(0, 3).join(', ')}${dirtyFiles.length > 3 ? '...' : ''}). Stash or commit before pushing to ensure clean evaluation.`);
       }
