@@ -17,7 +17,7 @@
 import { execSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -677,15 +677,17 @@ function checkSmokeImport() {
     const fullPath = path.join(rootDir, file);
     if (!fs.existsSync(fullPath)) continue;
 
-    const res = spawnSync('node', ['-e', `import('./' + process.argv[1]).then(() => process.exit(0)).catch((e) => { console.error(e.stack || e); process.exit(1); })`, file], {
+    const fileUrl = pathToFileURL(fullPath).href;
+    const res = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${fileUrl}').then(() => process.exit(0)).catch((e) => { console.error(e?.stack || e); process.exit(1); })`], {
       cwd: rootDir,
       env: dummyEnv,
-      timeout: 6000,
+      timeout: 10000,
       encoding: 'utf8',
+      windowsHide: true,
     });
 
     if (res.status !== 0) {
-      const errOut = (res.stderr || res.stdout || 'Process terminated with non-zero exit code').trim();
+      const errOut = (res.stderr || res.stdout || res.error?.message || 'Process terminated with non-zero exit code').trim();
       issues.push(`Smoke import failed for ${file}:\n      ${errOut.split('\n')[0]}`);
     }
   }
