@@ -85,3 +85,14 @@ if (typeof globalThis.DOMPoint === 'undefined') {
     matrixTransform() { return this; }
   };
 }
+
+// Suppress noisy harmless optional-dependency warning from pdfjs-dist in headless environments
+if (typeof console !== 'undefined' && console.warn) {
+  const _origWarn = console.warn;
+  console.warn = function (...args) {
+    if (typeof args[0] === 'string' && args[0].includes('@napi-rs/canvas')) {
+      return;
+    }
+    return _origWarn.apply(console, args);
+  };
+}
