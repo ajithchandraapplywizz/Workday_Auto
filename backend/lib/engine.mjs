@@ -1851,7 +1851,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   ).catch(() => {});
   await page.waitForTimeout(2500);
 
-  await takeScreenshot(page, 'workday-review-step');
+  await takeScreenshot(page, 'workday-review-step', profile);
   await attachFormMutationObserver(page);
   await acknowledgeAllPageAgreements(page, profile, 'Review');
   const review = await parseReviewDOM(page);
@@ -1987,7 +1987,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
   if (decision === 'dry-run-skip') {
     console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
-    await takeScreenshot(page, 'post-submit');
+    await takeScreenshot(page, 'post-submit', profile);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'dry_run' }).catch(() => {});
     return 'reached-review';
   }
@@ -2040,7 +2040,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');
-    await takeScreenshot(page, 'workday-submitted');
+    await takeScreenshot(page, 'workday-submitted', profile);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';
@@ -2258,7 +2258,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
     }
 
-    takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`).catch(() => {});
+    takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`, profile).catch(() => {});
 
     const pageGate = await validatePage(page, profile, stepName).catch(() => null);
     if (pageGate && !pageGate.ok) {
@@ -2492,7 +2492,7 @@ export async function runWorkdayQuestionScanLoop(page, profile, plan = {}, {
       questions.push(...reviewBatch);
       console.log(`    📋 Harvested ${reviewBatch.length} field(s) on Review`);
 
-      await takeScreenshot(page, `scan-review-${(getWorkdayTenant(url) || company || 'tenant').replace(/[^a-z0-9]+/gi, '-')}`);
+      await takeScreenshot(page, `scan-review-${(getWorkdayTenant(url) || company || 'tenant').replace(/[^a-z0-9]+/gi, '-')}`, profile);
 
       let reviewDecision = 'next';
       if (waitAtReview) {
@@ -3027,7 +3027,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
 
-      const postSubmitSS = await takeScreenshot(page, 'post-submit');
+      const postSubmitSS = await takeScreenshot(page, 'post-submit', profile);
       const statusLabel = typeof status === 'object' && status?.status ? status.status : status;
       await logToCSV(url, plan.company || '', plan.role || '', statusLabel, postSubmitSS, { ats });
 
@@ -3345,7 +3345,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`✅ Fill + verify complete: ${filled} filled, ${skipped} skipped, ${errors} errors`);
 
-    await takeScreenshot(page, 'pre-submit');
+    await takeScreenshot(page, 'pre-submit', profile);
 
     // ─── SUBMIT + ERROR RETRY LOOP ──────────────────────────────────
     let status = 'filled-not-submitted';
@@ -3381,7 +3381,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
       console.log(`  ❌ ${errorMessages.length} validation error(s):`);
       errorMessages.forEach(e => console.log(`    • ${e}`));
-      await takeScreenshot(page, `submit-error-${submitAttempt}`);
+      await takeScreenshot(page, `submit-error-${submitAttempt}`, profile);
 
       // Detect newly-revealed required fields (Workday conditional selects)
       const newSelects = await page.$$('select');
@@ -3436,7 +3436,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       await page.waitForTimeout(1000);
     }
 
-    const postSubmitSS = await takeScreenshot(page, 'post-submit');
+    const postSubmitSS = await takeScreenshot(page, 'post-submit', profile);
     await logToCSV(url, plan.company || '', plan.role || '', status, postSubmitSS, { ats });
 
     // Record for learner

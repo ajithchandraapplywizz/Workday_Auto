@@ -2031,17 +2031,29 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const fillValue = await dateInput.evaluate((el) => el.type || 'text').catch(() => 'text');
       const targetValue = fillValue === 'date' ? nativeValue : valueToFill;
       if (spinButtonCount >= 3) {
-        const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
-        await spinButtons.nth(0).fill(String(Number(month)));
-        await spinButtons.nth(1).fill(String(Number(day)));
-        await spinButtons.nth(2).fill(year);
+        const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
+        const mm = String(Number(month));
+        const dd = String(Number(day));
+        const yyyy = String(year);
+        await spinButtons.nth(0).click().catch(() => {});
+        await spinButtons.nth(0).fill(mm).catch(() => {});
+        await spinButtons.nth(0).dispatchEvent('change').catch(() => {});
+        await spinButtons.nth(1).click().catch(() => {});
+        await spinButtons.nth(1).fill(dd).catch(() => {});
+        await spinButtons.nth(1).dispatchEvent('change').catch(() => {});
+        await spinButtons.nth(2).click().catch(() => {});
+        await spinButtons.nth(2).fill(yyyy).catch(() => {});
+        await spinButtons.nth(2).dispatchEvent('change').catch(() => {});
+        await spinButtons.nth(2).press('Tab').catch(() => {});
+        await spinButtons.nth(2).dispatchEvent('blur').catch(() => {});
       } else if (fillValue === 'date') {
         await dateInput.fill(targetValue);
+        await dateInput.press('Tab');
       } else {
         await dateInput.click({ force: true }).catch(() => {});
         await dateInput.fill(targetValue).catch(() => {});
+        await dateInput.press('Tab');
       }
-      await dateInput.press('Tab');
       const expectedPattern = fillValue === 'date' ? /^\d{4}-\d{2}-\d{2}$/ : /^\d{2}\/\d{2}\/\d{4}$/;
       let actual = (await dateInput.inputValue().catch(() => '') || '').trim();
       if (spinButtonCount >= 3) {
@@ -2052,11 +2064,15 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       // full value when the calendar leaves month/year segments empty or stale.
       if (!expectedPattern.test(actual) || (fillValue !== 'date' && actual !== valueToFill)) {
         if (spinButtonCount >= 3) {
-          const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/);
+          const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
           await spinButtons.nth(0).fill(String(Number(month)));
+          await spinButtons.nth(0).dispatchEvent('change').catch(() => {});
           await spinButtons.nth(1).fill(String(Number(day)));
+          await spinButtons.nth(1).dispatchEvent('change').catch(() => {});
           await spinButtons.nth(2).fill(year);
-          await spinButtons.nth(2).press('Tab');
+          await spinButtons.nth(2).dispatchEvent('change').catch(() => {});
+          await spinButtons.nth(2).press('Tab').catch(() => {});
+          await spinButtons.nth(2).dispatchEvent('blur').catch(() => {});
           const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.value));
           actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
         } else {

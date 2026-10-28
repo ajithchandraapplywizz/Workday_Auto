@@ -37,7 +37,12 @@ import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './bro
 
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
-  let rawKey = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+  let rawKey = String(
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    ''
+  ).trim();
 
   if (!rawUrl || !rawKey) {
     const envCandidates = [
@@ -725,11 +730,29 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       };
     } else {
       // NOT expired: Candidates encountered auth or login issues.
-      const failedAwlIds = activeTasks.slice(0, maxLeadAttempts).map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
+      const attemptedTasks = activeTasks.slice(0, maxLeadAttempts);
+      const failedAwlIds = attemptedTasks.map((t) => String(t.applywizz_id).trim().toUpperCase()).filter(Boolean);
+      const attemptedTaskIds = attemptedTasks.map((t) => t.id).filter(Boolean);
       const failNow = new Date().toISOString();
 
       try {
-        const failedDistRows = activeTasks.slice(0, maxLeadAttempts).map((t) => ({
+        const { recordFailedJob } = await import('./supabaseClient.mjs');
+        for (const t of attemptedTasks) {
+          await recordFailedJob({
+            applywizzId: t.applywizz_id,
+            jobId: t.job_id || cluster.reqId || null,
+            jobUrl: t.job_url || jobUrl,
+            company,
+            roleTitle: role,
+            failureReason: leadFailReason || 'Lead candidate auth/form run failed',
+            failedAtStep: leadFailStep || 'Form Wizard',
+            screenshotPath: leadProofShot,
+          }).catch(() => {});
+        }
+      } catch {}
+
+      try {
+        const failedDistRows = attemptedTasks.map((t) => ({
           applywizz_id: String(t.applywizz_id).trim().toUpperCase(),
           job_id: t.job_id || cluster.reqId || null,
           job_url: t.job_url || jobUrl,
@@ -775,6 +798,11 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           }],
         });
       } catch {}
+
+      if (attemptedTaskIds.length > 0) {
+        await failClusterTasksByIds(attemptedTaskIds, leadFailReason || 'Lead candidate auth/form run failed');
+        console.log(`   ✓ Marked ${attemptedTaskIds.length} attempted task(s) as failed in batch_job_queue.`);
+      }
 
       console.log(`\n⚠️ [${workerId}] Link is NOT expired, but attempted lead candidate(s) encountered auth/login errors.`);
       console.log(`   ⏭️  Leaving remaining ${allTasks.length - maxLeadAttempts} follower tasks as pending in queue for retry.`);
@@ -1294,6 +1322,28 @@ export async function runClusterBatchRunner({
         });
       } catch (err) {
         console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
+        try {
+          const { recordFailedJob } = await import('./supabaseClient.mjs');
+          const firstTask = cluster.tasks?.[0];
+          if (firstTask) {
+            await recordFailedJob({
+              applywizzId: firstTask.applywizz_id,
+              jobId: firstTask.job_id || cluster.reqId || null,
+              jobUrl: cluster.canonicalUrl,
+              company: cluster.company,
+              roleTitle: cluster.roleTitle,
+              failureReason: `Worker error: ${err.message?.slice(0, 300)}`,
+              failedAtStep: 'Worker Process',
+              screenshotPath: null,
+            }).catch(() => {});
+          }
+          if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+            const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+            if (taskIds.length > 0) {
+              await failClusterTasksByIds(taskIds, `Worker error: ${err.message?.slice(0, 150)}`).catch(() => {});
+            }
+          }
+        } catch {}
         res = {
           workerId,
           jobUrl: cluster.canonicalUrl,

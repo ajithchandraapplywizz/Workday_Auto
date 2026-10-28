@@ -12,14 +12,87 @@ const SCREENSHOTS_DIR = resolve(process.cwd(), 'screenshots');
 const CSV_REPORT = resolve(process.cwd(), 'data', 'applied.csv');
 const QUEUE_FILE = resolve(process.cwd(), 'data', 'queue.csv');
 
-export async function takeScreenshot(page, label) {
-  await mkdir(SCREENSHOTS_DIR, { recursive: true });
+export async function takeScreenshot(page, label, profileOrContext = {}) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+    return null;
+  }
+  const { isSupabaseConfigured, uploadStorageScreenshot, updateRecordScreenshot } = await import('./supabaseClient.mjs').catch(() => ({
+    isSupabaseConfigured: () => false,
+    uploadStorageScreenshot: null,
+    updateRecordScreenshot: null,
+  }));
+
+  const context = (profileOrContext && typeof profileOrContext === 'object') ? profileOrContext : {};
+  const applywizzId = String(
+    context._applyWizzId ||
+    context.applywizz_id ||
+    context.client_id ||
+    process.env.APPLYWIZZ_ID ||
+    'CLIENT'
+  ).trim().toUpperCase();
+
+  const taskId = context._taskId || context.taskId || context._queueTaskId || context.queueTaskId || null;
+  const rawJobUrl = context._canonicalJobUrl || context._jobUrl || context.job_url || '';
+  const jobUrl = rawJobUrl ? String(rawJobUrl).split('?')[0].trim() : '';
+
   const ts = new Date().toISOString().replace(/[:.]/g, '-');
-  const path = resolve(SCREENSHOTS_DIR, `${label}-${ts}.png`);
-  await page.screenshot({ path, fullPage: true });
-  console.log(`  📸 Screenshot: ${basename(path)}`);
-  return path;
+  const safeLabel = String(label || 'screenshot').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+
+  // Zero Local Screenshots Policy: capture strictly in-memory buffer
+  const buf = await page.screenshot({ fullPage: true, type: 'png' }).catch(async () => {
+    return await page.screenshot({ type: 'png' }).catch(() => null);
+  });
+
+  if (!buf) {
+    console.warn(`  ⚠️  [Screenshot] Failed to capture in-memory buffer for "${safeLabel}"`);
+    return null;
+  }
+
+  // Offline / unit test mode: return synthetic in-memory URI without writing to disk
+  if (!isSupabaseConfigured() || typeof uploadStorageScreenshot !== 'function') {
+    const memoryPath = `in-memory://${applywizzId}/${safeLabel}-${ts}.png`;
+    console.log(`  📸 [Screenshot] In-memory buffer captured: ${safeLabel} (offline mode)`);
+    return memoryPath;
+  }
+
+  // Cloud Storage Mode: stream buffer directly to Supabase Storage bucket
+  const isFailure = /fail|error/i.test(safeLabel);
+  const bucketName = isFailure ? 'application-failures' : 'submitted-applications';
+  const filename = taskId
+    ? `${applywizzId}/${taskId}_${safeLabel}_${ts}.png`
+    : `${applywizzId}/${safeLabel}_${ts}.png`;
+
+  let uploadedUrl = null;
+  try {
+    uploadedUrl = await uploadStorageScreenshot(bucketName, filename, buf, 'image/png');
+  } catch (upErr) {
+    console.warn(`  ⚠️  [Supabase Storage] Upload error for "${filename}": ${upErr.message}`);
+  }
+
+  const finalUrl = uploadedUrl || `${bucketName}/${filename}`;
+
+  console.log(`  📸 [Screenshot Captured]: ${safeLabel}`);
+  console.log(`  ☁️  [Supabase Storage]: Uploaded to "${bucketName}/${filename}"`);
+  console.log(`     URL: ${uploadedUrl || 'Saved'}`);
+
+  // Persist screenshot path into relevant database tables
+  if (typeof updateRecordScreenshot === 'function') {
+    try {
+      await updateRecordScreenshot({
+        taskId,
+        applywizzId,
+        jobUrl,
+        screenshotUrl: finalUrl,
+        isReview: /review|blueprint|scan/i.test(safeLabel),
+      });
+    } catch (dbErr) {
+      console.warn(`  ⚠️  [Database] Screenshot table update notice: ${dbErr.message}`);
+    }
+  }
+
+  return finalUrl;
 }
+
 
 const CSV_HEADER = 'date,company,role,url,status,ats,screenshot,notes\n';
 

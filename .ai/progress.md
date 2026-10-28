@@ -23,6 +23,9 @@
 - ✅ **Playwright Extra Stealth AddExtra**: Switched stealth browser launcher to `addExtra` with defensive fallback to standard Playwright, resolving Docker module resolution errors.
 - ✅ **Security Hardening**: Zero hardcoded secrets, fail-fast verification on missing environment variables.
 
+- ✅ **In-Memory Screenshot Table Persistence & Cloud Streaming**: Replaced legacy local disk `takeScreenshot` in `reporter.mjs` with in-memory streaming to Supabase Storage (`submitted-applications` and `application-failures`), added `updateRecordScreenshot` in `supabaseClient.mjs` linking screenshot paths to `submission_tasks`, `job_distributions`, `client_job_applications`, and `scanned_jobs`, and added informative terminal logs.
+- ✅ **Workday CC-305 Date Spinbutton Commit Fix**: Dispatched click, fill, change, blur, and tab across all 3 date spinbuttons (Month, Day, Year) in `workdayQuestionFill.mjs`, fixing Workday's validation rejection `Error-DateThe field Date is required and must have a value`.
+
 ## In Progress (🚧 In Progress)
 - 🚧 **AI Context Architecture Bootstrap**: Implementing the `.ai/` memory standard, Andrej Karpathy coding principles (`rules.md`), system architecture (`architecture.md`), and agent orchestrator rules (`AGENTS.md`).
 - 🚧 **Queue Daemon Recovery Hardening**: Enhancing worker resilience against transient network timeouts or cloud storage drops during screenshot streaming.
@@ -34,6 +37,8 @@
 
 ## Known Bugs & Gotchas
 - **OneDrive Sync Delays**: Storing project files on Windows OneDrive path can cause momentary file write locks.
+- **Workday Date Spinbutton React Commitment**: Workday's 3-segment date inputs (Month, Day, Year) do not commit their value to React/Workday state on `.fill()` alone unless change/blur events are dispatched and the Year segment is tabbed out of; otherwise Workday throws `Error-DateThe field Date is required and must have a value`.
 - **Workday Custom Dropdown Shadow DOM / ARIA Quirks**: Some Workday tenants dynamically detach and re-render dropdown lists when scrolled; options should always be re-scanned if interaction fails on the first pass.
 - **No Asterisk on Voluntary Disclosures**: Workday frequently marks fields required in backend validation without rendering an asterisk (`*`) or `aria-required="true"` on the DOM element. The orchestrator must fill all detected compliance fields rather than skipping non-required ones.
 - **Missing Profile Statements from LLM**: Without strict prompt constraints, LLMs may return natural language explanations (e.g. `"The candidate has not provided this information"`). The engine guards against this with `isMissingProfileStatement`, but all prompts must instruct the LLM to return strictly valid field values or empty tokens.
+
