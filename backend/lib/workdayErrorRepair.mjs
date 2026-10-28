@@ -33,6 +33,9 @@ export function parseErrorFieldNames(errors = []) {
     if (/\bcity\b/i.test(text)) {
       names.add('City');
     }
+    if (/\bresume\b|\bcv\b/i.test(text)) {
+      names.add('Resume');
+    }
     const patterns = [
       /the field ([\s\S]{2,600}?) is required/gi,
       /\bError-([A-Za-z0-9 /'&-]{2,300}?)(?=The field|Select|$)/g,
@@ -396,14 +399,31 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
   }
 
   const names = parseErrorFieldNames(errors);
+  let filled = 0;
+
+  if (names.some(n => /resume|cv/i.test(n))) {
+    console.log('    📎 Workday validation flagged Resume — retrying resume upload from resumes/ folder...');
+    try {
+      const { handleWorkdayResumeUpload } = await import('./engine.mjs');
+      const { getResumePathForApply } = await import('./resumeParser.mjs');
+      const resumePath = profile?._resumePath || (await getResumePathForApply(profile, {}).catch(() => null));
+      if (resumePath) {
+        const uploaded = await handleWorkdayResumeUpload(page, resumePath, profile);
+        if (uploaded) {
+          console.log('    ✅ Resume upload re-verified during error repair');
+          filled++;
+        }
+      }
+    } catch {}
+  }
+
   const descriptors = await markErrorFields(page, names);
   if (!descriptors.length) {
     if (names.length) console.log(`    ⚠️  Workday flagged ${names.join(', ')} but the field was not found in the DOM`);
-    return 0;
+    return filled;
   }
 
   const tenant = profile?._tenant || getWorkdayTenant(page.url());
-  let filled = 0;
 
   for (const descriptor of descriptors) {
     if (/field\s*of\s*study/i.test(descriptor.label || descriptor.name || '')) {

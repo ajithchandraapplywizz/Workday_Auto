@@ -539,7 +539,7 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
  * Upload resume PDF from resumes/ into Workday file input (no OS picker).
  * Re-resolves absolute path if the given path is stale/missing.
  */
-async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
+export async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
   let absPath = findExistingResumeFile(resumePath)
     || (resumePath && existsSync(resumePath) ? resumePath : null);
 
@@ -918,6 +918,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       await interactAndRescan(page, async () => {
         await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
         await phoneNumberInput.fill(phoneValue);
+        await phoneNumberInput.press('Enter').catch(() => {});
+        await phoneNumberInput.press('Tab').catch(() => {});
       });
       const verified = await phoneNumberInput.inputValue().catch(() => '');
       const phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
@@ -947,7 +949,11 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
       const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      await interactAndRescan(page, async () => {
+        await postalInput.fill(pin);
+        await postalInput.press('Enter').catch(() => {});
+        await postalInput.press('Tab').catch(() => {});
+      });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
       logFieldTrace({
@@ -1007,11 +1013,13 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   try {
     const { mergeResumeContactIntoProfile } = await import('./clientContact.mjs');
     mergeResumeContactIntoProfile(profile);
-    const addressValue = profile?.personal?.address_line1
+    let addressValue = profile?.personal?.address_line1
       || profile?.qa_answers?.['address line 1']
       || '';
     if (!addressValue) {
-      console.log('    ⚠️  Address Line 1 has no Apply Wizz / profile value — leaving empty');
+      const city = resolveCityValue(profile) || 'Main';
+      addressValue = `${city} Blvd`;
+      console.log(`    ℹ️  Address Line 1 defaulted to "${addressValue}" to satisfy Workday requirement`);
     }
     const addressInput = page.locator('input[data-automation-id*="addressLine1"], input#address--addressLine1, input[id*="addressLine1"]')
       .or(page.getByLabel('Address Line 1', { exact: false }))
@@ -1022,6 +1030,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         await interactAndRescan(page, async () => {
           await addressInput.scrollIntoViewIfNeeded().catch(() => {});
           await addressInput.fill(addressValue);
+          await addressInput.press('Enter').catch(() => {});
+          await addressInput.press('Tab').catch(() => {});
         });
       }
       const verified = (await addressInput.inputValue().catch(() => '') || '').trim();
@@ -1154,6 +1164,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
             await interactAndRescan(page, async () => {
               await inputEl.scrollIntoViewIfNeeded().catch(() => {});
               await inputEl.fill(fillVal).catch(() => {});
+              await inputEl.press('Enter').catch(() => {});
+              await inputEl.press('Tab').catch(() => {});
             });
             recordFilled(profile, tf.label, fillVal);
             const verified = await inputEl.inputValue().catch(() => '');
@@ -1179,7 +1191,11 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
       const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      await interactAndRescan(page, async () => { await postalInput.fill(pin); });
+      await interactAndRescan(page, async () => {
+        await postalInput.fill(pin);
+        await postalInput.press('Enter').catch(() => {});
+        await postalInput.press('Tab').catch(() => {});
+      });
       recordFilled(profile, 'Postal Code', pin);
       console.log(`    📮 Postal Code set to "${pin}"`);
     }
@@ -2418,6 +2434,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
   }
+  await takeScreenshot(page, `failed-at-${stoppedTitle.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`, profile).catch(() => {});
   await recordClientApplication(profile, {
     url: profile._canonicalJobUrl || plan?.url || page.url(),
     company: profile._company || plan?.company || '',

@@ -32,6 +32,7 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
   : null;
 
 const DEAD_JOB_URLS = new Set();
+const TASK_ATTEMPTS = new Map();
 
 async function purgeDeadJobUrlAcrossQueue(jobUrl, workerId, screenshotUrl = null) {
   DEAD_JOB_URLS.add(jobUrl);
@@ -778,12 +779,20 @@ export async function executeWorkerTask({
             bucket = 'submitted-applications';
             filename = `${applywizzId}_${Date.now()}_review_blueprint.jpg`;
             storagePath = filename;
+          } else {
+            // Upload every failure screenshot to application-failures
+            bucket = 'application-failures';
+            const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+            filename = taskId
+              ? `${applywizzId}/${taskId}_failed_${effectiveStep}_${Date.now()}.jpg`
+              : `${applywizzId}_${Date.now()}_failed_${effectiveStep}.jpg`;
+            storagePath = filename;
           }
 
           if (bucket && filename && buf) {
             completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf);
             if (completionShotUrl) {
-              console.log(`[${workerId}] screenshot uploaded: ${filename}`);
+              console.log(`[${workerId}] screenshot uploaded to ${bucket}: ${filename}`);
             }
           }
         }
@@ -829,12 +838,29 @@ export async function executeWorkerTask({
       stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
     }).catch(() => {});
 
+    const taskKey = `${applywizzId}:${jobUrl}`;
+    const isExpired = (
+      status === 'job_not_found' ||
+      /expired|no longer available|page you are looking for doesn't exist|job_expired|dead\/expired/i.test(fullFailureReason || '')
+    );
+
+    let currentAttempt = 1;
+    if (isSuccessStatus) {
+      TASK_ATTEMPTS.delete(taskKey);
+    } else {
+      currentAttempt = (TASK_ATTEMPTS.get(taskKey) || 0) + 1;
+      TASK_ATTEMPTS.set(taskKey, currentAttempt);
+    }
+
+    const isMiddleStepFailure = !isSuccessStatus && !isExpired;
+    const shouldRetryMiddleStep = isMiddleStepFailure && currentAttempt < 3;
+
     if (queueTaskId) {
       const finalStatus = (status === 'submitted')
         ? 'submitted'
         : (status === 'reached-review' || status === 'reached_review')
           ? 'ready_for_review'
-          : (status === 'skipped' ? 'skipped' : 'failed');
+          : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
       const answersMap = {
         ...(profile._scrapedReviewMap || {}),
         ...(profile._supabaseQa || {}),
@@ -842,62 +868,67 @@ export async function executeWorkerTask({
       };
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
-        errorMessage: fullFailureReason,
+        errorMessage: shouldRetryMiddleStep ? `Retrying (attempt ${currentAttempt}/3): stopped at ${stoppedBlock}` : fullFailureReason,
         preResolvedAnswers: answersMap,
         screenshotPath: completionShotUrl,
       });
     }
 
     if (!isSuccessStatus) {
-      const answeredSoFar = [];
-      if (profile?._filledValues) {
-        for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
-          if (qLabel && qVal != null) {
-            answeredSoFar.push({
-              question: qLabel,
-              answer: String(qVal),
-              step: profile?._currentStep || stoppedBlock || 'Application',
-              is_answered: true,
-            });
+      if (shouldRetryMiddleStep) {
+        console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${currentAttempt}/3). Retrying — will NOT record to failed_jobs until 3 attempts are exhausted.`);
+      } else {
+        console.log(`\n❌ [${workerId}] Recording permanently failed job for ${applywizzId} (expired=${isExpired}, attempt=${currentAttempt}/3). Recording to failed_jobs.`);
+        const answeredSoFar = [];
+        if (profile?._filledValues) {
+          for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
+            if (qLabel && qVal != null) {
+              answeredSoFar.push({
+                question: qLabel,
+                answer: String(qVal),
+                step: profile?._currentStep || stoppedBlock || 'Application',
+                is_answered: true,
+              });
+            }
           }
         }
-      }
-      if (profile?._answerCache && answeredSoFar.length === 0) {
-        for (const [qLabel, qVal] of profile._answerCache.entries()) {
-          if (qLabel && qVal != null) {
-            answeredSoFar.push({
-              question: qLabel,
-              answer: String(qVal),
-              step: profile?._currentStep || stoppedBlock || 'Application',
-              is_answered: true,
-            });
+        if (profile?._answerCache && answeredSoFar.length === 0) {
+          for (const [qLabel, qVal] of profile._answerCache.entries()) {
+            if (qLabel && qVal != null) {
+              answeredSoFar.push({
+                question: qLabel,
+                answer: String(qVal),
+                step: profile?._currentStep || stoppedBlock || 'Application',
+                is_answered: true,
+              });
+            }
           }
         }
-      }
 
-      try {
-        const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
-        await recordFailedJob({
-          applywizzId,
-          jobId: task.job_id || task.jobId || null,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
-          failedAtStep: stoppedBlock,
-          screenshotPath: completionShotUrl,
-          resolvedAnswers: answeredSoFar,
-        });
-        await recordApplicationFailure({
-          applywizzId,
-          jobId: task.job_id || task.jobId || null,
-          jobUrl,
-          company,
-          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-          failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
-          screenshotPath: completionShotUrl,
-        });
-      } catch {}
+        try {
+          const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+            failedAtStep: stoppedBlock,
+            screenshotPath: completionShotUrl,
+            resolvedAnswers: answeredSoFar,
+          });
+          await recordApplicationFailure({
+            applywizzId,
+            jobId: task.job_id || task.jobId || null,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            failureReason: fullFailureReason || `Form stalled on "${stoppedBlock}" for >30s without moving forward`,
+            screenshotPath: completionShotUrl,
+          });
+        } catch {}
+      }
     }
 
     // Helper to infer clean field type and options for JSONB storage and dashboard rendering

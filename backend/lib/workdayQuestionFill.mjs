@@ -2165,6 +2165,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           await input.scrollIntoViewIfNeeded().catch(() => {});
           await input.click({ force: true }).catch(() => {});
           await input.fill(String(fillValue));
+          await input.press('Enter').catch(() => {});
           await input.press('Tab').catch(() => {});
           const actual = (await input.inputValue().catch(() => '') || '').trim();
           if (actual || String(fillValue).length > 0) {
@@ -2825,6 +2826,7 @@ export async function handleSelfIdentifyStep(page, profile) {
       const byLabel = page.getByLabel(/^Name\b/i).first();
       if (await byLabel.isVisible({ timeout: 1500 }).catch(() => false)) {
         await byLabel.fill(fullName);
+        await byLabel.press('Enter').catch(() => {});
         await byLabel.press('Tab').catch(() => {});
         nameOk = true;
         console.log(`    ✅ [text] Name ← "${fullName}" (getByLabel)`);

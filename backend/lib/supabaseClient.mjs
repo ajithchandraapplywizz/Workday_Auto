@@ -466,6 +466,24 @@ export async function updateRecordScreenshot({
     } catch {}
   }
 
+  // 5. failed_jobs (by applywizzId & jobUrl for failure screenshots)
+  if (applywizzId && jobUrl && !isReview) {
+    try {
+      const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
+      const patch = {
+        screenshot_path: screenshotUrl,
+        updated_at: now,
+      };
+      await request('failed_jobs', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
+        body: patch,
+      });
+      console.log(`  💾 [Database] Updated table "failed_jobs" (client: ${applywizzId}) -> screenshot_path: ${screenshotUrl}`);
+      updatedCount++;
+    } catch {}
+  }
+
   return updatedCount > 0;
 }
 
