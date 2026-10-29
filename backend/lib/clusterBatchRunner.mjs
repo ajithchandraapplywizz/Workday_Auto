@@ -1074,77 +1074,31 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   }
 
   // STEP 4: Update candidate rows in batch_job_queue with scanned_job_id, status, and lead screenshot
-  if (allTaskIds.length > 0) {
-    try {
-      const blueprintAwlId = String(blueprintTask.applywizz_id || '').trim().toUpperCase();
-      const blueprintTaskId = blueprintTask.id;
-      const CHUNK_SIZE = 40;
-      for (let i = 0; i < allTaskIds.length; i += CHUNK_SIZE) {
-        const chunk = allTaskIds.slice(i, i + CHUNK_SIZE);
-        const isComposite = chunk.some((id) => String(id).includes(':::'));
-        if (isComposite) {
-          for (const cid of chunk) {
-            const [awlId, ...rest] = String(cid).split(':::');
-            const jUrl = rest.join(':::');
-            const isLead = String(awlId).trim().toUpperCase() === blueprintAwlId;
-            await queueDbRequest('batch_job_queue', {
-              method: 'PATCH',
-              query: `?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(jUrl)}`,
-              prefer: 'return=minimal',
-              body: {
-                scanned_job_id: scannedJobId,
-                screenshot_path: null,
-                status: 'pre_resolved',
-                job_id: blueprintTask.job_id || cluster.reqId || null,
-                error_message: null,
-                updated_at: new Date().toISOString(),
-              },
-            }).catch(() => { });
-          }
-        } else {
-          // Update follower tasks with screenshot_path: null
-          const followerChunk = chunk.filter(id => id !== blueprintTaskId);
-          if (followerChunk.length > 0) {
-            const followerFilter = followerChunk.map((id) => encodeURIComponent(String(id).trim())).join(',');
-            await queueDbRequest('batch_job_queue', {
-              method: 'PATCH',
-              query: `?id=in.(${followerFilter})`,
-              prefer: 'return=minimal',
-              body: {
-                scanned_job_id: scannedJobId,
-                screenshot_path: null,
-                status: 'pre_resolved',
-                job_id: blueprintTask.job_id || cluster.reqId || null,
-                error_message: null,
-                updated_at: new Date().toISOString(),
-              },
-            }).catch(() => { });
-          }
-          // Update blueprint task with screenshot_path: null
-          if (chunk.includes(blueprintTaskId)) {
-            await queueDbRequest('batch_job_queue', {
-              method: 'PATCH',
-              query: `?id=eq.${encodeURIComponent(String(blueprintTaskId).trim())}`,
-              prefer: 'return=minimal',
-              body: {
-                scanned_job_id: scannedJobId,
-                screenshot_path: null,
-                status: 'pre_resolved',
-                job_id: blueprintTask.job_id || cluster.reqId || null,
-                error_message: null,
-                updated_at: new Date().toISOString(),
-              },
-            }).catch(() => { });
-          }
-        }
-      }
-      console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${allTasks.length} tasks)`);
-      console.log(`   • Lead Task (${blueprintAwlId}):  status: 'pre_resolved' | screenshot_path: null`);
-      console.log(`   • Follower Tasks (${allTasks.length - 1} clients): status: 'pre_resolved' | screenshot_path: null`);
-      console.log(`   • Linked Scanned Job ID:  ${scannedJobId || 'None'}\n`);
-    } catch (qErr) {
-      console.log(`⚠️ [${workerId}] Note on updating batch_job_queue: ${qErr.message}`);
+  try {
+    const urlsToComplete = Array.from(new Set([
+      ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
+      jobUrl,
+    ]));
+    for (const u of urlsToComplete) {
+      await queueDbRequest('batch_job_queue', {
+        method: 'PATCH',
+        query: `?job_url=eq.${encodeURIComponent(u)}`,
+        prefer: 'return=minimal',
+        body: {
+          scanned_job_id: scannedJobId,
+          screenshot_path: null,
+          status: 'reached_review',
+          job_id: blueprintTask?.job_id || cluster.reqId || null,
+          error_message: null,
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      }).catch(() => { });
     }
+    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${urlsToComplete.length} URL(s) -> 'reached_review')\n`);
+  } catch (qErr) {
+    console.log(`⚠️ [${workerId}] Note updating queue task status: ${qErr.message}`);
   }
 
   console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: ${company} — Tested Lead (${blueprintTask.applywizz_id}) in Browser & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
