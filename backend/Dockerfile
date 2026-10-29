@@ -15,6 +15,9 @@ RUN npm install --omit=dev --legacy-peer-deps
 # 3. Copy application source (.dockerignore excludes host node_modules, runs, screenshots, and logs)
 COPY . .
 
+# 4. Compatibility symlinks so both `node scripts/queue_daemon.mjs` and `node backend/scripts/queue_daemon.mjs` succeed
+RUN mkdir -p /app/backend && ln -sf /app/scripts /app/backend/scripts && ln -sf /app/lib /app/backend/lib
+
 ENV PORT=8080
 EXPOSE 8080
 

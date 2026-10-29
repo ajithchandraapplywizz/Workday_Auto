@@ -1460,7 +1460,7 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         'http://localhost:3002/api/developer/logs',
         'http://localhost:3001/api/bot/logs',
         'http://localhost:3001/api/developer/logs',
-      ] : (!backendBase ? ['/api/bot/logs', '/api/developer/logs'] : [])),
+      ] : []),
     ];
 
     let liveLogs = null;
@@ -2735,7 +2735,7 @@ export async function triggerAutonomousBot() {
         'http://localhost:3001/api/bot/start',
         'http://localhost:3001/api/bot/trigger',
         'http://localhost:3001/api/bot/webhook',
-      ] : (!backendBase ? ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook'] : [])),
+      ] : []),
     ];
     for (const ep of endpoints) {
       try {
@@ -2779,7 +2779,7 @@ export async function stopAutonomousBot() {
       ...(isLocal ? [
         'http://localhost:3001/api/bot/scan/stop',
         'http://localhost:3001/api/bot/stop',
-      ] : (!backendBase ? ['/api/bot/scan/stop', '/api/bot/stop', '/api/bot/webhook'] : [])),
+      ] : []),
     ];
     await Promise.any(
       stopEndpoints.map((u) =>
@@ -2914,7 +2914,7 @@ export async function triggerSubmissionStage() {
     ...(backendBase ? [`${backendBase}/api/bot/scan/stop`] : []),
     ...(isLocal ? [
       'http://localhost:3001/api/bot/scan/stop',
-    ] : (!backendBase ? ['/api/bot/scan/stop'] : [])),
+    ] : []),
   ];
   for (const ep of stopScanEndpoints) {
     try {
@@ -2934,7 +2934,7 @@ export async function triggerSubmissionStage() {
       'http://localhost:3002/api/bot/submit',
       'http://localhost:3001/api/bot/submit/start',
       'http://localhost:3001/api/bot/submit',
-    ] : (!backendBase ? ['/api/bot/submit/start', '/api/bot/submit', '/api/bot/webhook'] : [])),
+    ] : []),
   ];
 
   for (const ep of endpoints) {
@@ -3001,7 +3001,7 @@ export async function stopSubmissionStage() {
       'http://localhost:3002/api/bot/stop',
       'http://localhost:3001/api/bot/submit/stop',
       'http://localhost:3001/api/bot/stop',
-    ] : (!backendBase ? ['/api/bot/submit/stop', '/api/bot/stop', '/api/bot/webhook'] : [])),
+    ] : []),
   ];
 
   for (const ep of endpoints) {
@@ -3036,7 +3036,7 @@ export async function fetchBotDaemonStatus() {
         'http://localhost:3002/api/bot/status',
         'http://localhost:3001/health',
         'http://localhost:3001/api/bot/status',
-      ] : (!backendBase ? ['/health', '/api/bot/status'] : [])),
+      ] : []),
     ];
     for (const u of statusUrls) {
       try {
