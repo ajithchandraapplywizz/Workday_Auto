@@ -35,7 +35,7 @@ import {
   getWorkerControls,
   updateWorkerControl,
 } from '../lib/supabaseClient.mjs';
-import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
+import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
 import {
   setGlobalStop,
   isGlobalStopRequested,
@@ -179,7 +179,7 @@ async function syncBotControlState(patch = {}) {
     is_running: isPoolRunning,
     is_paused: isPoolPaused,
     stop_requested: isGlobalStopRequested(),
-    active_worker_count: isPoolRunning ? (currentMode === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : 10) : 0,
+    active_worker_count: isPoolRunning ? (currentMode === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0,
     ...patch,
   }).catch(() => { });
 }
@@ -364,12 +364,12 @@ export async function stopAutonomousPool() {
     current_action: 'Stopped by user',
   });
 
-  console.log(`✅ [DAEMON] Global stop complete. All 10 workers set to idle and active browsers closed.`);
+  console.log(`✅ [DAEMON] Global stop complete. All ${WORKER_COUNT} workers set to idle and active browsers closed.`);
   return { success: true, message: 'All workers stopped and reset to idle.' };
 }
 
 /**
- * Execute Stage 1: Scanning (scanning_worker_1..10)
+ * Execute Stage 1: Scanning (scanning_worker_1..2)
  */
 async function runStage1Scanning() {
   currentStage = 'scanning';
@@ -514,7 +514,7 @@ async function runStage3Submissions() {
 }
 
 /**
- * Parallel Pipeline: Scanning & Resolving run concurrently across the 10 shared workers
+ * Parallel Pipeline: Scanning & Resolving run concurrently across the 2 shared workers
  */
 export async function runScanAndResolveParallel() {
   if (SERVICE_ROLE === 'submitter') {
@@ -898,7 +898,7 @@ const server = http.createServer(async (req, res) => {
           is_running: true,
           refusal_reason: null,
           last_action_requested: null,
-          current_action: 'Running Scanning and Resolving in parallel across 10 workers',
+          current_action: `Running Scanning and Resolving in parallel across ${WORKER_COUNT} workers`,
         });
 
         // Run asynchronously
@@ -910,7 +910,7 @@ const server = http.createServer(async (req, res) => {
           mode: 'scanning',
           scanStatus: 'running',
           scan_status: 'running',
-          message: 'Scan & Resolve pipeline started across 10 workers in parallel.',
+          message: `Scan & Resolve pipeline started across ${WORKER_COUNT} workers in parallel.`,
         }));
         return;
       }
@@ -1011,7 +1011,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
-      message: 'All 10 workers stopped instantly. Active browser contexts aborted.',
+      message: `All ${WORKER_COUNT} workers stopped instantly. Active browser contexts aborted.`,
       isRunning: false,
     }));
     return;
@@ -1269,7 +1269,7 @@ const server = http.createServer(async (req, res) => {
       return;
     }
 
-    console.log(`\n⚡ [DAEMON WEBHOOK] Submit signal received! Launching Stage 3 Submissions with 10 submitting workers...`);
+    console.log(`\n⚡ [DAEMON WEBHOOK] Submit signal received! Launching Stage 3 Submissions with ${WORKER_COUNT} submitting workers...`);
     currentMode = 'submitting';
     currentStage = 'submitting';
     submitStatus = 'running';
@@ -1285,7 +1285,7 @@ const server = http.createServer(async (req, res) => {
       submit_stop_requested: false,
       is_running: true,
       refusal_reason: null,
-      current_action: 'Submitting approved applications across 10 workers in parallel',
+      current_action: `Submitting approved applications across ${WORKER_COUNT} workers in parallel`,
     });
 
     runStage3Submissions().catch(console.error);
@@ -1293,7 +1293,7 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       success: true,
-      message: 'Stage 3 Submissions triggered across 10 submitting workers in parallel.',
+      message: `Stage 3 Submissions triggered across ${WORKER_COUNT} submitting workers in parallel.`,
       isRunning: true,
       stage: 'submitting',
       mode: 'submitting',
@@ -1429,7 +1429,7 @@ export async function dispatchQueuedSubmissions() {
       }
     }
   } catch (err) {
-    console.warn(`[10-WORKER DISPATCHER] Error in cycle:`, err?.message);
+    console.warn(`[SUBMISSION DISPATCHER] Error in cycle:`, err?.message);
   }
 }
 

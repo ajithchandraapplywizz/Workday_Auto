@@ -34,6 +34,7 @@ import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
 import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
+import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
@@ -1259,21 +1260,21 @@ export async function runClusterBatchRunner({
   }
 
   console.log(`\n📋 Selected Top ${topClusters.length} Unique Job URLs for Parallel Execution:\n`);
-  console.log(` Worker   │ Job URL (Strict URL Identification)                                            │ Clients │ Links`);
+  console.log(` Job #    │ Job URL (Strict URL Identification)                                            │ Clients │ Links`);
   console.log(`──────────┼────────────────────────────────────────────────────────────────────────────────┼─────────┼──────`);
   topClusters.forEach((c, idx) => {
-    const workerLabel = `Worker ${idx + 1}`.padEnd(8, ' ');
+    const jobLabel = `Job #${idx + 1}`.padEnd(8, ' ');
     const urlDisplay = (c.jobUrl || '').slice(0, 78).padEnd(78, ' ');
     const count = String(c.clientCount).padStart(7, ' ');
     const variations = String(c.rawUrls.size).padStart(5, ' ');
-    console.log(` ${workerLabel} │ ${urlDisplay} │ ${count} │ ${variations}`);
+    console.log(` ${jobLabel} │ ${urlDisplay} │ ${count} │ ${variations}`);
   });
   console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
 
   // Step 2: Launch Workers in Parallel (concurrency pool, strictly based on PIPELINE_CONFIG)
   const maxWorkers = Number(workers) || PIPELINE_CONFIG.workersCount || 2;
   const concurrency = Math.min(maxWorkers, topClusters.length);
-  console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
+  console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (${headless ? 'HEADLESS Mode' : 'HEADED Mode'})...\n`);
 
   let clusterIndex = 0;
   let completedBatchesCount = 0;
