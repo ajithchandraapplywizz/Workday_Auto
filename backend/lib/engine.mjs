@@ -1957,10 +1957,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
   if (!confirmSubmit || dryRun) {
-    console.log('  🎯 Form completed up to Review & Submit. Halting without submitting so CA can review.');
-    profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
-    // Pure discovery/scan: do NOT capture or upload any screenshot during review pause
-    profile._submissionScreenshotBuffer = null;
+    // Capture full-page Review & Submit screenshot for scanned_jobs
+    try {
+      console.log('  📸 Capturing full-page Review & Submit blueprint screenshot for scanned_jobs...');
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await page.waitForTimeout(400).catch(() => {});
+      profile._submissionScreenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
+    } catch {}
     profile._submissionScreenshotUrl = null;
 
     // Stay for 5 seconds at Review & Submit before advancing to next unique link

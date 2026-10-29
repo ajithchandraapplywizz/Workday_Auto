@@ -800,11 +800,12 @@ export async function executeWorkerTask({
               : `${applywizzId}_${task.id || Date.now()}_submitted.png`;
             storagePath = filename;
           } else if (status === 'reached-review' || status === 'reached_review') {
-            // Strictly do NOT take/upload Review & Submit screenshot as submitted proof
-            bucket = null;
-            filename = null;
-            storagePath = null;
-            buf = null;
+            // Upload full-page Review & Submit blueprint screenshot to submitted-applications bucket for scanned_jobs
+            bucket = 'submitted-applications';
+            filename = taskId
+              ? `${applywizzId}_${taskId}_review_blueprint.jpg`
+              : `${applywizzId}_${task.id || Date.now()}_review_blueprint.jpg`;
+            storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
             bucket = 'failed-applications';
