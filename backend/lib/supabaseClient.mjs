@@ -2828,23 +2828,39 @@ export async function recordJobDistributions({
 
     // Automatically record ready_for_review rows into submission_tasks and stop there
     const readyToReviewRows = rows.filter((r) => r.status === 'ready_for_review');
+    const needsAnswersRows = rows.filter((r) => r.status === 'needs_answers');
+
+    // Purge any stale submission_tasks for candidates requiring answers
+    if (needsAnswersRows.length > 0) {
+      for (const nr of needsAnswersRows) {
+        const cleanAwl = String(nr.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+        await request('submission_tasks', {
+          method: 'DELETE',
+          query: `?applywizz_id=eq.${encode(cleanAwl)}&job_url=eq.${encode(cleanUrl)}&status=eq.ready_for_review`,
+        }).catch(() => {});
+      }
+    }
+
     if (readyToReviewRows.length > 0) {
       try {
         const jdIds = await request('job_distributions', {
           query: `?job_url=eq.${encode(cleanUrl)}&select=id,applywizz_id,job_url`,
         }).catch(() => []);
-        const jdMap = new Map((jdIds || []).map((j) => [`${j.applywizz_id}:::${j.job_url}`, j.id]));
+        const jdMap = new Map((jdIds || []).map((j) => [`${String(j.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()}:::${j.job_url}`, j.id]));
 
-        const submissionRows = readyToReviewRows.map((r) => ({
-          distribution_id: jdMap.get(`${r.applywizz_id}:::${r.job_url}`) || null,
-          applywizz_id: r.applywizz_id,
-          job_url: r.job_url,
-          company: r.company || cleanCompany,
-          role_title: r.role_title || cleanRole,
-          status: 'ready_for_review',
-          created_at: r.created_at || now,
-          updated_at: r.updated_at || now,
-        }));
+        const submissionRows = readyToReviewRows.map((r) => {
+          const cleanAwl = String(r.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          return {
+            distribution_id: jdMap.get(`${cleanAwl}:::${r.job_url}`) || null,
+            applywizz_id: cleanAwl,
+            job_url: r.job_url,
+            company: r.company || cleanCompany,
+            role_title: r.role_title || cleanRole,
+            status: 'ready_for_review',
+            created_at: r.created_at || now,
+            updated_at: r.updated_at || now,
+          };
+        });
         await request('submission_tasks', {
           method: 'POST',
           query: '?on_conflict=applywizz_id,job_url',

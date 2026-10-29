@@ -638,6 +638,14 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     if (isAlreadyFilled) {
       console.log(`    ✓ "${SOURCE_LABEL}" already set: "${currentSourceText}"`);
       profile._step1SourceFilled = true;
+      profile.personal = profile.personal || {};
+      profile.personal.source = currentSourceText;
+      profile.qa_answers = profile.qa_answers || {};
+      profile.qa_answers['how did you hear about us'] = currentSourceText;
+      recordFilled(profile, SOURCE_LABEL, currentSourceText);
+      recordFilled(profile, `${SOURCE_LABEL}*`, currentSourceText);
+      recordFilled(profile, 'How Did You Hear About Us?', currentSourceText);
+      recordFilled(profile, 'How Did You Hear About Us?*', currentSourceText);
       logFieldTrace({
         automationId: 'source--source',
         label: SOURCE_LABEL,
@@ -660,6 +668,9 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.qa_answers = profile.qa_answers || {};
         profile.qa_answers['how did you hear about us'] = selected;
         recordFilled(profile, SOURCE_LABEL, selected);
+        recordFilled(profile, `${SOURCE_LABEL}*`, selected);
+        recordFilled(profile, 'How Did You Hear About Us?', selected);
+        recordFilled(profile, 'How Did You Hear About Us?*', selected);
         logFieldTrace({
           automationId: 'source--source',
           label: SOURCE_LABEL,
