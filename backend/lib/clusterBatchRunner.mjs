@@ -265,7 +265,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   const clusterMap = new Map();
 
   for (const row of rows) {
-    if (row.status === 'submitted') continue;
+    if (row.status === 'submitted' || row.status === 'pre_resolved' || row.status === 'reached_review') continue;
     const rawUrl = String(row.job_url || '').trim();
     if (!rawUrl) continue;
 
@@ -679,9 +679,13 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
         console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
         try {
+          const isComposite = allTaskIds.some((id) => String(id).includes(':::'));
+          const query = isComposite || !allTaskIds.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id)))
+            ? `?job_url=eq.${encodeURIComponent(jobUrl)}`
+            : `?id=in.(${allTaskIds.join(',')})`;
           await queueDbRequest('batch_job_queue', {
             method: 'PATCH',
-            query: `?id=in.(${allTaskIds.join(',')})`,
+            query,
             prefer: 'return=minimal',
             body: {
               status: 'pending',
@@ -1084,7 +1088,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
               prefer: 'return=minimal',
               body: {
                 scanned_job_id: scannedJobId,
-                screenshot_path: isLead ? reviewShotUrl : null,
+                screenshot_path: null,
                 status: 'pre_resolved',
                 job_id: blueprintTask.job_id || cluster.reqId || null,
                 error_message: null,
@@ -1111,7 +1115,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
               },
             }).catch(() => { });
           }
-          // Update blueprint task with reviewShotUrl
+          // Update blueprint task with screenshot_path: null
           if (chunk.includes(blueprintTaskId)) {
             await queueDbRequest('batch_job_queue', {
               method: 'PATCH',
@@ -1119,7 +1123,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
               prefer: 'return=minimal',
               body: {
                 scanned_job_id: scannedJobId,
-                screenshot_path: reviewShotUrl,
+                screenshot_path: null,
                 status: 'pre_resolved',
                 job_id: blueprintTask.job_id || cluster.reqId || null,
                 error_message: null,
@@ -1130,7 +1134,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         }
       }
       console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${allTasks.length} tasks)`);
-      console.log(`   • Lead Task (${blueprintAwlId}):  status: 'pre_resolved' | screenshot_path: attached`);
+      console.log(`   • Lead Task (${blueprintAwlId}):  status: 'pre_resolved' | screenshot_path: null`);
       console.log(`   • Follower Tasks (${allTasks.length - 1} clients): status: 'pre_resolved' | screenshot_path: null`);
       console.log(`   • Linked Scanned Job ID:  ${scannedJobId || 'None'}\n`);
     } catch (qErr) {
@@ -1266,8 +1270,9 @@ export async function runClusterBatchRunner({
   });
   console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴──────\n`);
 
-  // Step 2: Launch strictly 2 Workers in Parallel (concurrency pool, strictly 2 at a time)
-  const concurrency = Math.min(Number(workers) || 2, topClusters.length, 2);
+  // Step 2: Launch Workers in Parallel (concurrency pool, strictly based on PIPELINE_CONFIG)
+  const maxWorkers = Number(workers) || PIPELINE_CONFIG.workersCount || 2;
+  const concurrency = Math.min(maxWorkers, topClusters.length);
   console.log(`🚀 Running strictly ${concurrency} Parallel Scanning Workers on ${topClusters.length} unique links in dynamic queue (HEADED Mode)...\n`);
 
   let clusterIndex = 0;
@@ -1277,7 +1282,7 @@ export async function runClusterBatchRunner({
   const clusterResults = [];
 
   async function workerLoop(slot) {
-    const workerId = `scanning_worker_${slot}`;
+    const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
     while (clusterIndex < topClusters.length) {
       if (await isClusterStopRequested()) {
         console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);
@@ -1286,6 +1291,39 @@ export async function runClusterBatchRunner({
       const myIndex = clusterIndex++;
       const cluster = topClusters[myIndex];
       if (!cluster) break;
+
+      // Prevent duplicate scan if already completed in scanned_jobs
+      const checkScanned = await queueDbRequest('scanned_jobs', {
+        query: `?job_url=eq.${encodeURIComponent(cluster.jobUrl)}&select=id,scan_status&limit=1`,
+      }).catch(() => null);
+      if (checkScanned?.[0]?.scan_status === 'completed') {
+        console.log(`⚡ [${workerId}] Skipping "${cluster.jobUrl}" — already scanned & completed.`);
+        continue;
+      }
+
+      // Atomic Lease on batch_job_queue:
+      // Claim all tasks for this cluster atomically so NO other replica or worker can pick it simultaneously
+      let claimedCount = 0;
+      const urlsToClaim = Array.from(cluster.rawUrls?.size ? cluster.rawUrls : [cluster.jobUrl]);
+      for (const u of urlsToClaim) {
+        const claimed = await queueDbRequest('batch_job_queue', {
+          method: 'PATCH',
+          query: `?job_url=eq.${encodeURIComponent(u)}&status=in.(pending,queued,failed)`,
+          prefer: 'return=representation',
+          body: {
+            status: 'processing',
+            worker_id: workerId,
+            locked_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => null);
+        if (Array.isArray(claimed)) claimedCount += claimed.length;
+      }
+
+      if (claimedCount === 0) {
+        console.log(`⚡ [${workerId}] Skipping "${cluster.jobUrl}" — already claimed by another replica/worker or completed.`);
+        continue;
+      }
 
       await updateWorkerStatus(workerId, {
         state: 'in_flight',

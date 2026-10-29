@@ -128,3 +128,32 @@ test('option lists map to an exact live value', () => {
     }
   }
 });
+
+test('analyzeUnknownQuestionsBatch returns an Array and supports answerPageQuestions batch mapping', async () => {
+  const { analyzeUnknownQuestionsBatch } = await import('../lib/claudeLlm.mjs');
+  const { answerPageQuestions } = await import('../lib/questionEngine/pageAnswerEngine.mjs');
+
+  const unknownItems = [
+    { questionId: 'q_custom_1', label: 'Have you worked with PyTorch?', options: ['Yes', 'No'], field: { questionId: 'q_custom_1', label: 'Have you worked with PyTorch?', options: ['Yes', 'No'] } },
+    { questionId: 'q_custom_2', label: 'What is your preferred development OS?', options: ['Linux', 'macOS', 'Windows'], field: { questionId: 'q_custom_2', label: 'What is your preferred development OS?', options: ['Linux', 'macOS', 'Windows'] } },
+  ];
+
+  const batch = await analyzeUnknownQuestionsBatch(unknownItems, {}, { allowLlm: false });
+  assert.ok(Array.isArray(batch), 'batch must be an Array');
+  assert.equal(batch.length, 2);
+  assert.equal(batch[0].questionId, 'q_custom_1');
+  assert.equal(batch[1].questionId, 'q_custom_2');
+
+  // Verify answerPageQuestions handles unknown fields without throwing "batch.map is not a function"
+  const pack = await answerPageQuestions(
+    [
+      { questionId: 'q_custom_1', label: 'Have you worked with PyTorch?', options: ['Yes', 'No'], elementType: 'radio', required: true },
+    ],
+    { personal: { email: 'test@example.com' } },
+    { pageNumber: 1, allowLlm: false },
+  );
+
+  assert.ok(pack && Array.isArray(pack.answers));
+  assert.equal(pack.answers.length, 1);
+  assert.equal(pack.answers[0].questionId, 'q_custom_1');
+});

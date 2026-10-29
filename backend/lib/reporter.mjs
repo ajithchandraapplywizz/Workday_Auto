@@ -55,12 +55,23 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
     return memoryPath;
   }
 
-  // Cloud Storage Mode: stream buffer directly to Supabase Storage bucket
-  const isFailure = /fail|error/i.test(safeLabel);
+  // Cloud Storage Mode: stream buffer directly to Supabase Storage bucket (strictly flat, zero nested folders)
+  const isFailure = /fail|error|blocked|exception|timeout|stuck|missing/i.test(safeLabel);
+  const isSubmitted = /submitted|complete|success/i.test(safeLabel);
+
+  // Policy: Terminate all intermediate step, scan, fill, and review screenshot uploads.
+  // ONLY capture & upload:
+  // 1) Real final submission confirmation (to 'submitted-applications')
+  // 2) Mid-flow wizard failure/error (to 'failed-applications')
+  if (!isFailure && !isSubmitted) {
+    console.log(`  ℹ️  [Screenshot Skipped] Intermediate/step screenshot "${safeLabel}" suppressed (only final submission and failures are stored).`);
+    return null;
+  }
+
   const bucketName = isFailure ? 'failed-applications' : 'submitted-applications';
   const filename = taskId
-    ? `${applywizzId}/${taskId}_${safeLabel}_${ts}.png`
-    : `${applywizzId}/${safeLabel}_${ts}.png`;
+    ? `${applywizzId}_${taskId}_${safeLabel}_${ts}.png`
+    : `${applywizzId}_${safeLabel}_${ts}.png`;
 
   let uploadedUrl = null;
   try {
@@ -75,7 +86,7 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
   console.log(`  ☁️  [Supabase Storage]: Uploaded to "${bucketName}/${filename}"`);
   console.log(`     URL: ${uploadedUrl || 'Saved'}`);
 
-  // Persist screenshot path into relevant database tables
+  // Persist screenshot path ONLY for real final submissions or failures (never for review or intermediate steps)
   if (typeof updateRecordScreenshot === 'function') {
     try {
       await updateRecordScreenshot({
@@ -83,7 +94,8 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
         applywizzId,
         jobUrl,
         screenshotUrl: finalUrl,
-        isReview: /review|blueprint|scan/i.test(safeLabel),
+        isReview: false,
+        isFailure,
       });
     } catch (dbErr) {
       console.warn(`  ⚠️  [Database] Screenshot table update notice: ${dbErr.message}`);

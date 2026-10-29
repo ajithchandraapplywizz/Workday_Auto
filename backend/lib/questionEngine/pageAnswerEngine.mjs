@@ -509,10 +509,19 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
 
   if (unknown.length) {
     console.log(`  🧠 Question engine: ${unknown.length} unknown field(s) on page ${pageNumber} → ${isOpenRouterEnabled() ? 'one LLM batch' : 'review (LLM off)'}`);
-    const batch = await analyzeUnknownQuestionsBatch(unknown, profile, {
+    const batchRaw = await analyzeUnknownQuestionsBatch(unknown, profile, {
       resumePath: opts.resumePath || profile._resumePath,
     });
-    const byId = new Map(batch.map((row) => [row.questionId, row]));
+    const batch = Array.isArray(batchRaw)
+      ? batchRaw
+      : Object.entries(batchRaw || {}).map(([key, val]) => ({
+          questionId: typeof val === 'object' && val?.questionId ? val.questionId : key,
+          label: key,
+          answer: typeof val === 'object' ? val.answer : val,
+          confidence: typeof val === 'object' ? val.confidence : (val ? 0.85 : 0),
+          requiresReview: typeof val === 'object' ? Boolean(val.requiresReview) : !val,
+        }));
+    const byId = new Map(batch.map((row) => [row.questionId || row.label, row]));
     for (const item of unknown) {
       const llm = byId.get(item.questionId);
       if (llm?.answer && !llm.requiresReview) {
@@ -612,10 +621,19 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
       required: normalized.required === true,
       field: normalized,
     };
-    const batch = await analyzeUnknownQuestionsBatch([unknown], profile, {
+    const batchRaw = await analyzeUnknownQuestionsBatch([unknown], profile, {
       resumePath: opts.resumePath || profile._resumePath,
       page: opts.page || null,
     });
+    const batch = Array.isArray(batchRaw)
+      ? batchRaw
+      : Object.entries(batchRaw || {}).map(([key, val]) => ({
+          questionId: typeof val === 'object' && val?.questionId ? val.questionId : key,
+          label: key,
+          answer: typeof val === 'object' ? val.answer : val,
+          confidence: typeof val === 'object' ? val.confidence : (val ? 0.85 : 0),
+          requiresReview: typeof val === 'object' ? Boolean(val.requiresReview) : !val,
+        }));
     const llm = batch[0];
     if (llm?.answer && !llm.requiresReview) {
       record = finish(

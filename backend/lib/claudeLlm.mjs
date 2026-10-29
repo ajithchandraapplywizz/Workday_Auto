@@ -438,10 +438,29 @@ export async function hydrateExperienceFromLlm(profile = {}) {
 }
 
 export async function analyzeUnknownQuestionsBatch(questions = [], profile = {}, opts = {}) {
-  const results = {};
-  for (const q of questions) {
-    const label = q.label || q.question || '';
-    results[label] = await resolveUnknownWithLlm(label, q, { profile, ...opts });
+  const list = Array.isArray(questions) ? questions : (questions ? [questions] : []);
+  const results = [];
+  for (const q of list) {
+    const label = q.label || q.question || q.field?.label || '';
+    const rawField = q.field || q;
+    let answer = null;
+    let confidence = 0;
+    try {
+      answer = await resolveUnknownWithLlm(label, rawField, { profile, ...opts });
+      if (answer) {
+        confidence = 0.85;
+      }
+    } catch (err) {
+      console.warn(`    ⚠️ [claudeLlm batch] Error answering "${label}": ${err.message}`);
+    }
+
+    results.push({
+      questionId: q.questionId || rawField?.questionId || rawField?.id || label,
+      label,
+      answer: answer || null,
+      confidence,
+      requiresReview: !answer,
+    });
   }
   return results;
 }

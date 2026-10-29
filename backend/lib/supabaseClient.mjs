@@ -388,19 +388,32 @@ export async function updateRecordScreenshot({
   jobUrl = null,
   screenshotUrl = null,
   isReview = false,
+  isFailure = false,
 } = {}) {
   if (!isSupabaseConfigured() || !screenshotUrl) return false;
+  // Strictly reject review, blueprint, or scan screenshots from being saved as submitted proof
+  if (isReview || /review|blueprint|scan|step/i.test(screenshotUrl)) {
+    console.log(`  ℹ️ [Screenshot Guard] Skipping DB table update for review/intermediate screenshot: ${screenshotUrl}`);
+    return false;
+  }
+  const failed = isFailure || /fail|error|blocked|exception|timeout|stuck|missing/i.test(screenshotUrl);
   const now = new Date().toISOString();
   let updatedCount = 0;
 
   // 1. submission_tasks (by taskId)
   if (taskId) {
     try {
-      const patch = {
-        screenshot_path: screenshotUrl,
-        application_submitted_screenshot_url: screenshotUrl,
-        updated_at: now,
-      };
+      const patch = failed
+        ? {
+            screenshot_path: screenshotUrl,
+            application_submitted_screenshot_url: null,
+            updated_at: now,
+          }
+        : {
+            screenshot_path: screenshotUrl,
+            application_submitted_screenshot_url: screenshotUrl,
+            updated_at: now,
+          };
       await request('submission_tasks', {
         method: 'PATCH',
         query: `?id=eq.${encode(taskId)}`,
@@ -415,11 +428,18 @@ export async function updateRecordScreenshot({
   if (applywizzId && jobUrl) {
     try {
       const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
-      const patch = {
-        screenshot_url: screenshotUrl,
-        applied_screenshot: screenshotUrl,
-        updated_at: now,
-      };
+      const patch = failed
+        ? {
+            screenshot_url: screenshotUrl,
+            application_submitted_screenshot_url: null,
+            updated_at: now,
+          }
+        : {
+            screenshot_url: screenshotUrl,
+            applied_screenshot: screenshotUrl,
+            application_submitted_screenshot_url: screenshotUrl,
+            updated_at: now,
+          };
       await request('job_distributions', {
         method: 'PATCH',
         query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
@@ -430,25 +450,7 @@ export async function updateRecordScreenshot({
     } catch {}
   }
 
-  // 3. client_job_applications (by applywizzId & jobUrl)
-  if (applywizzId && jobUrl) {
-    try {
-      const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
-      const patch = {
-        applied_screenshot: screenshotUrl,
-        updated_at: now,
-      };
-      await request('client_job_applications', {
-        method: 'PATCH',
-        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
-        body: patch,
-      });
-      console.log(`  💾 [Database] Updated table "client_job_applications" (client: ${applywizzId}) -> applied_screenshot: ${screenshotUrl}`);
-      updatedCount++;
-    } catch {}
-  }
-
-  // 4. scanned_jobs (by jobUrl if review / blueprint step)
+  // 3. scanned_jobs (by jobUrl if review / blueprint step)
   if (jobUrl && isReview) {
     try {
       const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
@@ -531,59 +533,52 @@ export async function upsertSupabaseApplication({
   if (failureScreenshotUrl) row.failure_screenshot_url = failureScreenshotUrl;
   if (stoppedAtStep) row.stopped_at_step = stoppedAtStep;
 
+  let liveAppId = null;
+
+  // 1. Always sync status to the active consolidated table job_distributions
   try {
-    const res = await request('applications', {
-      method: 'POST',
-      query: '?on_conflict=applywizz_id%2Cjob_url',
-      prefer: 'resolution=merge-duplicates,return=representation',
-      body: row,
+    const distStatus = normalizedStatus === 'in_progress' || normalizedStatus === 'started'
+      ? 'applying'
+      : (normalizedStatus === 'skipped' ? 'failed' : normalizedStatus);
+    const distPatch = {
+      status: distStatus,
+      updated_at: new Date().toISOString(),
+    };
+    if (company) distPatch.company = company;
+    if (roleTitle) distPatch.role_title = roleTitle;
+    if (normalizedStatus === 'submitted' && failureScreenshotUrl) {
+      distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
+    }
+    const distRes = await request('job_distributions', {
+      method: 'PATCH',
+      query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
+      prefer: 'return=representation',
+      body: distPatch,
     });
-    if (Array.isArray(res) && res[0]?.id) {
-      return { success: true, id: res[0].id };
+    if (Array.isArray(distRes) && distRes[0]?.id) {
+      liveAppId = distRes[0].id;
     }
-  } catch (err) {
-    if (/column.*does not exist|42703/i.test(String(err.message || ''))) {
-      delete row.failure_screenshot_url;
-      delete row.stopped_at_step;
-      try {
-        const res = await request('applications', {
-      method: 'POST',
-      query: '?on_conflict=applywizz_id%2Cjob_url',
-      prefer: 'resolution=merge-duplicates,return=representation',
-      body: row,
-    });
-    if (Array.isArray(res) && res[0]?.id) {
-      return { success: true, id: res[0].id };
-    }
-        return true;
-      } catch (innerErr) {
-        err = innerErr;
-      }
-    }
-
-    if (!/42P10|unique or exclusion constraint/i.test(String(err.message || ''))) throw err;
-
-    // Older deployments may have the table but not the unique pair constraint.
-    const existing = await request('applications', {
-      query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}&select=id&limit=1`,
-    });
-    if (existing?.[0]?.id) {
-      await request('applications', {
-        method: 'PATCH',
-        query: `?id=eq.${encode(existing[0].id)}`,
-        prefer: 'return=minimal',
-        body: row,
-      });
-    } else {
-      const created = await request('applications', {
-        method: 'POST',
-        prefer: 'return=representation',
-        body: row,
-      });
-      return { success: true, id: created?.[0]?.id || null };
-    }
+  } catch (distErr) {
+    // Non-fatal if candidate row was not pre-created in job_distributions
   }
-  return { success: true };
+
+  // 2. If application failed, track in failed_jobs for audit and dashboard visibility
+  if (normalizedStatus === 'failed') {
+    try {
+      await recordFailedJob({
+        applywizzId,
+        jobUrl: cleanUrl,
+        company,
+        roleTitle,
+        failureReason: fullReason,
+        failedAtStep: stoppedAtStep || 'Unknown',
+        screenshotPath: failureScreenshotUrl,
+      });
+    } catch {}
+  }
+
+  // 3. Application tracking is 100% consolidated into job_distributions (Migration 026)
+  return { success: true, id: liveAppId || null, table: 'job_distributions' };
 }
 
 /**
@@ -1266,6 +1261,21 @@ export async function updateQueueTaskStatus(taskId, {
     });
     return true;
   } catch (err) {
+    if (body.pre_resolved_answers !== undefined && (err?.message?.includes('pre_resolved_answers') || err?.message?.includes('PGRST204'))) {
+      delete body.pre_resolved_answers;
+      try {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query,
+          prefer: 'return=minimal',
+          body,
+        });
+        return true;
+      } catch (innerErr) {
+        console.log(`  ⚠️  updateQueueTaskStatus fallback error: ${innerErr.message?.slice(0, 100)}`);
+        return false;
+      }
+    }
     console.log(`  ⚠️  updateQueueTaskStatus error: ${err.message?.slice(0, 100)}`);
     return false;
   }
@@ -2950,7 +2960,6 @@ export async function recordFailedJob({
       failed_at_step: cleanStep,
       screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
       client_ids: parsedClientIds,
-      client_count: totalCount,
       failed_client_count: totalCount,
       created_at: now,
       updated_at: now,
@@ -2967,9 +2976,10 @@ export async function recordFailedJob({
       insertOk = true;
     } catch (err) {
       console.error(`❌ [failed_jobs] Upsert error body for ${cleanUrl}:`, err.message || err);
-      // Fallback without new columns if migration is pending
+      // Fallback without new columns if migration 045 is pending
       delete payload.client_ids;
       delete payload.failed_client_count;
+      delete payload.client_count;
       try {
         await request('failed_jobs', {
           method: 'POST',

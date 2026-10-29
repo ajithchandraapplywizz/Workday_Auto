@@ -365,7 +365,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             if (buf) {
               const cleanId = String(task.applywizz_id).trim().toUpperCase();
               const timestamp = Date.now();
-              shotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
+              // Zero nested folders: flat filename directly in root of failed-applications
+              shotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
               const { error: upErr } = await supabase.storage
                 .from('failed-applications')
                 .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
@@ -402,11 +403,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const now = new Date().toISOString();
     const isSuccess = result?.status === 'submitted' || result?.status === 'success';
 
-    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || null;
+    let finalShotUrl = result?.screenshotUrl || null;
     let finalStoragePath = result?.screenshotPath || null;
     if (!finalStoragePath && finalShotUrl) {
       const cleanId = String(task.applywizz_id).trim().toUpperCase();
-      finalStoragePath = `${cleanId}/${task.id}.png`;
+      // Flat filename directly in bucket root
+      finalStoragePath = `${cleanId}_${task.id}.png`;
     }
 
     if (isSuccess) {
@@ -429,6 +431,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'submitted',
             application_submitted_screenshot_url: finalShotUrl,
+            screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
@@ -442,7 +445,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           error_message: errMsg,
           completed_at: now,
-          application_submitted_screenshot_url: finalShotUrl,
+          application_submitted_screenshot_url: null,
           screenshot_path: finalStoragePath,
           updated_at: now,
         },
@@ -455,7 +458,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: {
             status: 'failed',
             error_message: errMsg,
-            application_submitted_screenshot_url: finalShotUrl,
+            application_submitted_screenshot_url: null,
+            screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
@@ -481,7 +485,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         if (buf) {
           const cleanId = String(task.applywizz_id).trim().toUpperCase();
           const timestamp = Date.now();
-          errShotPath = `${cleanId}/${task.id}_failed_${timestamp}.png`;
+          // Flat filename directly in root of failed-applications
+          errShotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
           const { error: upErr } = await supabase.storage
             .from('failed-applications')
             .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
@@ -508,7 +513,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         status: 'failed',
         error_message: err?.message || 'Execution error',
         completed_at: now,
-        application_submitted_screenshot_url: errShotUrl,
+        application_submitted_screenshot_url: null,
         screenshot_path: errShotPath,
         updated_at: now,
       },
@@ -521,7 +526,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         patch: {
           status: 'failed',
           error_message: err?.message || 'Execution error',
-          application_submitted_screenshot_url: errShotUrl,
+          application_submitted_screenshot_url: null,
+          screenshot_url: errShotUrl,
           updated_at: now,
         },
       });

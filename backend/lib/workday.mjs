@@ -626,7 +626,7 @@ export async function workdayCreateAccount(page, email, givenPassword) {
   }
 
   // Check all consent/terms checkboxes on Create Account form so submit button is enabled
-  const allCheckboxes = await page.$('input[type="checkbox"]');
+  const allCheckboxes = (await page.$$('input[type="checkbox"]')) || [];
   for (const cb of allCheckboxes) {
     try {
       if (await cb.isVisible().catch(() => false)) {
@@ -639,12 +639,12 @@ export async function workdayCreateAccount(page, email, givenPassword) {
     } catch {}
   }
 
-  const submitBtns = await page.$([
+  const submitBtns = (await page.$$([
     'button[data-automation-id="createAccountSubmitButton"]',
     '[data-automation-id="createAccountSubmitButton"]',
     'button:has-text("Create Account")',
     'button[type="submit"]'
-  ].join(', '));
+  ].join(', '))) || [];
 
   let submitted = false;
   for (const btn of submitBtns) {

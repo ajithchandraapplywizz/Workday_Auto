@@ -1886,7 +1886,6 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   ).catch(() => {});
   await page.waitForTimeout(2500);
 
-  await takeScreenshot(page, 'workday-review-step', profile);
   await attachFormMutationObserver(page);
   await acknowledgeAllPageAgreements(page, profile, 'Review');
   const review = await parseReviewDOM(page);
@@ -1960,56 +1959,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   if (!confirmSubmit || dryRun) {
     console.log('  🎯 Form completed up to Review & Submit. Halting without submitting so CA can review.');
     profile?._onLog?.(5, 'Step 5: Form completed up to Review & Submit. Application marked "ready_for_review". Paused for CA manual review & confirmation.');
-    try {
-      if (page && !page.isClosed()) {
-        console.log('  📸 Capturing mandatory Review & Submit complete page screenshot...');
-        await page.waitForLoadState('domcontentloaded').catch(() => {});
-        await page.waitForTimeout(1500).catch(() => {});
-
-        // Level 1: Full page screenshot with 8s timeout
-        let reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
-
-        // Level 2: High-resolution viewport screenshot fallback
-        if (!reviewBuf) {
-          console.log('  📸 fullPage screenshot timed out; falling back to viewport screenshot...');
-          reviewBuf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
-        }
-
-        // Level 3: Body element screenshot fallback
-        if (!reviewBuf) {
-          const bodyEl = await page.$('body').catch(() => null);
-          if (bodyEl) {
-            reviewBuf = await bodyEl.screenshot({ type: 'jpeg', quality: 80, timeout: 5000 }).catch(() => null);
-          }
-        }
-
-        if (reviewBuf) {
-          profile._submissionScreenshotBuffer = reviewBuf;
-          console.log('  📸 Review & Submit screenshot buffer captured successfully.');
-
-          // Immediately upload to Supabase Storage right while on page!
-          try {
-            const { uploadStorageScreenshot } = await import('./supabaseClient.mjs');
-            const cleanAwl = String(profile._applyWizzId || profile?.applywizz_id || 'AWL').trim().toUpperCase();
-            const shotUrl = await uploadStorageScreenshot(
-              'application-successes',
-              `${cleanAwl}_${Date.now()}_review_and_submit.jpg`,
-              reviewBuf
-            );
-            if (shotUrl) {
-              profile._submissionScreenshotUrl = shotUrl;
-              console.log(`  📸 Review & Submit screenshot uploaded to Supabase Storage: ${shotUrl}`);
-            }
-          } catch (uploadErr) {
-            console.log(`  ⚠️ Note uploading review screenshot: ${uploadErr.message}`);
-          }
-        } else {
-          console.error('  ❌ Warning: Failed to capture Review & Submit screenshot buffer.');
-        }
-      }
-    } catch (ssErr) {
-      console.log(`  ⚠️ Review screenshot capture error: ${ssErr.message}`);
-    }
+    // Pure discovery/scan: do NOT capture or upload any screenshot during review pause
+    profile._submissionScreenshotBuffer = null;
+    profile._submissionScreenshotUrl = null;
 
     // Stay for 5 seconds at Review & Submit before advancing to next unique link
     console.log('  ⏳ Reached Review & Submit! Staying on page for 5 seconds before advancing to next unique link...');
@@ -2022,7 +1974,6 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
   if (decision === 'dry-run-skip') {
     console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
-    await takeScreenshot(page, 'post-submit', profile);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'dry_run' }).catch(() => {});
     return 'reached-review';
   }
@@ -2061,22 +2012,11 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
-  }
-
-  // Capture real browser screenshot of the confirmation page
-  try {
-    if (page && !page.isClosed()) {
-      const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
-      if (buf) {
-        profile._submissionScreenshotBuffer = buf;
-      }
-    }
-  } catch {}
-
-  if (confirmationFound) {
     console.log('✅ Workday application successfully submitted!');
-    await takeScreenshot(page, 'workday-submitted', profile);
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
+    // Only capture full-page screenshot when application submission is 100% complete
+    const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
+    profile._submissionScreenshotUrl = finalProofUrl;
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';
   }
@@ -2088,9 +2028,11 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'needs-manual-verification';
   }
 
-  await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted' }).catch(() => {});
+  console.log('❌ Workday submission confirmation was not detected on page.');
+  const failShot = await takeScreenshot(page, 'failed-submit-confirmation-missing', profile).catch(() => null);
+  await recordClientApplication(profile, { url: canonicalJobUrl, status: 'failed', failureReason: 'submission_confirmation_missing', screenshotUrl: failShot }).catch(() => {});
   await cleanupClientResume(profile);
-  return 'submitted';
+  return 'failed';
 }
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
@@ -2292,8 +2234,6 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     if (blockedClicks.length) {
       console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
     }
-
-    takeScreenshot(page, `workday-step-${currentIteration}-${stepName.replace(/\s+/g, '-').toLowerCase()}`, profile).catch(() => {});
 
     const pageGate = await validatePage(page, profile, stepName).catch(() => null);
     if (pageGate && !pageGate.ok) {
@@ -2527,8 +2467,6 @@ export async function runWorkdayQuestionScanLoop(page, profile, plan = {}, {
       const reviewBatch = await harvestPageQuestions(page, { company, url, stepName: 'Review' });
       questions.push(...reviewBatch);
       console.log(`    📋 Harvested ${reviewBatch.length} field(s) on Review`);
-
-      await takeScreenshot(page, `scan-review-${(getWorkdayTenant(url) || company || 'tenant').replace(/[^a-z0-9]+/gi, '-')}`, profile);
 
       let reviewDecision = 'next';
       if (waitAtReview) {
@@ -3063,8 +3001,8 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
 
-      const postSubmitSS = await takeScreenshot(page, 'post-submit', profile);
       const statusLabel = typeof status === 'object' && status?.status ? status.status : status;
+      const postSubmitSS = profile._submissionScreenshotUrl || null;
       await logToCSV(url, plan.company || '', plan.role || '', statusLabel, postSubmitSS, { ats });
 
       try {
@@ -3381,8 +3319,6 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`✅ Fill + verify complete: ${filled} filled, ${skipped} skipped, ${errors} errors`);
 
-    await takeScreenshot(page, 'pre-submit', profile);
-
     // ─── SUBMIT + ERROR RETRY LOOP ──────────────────────────────────
     let status = 'filled-not-submitted';
     // This fallback path never submits by itself — only --confirm-submit unlocks it.
@@ -3472,7 +3408,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       await page.waitForTimeout(1000);
     }
 
-    const postSubmitSS = await takeScreenshot(page, 'post-submit', profile);
+    const postSubmitSS = status === 'submitted' ? await takeScreenshot(page, 'workday-submitted', profile) : null;
     await logToCSV(url, plan.company || '', plan.role || '', status, postSubmitSS, { ats });
 
     // Record for learner
