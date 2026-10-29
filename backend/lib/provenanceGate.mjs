@@ -31,6 +31,9 @@ export const ALLOWED_SOURCES = new Set([
   'llm_live_options',
   'llm_profile',
   'llm_semantic_analysis',
+  'master_yaml',
+  'qa_bank',
+  'scan_mandatory_fallback',
 ]);
 
 export const SENSITIVE_INTENTS = new Set([
@@ -87,8 +90,8 @@ export function verifyProvenance(field = {}, decision = {}) {
     };
   }
 
-  // 3. Block hardcoded defaults, sensitive_safe, profile_fallback
-  if (/sensitive_safe|profile_fallback|default|static|workday_default/i.test(source)) {
+  // 3. Block hardcoded defaults, sensitive_safe, profile_fallback (unless scan_mandatory_fallback)
+  if (/sensitive_safe|profile_fallback|default|static|workday_default/i.test(source) && !/scan_mandatory_fallback/i.test(source)) {
     return {
       ok: false,
       blocked: true,

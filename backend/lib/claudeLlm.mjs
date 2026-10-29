@@ -321,6 +321,18 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
   const resumeText = profile._resumeText || profile.resume_text || '';
   const applicant = profile.personal || {};
 
+  let relevantQaText = '';
+  try {
+    const { getMasterYamlQuestions } = await import('./masterYamlManager.mjs');
+    const qaQuestions = getMasterYamlQuestions();
+    const qaEntries = Object.entries(qaQuestions).slice(0, 15);
+    if (qaEntries.length > 0) {
+      relevantQaText = qaEntries
+        .map(([q, it]) => `- "${it.question || q}": "${it.sample_answer || it.answer || ''}"`)
+        .join('\n');
+    }
+  } catch {}
+
   const system = `You are an automated application assistant resolving Workday job application questions based strictly on the applicant's resume and verified profile facts.
 
 Return ONLY a valid JSON object with NO markdown formatting:
@@ -341,7 +353,7 @@ RULES:
 Field Type: ${fieldType} (Code ${typeCode}: ${typeDesc})
 ${options.length > 0 ? `Available Options:\n- ${options.join('\n- ')}` : 'Field Type: Free-text input'}
 
-Applicant Summary:
+Applicant Summary (Supabase Profile DB):
 ${JSON.stringify({
   title: profile.experience?.current_title,
   years: profile.experience?.years,
@@ -349,8 +361,11 @@ ${JSON.stringify({
   education: profile.education,
 }, null, 2)}
 
-Resume Excerpt:
-${resumeText ? resumeText.slice(0, 3000) : '(No resume excerpt available)'}`;
+Resume Facts (Parsed Resume):
+${resumeText ? resumeText.slice(0, 3000) : '(No resume excerpt available)'}
+
+Universal Reference Knowledge (QA Bank & Master Template):
+${relevantQaText || '(None)'}`;
 
   try {
     const res = await claudeChat({

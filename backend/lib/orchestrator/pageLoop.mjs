@@ -13,7 +13,14 @@ import {
 } from '../questionEngine/index.mjs';
 import { isSelectOnePlaceholder } from '../interaction/workdayCustomDropdown.mjs';
 import { normalizeLabel, saveAnswerToYaml, appendManualReviewRecord } from '../qaStore.mjs';
-import { isMandatoryField } from '../scanFieldFilter.mjs';
+import { isMandatoryField, hasRequiredSignal } from '../scanFieldFilter.mjs';
+import {
+  findAnswerFromQaBankTable,
+  findAnswerFromLocalYaml,
+  findSemanticMatchInQaBank,
+  findAnswerFromQaBank,
+  saveMasterYamlTemplate,
+} from '../masterYamlManager.mjs';
 import { validateBeforeFill } from './preFillValidator.mjs';
 import { rememberVerified } from './memory.mjs';
 import { blockedResult, STATUS } from './types.mjs';
@@ -28,6 +35,77 @@ import { autoRecordVerifiedFieldAnswer } from '../supabaseClient.mjs';
 const MAX_FIELD_RETRIES = 2;
 const MAX_FILLS_PER_CYCLE = 24;
 const MAX_VERIFY_FAILS_PER_FIELD = 2;
+
+function synthesizeScanMandatoryAnswer(field = {}, profile = {}) {
+  const label = String(field.label || '').trim().toLowerCase();
+  const options = (field.options || [])
+    .map((o) => (typeof o === 'string' ? o : o?.text || o?.value || ''))
+    .map((s) => s.trim())
+    .filter(Boolean);
+
+  const cleanOpts = options.filter((o) => !isSelectOnePlaceholder(o));
+
+  if (cleanOpts.length > 0) {
+    // 1. Minimum qualification / legal authorization / eligibility / confirmation -> "Yes"
+    if (
+      /meet.*(minimum|qualification)|authori[sz]ed|eligible|eligibility|18 years|fluent|possess|certif|confirm|agree|acknowledge/i.test(label) &&
+      !/visa|sponsor|felony|crime|convict|relative|conflict|terminated|adverse/i.test(label)
+    ) {
+      const yesOpt = cleanOpts.find((o) => /^yes\b/i.test(o) || /^true\b/i.test(o));
+      if (yesOpt) return yesOpt;
+    }
+
+    // 2. Relatives, felony, crime, conflict of interest, non-compete, prior employee, misconduct -> "No"
+    if (/relative|family|nepotism|convict|felony|crime|misdemeanor|conflict|non-?compete|previously employed|prior employee|vendor|investigat|terminat|discharge|disciplinary/i.test(label)) {
+      const noOpt = cleanOpts.find((o) => /^no\b/i.test(o) || /^false\b/i.test(o));
+      if (noOpt) return noOpt;
+    }
+
+    // 3. Visa sponsorship / bilateral agreement questions -> "No"
+    if (/require.*sponsor|need.*sponsor|visa classification|bilateral agreement/i.test(label)) {
+      const noOpt = cleanOpts.find((o) => /^no\b/i.test(o) || /^false\b/i.test(o));
+      if (noOpt) return noOpt;
+    }
+
+    // 4. Default for generic Yes/No questions: prefer "No" per user directive
+    const noOpt = cleanOpts.find((o) => /^no\b/i.test(o) || /^false\b/i.test(o));
+    if (noOpt) return noOpt;
+
+    const yesOpt = cleanOpts.find((o) => /^yes\b/i.test(o) || /^true\b/i.test(o));
+    if (yesOpt) return yesOpt;
+
+    // 5. Otherwise pick the first valid option among available choices (e.g. Hourly/Salary)
+    return cleanOpts[0];
+  }
+
+  const elType = String(field.elementType || field.fieldType || field.controlType || '').toLowerCase();
+  if (elType === 'checkbox') {
+    return 'true';
+  }
+
+  if (elType === 'date' || /date/i.test(label)) {
+    const d = new Date();
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    const yyyy = d.getFullYear();
+    return `${mm}/${dd}/${yyyy}`;
+  }
+
+  if (elType === 'number' || /how many years|years of experience|number of years/i.test(label)) {
+    return '5';
+  }
+  if (/hours per week|desired hours/i.test(label)) {
+    return '40';
+  }
+  if (/salary|compensation|hourly rate|pay expected|expected pay/i.test(label)) {
+    return '80000';
+  }
+
+  if (/name|other names|former name|alias/i.test(label)) {
+    return 'None';
+  }
+  return 'N/A';
+}
 
 function squashOptionText(v = '') {
   return String(v).toLowerCase().replace(/[^\w]/g, '');
@@ -202,8 +280,49 @@ export async function runPageOrchestrator({
         source: 'default_password',
       };
     }
+
+    // Check Tier 4 (QA Bank Table), Tier 5 (Semantic Match), Tier 6 (Master YAML) if not yet answered
+    if (!decision?.answer) {
+      try {
+        const isSubmission = !Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+        const tenant = profile?._tenant || 'global';
+        const opts = field.options || [];
+
+        // Tier 4: QA Bank Table
+        let hit = await findAnswerFromQaBankTable({ questionLabel: field.label, options: opts, tenant, isSubmission });
+        let hitTier = 'qa_bank';
+        let hitConfidence = 0.94;
+
+        // Tier 5: Semantic Match
+        if (!hit) {
+          hit = findSemanticMatchInQaBank({ questionLabel: field.label, options: opts, threshold: 0.80 });
+          hitTier = 'semantic_match';
+          hitConfidence = 0.88;
+        }
+
+        // Tier 6: Master YAML (Scanning Only)
+        if (!hit && !isSubmission) {
+          hit = findAnswerFromLocalYaml({ questionLabel: field.label, options: opts, isSubmission });
+          hitTier = 'master_yaml';
+          hitConfidence = 0.85;
+        }
+
+        if (hit) {
+          console.log(`  📄 [${hitTier === 'qa_bank' ? 'Tier 4: QA Bank' : hitTier === 'semantic_match' ? 'Tier 5: Semantic' : 'Tier 6: Master YAML'} Match] "${field.label.slice(0, 50)}" ← "${hit}"`);
+          decision = {
+            questionId: field.questionId,
+            intent: classifyQuestionIntent(field.label, field),
+            answer: hit,
+            confidence: hitConfidence,
+            requiresReview: false,
+            source: hitTier,
+          };
+        }
+      } catch {}
+    }
+
     let gate = validateBeforeFill(field, decision, profile);
-    const mandatory = field.required === true || isMandatoryField(field.label, field, step);
+    const mandatory = field.required === true || isMandatoryField(field.label, field, step) || hasRequiredSignal(field.label, field);
     if (!gate.ok && mandatory && gate.reason !== 'high_risk_missing_data') {
       const alt = await resolveDynamicAnswer(
         { ...(field._raw || {}), ...field, label: field.label },
@@ -236,6 +355,21 @@ export async function runPageOrchestrator({
             logOrchestrator('llm_dom_retry', { questionId: field.questionId, from: gate.reason });
             gate = retry;
             decision = domLlm;
+            if (profile?._isScanOnly || profile?._isClusterBlueprint) {
+              console.log(`    🧠 [Tier 7: LLM Scan Learning] "${field.label.slice(0, 50)}" ← "${domLlm.answer}" (stored in YAML & QA Bank)`);
+              saveMasterYamlTemplate([{
+                question: field.label,
+                field_type: field.elementType || field.fieldType || 'text',
+                step,
+                options: field.options || [],
+                value: domLlm.answer,
+                source: 'llm_scan_learned',
+              }], {
+                tenant: profile?._tenant || 'global',
+                company: profile?._company || '',
+                roleTitle: profile?._roleTitle || '',
+              }).catch(() => {});
+            }
           }
         }
       }
@@ -265,6 +399,21 @@ export async function runPageOrchestrator({
             logOrchestrator('llm_force_retry', { questionId: field.questionId, from: gate.reason });
             gate = retry;
             decision = synthetic;
+            if (profile?._isScanOnly || profile?._isClusterBlueprint) {
+              console.log(`    🧠 [Tier 7: LLM Scan Learning] "${field.label.slice(0, 50)}" ← "${clientHit.answer}" (stored in YAML & QA Bank)`);
+              saveMasterYamlTemplate([{
+                question: field.label,
+                field_type: field.elementType || field.fieldType || 'text',
+                step,
+                options: field.options || [],
+                value: clientHit.answer,
+                source: 'llm_scan_learned',
+              }], {
+                tenant: profile?._tenant || 'global',
+                company: profile?._company || '',
+                roleTitle: profile?._roleTitle || '',
+              }).catch(() => {});
+            }
           }
         }
       }
@@ -273,30 +422,71 @@ export async function runPageOrchestrator({
     // Provenance Gate Check (Block-and-log mode)
     const prov = verifyProvenance(field, decision);
     if (!prov.ok) {
-      logOrchestrator('provenance_blocked', {
+      if (profile?._isScanOnly || profile?._isClusterBlueprint) {
+        logOrchestrator('provenance_scan_override', {
+          questionId: field.questionId,
+          label: field.label,
+          source: prov.source,
+          reason: prov.reason,
+        });
+      } else {
+        logOrchestrator('provenance_blocked', {
+          questionId: field.questionId,
+          label: field.label,
+          source: prov.source,
+          reason: prov.reason,
+        });
+        trace({
+          stage: 'provenance_blocked',
+          step,
+          page: pageNumber,
+          questionId: field.questionId,
+          label: field.label,
+          source: prov.source,
+          evidence: prov.evidence,
+          matchScore: prov.matchScore,
+          reason: prov.reason,
+          controlTag: field.controlTag || field._raw?.tagName,
+          controlRole: field.controlRole || field.role || field._raw?.role,
+          controlAriaHaspopup: field.controlAriaHaspopup || field._raw?.ariaHaspopup,
+          controlType: field.elementType || field.fieldType,
+          controlId: field.questionId || field._raw?.wdQId || field.label,
+          labelResolutionPath: field.locatorStrategy?.preferred || 'label',
+        });
+        gate = { ok: false, reason: `provenance_gate:${prov.reason}`, requiresReview: true };
+      }
+    }
+
+    const isScanMode = Boolean(profile?._isScanOnly || profile?._isClusterBlueprint);
+
+    if (!gate.ok && mandatory && isScanMode) {
+      // User Directive: Never stop or fail with validation errors during scanning.
+      // Auto-fill mandatory fields with safe synthesized fallback and store in Master YAML.
+      const scanAnswer = synthesizeScanMandatoryAnswer(field, profile);
+      console.log(`    🛠️ [Scan Mandatory Fallback] "${field.label.slice(0, 55)}" ← "${scanAnswer}"`);
+
+      saveMasterYamlTemplate([{
+        question: field.label,
+        field_type: field.elementType || field.fieldType || 'text',
+        step: step,
+        options: field.options || [],
+        value: scanAnswer,
+        source: 'scan_mandatory_fallback',
+      }], {
+        tenant: profile?._tenant || 'global',
+        company: profile?._company || '',
+        roleTitle: profile?._roleTitle || '',
+      }).catch(() => {});
+
+      decision = {
         questionId: field.questionId,
-        label: field.label,
-        source: prov.source,
-        reason: prov.reason,
-      });
-      trace({
-        stage: 'provenance_blocked',
-        step,
-        page: pageNumber,
-        questionId: field.questionId,
-        label: field.label,
-        source: prov.source,
-        evidence: prov.evidence,
-        matchScore: prov.matchScore,
-        reason: prov.reason,
-        controlTag: field.controlTag || field._raw?.tagName,
-        controlRole: field.controlRole || field.role || field._raw?.role,
-        controlAriaHaspopup: field.controlAriaHaspopup || field._raw?.ariaHaspopup,
-        controlType: field.elementType || field.fieldType,
-        controlId: field.questionId || field._raw?.wdQId || field.label,
-        labelResolutionPath: field.locatorStrategy?.preferred || 'label',
-      });
-      gate = { ok: false, reason: `provenance_gate:${prov.reason}`, requiresReview: true };
+        intent: classifyQuestionIntent(field.label, field),
+        answer: scanAnswer,
+        confidence: 0.85,
+        requiresReview: false,
+        source: 'scan_mandatory_fallback',
+      };
+      gate = { ok: true, answer: scanAnswer };
     }
     if (!gate.ok) {
       const highRisk = isHighRiskIntent(decision?.intent || classifyQuestionIntent(field.label, field)) && mandatory;

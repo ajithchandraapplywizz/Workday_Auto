@@ -129,7 +129,19 @@ export async function runResolvingWorkerPool(options = {}) {
         });
         if (queueRes.ok) {
           const qRows = queueRes.json() || [];
-          candidatesToProcess = [...new Set(qRows.map(r => r.applywizz_id).filter(Boolean))];
+          const rawAwls = [];
+          for (const r of qRows) {
+            if (!r.applywizz_id) continue;
+            try {
+              const parsed = JSON.parse(r.applywizz_id);
+              if (Array.isArray(parsed)) {
+                rawAwls.push(...parsed);
+                continue;
+              }
+            } catch {}
+            rawAwls.push(...String(r.applywizz_id).split(','));
+          }
+          candidatesToProcess = [...new Set(rawAwls.map(id => String(id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean))];
         }
       } catch {}
 
@@ -219,46 +231,35 @@ export async function runResolvingWorkerPool(options = {}) {
             // Scan and resolving workers may ONLY create submission_tasks rows as ready_for_review (R3)
             if (isFully) {
               try {
+                const cleanAwl = String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
                 // Fetch distribution_id from job_distributions to maintain 1:1 foreign key linkage
                 let distributionId = null;
                 try {
                   const distRes = await httpsJsonWithRetry({
-                    url: `${url}/rest/v1/job_distributions?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
+                    url: `${url}/rest/v1/job_distributions?applywizz_id=eq.${encodeURIComponent(cleanAwl)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
                     method: 'GET',
                     headers: {
                       apikey: key,
                       Authorization: `Bearer ${key}`,
                     },
-                    });
+                  });
                   const distRows = (distRes && distRes.ok) ? distRes.json() : [];
                   if (Array.isArray(distRows) && distRows.length > 0) {
                     distributionId = distRows[0].id;
                   }
                 } catch { }
 
-                let alreadyExists = false;
-                try {
-                  const existCheck = await httpsJsonWithRetry({
-                    url: `${url}/rest/v1/submission_tasks?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
-                    method: 'GET',
-                    headers: { apikey: key, Authorization: `Bearer ${key}` },
-                    });
-                  const existRows = (existCheck && existCheck.ok) ? existCheck.json() : [];
-                  if (Array.isArray(existRows) && existRows.length > 0) alreadyExists = true;
-                } catch { }
-
-                if (!alreadyExists) {
-                  await httpsJsonWithRetry({
-                  url: `${url}/rest/v1/submission_tasks`,
+                await httpsJsonWithRetry({
+                  url: `${url}/rest/v1/submission_tasks?on_conflict=applywizz_id,job_url`,
                   method: 'POST',
                   headers: {
                     apikey: key,
                     Authorization: `Bearer ${key}`,
-                    Prefer: 'resolution=ignore-duplicates',
+                    Prefer: 'resolution=merge-duplicates,return=minimal',
                   },
                   body: {
                     distribution_id: distributionId,
-                    applywizz_id: awlId,
+                    applywizz_id: cleanAwl,
                     job_url: job.job_url,
                     company,
                     role_title: roleTitle,
@@ -266,8 +267,7 @@ export async function runResolvingWorkerPool(options = {}) {
                     created_at: new Date().toISOString(),
                     updated_at: new Date().toISOString(),
                   },
-                  });
-                }
+                }).catch(() => {});
               } catch {}
             }
 

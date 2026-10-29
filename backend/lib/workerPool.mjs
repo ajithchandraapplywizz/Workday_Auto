@@ -644,6 +644,9 @@ export async function executeWorkerTask({
       await writeFile(planOut, JSON.stringify(plan, null, 2));
     } catch {}
 
+    profile._isScanOnly = Boolean(options.isScanOnly || options.isClusterBlueprint);
+    profile._isClusterBlueprint = Boolean(options.isClusterBlueprint);
+
     // Step D: Fill & Submit
     appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
     console.log(`   [${workerId}] Step 4: Filling application...`);
@@ -658,6 +661,8 @@ export async function executeWorkerTask({
       confirmSubmit: effectiveConfirmSubmit,
       dryRun,
       isBatch: true,
+      isScanOnly: Boolean(options.isScanOnly || options.isClusterBlueprint),
+      isClusterBlueprint: Boolean(options.isClusterBlueprint),
     });
 
     if (status === 'job_not_found') {

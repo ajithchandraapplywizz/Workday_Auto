@@ -482,7 +482,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
   trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
 
-  // ─── TIER 2.5: Universal YAML / qa_bank Reference Bank ───────────────────────
+  // ─── TIER 2.5: QA Bank Reference Bank (Table) ──────────────────────────────
   try {
     const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
     const qaBankAnswer = await findAnswerFromQaBank({
@@ -490,6 +490,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       options,
       tenant,
       isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
+      isScanOnly: Boolean(opts.isScanOnly || opts.isClusterBlueprint),
     });
     if (qaBankAnswer) {
       const qaHit = finish(qaBankAnswer, 'qa_bank');

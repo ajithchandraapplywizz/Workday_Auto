@@ -180,10 +180,9 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
 }
 
 /**
- * Searches qa_bank / master YAML for an answer matching a question label.
- * Enforces Rule A guard: scan_placeholder is NEVER used at submission for protected fields.
+ * Tier 4: Searches Supabase qa_bank table and memory cache
  */
-export async function findAnswerFromQaBank({
+export async function findAnswerFromQaBankTable({
   questionLabel = '',
   options = [],
   tenant = 'global',
@@ -194,8 +193,6 @@ export async function findAnswerFromQaBank({
   if (!normKey) return null;
 
   const cleanTenant = String(tenant || 'global').trim().toLowerCase();
-
-  // Guard against using placeholders for sensitive fields during submission
   const isGuardedField = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo|salary|compensation|first name|last name|email|phone|social security|ssn/i.test(questionLabel);
 
   // 1. Check in-memory cache first
@@ -216,7 +213,6 @@ export async function findAnswerFromQaBank({
         query: `?normalized_question=eq.${encodeURIComponent(normKey)}&select=tenant,answer,source,options&limit=2`,
       });
       if (Array.isArray(rows) && rows.length > 0) {
-        // Prefer tenant match over global
         const hit = rows.find((r) => r.tenant === cleanTenant) || rows[0];
         if (hit) {
           QA_BANK_CACHE.set(`${hit.tenant}:${normKey}`, hit);
@@ -231,14 +227,96 @@ export async function findAnswerFromQaBank({
     } catch {}
   }
 
-  // 3. Fallback to local master YAML file
+  return null;
+}
+
+/**
+ * Tier 6: Searches local master YAML file (backend/config/master_scan_template.yml)
+ */
+export function findAnswerFromLocalYaml({
+  questionLabel = '',
+  options = [],
+  isSubmission = false,
+  isScanOnly = false,
+} = {}) {
+  // Master YAML is strictly and exclusively confined to Stage 1 Blueprint Scanning
+  if (isSubmission || !isScanOnly) return null;
+  if (!questionLabel) return null;
+  const normKey = normalizeQuestionKey(questionLabel);
+  if (!normKey) return null;
+
   const localQuestions = getMasterYamlQuestions();
   const yamlMatch = localQuestions[normKey];
   if (yamlMatch && yamlMatch.sample_answer != null) {
-    if (isSubmission && isGuardedField && yamlMatch.source === 'scan_placeholder') {
-      return null;
-    }
     return matchOptionIfPresent(yamlMatch.sample_answer, options);
+  }
+  return null;
+}
+
+/**
+ * Tier 5 helper: Fuzzy semantic matching in QA Bank / Master YAML
+ */
+export function findSemanticMatchInQaBank({
+  questionLabel = '',
+  options = [],
+  threshold = 0.80,
+} = {}) {
+  if (!questionLabel) return null;
+  const targetNorm = normalizeQuestionKey(questionLabel);
+  if (!targetNorm || targetNorm.length < 4) return null;
+
+  const targetTokens = new Set(targetNorm.split(/\s+/).filter((w) => w.length > 2));
+  if (!targetTokens.size) return null;
+
+  const localQuestions = getMasterYamlQuestions();
+  let best = null;
+  let bestScore = 0;
+
+  for (const [key, item] of Object.entries(localQuestions)) {
+    if (!item?.sample_answer) continue;
+    const keyTokens = new Set(key.split(/\s+/).filter((w) => w.length > 2));
+    if (!keyTokens.size) continue;
+
+    let matchCount = 0;
+    for (const t of targetTokens) {
+      if (keyTokens.has(t)) matchCount++;
+    }
+    const union = new Set([...targetTokens, ...keyTokens]).size;
+    const jaccard = union > 0 ? matchCount / union : 0;
+    const subMatch = (key.includes(targetNorm) || targetNorm.includes(key))
+      && (Math.min(key.length, targetNorm.length) / Math.max(key.length, targetNorm.length) > 0.60);
+
+    const score = Math.max(jaccard, subMatch ? 0.86 : 0);
+    if (score > bestScore && score >= threshold) {
+      bestScore = score;
+      best = item.sample_answer;
+    }
+  }
+
+  if (best) {
+    return matchOptionIfPresent(best, options);
+  }
+  return null;
+}
+
+/**
+ * Searches qa_bank / master YAML for an answer matching a question label.
+ * Enforces Rule A guard: scan_placeholder is NEVER used at submission for protected fields.
+ */
+export async function findAnswerFromQaBank({
+  questionLabel = '',
+  options = [],
+  tenant = 'global',
+  isSubmission = false,
+  isScanOnly = false,
+} = {}) {
+  const fromTable = await findAnswerFromQaBankTable({ questionLabel, options, tenant, isSubmission });
+  if (fromTable) return fromTable;
+
+  // Master YAML is strictly and exclusively for Stage 1 Blueprint Scanning
+  if (isScanOnly && !isSubmission) {
+    const fromYaml = findAnswerFromLocalYaml({ questionLabel, options, isSubmission: false, isScanOnly: true });
+    if (fromYaml) return fromYaml;
   }
 
   return null;

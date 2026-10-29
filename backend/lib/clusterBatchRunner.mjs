@@ -208,7 +208,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
     let offset = 0;
     while (true) {
       const chunk = await queueDbRequest('batch_job_queue', {
-        query: `?select=id,applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=1000&offset=${offset}`,
+        query: `?select=id,applywizz_id,job_url,status,company,role_title,screenshot_path,job_id,attempt_count&limit=1000&offset=${offset}`,
       });
       if (!Array.isArray(chunk) || chunk.length === 0) break;
       rows.push(...chunk);
@@ -221,7 +221,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
       rows = [];
       while (true) {
         const chunk = await queueDbRequest('batch_job_queue', {
-          query: `?select=applywizz_id,job_url,status,company,role_title,screenshot_path,job_id&limit=1000&offset=${offset}`,
+          query: `?select=applywizz_id,job_url,status,company,role_title,screenshot_path,job_id,attempt_count&limit=1000&offset=${offset}`,
         });
         if (!Array.isArray(chunk) || chunk.length === 0) break;
         rows.push(...chunk);
@@ -266,7 +266,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   const clusterMap = new Map();
 
   for (const row of rows) {
-    if (row.status === 'submitted' || row.status === 'pre_resolved' || row.status === 'reached_review') continue;
+    if (row.status === 'submitted' || row.status === 'pre_resolved' || row.status === 'reached_review' || row.status === 'failed') continue;
     const rawUrl = String(row.job_url || '').trim();
     if (!rawUrl) continue;
 
@@ -306,15 +306,15 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
     let awlList = [];
     if (rawAwl.startsWith('[') && rawAwl.endsWith(']')) {
       try {
-        awlList = JSON.parse(rawAwl).map((s) => String(s).trim().toUpperCase()).filter(Boolean);
+        awlList = JSON.parse(rawAwl).map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean);
       } catch {}
     }
     if (!awlList.length) {
       awlList = rawAwl.includes(',')
-        ? rawAwl.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+        ? rawAwl.split(',').map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean)
         : (Array.isArray(row.client_ids) && row.client_ids.length > 0
-            ? row.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-            : [rawAwl]);
+            ? row.client_ids.map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean)
+            : [rawAwl.replace(/["'\[\]\\]/g, '').trim().toUpperCase()].filter(Boolean));
     }
 
     for (const singleAwl of awlList) {
@@ -353,36 +353,21 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
 }
 
 /**
- * Reset all tasks in a cluster to 'pending' by task IDs (immune to URL variations).
+ * Reset all tasks in a cluster to 'pending' by task IDs or URLs.
  */
 export async function resetClusterTasksByIds(taskIds = []) {
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
-    const CHUNK_SIZE = 40;
-    for (let i = 0; i < taskIds.length; i += CHUNK_SIZE) {
-      const chunk = taskIds.slice(i, i + CHUNK_SIZE);
-      const isComposite = chunk.some((id) => String(id).includes(':::'));
-      if (isComposite) {
-        for (const cid of chunk) {
-          const [awlId, ...rest] = String(cid).split(':::');
-          const jUrl = rest.join(':::');
-          await queueDbRequest('batch_job_queue', {
-            method: 'PATCH',
-            query: `?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(jUrl)}`,
-            prefer: 'return=minimal',
-            body: {
-              status: 'pending',
-              worker_id: null,
-              locked_at: null,
-              updated_at: new Date().toISOString(),
-            },
-          }).catch(() => { });
-        }
-      } else {
-        const idFilter = chunk.map((id) => encodeURIComponent(String(id).trim())).join(',');
+    const isComposite = taskIds.some((id) => String(id).includes(':::'));
+    if (isComposite) {
+      const urls = Array.from(new Set(taskIds.map((cid) => {
+        const [, ...rest] = String(cid).split(':::');
+        return rest.join(':::');
+      }).filter(Boolean)));
+      for (const jUrl of urls) {
         await queueDbRequest('batch_job_queue', {
           method: 'PATCH',
-          query: `?id=in.(${idFilter})`,
+          query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
           prefer: 'return=minimal',
           body: {
             status: 'pending',
@@ -390,8 +375,21 @@ export async function resetClusterTasksByIds(taskIds = []) {
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
-        });
+        }).catch(() => { });
       }
+    } else {
+      const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
+      await queueDbRequest('batch_job_queue', {
+        method: 'PATCH',
+        query: `?id=in.(${idFilter})`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'pending',
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      });
     }
   } catch (err) {
     console.log(`  ⚠️ Note on queue reset: ${err.message}`);
@@ -399,45 +397,43 @@ export async function resetClusterTasksByIds(taskIds = []) {
 }
 
 /**
- * Fail/skip multiple cluster tasks by their specific IDs in Supabase.
+ * Fail/skip multiple cluster tasks by their specific IDs or URLs in Supabase.
  */
 export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired on Workday') {
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
-    const CHUNK_SIZE = 40;
-    for (let i = 0; i < taskIds.length; i += CHUNK_SIZE) {
-      const chunk = taskIds.slice(i, i + CHUNK_SIZE);
-      const isComposite = chunk.some((id) => String(id).includes(':::'));
-      if (isComposite) {
-        for (const cid of chunk) {
-          const [awlId, ...rest] = String(cid).split(':::');
-          const jUrl = rest.join(':::');
-          await queueDbRequest('batch_job_queue', {
-            method: 'PATCH',
-            query: `?applywizz_id=eq.${encodeURIComponent(awlId)}&job_url=eq.${encodeURIComponent(jUrl)}`,
-            prefer: 'return=minimal',
-            body: {
-              status: 'failed',
-              locked_at: null,
-              updated_at: new Date().toISOString(),
-            },
-          }).catch(() => { });
-        }
-      } else {
-        const idFilter = chunk.map((id) => encodeURIComponent(String(id).trim())).join(',');
+    const isComposite = taskIds.some((id) => String(id).includes(':::'));
+    if (isComposite) {
+      const urls = Array.from(new Set(taskIds.map((cid) => {
+        const [, ...rest] = String(cid).split(':::');
+        return rest.join(':::');
+      }).filter(Boolean)));
+      for (const jUrl of urls) {
         await queueDbRequest('batch_job_queue', {
           method: 'PATCH',
-          query: `?id=in.(${idFilter})`,
+          query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
           prefer: 'return=minimal',
           body: {
             status: 'failed',
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
-        });
+        }).catch(() => { });
       }
+    } else {
+      const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
+      await queueDbRequest('batch_job_queue', {
+        method: 'PATCH',
+        query: `?id=in.(${idFilter})`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'failed',
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      });
     }
-    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} follower tasks marked status = 'failed' | reason: ${reason})\n`);
+    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} candidate tasks marked status = 'failed' | reason: ${reason})\n`);
   } catch (err) {
     console.log(`  ⚠️ Note on failing cluster tasks: ${err.message}`);
   }
@@ -577,7 +573,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
   // Parse all sibling AWL IDs
   const allSiblingAwlIds = Array.from(new Set(
-    allTasks.flatMap((t) => String(t.applywizz_id || '').split(',').map((s) => s.trim().toUpperCase()).filter(Boolean))
+    allTasks.flatMap((t) => String(t.applywizz_id || '').split(',').map((s) => s.replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean))
   ));
 
   const candidateTask = {
@@ -680,22 +676,25 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
         console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
         try {
-          const isComposite = allTaskIds.some((id) => String(id).includes(':::'));
-          const query = isComposite || !allTaskIds.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(String(id)))
-            ? `?job_url=eq.${encodeURIComponent(jobUrl)}`
-            : `?id=in.(${allTaskIds.join(',')})`;
-          await queueDbRequest('batch_job_queue', {
-            method: 'PATCH',
-            query,
-            prefer: 'return=minimal',
-            body: {
-              status: 'pending',
-              attempt_count: nextAttempt,
-              worker_id: null,
-              locked_at: null,
-              updated_at: new Date().toISOString(),
-            },
-          });
+          const urlsToRetry = Array.from(new Set([
+            ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
+            jobUrl,
+            ...(cluster.rawUrls || []),
+          ]));
+          for (const u of urlsToRetry) {
+            await queueDbRequest('batch_job_queue', {
+              method: 'PATCH',
+              query: `?job_url=eq.${encodeURIComponent(u)}`,
+              prefer: 'return=minimal',
+              body: {
+                status: 'pending',
+                attempt_count: nextAttempt,
+                worker_id: null,
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+              },
+            }).catch(() => {});
+          }
         } catch (rqErr) {
           console.warn(`⚠️ [${workerId}] Failed to update attempt_count for retry: ${rqErr.message}`);
         }
@@ -892,9 +891,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
         uniqueCandidateTasksMap.set(singleId, {
           ...t,
-          id: `${singleId}:::${t.job_url || jobUrl}`,
+          id: `${singleId}:::${jobUrl}`,
           applywizz_id: singleId,
           applywizzId: singleId,
+          job_url: jobUrl,
         });
       }
     }
@@ -912,6 +912,20 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       });
     }
   }
+
+  // Ensure the lead candidate profile used for scanning is explicitly included in job_distributions!
+  const leadAwl = String(blueprintTask?.applywizz_id || MOCK_SCAN_CLIENT_ID).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+  if (leadAwl && !uniqueCandidateTasksMap.has(leadAwl)) {
+    uniqueCandidateTasksMap.set(leadAwl, {
+      id: `${leadAwl}:::${jobUrl}`,
+      applywizz_id: leadAwl,
+      applywizzId: leadAwl,
+      job_url: jobUrl,
+      company,
+      role_title: role,
+    });
+  }
+
   const dedupedAllTasks = Array.from(uniqueCandidateTasksMap.values());
 
   const distributionRows = [];
@@ -957,38 +971,19 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         return true;
       });
 
-      // Merge blueprint/master resolved answers for any question that candidate profile didn't answer
-      for (const q of harvestedQuestions) {
-        const qLabel = q.question || q.label || '';
-        const norm = qLabel.trim().toLowerCase();
-        if (!answersMap[qLabel] && !answersMap[norm]) {
-          const blueprintMatch = leadAnswers.find(la => la.question === qLabel || la.question?.trim().toLowerCase() === norm);
-          if (blueprintMatch?.answer) {
-            answersMap[qLabel] = blueprintMatch.answer;
-            structuredAnswers.push({
-              question: qLabel,
-              answer: blueprintMatch.answer,
-              field_type: q.field_type || 'text',
-              step: q.step || 'Application Questions',
-              is_answered: true,
-              source: 'blueprint_master',
-            });
-          }
-        }
-      }
+      // Strict Authentic 5-Tier Resolution: YAML is completely halted for job_distributions.
+      // Every profile (including the lead) is evaluated solely by authentic 5-tier answers.
+      const unansweredCount = unansweredQuestions.length;
+      const isFullyAnswered = (unansweredCount === 0);
+      const clientStatus = isFullyAnswered ? 'ready_for_review' : 'needs_answers';
 
-      // Per user instruction: all clients are answered completely across 5 tiers and marked ready_for_review!
-      const clientStatus = 'ready_for_review';
-      const isFullyAnswered = true;
-      const unansweredCount = 0;
-
-      console.log(`   ⚡ [Phase 3 Client #${idx + 1}: ${awlId}] Resolved ${structuredAnswers.length}/${harvestedQuestions.length} questions across 5 tiers | Status: "${clientStatus}" | Ready for Review`);
+      console.log(`   ⚡ [Phase 3 Client #${idx + 1}: ${awlId}] Resolved ${answeredCount}/${harvestedQuestions.length} questions across 5 tiers | Status: "${clientStatus}" (${isFullyAnswered ? '100% complete' : `${unansweredCount} missing`})`);
 
       return {
         taskId: task.id,
         applywizzId: awlId,
         jobId: task.job_id || cluster.reqId || null,
-        jobUrl: task.job_url || jobUrl,
+        jobUrl,
         company: task.company || company,
         roleTitle: task.role_title || role,
         leadApplywizzId: blueprintTask.applywizz_id,
@@ -1044,20 +1039,29 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_for_review');
     if (readyToReviewRows.length > 0) {
       try {
-        const submissionPayloads = readyToReviewRows.map((r) => ({
-          applywizz_id: r.applywizzId,
-          job_url: r.jobUrl,
-          company: r.company || company,
-          role_title: r.roleTitle || role,
-          status: 'ready_for_review',
-          created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        }));
+        const jdIds = await queueDbRequest('job_distributions', {
+          query: `?job_url=eq.${encodeURIComponent(jobUrl)}&select=id,applywizz_id,job_url`,
+        }).catch(() => []);
+        const jdMap = new Map((jdIds || []).map((j) => [`${String(j.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()}:::${j.job_url}`, j.id]));
+
+        const submissionPayloads = readyToReviewRows.map((r) => {
+          const cleanAwl = String(r.applywizzId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          return {
+            distribution_id: jdMap.get(`${cleanAwl}:::${r.jobUrl}`) || null,
+            applywizz_id: cleanAwl,
+            job_url: r.jobUrl,
+            company: r.company || company,
+            role_title: r.roleTitle || role,
+            status: 'ready_for_review',
+            created_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          };
+        });
 
         await queueDbRequest('submission_tasks', {
           method: 'POST',
           query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=ignore-duplicates,return=minimal',
+          prefer: 'resolution=merge-duplicates,return=minimal',
           body: submissionPayloads,
         });
         console.log(`\n📋 [${workerId}] PHASE 4 RECORDED: ${submissionPayloads.length} client application(s) entered submission_tasks at ready_for_review. Stopped here.`);
@@ -1230,7 +1234,11 @@ export async function runClusterBatchRunner({
   }
   console.log(`${'═'.repeat(78)}\n`);
 
-  // Step 1: Cluster links canonically and select top N
+  // Step 1: Dynamically synchronize batch_job_queue with completed scanned_jobs and failed_jobs
+  const { syncQueueWithScannedAndFailedJobs } = await import('./supabaseClient.mjs');
+  await syncQueueWithScannedAndFailedJobs().catch(() => {});
+
+  // Step 2: Cluster links canonically and select top N
   console.log(`🔍 Canonicalizing & clustering URLs from Supabase batch_job_queue...`);
   const topClusters = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId });
 
@@ -1346,15 +1354,18 @@ export async function runClusterBatchRunner({
           scanRunId,
         });
       } catch (err) {
-        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${cluster.canonicalUrl}): ${err.message}`);
+        const errorUrl = cluster.jobUrl || cluster.primaryRawUrl || cluster.canonicalKey || 'Unknown URL';
+        console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${errorUrl}): ${err.message}`);
         try {
           const { recordFailedJob } = await import('./supabaseClient.mjs');
           const firstTask = cluster.tasks?.[0];
           if (firstTask) {
             await recordFailedJob({
               applywizzId: firstTask.applywizz_id,
+              clientIds: Array.from(new Set(cluster.tasks.map((t) => t.applywizz_id).filter(Boolean))),
+              clientCount: cluster.clientCount || 1,
               jobId: firstTask.job_id || cluster.reqId || null,
-              jobUrl: cluster.canonicalUrl,
+              jobUrl: errorUrl,
               company: cluster.company,
               roleTitle: cluster.roleTitle,
               failureReason: `Worker error: ${err.message?.slice(0, 300)}`,
@@ -1371,7 +1382,7 @@ export async function runClusterBatchRunner({
         } catch {}
         res = {
           workerId,
-          jobUrl: cluster.canonicalUrl,
+          jobUrl: errorUrl,
           company: cluster.company,
           role: cluster.roleTitle,
           total: cluster.clientCount,

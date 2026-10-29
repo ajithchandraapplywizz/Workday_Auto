@@ -2764,15 +2764,16 @@ export async function recordJobDistributions({
         ? Number(c.unansweredCount)
         : clientUnanswered.length;
       const clientIsFully = (clientCountUnanswered === 0);
-      // Per user instruction: all clients distributed with blueprint master/5-tier answers are marked ready_for_review!
-      let clientStatus = 'ready_for_review';
-      if (typeof c === 'object' && (c.status === 'submitted' || c.status === 'applying')) {
-        clientStatus = c.status;
+      let clientStatus = (typeof c === 'object' && c.status)
+        ? c.status
+        : (clientIsFully ? 'ready_for_review' : 'needs_answers');
+      if (!clientIsFully && clientStatus === 'ready_for_review') {
+        clientStatus = 'needs_answers';
       }
       const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : null;
 
       return {
-        applywizz_id: String(awlId).trim().toUpperCase(),
+        applywizz_id: String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase(),
         job_id: specificJobId ? String(specificJobId).trim() : null,
         job_url: String(specificJobUrl).trim(),
         scanned_job_id: scannedJobRecord?.id || null,
@@ -2829,7 +2830,13 @@ export async function recordJobDistributions({
     const readyToReviewRows = rows.filter((r) => r.status === 'ready_for_review');
     if (readyToReviewRows.length > 0) {
       try {
+        const jdIds = await request('job_distributions', {
+          query: `?job_url=eq.${encode(cleanUrl)}&select=id,applywizz_id,job_url`,
+        }).catch(() => []);
+        const jdMap = new Map((jdIds || []).map((j) => [`${j.applywizz_id}:::${j.job_url}`, j.id]));
+
         const submissionRows = readyToReviewRows.map((r) => ({
+          distribution_id: jdMap.get(`${r.applywizz_id}:::${r.job_url}`) || null,
           applywizz_id: r.applywizz_id,
           job_url: r.job_url,
           company: r.company || cleanCompany,
@@ -2841,8 +2848,14 @@ export async function recordJobDistributions({
         await request('submission_tasks', {
           method: 'POST',
           query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=ignore-duplicates,return=minimal',
+          prefer: 'resolution=merge-duplicates,return=minimal',
           body: submissionRows,
+        }).catch(async (primaryErr) => {
+          await request('submission_tasks', {
+            method: 'POST',
+            prefer: 'return=minimal',
+            body: submissionRows,
+          }).catch(() => {});
         });
         console.log(`   📋 [submission_tasks] Recorded ${submissionRows.length} 'ready_for_review' application(s) into submission_tasks. Stopped here.`);
       } catch (stErr) {
@@ -3042,4 +3055,66 @@ export async function recordFailedJob({
     return false;
   }
 }
+
+/**
+ * Dynamically synchronizes batch_job_queue statuses on every scan run or trigger:
+ * - Scanned jobs (in scanned_jobs with completed status) -> reached_review in batch_job_queue
+ * - Failed/expired jobs (in failed_jobs) -> failed in batch_job_queue
+ */
+export async function syncQueueWithScannedAndFailedJobs() {
+  if (!isSupabaseConfigured()) return { scanned: 0, failed: 0 };
+  try {
+    const sj = await request('scanned_jobs', { query: '?select=job_url&scan_status=eq.completed&limit=5000' });
+    const fj = await request('failed_jobs', { query: '?select=job_url&limit=5000' });
+    const bq = await request('batch_job_queue', { query: '?select=id,job_url,status&limit=5000' });
+
+    if (!Array.isArray(bq) || bq.length === 0) return { scanned: 0, failed: 0 };
+
+    const scannedUrls = new Set((sj || []).map((r) => String(r.job_url || '').trim()));
+    const failedUrls = new Set((fj || []).map((r) => String(r.job_url || '').trim()));
+
+    let markedScanned = 0;
+    let markedFailed = 0;
+
+    for (const row of bq) {
+      const rawUrl = String(row.job_url || '').trim();
+      if (scannedUrls.has(rawUrl) && row.status !== 'reached_review' && row.status !== 'submitted') {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query: `?id=eq.${row.id}`,
+          prefer: 'return=minimal',
+          body: {
+            status: 'reached_review',
+            worker_id: null,
+            locked_at: null,
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => {});
+        markedScanned++;
+      } else if (failedUrls.has(rawUrl) && row.status !== 'failed' && row.status !== 'submitted') {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query: `?id=eq.${row.id}`,
+          prefer: 'return=minimal',
+          body: {
+            status: 'failed',
+            worker_id: null,
+            locked_at: null,
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => {});
+        markedFailed++;
+      }
+    }
+
+    if (markedScanned > 0 || markedFailed > 0) {
+      console.log(`⚡ [queue_sync] Dynamically synchronized batch_job_queue: ${markedScanned} marked reached_review, ${markedFailed} marked failed.`);
+    }
+    return { scanned: markedScanned, failed: markedFailed };
+  } catch (err) {
+    console.warn(`⚠️ [queue_sync] Error syncing queue with scanned/failed jobs: ${err.message}`);
+    return { scanned: 0, failed: 0 };
+  }
+}
+
 

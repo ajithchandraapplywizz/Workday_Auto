@@ -390,6 +390,9 @@ async function runStage1Scanning() {
 
   console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with 2 scanning workers (${PIPELINE_CONFIG.scanWorkerIds.slice(0, 2).join(', ')}) under run ${scanRunId}...`);
 
+  const { syncQueueWithScannedAndFailedJobs } = await import('../lib/supabaseClient.mjs');
+  await syncQueueWithScannedAndFailedJobs().catch(() => {});
+
   const { runClusterBatchRunner } = await import('../lib/clusterBatchRunner.mjs');
   await runClusterBatchRunner({
     scanRunId,

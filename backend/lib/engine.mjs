@@ -2903,7 +2903,7 @@ async function handleMultiSelect(page, el, values, fieldName) {
 }
 
 // ─── Main fill function ─────────────────────────────────────────────────────
-export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, isBatch = false, profile: profileIn = null, headless = true } = {}) {
+export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode = 'signin', browser: existingBrowser, context: existingContext, page: existingPage, confirmSubmit = false, dryRun = false, isBatch = false, profile: profileIn = null, headless = true, isScanOnly = false, isClusterBlueprint = false } = {}) {
   console.log(`📝 Fill mode: ${url}`);
 
   const ats = detectATS(url);
@@ -2948,6 +2948,8 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
     const profile = profileIn || await loadProfile().catch(() => ({}));
     activeProfile = profile;
+    if (isScanOnly || profile._isScanOnly) profile._isScanOnly = true;
+    if (isClusterBlueprint || profile._isClusterBlueprint) profile._isClusterBlueprint = true;
     if (url) {
       profile._canonicalJobUrl = url;
       profile._jobUrl = url;

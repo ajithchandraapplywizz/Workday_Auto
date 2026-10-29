@@ -47,6 +47,13 @@ import {
 import { buildLlmDateContext } from '../date-utils.mjs';
 import { validateBeforeFill } from '../orchestrator/preFillValidator.mjs';
 import { pickCompensationFromOptions, isCurrencyRequiredQuestion, formatSalaryWithCurrency } from '../compensationPick.mjs';
+import {
+  findAnswerFromQaBankTable,
+  findAnswerFromLocalYaml,
+  findSemanticMatchInQaBank,
+  findAnswerFromQaBank,
+  saveMasterYamlTemplate,
+} from '../masterYamlManager.mjs';
 
 function isAvailabilityDropdown(field, intent) {
   const type = String(field?.fieldType || field?.elementType || '').toLowerCase();
@@ -373,7 +380,30 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
   // option such as Immediately or 1 week. Let the LLM map date to live options.
   if (isAvailabilityDropdown(field, intent)) return null;
 
-  // ─── Tier 2: ApplyWizz API Profile Facts ─────────────────────────
+  // ─── Tier 2: Resume Parsing Facts ─────────────────────────────────
+  const fromExperience = resolveExperienceQuestionAnswer(label, profile, {
+    options: optionsOf(field),
+    fieldType: field.fieldType || field.elementType || '',
+  });
+  if (fromExperience?.answer) {
+    const expAccepted = acceptClientValue(label, fromExperience.answer, {
+      options: optionsOf(field),
+      fieldType: field.fieldType || field.elementType || '',
+      profile,
+    });
+    if (expAccepted) {
+      return finish(
+        field,
+        intent,
+        expAccepted,
+        `experience/${fromExperience.source || 'resume'}`,
+        REASON.EXPLICIT_PROFILE_MATCH,
+        0.95,
+      );
+    }
+  }
+
+  // ─── Tier 3: ApplyWizz CRM API Profile Facts ───────────────────────
   const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
     options: optionsOf(field),
     fieldType: field.fieldType || field.elementType || '',
@@ -392,7 +422,7 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
         apiAccepted,
         SOURCE.APPLYWIZZ,
         /fuzzy|substring/.test(String(fromApi.source || '')) ? REASON.SEMANTIC_PROFILE_MATCH : REASON.EXPLICIT_PROFILE_MATCH,
-        /fuzzy|substring/.test(String(fromApi.source || '')) ? 0.86 : 0.97,
+        /fuzzy|substring/.test(String(fromApi.source || '')) ? 0.86 : 0.94,
       );
     }
   }
@@ -406,29 +436,6 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
       return reviewRecord(field, intent, REASON.HIGH_RISK_MISSING_DATA, { answerType });
     }
     return finish(field, intent, peeked, inferSource(label, profile, peeked), REASON.EXPLICIT_PROFILE_MATCH, 0.93);
-  }
-
-  // ─── Tier 3: Resume Parsing Facts ─────────────────────────────────
-  const fromExperience = resolveExperienceQuestionAnswer(label, profile, {
-    options: optionsOf(field),
-    fieldType: field.fieldType || field.elementType || '',
-  });
-  if (fromExperience?.answer) {
-    const expAccepted = acceptClientValue(label, fromExperience.answer, {
-      options: optionsOf(field),
-      fieldType: field.fieldType || field.elementType || '',
-      profile,
-    });
-    if (expAccepted) {
-      return finish(
-        field,
-        intent,
-        expAccepted,
-        `experience/${fromExperience.source || 'resume'}`,
-        REASON.EXPLICIT_PROFILE_MATCH,
-        0.92,
-      );
-    }
   }
 
   if (isHighRiskIntent(intent) || isComplianceSensitive(label)) {
@@ -481,13 +488,66 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
     const intent = classifyQuestionIntent(field.label, field);
     const availabilityDropdown = isAvailabilityDropdown(field, intent);
     let record = resolveFieldWithoutLlm(field, profile);
-    const hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '' && !record.requiresReview);
+    let hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '' && !record.requiresReview);
+
+    const isSubmission = !Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+
+    // ─── Tier 4: QA Bank Table & Memory Cache ────────────────────────
     if (!hasResolvedAnswer) {
-      const mem = availabilityDropdown ? null : await resolveVerifiedMemory(field, profile, opts.qaStore);
-      if (mem && !mem.requiresReview && mem.answer != null && String(mem.answer).trim() !== '') {
-        record = mem;
+      try {
+        const qaHit = await findAnswerFromQaBankTable({
+          questionLabel: field.label,
+          options: optionsOf(field),
+          tenant: profile?._tenant || 'global',
+          isSubmission,
+        });
+        if (qaHit) {
+          console.log(`  🏦 [Tier 4: QA Bank Match] "${field.label.slice(0, 50)}" ← "${qaHit}"`);
+          record = finish(field, intent, qaHit, 'qa_bank', REASON.EXPLICIT_PROFILE_MATCH, 0.94);
+          hasResolvedAnswer = true;
+        }
+      } catch {}
+    }
+
+    // ─── Tier 5: Semantic Fuzzy Matching (Supabase + Resume + QA Bank) ──
+    if (!hasResolvedAnswer) {
+      try {
+        const semanticHit = findSemanticMatchInQaBank({
+          questionLabel: field.label,
+          options: optionsOf(field),
+          threshold: 0.80,
+        });
+        if (semanticHit) {
+          console.log(`  🔍 [Tier 5: Semantic Match] "${field.label.slice(0, 50)}" ← "${semanticHit}"`);
+          record = finish(field, intent, semanticHit, 'semantic_match', REASON.SEMANTIC_PROFILE_MATCH, 0.88);
+          hasResolvedAnswer = true;
+        }
+      } catch {}
+      if (!hasResolvedAnswer && !availabilityDropdown) {
+        const mem = await resolveVerifiedMemory(field, profile, opts.qaStore);
+        if (mem && !mem.requiresReview && mem.answer != null && String(mem.answer).trim() !== '') {
+          record = mem;
+          hasResolvedAnswer = true;
+        }
       }
     }
+
+    // ─── Tier 6: Master YAML Reference Template (Scanning Only) ───────
+    if (!hasResolvedAnswer && !isSubmission) {
+      try {
+        const yamlHit = findAnswerFromLocalYaml({
+          questionLabel: field.label,
+          options: optionsOf(field),
+          isSubmission,
+        });
+        if (yamlHit) {
+          console.log(`  📄 [Tier 6: Master YAML Match] "${field.label.slice(0, 50)}" ← "${yamlHit}"`);
+          record = finish(field, intent, yamlHit, 'master_yaml', REASON.EXPLICIT_PROFILE_MATCH, 0.85);
+          hasResolvedAnswer = true;
+        }
+      } catch {}
+    }
+
     if (record && !record.requiresReview && record.answer != null && String(record.answer).trim() !== '') {
       answers.push(record);
       continue;
@@ -508,7 +568,7 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
   }
 
   if (unknown.length) {
-    console.log(`  🧠 Question engine: ${unknown.length} unknown field(s) on page ${pageNumber} → ${isOpenRouterEnabled() ? 'one LLM batch' : 'review (LLM off)'}`);
+    console.log(`  🧠 Question engine: ${unknown.length} unknown field(s) on page ${pageNumber} → ${isOpenRouterEnabled() ? 'one LLM batch (Tier 7)' : 'review (LLM off)'}`);
     const batchRaw = await analyzeUnknownQuestionsBatch(unknown, profile, {
       resumePath: opts.resumePath || profile._resumePath,
     });
@@ -525,6 +585,22 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
     for (const item of unknown) {
       const llm = byId.get(item.questionId);
       if (llm?.answer && !llm.requiresReview) {
+        const isScanMode = Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+        if (isScanMode) {
+          console.log(`  🧠 [Tier 7: LLM Scan Learning] "${item.label.slice(0, 50)}" ← "${llm.answer}" (stored in YAML & QA Bank)`);
+          saveMasterYamlTemplate([{
+            question: item.label,
+            field_type: item.elementType || item.field?.fieldType || 'text',
+            step: opts.stepName || 'Application Questions',
+            options: item.options || [],
+            value: llm.answer,
+            source: 'llm_scan_learned',
+          }], {
+            tenant: profile?._tenant || 'global',
+            company: profile?._company || '',
+            roleTitle: profile?._roleTitle || '',
+          }).catch(() => {});
+        }
         answers.push(finish(
           item.field,
           item.intent,
@@ -542,6 +618,22 @@ export async function answerPageQuestions(fields = [], profile = {}, opts = {}) 
       });
       if (playwrightLlm?.answer && !playwrightLlm.requiresReview) {
         console.log(`    🤖 [LLM+DOM] "${item.label.slice(0, 55)}" ← "${String(playwrightLlm.answer).slice(0, 40)}"`);
+        const isScanMode = Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+        if (isScanMode) {
+          console.log(`  🧠 [Tier 7: LLM Scan Learning] "${item.label.slice(0, 50)}" ← "${playwrightLlm.answer}" (stored in YAML & QA Bank)`);
+          saveMasterYamlTemplate([{
+            question: item.label,
+            field_type: item.elementType || item.field?.fieldType || 'text',
+            step: opts.stepName || 'Application Questions',
+            options: item.options || [],
+            value: playwrightLlm.answer,
+            source: 'llm_scan_learned',
+          }], {
+            tenant: profile?._tenant || 'global',
+            company: profile?._company || '',
+            roleTitle: profile?._roleTitle || '',
+          }).catch(() => {});
+        }
         answers.push(playwrightLlm);
         continue;
       }
@@ -605,9 +697,63 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
   const qaStore = opts.qaStore;
 
   let record = resolveFieldWithoutLlm(normalized, profile);
-  const hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
+  let hasResolvedAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
+
+  const isSubmission = !Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+
+  // ─── Tier 4: QA Bank Table ───────────────────────────────────────
   if (!hasResolvedAnswer) {
-    record = availabilityDropdown ? null : await resolveVerifiedMemory(normalized, profile, qaStore);
+    try {
+      const qaHit = await findAnswerFromQaBankTable({
+        questionLabel: normalized.label,
+        options: optionsOf(normalized),
+        tenant: profile?._tenant || 'global',
+        isSubmission,
+      });
+      if (qaHit) {
+        console.log(`  🏦 [Tier 4: QA Bank Match] "${normalized.label.slice(0, 50)}" ← "${qaHit}"`);
+        record = finish(normalized, intent, qaHit, 'qa_bank', REASON.EXPLICIT_PROFILE_MATCH, 0.94);
+        hasResolvedAnswer = true;
+      }
+    } catch {}
+  }
+
+  // ─── Tier 5: Semantic Fuzzy Matching ─────────────────────────────
+  if (!hasResolvedAnswer) {
+    try {
+      const semanticHit = findSemanticMatchInQaBank({
+        questionLabel: normalized.label,
+        options: optionsOf(normalized),
+        threshold: 0.80,
+      });
+      if (semanticHit) {
+        console.log(`  🔍 [Tier 5: Semantic Match] "${normalized.label.slice(0, 50)}" ← "${semanticHit}"`);
+        record = finish(normalized, intent, semanticHit, 'semantic_match', REASON.SEMANTIC_PROFILE_MATCH, 0.88);
+        hasResolvedAnswer = true;
+      }
+    } catch {}
+    if (!hasResolvedAnswer && !availabilityDropdown) {
+      record = await resolveVerifiedMemory(normalized, profile, qaStore);
+      if (record && record.answer != null && String(record.answer).trim() !== '') {
+        hasResolvedAnswer = true;
+      }
+    }
+  }
+
+  // ─── Tier 6: Master YAML Reference Template (Scanning Only) ───────
+  if (!hasResolvedAnswer && !isSubmission) {
+    try {
+      const yamlHit = findAnswerFromLocalYaml({
+        questionLabel: normalized.label,
+        options: optionsOf(normalized),
+        isSubmission,
+      });
+      if (yamlHit) {
+        console.log(`  📄 [Tier 6: Master YAML Match] "${normalized.label.slice(0, 50)}" ← "${yamlHit}"`);
+        record = finish(normalized, intent, yamlHit, 'master_yaml', REASON.EXPLICIT_PROFILE_MATCH, 0.85);
+        hasResolvedAnswer = true;
+      }
+    } catch {}
   }
 
   const hasMemoryAnswer = Boolean(record && record.answer != null && String(record.answer).trim() !== '');
@@ -636,6 +782,22 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
         }));
     const llm = batch[0];
     if (llm?.answer && !llm.requiresReview) {
+      const isScanMode = Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+      if (isScanMode) {
+        console.log(`  🧠 [Tier 7: LLM Scan Learning] "${normalized.label.slice(0, 50)}" ← "${llm.answer}" (stored in YAML & QA Bank)`);
+        saveMasterYamlTemplate([{
+          question: normalized.label,
+          field_type: normalized.elementType || normalized.fieldType || 'text',
+          step: opts.stepName || profile._currentStep || 'Application Questions',
+          options: optionsOf(normalized),
+          value: llm.answer,
+          source: 'llm_scan_learned',
+        }], {
+          tenant: profile?._tenant || 'global',
+          company: profile?._company || '',
+          roleTitle: profile?._roleTitle || '',
+        }).catch(() => {});
+      }
       record = finish(
         normalized,
         intent,
@@ -654,6 +816,24 @@ export async function resolveDynamicAnswer(rawField = {}, profile = {}, opts = {
       resumePath: opts.resumePath || profile._resumePath,
       stepName: opts.stepName,
     });
+    if (record?.answer && !record.requiresReview) {
+      const isScanMode = Boolean(profile._isScanOnly || profile._isClusterBlueprint);
+      if (isScanMode) {
+        console.log(`  🧠 [Tier 7: LLM Scan Learning] "${normalized.label.slice(0, 50)}" ← "${record.answer}" (stored in YAML & QA Bank)`);
+        saveMasterYamlTemplate([{
+          question: normalized.label,
+          field_type: normalized.elementType || normalized.fieldType || 'text',
+          step: opts.stepName || profile._currentStep || 'Application Questions',
+          options: optionsOf(normalized),
+          value: record.answer,
+          source: 'llm_scan_learned',
+        }], {
+          tenant: profile?._tenant || 'global',
+          company: profile?._company || '',
+          roleTitle: profile?._roleTitle || '',
+        }).catch(() => {});
+      }
+    }
   }
 
   // ─── Layer 4: Live Best-Fit Fallback for Required Degree Dropdown ───────
