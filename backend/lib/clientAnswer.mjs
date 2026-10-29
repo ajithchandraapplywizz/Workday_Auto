@@ -10,7 +10,15 @@
  * Default: API-only mode — no profile.yml qa_answers or local qa-store (USE_LOCAL_PROFILE_QA=1 to restore).
  */
 
-import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured, saveApplyWizzClientAnswer } from './applyWizzClient.mjs';
+import {
+  hydrateProfileFromApplyWizz,
+  resolveDomQuestionFromApplyWizz,
+  isApplyWizzConfigured,
+  saveApplyWizzClientAnswer,
+  alignAnswerToWorkdayOptions,
+  stripWorkdayQuestionLabel,
+} from './applyWizzClient.mjs';
+import { tokenSetRatio, fuzzyScore } from './fields.mjs';
 import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
 import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './claudeLlm.mjs';
 import {
@@ -249,6 +257,101 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
 }
 
 /**
+ * Tier 0: Direct JSON Lookup for Pre-Resolved Answers from job_distributions.
+ * During scanning, all questions were answered and stored in job_distributions.resolved_answers.
+ * Applications in ready_for_review have 100% complete answers in this JSON.
+ */
+export function lookupResolvedAnswerFromProfile(rawLabel, profile = {}, opts = {}) {
+  if (!rawLabel || !profile) return null;
+  const stripped = stripWorkdayQuestionLabel(rawLabel);
+  const norm = normalizeLabel(stripped || rawLabel);
+  if (!norm) return null;
+
+  const options = opts.options || [];
+  const fieldType = opts.fieldType || '';
+
+  // 1. Direct Map lookup if initialized on profile
+  const map = profile._resolvedAnswersMap;
+  if (map instanceof Map && map.size > 0) {
+    const entry = map.get(norm)
+      || map.get(rawLabel)
+      || map.get(String(rawLabel).toLowerCase().trim())
+      || map.get(stripped)
+      || map.get(normalizeLabel(rawLabel));
+    if (entry && entry.answer !== undefined && entry.answer !== null && String(entry.answer).trim() !== '') {
+      let aligned = entry.answer;
+      if (options.length > 0 && /dropdown|select|combobox|radio/i.test(fieldType)) {
+        aligned = alignAnswerToWorkdayOptions(entry.answer, options, fieldType) || entry.answer;
+      }
+      return {
+        answer: aligned,
+        source: 'job_distributions_resolved_answers',
+        field_type: fieldType,
+        tier: 0,
+        matched_question: entry.rawQ || rawLabel,
+      };
+    }
+  }
+
+  // 2. Scan array profile._resolvedAnswersJson
+  const list = profile._resolvedAnswersJson
+    || profile._resolvedAnswers
+    || (Array.isArray(profile.resolved_answers) ? profile.resolved_answers : null);
+
+  if (Array.isArray(list) && list.length > 0) {
+    // First pass: Exact or normalized match
+    for (const item of list) {
+      if (!item) continue;
+      const ans = item.answer ?? item.value;
+      if (ans === undefined || ans === null || String(ans).trim() === '') continue;
+      const q = String(item.question || item.label || item.question_label || '').trim();
+      const itemNorm = item.question_normalized || normalizeLabel(stripWorkdayQuestionLabel(q));
+      if (itemNorm === norm || normalizeLabel(q) === norm || q.toLowerCase() === String(rawLabel).toLowerCase().trim()) {
+        let aligned = ans;
+        if (options.length > 0 && /dropdown|select|combobox|radio/i.test(fieldType)) {
+          aligned = alignAnswerToWorkdayOptions(ans, options, fieldType) || ans;
+        }
+        return {
+          answer: aligned,
+          source: 'job_distributions_resolved_answers',
+          field_type: fieldType,
+          tier: 0,
+          matched_question: q,
+        };
+      }
+    }
+
+    // Second pass: Token set / Fuzzy match (threshold 0.85)
+    for (const item of list) {
+      if (!item) continue;
+      const ans = item.answer ?? item.value;
+      if (ans === undefined || ans === null || String(ans).trim() === '') continue;
+      const q = String(item.question || item.label || item.question_label || '').trim();
+      const itemNorm = item.question_normalized || normalizeLabel(stripWorkdayQuestionLabel(q));
+      if (!itemNorm) continue;
+
+      const sim = Math.max(tokenSetRatio(itemNorm, norm), fuzzyScore(itemNorm, norm));
+      if (sim >= 0.85) {
+        let aligned = ans;
+        if (options.length > 0 && /dropdown|select|combobox|radio/i.test(fieldType)) {
+          aligned = alignAnswerToWorkdayOptions(ans, options, fieldType) || ans;
+        }
+        return {
+          answer: aligned,
+          source: 'job_distributions_resolved_answers',
+          field_type: fieldType,
+          tier: 0,
+          matched_question: q,
+          similarity: sim,
+        };
+      }
+    }
+  }
+
+  return null;
+}
+
+/**
  * Sync peek: age/safety first, then Tier 1 (Supabase clients table -> client_questions table) -> Tier 2 (Resume parsing).
  * Never calls the LLM.
  */
@@ -257,6 +360,13 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   if (!question || !profile) return null;
   const options = opts.options || [];
   const fieldType = opts.fieldType || '';
+
+  // ─── TIER 0: Pre-Resolved JSON Lookup (PRIMARY) ───
+  const fromResolvedJson = lookupResolvedAnswerFromProfile(question, profile, { options, fieldType });
+  if (fromResolvedJson?.answer) {
+    const jsonOk = acceptClientValue(question, fromResolvedJson.answer, { options, fieldType, profile });
+    if (jsonOk) return jsonOk;
+  }
 
   const priorEmployer = priorEmployerAnswer(question, profile);
   if (priorEmployer) return acceptClientValue(question, priorEmployer, { options, fieldType, profile }) || priorEmployer;
@@ -339,6 +449,19 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType };
   }
 
+  const currentStep = profile?._currentStepIndex || 2;
+
+  // ─── TIER 0: Pre-Resolved Answers JSON from job_distributions (PRIMARY FIRST CHOICE) ───
+  const preResolvedHit = lookupResolvedAnswerFromProfile(label, profile, { options, fieldType });
+  if (preResolvedHit?.answer) {
+    const validated = finish(preResolvedHit.answer, preResolvedHit.source);
+    if (validated) {
+      console.log(`    ⚡ [Tier 0 Pre-Resolved JSON] "${label.slice(0, 55)}" ← "${validated.answer}" (${preResolvedHit.matched_question || 'exact'})`);
+      profile?._onLog?.(currentStep, `[Tier 0 JSON Match] "${label.slice(0, 50)}" ← "${validated.answer}"`);
+      return validated;
+    }
+  }
+
   const ageYes = resolveMinimumAgeAnswer(label, profile);
   if (ageYes) {
     const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
@@ -346,8 +469,6 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     return hit;
   }
 
-
-  const currentStep = profile?._currentStepIndex || 2;
 
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)

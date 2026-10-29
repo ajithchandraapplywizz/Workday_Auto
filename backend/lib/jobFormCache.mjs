@@ -22,6 +22,7 @@ import {
 } from './supabaseClient.mjs';
 import { resolveClientAnswer } from './clientAnswer.mjs';
 import { normalizeLabel } from './qaStore.mjs';
+import { normalizeWorkdayStepName, getStepOrder } from './stateDetector.mjs';
 
 /**
  * Checks if a job URL already has a cached form schema in Supabase.
@@ -193,8 +194,8 @@ export async function recordDiscoveredJobForm({
         isFullyAnswered: detailed.isFullyAnswered,
         unansweredCount: detailed.unansweredCount,
         status: detailed.isFullyAnswered ? 'ready_for_review' : 'needs_answers',
-      }).catch(() => {});
-    } catch {}
+      }).catch(() => { });
+    } catch { }
   }
 
   return success;
@@ -262,7 +263,7 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
               answer: ansVal,
               fieldType: field.field_type || 'text',
               source: 'llm',
-            }).catch(() => {});
+            }).catch(() => { });
           }
         } else {
           sourceTag = 'Tier 3: CRM API';
@@ -289,7 +290,7 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           rawSource = 'llm';
         }
       }
-    } catch {}
+    } catch { }
 
     const isRequired = Boolean(field.is_required || field.required);
     const isAnswered = Boolean(ansVal && ansVal.trim().length > 0);
@@ -309,6 +310,8 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
       answersMap[norm] = ansVal;
     }
 
+    const authenticStep = normalizeWorkdayStepName(field.step, rawLabel);
+
     structuredAnswers.push({
       question: rawLabel,
       question_normalized: norm,
@@ -318,18 +321,35 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
       raw_source: rawSource,
       field_type: field.field_type || 'text',
       options: field.options || [],
-      step: field.step || 'Application',
+      step: authenticStep,
       is_required: isRequired,
       is_answered: isAnswered,
     });
   }
+
+  // Deduplicate and sort structuredAnswers strictly in Workday wizard sequence
+  const dedupedMap = new Map();
+  for (const item of structuredAnswers) {
+    const key = item.question_normalized || normalizeLabel(item.question);
+    if (!dedupedMap.has(key)) {
+      dedupedMap.set(key, item);
+    } else {
+      const existing = dedupedMap.get(key);
+      if (!existing.is_answered && item.is_answered) {
+        dedupedMap.set(key, item);
+      }
+    }
+  }
+  const sequentialStructuredAnswers = Array.from(dedupedMap.values()).sort(
+    (a, b) => getStepOrder(a.step) - getStepOrder(b.step)
+  );
 
   const isFullyAnswered = unansweredCount === 0;
   const status = isFullyAnswered ? 'ready_for_review' : 'needs_answers';
 
   return {
     answersMap,
-    structuredAnswers,
+    structuredAnswers: sequentialStructuredAnswers,
     unansweredQuestions,
     isFullyAnswered,
     unansweredCount,
@@ -360,8 +380,8 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
     try {
       pendingTasks = await getPendingQueueTasksForUrl(jobUrl, allowedCandidateIds);
     } catch (err) {
-    console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
-    return;
+      console.log(`  ⚠️  bulkPreResolveForJobUrl: Could not fetch pending tasks — ${err.message}`);
+      return;
     }
   }
 
@@ -390,7 +410,7 @@ export async function bulkPreResolveForJobUrl({ jobUrl, schema, loadProfileFn, a
         isFullyAnswered: detailed.isFullyAnswered,
         unansweredCount: detailed.unansweredCount,
         status: detailed.isFullyAnswered ? 'ready_for_review' : 'needs_answers',
-      }).catch(() => {});
+      }).catch(() => { });
 
       // Keep batch_job_queue synchronized
       await updateQueueTaskStatus(row.id, {

@@ -57,7 +57,7 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
 
   // Cloud Storage Mode: stream buffer directly to Supabase Storage bucket (strictly flat, zero nested folders)
   const isFailure = /fail|error|blocked|exception|timeout|stuck|missing/i.test(safeLabel);
-  const isSubmitted = /submitted|complete|success/i.test(safeLabel);
+  const isSubmitted = /submitted|complete|success|already/i.test(safeLabel);
 
   // Policy: Terminate all intermediate step, scan, fill, and review screenshot uploads.
   // ONLY capture & upload:

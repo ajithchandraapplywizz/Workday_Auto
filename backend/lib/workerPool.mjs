@@ -20,7 +20,8 @@ import { fillForm } from './engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
 import { inferStandardOptions } from './workdayScanHarvest.mjs';
-import { resolveCompanyEmail } from './applyWizzClient.mjs';
+import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClient.mjs';
+import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
@@ -68,6 +69,75 @@ export function getWorkerPoolStop() {
 
 export async function isWorkerPoolStopRequested() {
   return workerPoolStopRequested || isGlobalStopRequested();
+}
+
+/**
+ * Index pre-resolved answers from job_distributions into profile for direct Tier 0 filling.
+ */
+export function indexResolvedAnswers(profile, rawAnswersList) {
+  if (!profile || !rawAnswersList) return 0;
+  profile._resolvedAnswersJson = Array.isArray(rawAnswersList) ? rawAnswersList : [];
+  profile._resolvedAnswersMap = profile._resolvedAnswersMap || new Map();
+  profile._supabaseQa = profile._supabaseQa || {};
+  profile._answerCache = profile._answerCache || new Map();
+
+  let count = 0;
+  if (Array.isArray(rawAnswersList)) {
+    for (const item of rawAnswersList) {
+      if (!item) continue;
+      const ans = item.answer ?? item.value;
+      if (ans === undefined || ans === null) continue;
+      const rawQ = String(item.question || item.label || item.question_label || '').trim();
+      const normQ = item.question_normalized || normalizeLabel(rawQ);
+      const strippedQ = normalizeLabel(stripWorkdayQuestionLabel(rawQ));
+
+      const entry = {
+        answer: ans,
+        item,
+        rawQ,
+        normQ,
+        strippedQ,
+      };
+
+      if (rawQ) {
+        profile._resolvedAnswersMap.set(rawQ, entry);
+        profile._resolvedAnswersMap.set(rawQ.toLowerCase(), entry);
+        profile._supabaseQa[rawQ] = ans;
+        profile._answerCache.set(rawQ, ans);
+      }
+      if (normQ) {
+        profile._resolvedAnswersMap.set(normQ, entry);
+        profile._supabaseQa[normQ] = ans;
+        profile._answerCache.set(normQ, ans);
+      }
+      if (strippedQ) {
+        profile._resolvedAnswersMap.set(strippedQ, entry);
+        profile._supabaseQa[strippedQ] = ans;
+        profile._answerCache.set(strippedQ, ans);
+      }
+      count++;
+    }
+  } else if (typeof rawAnswersList === 'object') {
+    for (const [q, a] of Object.entries(rawAnswersList)) {
+      if (a === undefined || a === null) continue;
+      const rawQ = String(q).trim();
+      const normQ = normalizeLabel(rawQ);
+      const strippedQ = normalizeLabel(stripWorkdayQuestionLabel(rawQ));
+      const entry = { answer: a, rawQ, normQ, strippedQ };
+      profile._resolvedAnswersMap.set(rawQ, entry);
+      profile._resolvedAnswersMap.set(rawQ.toLowerCase(), entry);
+      profile._resolvedAnswersMap.set(normQ, entry);
+      profile._resolvedAnswersMap.set(strippedQ, entry);
+      profile._supabaseQa[rawQ] = a;
+      profile._supabaseQa[normQ] = a;
+      profile._supabaseQa[strippedQ] = a;
+      profile._answerCache.set(rawQ, a);
+      profile._answerCache.set(normQ, a);
+      profile._answerCache.set(strippedQ, a);
+      count++;
+    }
+  }
+  return count;
 }
 
 /**
@@ -236,43 +306,35 @@ export async function executeWorkerTask({
   }
 
   // 4. Check Job Form Cache in Supabase (Duplicate Link Detection & Pre-Resolved Cell)
+  // 4. Check Job Form Cache & Pre-Resolved JSON from job_distributions
   let cacheHit = false;
   let cacheResult = null;
-  const queuePreResolved = task.pre_resolved_answers || task.preResolvedAnswers;
-  if (queuePreResolved && typeof queuePreResolved === 'object' && Object.keys(queuePreResolved).length > 0) {
+  const queuePreResolved = task.resolved_answers || task.resolvedAnswers || task.pre_resolved_answers || task.preResolvedAnswers;
+  if (queuePreResolved && (Array.isArray(queuePreResolved) ? queuePreResolved.length > 0 : (typeof queuePreResolved === 'object' && Object.keys(queuePreResolved).length > 0))) {
     cacheHit = true;
-    profile._supabaseQa = { ...(profile._supabaseQa || {}), ...queuePreResolved };
-    profile._answerCache = profile._answerCache || new Map();
-    for (const [k, v] of Object.entries(queuePreResolved)) {
-      profile._answerCache.set(k, v);
-    }
-    const preCount = Object.keys(queuePreResolved).length;
-    appLog(3, `Supabase QA Cache HIT: Loaded ${preCount} pre-resolved answers from queue cell for instant fill.`);
-    console.log(`   ⚡ [${workerId}] Queue Pre-Resolved Hit: ${preCount} answers loaded directly from queue cell for instant fill.`);
+    const loadedCount = indexResolvedAnswers(profile, queuePreResolved);
+    appLog(3, `Pre-Resolved JSON HIT: Loaded ${loadedCount} answers from job_distributions for instant fill.`);
+    console.log(`   ⚡ [${workerId}] Pre-Resolved JSON Hit: ${loadedCount} answers loaded from job_distributions for instant fill.`);
   } else {
     // Also load pre-resolved answers from job_distributions table
     try {
-      const { getResolvedAnswers } = await import('./supabaseClient.mjs');
-      const distData = await getResolvedAnswers(applywizzId, jobUrl);
-      if (distData?.resolved_answers && Array.isArray(distData.resolved_answers) && distData.resolved_answers.length > 0) {
-        cacheHit = true;
-        profile._supabaseQa = profile._supabaseQa || {};
-        profile._answerCache = profile._answerCache || new Map();
-        let loadedCount = 0;
-        for (const item of distData.resolved_answers) {
-          const q = item.question || item.label || item.question_label;
-          const a = item.answer || item.value;
-          if (q && a !== undefined && a !== null) {
-            profile._supabaseQa[q] = a;
-            profile._answerCache.set(q, a);
-            loadedCount++;
-          }
-        }
-        if (loadedCount > 0) {
-          console.log(`   * [Worker ${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
-        }
+      const { getResolvedAnswers, getResolvedAnswersById } = await import('./supabaseClient.mjs');
+      let distData = null;
+      if (task.distributionId || task.distribution_id || task.id) {
+        distData = await getResolvedAnswersById(task.distributionId || task.distribution_id || task.id);
       }
-    } catch {}
+      if (!distData && applywizzId && jobUrl) {
+        distData = await getResolvedAnswers(applywizzId, jobUrl);
+      }
+      const rawList = distData?.resolved_answers || distData?.resolved_answers_json;
+      if (rawList && (Array.isArray(rawList) ? rawList.length > 0 : (typeof rawList === 'object' && Object.keys(rawList).length > 0))) {
+        cacheHit = true;
+        const loadedCount = indexResolvedAnswers(profile, rawList);
+        console.log(`   ⚡ [Worker ${workerId}] Loaded ${loadedCount} pre-resolved answers from job_distributions for ${applywizzId}!`);
+      }
+    } catch (err) {
+      console.warn(`   ⚠️ [Worker ${workerId}] Warning loading pre-resolved answers: ${err.message}`);
+    }
 
     try {
       cacheResult = await checkAndPreResolveJobForClient({ jobUrl, profile });

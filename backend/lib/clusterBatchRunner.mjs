@@ -1035,6 +1035,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       for (const sa of structuredAnswers) {
         const qText = sa.question || sa.label || '';
         if (/how did you hear/i.test(qText)) {
+          sa.step = 'My Information';
           if (!sa.answer || !sa.is_answered) {
             sa.answer = String(leadSourceAns);
             sa.is_answered = true;
@@ -1043,6 +1044,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           }
         }
         if (/current value is|signature date|^date\*?$/i.test(qText)) {
+          sa.step = 'Self Identify';
           if (!sa.answer || !sa.is_answered) {
             sa.answer = todayDate;
             sa.is_answered = true;
@@ -1051,6 +1053,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           }
         }
         if (/if yes.*explain/i.test(qText)) {
+          sa.step = 'Voluntary Disclosures';
           if (!sa.answer || !sa.is_answered) {
             sa.answer = 'N/A';
             sa.is_answered = true;
@@ -1059,6 +1062,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           }
         }
       }
+
+      const { getStepOrder } = await import('./stateDetector.mjs');
+      structuredAnswers.sort((a, b) => getStepOrder(a.step) - getStepOrder(b.step));
 
       const answeredCount = structuredAnswers.filter(q => q.is_answered).length;
       const rawUnanswered = Array.isArray(detailed?.unansweredQuestions)

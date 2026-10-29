@@ -1703,10 +1703,12 @@ export async function updateBotControl(patch = {}) {
     // If table doesn't have the new columns yet, fallback to patching standard known columns
     try {
       const fallbackBody = {
-        stage: memoryBotControl.stage || memoryBotControl.mode || 'idle',
+        stage: patch.stage || patch.mode || memoryBotControl.stage || memoryBotControl.mode || 'idle',
         is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
         is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
         stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested ?? memoryBotControl.scan_stop_requested ?? memoryBotControl.submit_stop_requested),
+        trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested),
+        last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : (memoryBotControl.last_action_requested || null),
         active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
         current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
         updated_at: now,
@@ -2197,9 +2199,33 @@ export async function saveResolvedAnswers({
 }
 
 /**
+ * Fetch resolved answers directly by job_distributions primary key id.
+ */
+export async function getResolvedAnswersById(distributionId) {
+  if (!isSupabaseConfigured() || !distributionId) return null;
+  try {
+    const rows = await request('job_distributions', {
+      query: `?id=eq.${encode(distributionId)}&limit=1`,
+    });
+    if (Array.isArray(rows) && rows.length > 0) {
+      const r = rows[0];
+      if (!r.resolved_answers_json && r.resolved_answers) {
+        r.resolved_answers_json = r.resolved_answers;
+      }
+      return r;
+    }
+  } catch {}
+  return null;
+}
+
+/**
  * Fetch resolved answers for a candidate and job link from job_distributions.
  */
-export async function getResolvedAnswers(applywizzId, jobUrl) {
+export async function getResolvedAnswers(applywizzId, jobUrl, distributionId = null) {
+  if (distributionId) {
+    const byId = await getResolvedAnswersById(distributionId);
+    if (byId?.resolved_answers || byId?.resolved_answers_json) return byId;
+  }
   if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return null;
   const cleanId = String(applywizzId).trim().toUpperCase();
   const cleanUrl = String(jobUrl).split('?')[0].trim();
@@ -2217,6 +2243,7 @@ export async function getResolvedAnswers(applywizzId, jobUrl) {
   } catch {}
   return null;
 }
+
 
 /**
  * Fetch ONLY 100% fully-answered applications from job_distributions for candidate IDs.

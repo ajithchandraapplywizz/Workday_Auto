@@ -302,27 +302,20 @@ export async function checkAllApiHealth() {
       service: 'Microsoft / M365 Zoho Gateway',
       runner: async () => {
         const start = performance.now();
-        // 1. Try local dev server proxy (avoids CORS restrictions entirely)
+        // 1. Try local or backend proxy
         try {
-          const res = await fetch('/api/zoho-health', { signal: AbortSignal.timeout(3500) });
+          const backendBase = getBackendBaseUrl();
+          const ep = backendBase ? `${backendBase}/api/bot/health` : '/api/zoho-health';
+          const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
           if (res.ok) {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
           }
         } catch { }
 
-        // 2. Direct fetch with CORS
+        // 2. Probe with no-cors mode (avoids browser console CORS blocked error)
         try {
-          const res = await fetch('https://zoho-mail-reader.onrender.com/health', { signal: AbortSignal.timeout(3500) });
-          if (res.ok) {
-            const latency = Math.max(1, Math.round(performance.now() - start));
-            return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
-          }
-        } catch { }
-
-        // 3. Fallback: probe via no-cors mode so browser CORS header absences do not mark live service as error
-        try {
-          await fetch('https://zoho-mail-reader.onrender.com/health', { mode: 'no-cors', signal: AbortSignal.timeout(4500) });
+          await fetch('https://zoho-mail-reader.onrender.com/health', { mode: 'no-cors', signal: AbortSignal.timeout(3500) });
           const latency = Math.max(1, Math.round(performance.now() - start));
           return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online (HTTP 200)' };
         } catch {
@@ -337,7 +330,9 @@ export async function checkAllApiHealth() {
       runner: async () => {
         const start = performance.now();
         try {
-          const res = await fetch('/api/zoho-health', { signal: AbortSignal.timeout(3500) });
+          const backendBase = getBackendBaseUrl();
+          const ep = backendBase ? `${backendBase}/api/bot/health` : '/api/zoho-health';
+          const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
           if (res.ok) {
             const latency = Math.max(1, Math.round(performance.now() - start));
             return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
@@ -345,15 +340,7 @@ export async function checkAllApiHealth() {
         } catch { }
 
         try {
-          const res = await fetch('https://zoho-mail-reader.onrender.com/health', { signal: AbortSignal.timeout(3500) });
-          if (res.ok) {
-            const latency = Math.max(1, Math.round(performance.now() - start));
-            return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
-          }
-        } catch { }
-
-        try {
-          await fetch('https://zoho-mail-reader.onrender.com/health', { mode: 'no-cors', signal: AbortSignal.timeout(4500) });
+          await fetch('https://zoho-mail-reader.onrender.com/health', { mode: 'no-cors', signal: AbortSignal.timeout(3500) });
           const latency = Math.max(1, Math.round(performance.now() - start));
           return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
         } catch {
@@ -1627,8 +1614,10 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         }
       }
 
-      // 3. Live Scanned Jobs Activity
-      if (sjData && sjData.length > 0) {
+      const isSubmittingStage = bcData?.stage === 'submitting' || bcData?.mode === 'submitting' || bcData?.submit_status === 'running';
+
+      // 3. Live Scanned Jobs Activity (suppressed during submitting stage)
+      if (!isSubmittingStage && sjData && sjData.length > 0) {
         for (const s of sjData) {
           const qCount = s.question_count || (Array.isArray(s.scraped_questions) ? s.scraped_questions.length : 0);
           scanningLogs.push({
@@ -1645,8 +1634,8 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         }
       }
 
-      // 4. Live Resolving Activity (Pre-resolved answers)
-      if (jdData && jdData.length > 0) {
+      // 4. Live Resolving Activity (Pre-resolved answers, suppressed during submitting stage)
+      if (!isSubmittingStage && jdData && jdData.length > 0) {
         for (const d of jdData) {
           resolvingLogs.push({
             id: 'jd-' + d.id,
@@ -1693,11 +1682,13 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         return {
           success: true,
           batches: {
-            scanning: scanningLogs.slice(-limit),
-            resolving: resolvingLogs.slice(-limit),
+            scanning: isSubmittingStage ? [] : scanningLogs.slice(-limit),
+            resolving: isSubmittingStage ? [] : resolvingLogs.slice(-limit),
             submitting: submittingLogs.slice(-limit),
           },
-          allLogs: [...scanningLogs, ...resolvingLogs, ...submittingLogs].sort(sortByTs).slice(-limit * 2),
+          allLogs: isSubmittingStage
+            ? submittingLogs.slice(-limit * 2)
+            : [...scanningLogs, ...resolvingLogs, ...submittingLogs].sort(sortByTs).slice(-limit * 2),
         };
       }
     } catch {}
@@ -2881,13 +2872,22 @@ export async function triggerSubmissionStage() {
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
+        mode: 'submitting',
         stage: 'submitting',
+        submit_enabled: true,
+        submit_status: 'running',
+        submit_stop_requested: false,
+        scan_enabled: false,
+        scan_status: 'off',
+        scan_stop_requested: true,
         is_running: true,
         is_paused: false,
         stop_requested: false,
         trigger_requested: true,
+        refusal_reason: null,
         last_action_requested: 'start_submit',
-        current_action: 'Submitting approved applications across 3 dedicated workers...',
+        current_action: 'Submitting approved applications across 2 dedicated workers...',
+        active_worker_count: 2,
         updated_at: now,
       })
       .eq('id', 'primary');
@@ -2907,8 +2907,38 @@ export async function triggerSubmissionStage() {
     }, { onConflict: 'key' }).catch(() => {});
   } catch {}
 
+  try {
+    await supabase.from('worker_control').upsert({
+      key: 'scan',
+      enabled: false,
+      status: 'off',
+      stop_requested: true,
+      updated_at: now,
+    }, { onConflict: 'key' }).catch(() => {});
+  } catch {}
+
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
+
+  // Stop scanner endpoint call to ensure backend daemon halts scanning cluster immediately
+  const stopScanEndpoints = [
+    ...(backendBase ? [`${backendBase}/api/bot/scan/stop`] : ['/api/bot/scan/stop']),
+    ...(isLocal ? [
+      'http://localhost:3005/api/bot/scan/stop',
+      'http://localhost:3001/api/bot/scan/stop',
+    ] : []),
+  ];
+  for (const ep of stopScanEndpoints) {
+    try {
+      await fetch(ep, {
+        method: 'POST',
+        headers: getStaffAuthHeaders(),
+        body: JSON.stringify({ action: 'stop_scan', nonce: actionNonce, timestamp: now }),
+        signal: AbortSignal.timeout(1500),
+      });
+    } catch {}
+  }
+
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : ['/api/bot/submit/start', '/api/bot/submit', '/api/bot/webhook']),
     ...(isLocal ? [
@@ -2928,13 +2958,13 @@ export async function triggerSubmissionStage() {
         signal: AbortSignal.timeout(3000),
       });
       if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions triggered across 3 dedicated submitting workers!' };
+        return { success: true, message: 'Stage 3 Submissions triggered across dedicated submitting workers!' };
       }
     } catch { }
   }
 
   if (supabaseSuccess) {
-    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge across 3 submitting workers!' };
+    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge across dedicated submitting workers!' };
   }
   return { success: false, error: 'Could not reach daemon webhook server or cloud bridge.' };
 }

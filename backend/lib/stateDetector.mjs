@@ -71,3 +71,55 @@ export async function detectWorkdayStep(page) {
   });
 }
 
+/**
+ * Canonical sequence order for Workday wizard pages.
+ */
+export const WORKDAY_STEP_SEQUENCE = [
+  'My Information',
+  'My Experience',
+  'Application Questions',
+  'Voluntary Disclosures',
+  'Self Identify',
+  'Review',
+];
+
+export function getStepOrder(stepName) {
+  const s = String(stepName || '').toLowerCase().trim();
+  if (s.includes('information')) return 1;
+  if (s.includes('experience')) return 2;
+  if (s.includes('application questions') || s.includes('question')) return 3;
+  if (s.includes('voluntary') || s.includes('disclosure') || s.includes('eeo')) return 4;
+  if (s.includes('self') || s.includes('identify') || s.includes('disability') || s.includes('veteran')) return 5;
+  if (s.includes('review')) return 6;
+  return 7;
+}
+
+export function normalizeWorkdayStepName(stepName, questionLabel = '') {
+  const q = String(questionLabel || '').toLowerCase();
+
+  // Heuristic disambiguation for fields scraped on Review or generic containers
+  if (!stepName || stepName === 'Application' || stepName === 'Review' || stepName === 'Review & Submit' || stepName === 'Unknown') {
+    if (/first\s*name|last\s*name|email|phone|mobile|country|city|state|postal|zip|address|hear about us/i.test(q)) {
+      return 'My Information';
+    }
+    if (/resume|education|degree|school|university|gpa|employer|job title|company|years of experience/i.test(q)) {
+      return 'My Experience';
+    }
+    if (/disability|cc-?305|veteran|gender|race|ethnicity|hispanic|latino/i.test(q)) {
+      return 'Self Identify';
+    }
+    if (/authorized|permit.*work|sponsor|visa|terms and conditions|policy|convict|felon|relative|family member/i.test(q)) {
+      return 'Voluntary Disclosures';
+    }
+  }
+
+  const s = String(stepName || '').toLowerCase().trim();
+  if (s.includes('information')) return 'My Information';
+  if (s.includes('experience')) return 'My Experience';
+  if (s.includes('self') || s.includes('identify') || s.includes('disability')) return 'Self Identify';
+  if (s.includes('voluntary') || s.includes('disclosure') || s.includes('eeo')) return 'Voluntary Disclosures';
+  if (s.includes('question')) return 'Application Questions';
+  if (s.includes('review')) return 'Review';
+  return stepName || 'Application Questions';
+}
+

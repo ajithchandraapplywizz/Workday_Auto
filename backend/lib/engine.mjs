@@ -2035,6 +2035,23 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'submitted';
   }
 
+  // Detect if application was already submitted on Workday
+  const isAlreadyApplied = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied/i.test(text) ||
+           !!document.querySelector('[data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]');
+  }).catch(() => false);
+
+  if (isAlreadyApplied) {
+    profile?._onLog?.(5, 'Step 5: Workday verified: candidate has already applied to this position.');
+    console.log('ℹ️ Application already applied on Workday!');
+    const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+    profile._submissionScreenshotUrl = alreadyProofUrl;
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+    await cleanupClientResume(profile);
+    return 'already_applied';
+  }
+
   const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
     console.log('Post-submit verification appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
@@ -2090,10 +2107,17 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const { isApplyWizzConfigured } = await import('./applyWizzClient.mjs');
   const { profileFactPresence } = await import('./questionEngine/profileFacts.mjs');
   if (isApplyWizzConfigured() && !profile._applyWizzHydrated) {
-    console.error('❌ Apply Wizz client API did not hydrate — stopping this apply (no fabricated identity/contact answers).');
-    console.error('     Fix TLS/network (APPLYWIZZ_TLS_INSECURE=1 on Windows CA issues) and confirm get-client-details returns client + additional_information.');
-    await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'applywizz_not_hydrated' }).catch(() => {});
-    return 'incomplete';
+    const hasPreResolved = (profile._supabaseQa && Object.keys(profile._supabaseQa).length > 0) || (profile._answerCache && profile._answerCache.size > 0);
+    const hasCandidateName = Boolean(profile.personal?.first_name || profile.personal?.name || profile.name);
+    const hasCandidateEmail = Boolean(profile.personal?.email || profile.personal?.company_email || profile.email);
+    if (!hasPreResolved && (!hasCandidateName || !hasCandidateEmail)) {
+      console.error('❌ Apply Wizz client API did not hydrate — stopping this apply (no fabricated identity/contact answers).');
+      console.error('     Fix TLS/network (APPLYWIZZ_TLS_INSECURE=1 on Windows CA issues) and confirm get-client-details returns client + additional_information.');
+      await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'applywizz_not_hydrated' }).catch(() => {});
+      return 'incomplete';
+    } else {
+      console.log('  ℹ️  Apply Wizz live API skipped, but candidate profile facts & pre-resolved answers loaded from Supabase. Continuing submission!');
+    }
   }
   if (isApplyWizzConfigured()) {
     const facts = profileFactPresence(profile);

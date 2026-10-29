@@ -642,8 +642,9 @@ export default function DeveloperDashboard() {
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across 3 dedicated workers.',
+          text: '✓ Submissions Pipeline Triggered! Submitting approved applications across dedicated workers.',
         });
+        setActiveBatchView('submitting');
         setBotStatus((prev) => ({
           ...prev,
           isRunning: true,
