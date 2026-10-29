@@ -39,9 +39,40 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
   const safeLabel = String(label || 'screenshot').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
 
   // Zero Local Screenshots Policy: capture strictly in-memory buffer
-  const buf = await page.screenshot({ fullPage: true, type: 'png' }).catch(async () => {
-    return await page.screenshot({ type: 'png' }).catch(() => null);
-  });
+  let buf = null;
+
+  // For submitted confirmation, target the popup/modal card rectangle instead of full-page
+  if (/submitted|complete|success/i.test(safeLabel)) {
+    const modalSelectors = [
+      '[data-automation-id="submissionSuccess"]',
+      '[data-automation-id="applicationSubmitted"]',
+      '[data-automation-id="congratulations"]',
+      '[data-automation-id="thankYouMessage"]',
+      'div[role="dialog"]',
+      'div[role="alertdialog"]',
+      '[data-automation-id="card"]',
+      '[data-automation-id="modal"]',
+    ];
+    for (const sel of modalSelectors) {
+      try {
+        const locator = page.locator(sel).first();
+        if (await locator.isVisible({ timeout: 500 }).catch(() => false)) {
+          buf = await locator.screenshot({ type: 'png' }).catch(() => null);
+          if (buf) {
+            console.log(`  📸 [Screenshot] Captured cropped modal/popup rectangle: "${sel}"`);
+            break;
+          }
+        }
+      } catch {}
+    }
+  }
+
+  // Fallback to standard viewport screenshot (not fullPage) to capture the visible confirmation dialog
+  if (!buf) {
+    buf = await page.screenshot({ fullPage: false, type: 'png' }).catch(async () => {
+      return await page.screenshot({ type: 'png' }).catch(() => null);
+    });
+  }
 
   if (!buf) {
     console.warn(`  ⚠️  [Screenshot] Failed to capture in-memory buffer for "${safeLabel}"`);

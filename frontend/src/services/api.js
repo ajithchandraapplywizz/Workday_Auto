@@ -1455,14 +1455,12 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
     const isLocal = isLocalEnvironment();
     const endpoints = [
       ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
-      '/api/bot/logs',
-      '/api/developer/logs',
       ...(isLocal ? [
-        'http://localhost:3005/api/bot/logs',
-        'http://localhost:3005/api/developer/logs',
+        'http://localhost:3002/api/bot/logs',
+        'http://localhost:3002/api/developer/logs',
         'http://localhost:3001/api/bot/logs',
         'http://localhost:3001/api/developer/logs',
-      ] : []),
+      ] : (!backendBase ? ['/api/bot/logs', '/api/developer/logs'] : [])),
     ];
 
     let liveLogs = null;
@@ -2732,15 +2730,12 @@ export async function triggerAutonomousBot() {
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
     const endpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook']),
+      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
       ...(isLocal ? [
-        'http://localhost:3005/api/bot/start',
-        'http://localhost:3005/api/bot/trigger',
-        'http://localhost:3005/api/bot/webhook',
         'http://localhost:3001/api/bot/start',
         'http://localhost:3001/api/bot/trigger',
         'http://localhost:3001/api/bot/webhook',
-      ] : []),
+      ] : (!backendBase ? ['/api/bot/start', '/api/bot/trigger', '/api/bot/webhook'] : [])),
     ];
     for (const ep of endpoints) {
       try {
@@ -2780,13 +2775,11 @@ export async function stopAutonomousBot() {
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
     const stopEndpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : ['/api/bot/scan/stop', '/api/bot/stop', '/api/bot/webhook']),
+      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
       ...(isLocal ? [
-        'http://localhost:3005/api/bot/scan/stop',
-        'http://localhost:3005/api/bot/stop',
         'http://localhost:3001/api/bot/scan/stop',
         'http://localhost:3001/api/bot/stop',
-      ] : []),
+      ] : (!backendBase ? ['/api/bot/scan/stop', '/api/bot/stop', '/api/bot/webhook'] : [])),
     ];
     await Promise.any(
       stopEndpoints.map((u) =>
@@ -2869,30 +2862,26 @@ export async function triggerSubmissionStage() {
   const actionNonce = Date.now().toString();
   let supabaseSuccess = false;
   try {
+    const basePayload = {
+      stage: 'submitting',
+      is_running: true,
+      is_paused: false,
+      stop_requested: false,
+      trigger_requested: true,
+      last_action_requested: 'start_submit',
+      current_action: 'Submitting approved applications across 2 dedicated workers...',
+      active_worker_count: 2,
+      updated_at: now,
+    };
     const { error: sbErr } = await supabase
       .from('bot_control')
-      .update({
-        mode: 'submitting',
-        stage: 'submitting',
-        submit_enabled: true,
-        submit_status: 'running',
-        submit_stop_requested: false,
-        scan_enabled: false,
-        scan_status: 'off',
-        scan_stop_requested: true,
-        is_running: true,
-        is_paused: false,
-        stop_requested: false,
-        trigger_requested: true,
-        refusal_reason: null,
-        last_action_requested: 'start_submit',
-        current_action: 'Submitting approved applications across 2 dedicated workers...',
-        active_worker_count: 2,
-        updated_at: now,
-      })
+      .update(basePayload)
       .eq('id', 'primary');
-    if (!sbErr) supabaseSuccess = true;
-    else console.warn('Supabase bot_control update error:', sbErr);
+    if (!sbErr) {
+      supabaseSuccess = true;
+    } else {
+      console.warn('Supabase bot_control update error:', sbErr?.message);
+    }
   } catch (err) {
     console.warn('Supabase bot_control error:', err);
   }
@@ -2922,11 +2911,10 @@ export async function triggerSubmissionStage() {
 
   // Stop scanner endpoint call to ensure backend daemon halts scanning cluster immediately
   const stopScanEndpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/scan/stop`] : ['/api/bot/scan/stop']),
+    ...(backendBase ? [`${backendBase}/api/bot/scan/stop`] : []),
     ...(isLocal ? [
-      'http://localhost:3005/api/bot/scan/stop',
       'http://localhost:3001/api/bot/scan/stop',
-    ] : []),
+    ] : (!backendBase ? ['/api/bot/scan/stop'] : [])),
   ];
   for (const ep of stopScanEndpoints) {
     try {
@@ -2940,13 +2928,13 @@ export async function triggerSubmissionStage() {
   }
 
   const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : ['/api/bot/submit/start', '/api/bot/submit', '/api/bot/webhook']),
+    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
     ...(isLocal ? [
-      'http://localhost:3005/api/bot/submit/start',
-      'http://localhost:3005/api/bot/submit',
+      'http://localhost:3002/api/bot/submit/start',
+      'http://localhost:3002/api/bot/submit',
       'http://localhost:3001/api/bot/submit/start',
       'http://localhost:3001/api/bot/submit',
-    ] : []),
+    ] : (!backendBase ? ['/api/bot/submit/start', '/api/bot/submit', '/api/bot/webhook'] : [])),
   ];
 
   for (const ep of endpoints) {
@@ -3007,13 +2995,13 @@ export async function stopSubmissionStage() {
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
   const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : ['/api/bot/submit/stop', '/api/bot/stop', '/api/bot/webhook']),
+    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
     ...(isLocal ? [
-      'http://localhost:3005/api/bot/submit/stop',
-      'http://localhost:3005/api/bot/stop',
+      'http://localhost:3002/api/bot/submit/stop',
+      'http://localhost:3002/api/bot/stop',
       'http://localhost:3001/api/bot/submit/stop',
       'http://localhost:3001/api/bot/stop',
-    ] : []),
+    ] : (!backendBase ? ['/api/bot/submit/stop', '/api/bot/stop', '/api/bot/webhook'] : [])),
   ];
 
   for (const ep of endpoints) {
@@ -3042,13 +3030,13 @@ export async function fetchBotDaemonStatus() {
 
     // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
     const statusUrls = [
-      ...(backendBase ? [`${backendBase}/health`, `${backendBase}/api/bot/status`] : ['/health', '/api/bot/status']),
+      ...(backendBase ? [`${backendBase}/health`, `${backendBase}/api/bot/status`] : []),
       ...(isLocal ? [
-        'http://localhost:3005/health',
-        'http://localhost:3005/api/bot/status',
+        'http://localhost:3002/health',
+        'http://localhost:3002/api/bot/status',
         'http://localhost:3001/health',
         'http://localhost:3001/api/bot/status',
-      ] : []),
+      ] : (!backendBase ? ['/health', '/api/bot/status'] : [])),
     ];
     for (const u of statusUrls) {
       try {

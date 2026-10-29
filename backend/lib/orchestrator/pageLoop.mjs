@@ -321,6 +321,21 @@ export async function runPageOrchestrator({
       } catch {}
     }
 
+    const isAgreementCheckbox = (field.elementType === 'checkbox' || field.fieldType === 'checkbox' || field.type === 'checkbox') &&
+      (/terms|read and understood|consent|agreement|statement and certify|acknowledge|state that i have read/i.test(field.label || '') ||
+       /terms|agree|consent|ack/i.test(field.automationId || ''));
+
+    if (isAgreementCheckbox && (!decision || decision.requiresReview || !decision.answer)) {
+      decision = {
+        questionId: field.questionId,
+        intent: 'terms_agreement',
+        answer: true,
+        confidence: 1.0,
+        requiresReview: false,
+        source: 'terms_agreement_default',
+      };
+    }
+
     let gate = validateBeforeFill(field, decision, profile);
     const mandatory = field.required === true || isMandatoryField(field.label, field, step) || hasRequiredSignal(field.label, field);
     if (!gate.ok && mandatory && gate.reason !== 'high_risk_missing_data') {

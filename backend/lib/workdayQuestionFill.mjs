@@ -1713,7 +1713,7 @@ export async function matchQuestionToAnswer(label, profile, qaStore = null) {
     label,
     question: label,
     containerText: /voluntary|disability|cc-305/i.test(label) ? 'Voluntary Self-Identification of Disability CC-305 current value is MM/DD/YYYY' : '',
-    timeZone: 'Asia/Kolkata',
+    timeZone: 'America/New_York',
   });
   if (dynamicDateAction) {
     console.log(`[date] Detected dynamic current-date field`);
@@ -1722,7 +1722,7 @@ export async function matchQuestionToAnswer(label, profile, qaStore = null) {
   }
 
   if (isTodaysDateField(label) || isTodaysDateField(norm)) {
-    return getTodayMMDDYYYY('Asia/Kolkata');
+    return getTodayMMDDYYYY('America/New_York');
   }
 
   if (/please\s+enter\s+your\s+name/i.test(norm)) {
@@ -2014,7 +2014,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       automationId: fieldMetadata.automationId,
       question: label,
       containerText: fieldMetadata.containerText,
-      timeZone: 'Asia/Kolkata',
+      timeZone: 'America/New_York',
     });
 
     if (dynamicDateAction) {
@@ -2057,7 +2057,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       const expectedPattern = fillValue === 'date' ? /^\d{4}-\d{2}-\d{2}$/ : /^\d{2}\/\d{2}\/\d{4}$/;
       let actual = (await dateInput.inputValue().catch(() => '') || '').trim();
       if (spinButtonCount >= 3) {
-        const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.value));
+        const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.getAttribute('aria-valuenow') || element.value || (element.textContent || '').trim()));
         actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
       }
       // Some Workday masked controls update only the selected day. Complete the
@@ -2073,7 +2073,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           await spinButtons.nth(2).dispatchEvent('change').catch(() => {});
           await spinButtons.nth(2).press('Tab').catch(() => {});
           await spinButtons.nth(2).dispatchEvent('blur').catch(() => {});
-          const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.value));
+          const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.getAttribute('aria-valuenow') || element.value || (element.textContent || '').trim()));
           actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
         } else {
           await dateInput.fill(targetValue);
@@ -2345,10 +2345,10 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       automationId: q.automationId,
       question: `${questionLabel} ${q.containerText || ''}`,
       containerText: q.containerText,
-      timeZone: 'Asia/Kolkata',
+      timeZone: 'America/New_York',
     });
     const currentDateValue = q.fieldType === 'date'
-      ? getTodayISODate(dynamicDateAction?.timeZone || 'Asia/Kolkata')
+      ? getTodayISODate(dynamicDateAction?.timeZone || 'America/New_York')
       : dynamicDateAction?.value;
     const isCurrentDateAlreadyCorrect = dynamicDateAction
       && (
@@ -2616,26 +2616,34 @@ async function readSelfIdentifyFieldStatus(page) {
         const t = (btn?.textContent || '').replace(/\s+/g, ' ').trim();
         if (t && !/^select/i.test(t)) status.language = t;
       }
-      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(label)) {
+      if (/^(your\s+|full\s+|applicant\s*)?name[:\s]*$/i.test(label) || label.includes('name')) {
         const input = field.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
         status.name = (input?.value || '').trim();
       }
-      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(label)) {
+      if (/^(today'?s\s+|signature\s+)?date[:\s]*$/i.test(label) || label.includes('date')) {
         const spins = field.querySelectorAll('input[role="spinbutton"]');
         if (spins.length >= 3) {
-          status.date = `${spins[0]?.value || ''}/${spins[1]?.value || ''}/${spins[2]?.value || ''}`;
+          const m = spins[0]?.value || spins[0]?.getAttribute('aria-valuenow') || '';
+          const d = spins[1]?.value || spins[1]?.getAttribute('aria-valuenow') || '';
+          const y = spins[2]?.value || spins[2]?.getAttribute('aria-valuenow') || '';
+          if (m && d && y) status.date = `${m}/${d}/${y}`;
         } else {
           const input = field.querySelector('input[type="date"], input[type="text"]');
           status.date = (input?.value || '').trim();
         }
       }
     }
-    for (const input of document.querySelectorAll('input[type="radio"]:checked, input[type="checkbox"]:checked')) {
+    const allRadios = document.querySelectorAll('input[type="radio"], [role="radio"], input[type="checkbox"]');
+    for (const input of allRadios) {
+      const isChecked = input.checked || input.getAttribute('aria-checked') === 'true';
+      if (!isChecked) continue;
       const id = input.id;
-      const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : input.closest('label');
-      const text = (lab?.textContent || '').replace(/\s+/g, ' ').trim();
-      if (/do not have a disability|no disability|not have a disability/i.test(text)) {
+      const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+      const parent = input.closest('[data-automation-id*="formField"], [role="group"], [role="radiogroup"], fieldset, label, div');
+      const text = `${lab?.textContent || ''} ${input.getAttribute('aria-label') || ''} ${parent?.textContent || ''}`.replace(/\s+/g, ' ').trim();
+      if (/disability/i.test(text)) {
         status.disability = true;
+        break;
       }
     }
     return status;
@@ -2705,8 +2713,10 @@ async function fillSelfIdentifyDisability(page, profile) {
   if (!ok) {
     const patterns = [
       /no,?\s*i do not have a disability/i,
-      /do not have a disability and have not had one in the past/i,
-      /i don't have a disability/i,
+      /do not have a disability/i,
+      /don't have a disability/i,
+      /i do not wish to answer/i,
+      /decline to self-identify/i,
     ];
     for (const pattern of patterns) {
       const radio = page.getByRole('radio', { name: pattern }).first();
@@ -2726,17 +2736,26 @@ async function fillSelfIdentifyDisability(page, profile) {
 
   if (!ok) {
     ok = await page.evaluate(() => {
-      const needles = [/do not have a disability/i, /no disability/i];
-      for (const input of document.querySelectorAll('input[type="radio"], input[type="checkbox"]')) {
+      const allRadios = Array.from(document.querySelectorAll('input[type="radio"], [role="radio"], input[type="checkbox"]'));
+      let target = allRadios.find((input) => {
         const id = input.id;
-        const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : input.closest('label');
-        const text = (lab?.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!needles.some((re) => re.test(text))) continue;
-        if (!input.checked) {
-          input.click();
-          input.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-        return input.checked;
+        const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+        const parent = input.closest('[data-automation-id*="formField"], [role="group"], [role="radiogroup"], fieldset, label, div');
+        const text = `${lab?.textContent || ''} ${input.getAttribute('aria-label') || ''} ${parent?.textContent || ''}`.toLowerCase();
+        return (text.includes('do not have a disability') || text.includes("don't have a disability") || text.includes('no, i do not have') || text.includes('no disability')) && !text.includes('yes, i have');
+      });
+      if (!target) {
+        target = allRadios.find((input) => {
+          const parent = input.closest('[data-automation-id*="formField"], [role="group"], fieldset, label, div');
+          const text = (parent?.textContent || input.getAttribute('aria-label') || '').toLowerCase();
+          return text.includes('disability') && !text.includes('yes, i have');
+        });
+      }
+      if (target) {
+        target.scrollIntoView?.();
+        target.click();
+        target.dispatchEvent(new Event('change', { bubbles: true }));
+        return true;
       }
       return false;
     });
@@ -2808,7 +2827,7 @@ export async function handleSelfIdentifyStep(page, profile) {
   };
 
   let filled = 0;
-  const today = getTodayMMDDYYYY('Asia/Kolkata');
+  const today = getTodayMMDDYYYY('America/New_York');
 
   if (await fillSelfIdentifyLanguage(page, profile)) filled++;
 
@@ -2848,9 +2867,12 @@ export async function handleSelfIdentifyStep(page, profile) {
   }
   if (!dateOk) {
     console.log('    ⚠️  Date field fill failed — retrying spinbutton locators...');
-    const dateField = page.locator('[data-automation-id*="formField"]').filter({ hasText: /^Date\b/i }).first();
-    const spins = dateField.locator('input[role="spinbutton"]');
-    if (await spins.count() >= 3) {
+    const dateField = page.locator('[data-automation-id*="formField"]').filter({ hasText: /date/i }).first();
+    let spins = dateField.locator('input[role="spinbutton"]');
+    if (await spins.count().catch(() => 0) < 3) {
+      spins = page.locator('input[role="spinbutton"]');
+    }
+    if (await spins.count().catch(() => 0) >= 3) {
       const [, month, day, year] = today.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
       await spins.nth(0).fill(String(Number(month)));
       await spins.nth(1).fill(String(Number(day)));

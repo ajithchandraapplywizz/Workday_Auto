@@ -393,7 +393,9 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
       if (errState) {
         profile.personal = profile.personal || {};
         profile.personal.state = errState;
-        console.log(`    📍 Workday indicates address state is "${errState}" — aligning postal code`);
+        const { resolvePostalForWorkday } = await import('./clientContact.mjs');
+        profile.personal.postal_code = resolvePostalForWorkday(profile);
+        console.log(`    📍 Workday indicates address state is "${errState}" — aligned postal code to "${profile.personal.postal_code}"`);
       }
     }
   }

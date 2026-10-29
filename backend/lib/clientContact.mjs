@@ -665,11 +665,16 @@ export function resolvePostalForWorkday(profile = {}, indiaFallback) {
   const usZip = String(profile?.personal?.postal_code || '').trim();
 
   if (isUs) {
+    const state = String(profile?.personal?.state || profile?.qa_answers?.state || '').toLowerCase();
+    const city = String(profile?.personal?.city || profile?.qa_answers?.city || '').toLowerCase();
+
+    if (state.includes('pa') || state.includes('pennsylvania') || city.includes('york') || city.includes('pittsburgh')) {
+      if (!/^(15|16|17|18|19)\d{3}$/.test(usZip)) return '17401';
+    }
+
     if (/^\d{5}(-\d{4})?$/.test(usZip)) {
       return usZip.slice(0, 5);
     }
-    const state = String(profile?.personal?.state || profile?.qa_answers?.state || '').toLowerCase();
-    const city = String(profile?.personal?.city || profile?.qa_answers?.city || '').toLowerCase();
 
     // Accurate city-to-zip mappings
     if (city.includes('dallas')) return '75201';
@@ -693,8 +698,10 @@ export function resolvePostalForWorkday(profile = {}, indiaFallback) {
     if (city.includes('portland')) return '97201';
     if (city.includes('philadelphia')) return '19102';
     if (city.includes('phoenix')) return '85001';
-    if (city.includes('miami')) return '33101';
+    if (city.includes('york')) return '17401';
+    if (city.includes('pittsburgh')) return '15201';
 
+    if (state.includes('pa') || state.includes('pennsylvania')) return '17401';
     if (state.includes('tx') || state.includes('texas')) return '75201';
     if (state.includes('ma') || state.includes('massachusetts')) return '02108';
     if (state.includes('ca') || state.includes('california')) return '94102';

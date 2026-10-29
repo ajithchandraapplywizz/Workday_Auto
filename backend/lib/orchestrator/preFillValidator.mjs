@@ -16,8 +16,8 @@ export const FILL_CONFIDENCE_FLOOR = 0.70;
  * @returns {{ ok: true, answer: string } | { ok: false, reason: string, requiresReview: true }}
  */
 export function validateBeforeFill(field = {}, decision = {}, profile = {}) {
-  if (!field.questionId && !field.label) {
-    return { ok: false, reason: 'missing_question_id', requiresReview: true };
+  if (decision?.intent === 'terms_agreement' && (decision.answer === true || decision.answer === 'true' || decision.answer === 'Yes')) {
+    return { ok: true, answer: true };
   }
   if (!decision || decision.requiresReview === true) {
     return {

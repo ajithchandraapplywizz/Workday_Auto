@@ -491,7 +491,7 @@ export const WORKDAY_DEFAULT_QA = [
   },
   {
     question: 'What is your desired start date?',
-    answer: getTodayMMDDYYYY('Asia/Kolkata'),
+    answer: getTodayMMDDYYYY('America/New_York'),
   },
   {
     question: 'Instahire',
@@ -587,7 +587,7 @@ export const WORKDAY_DEFAULT_QA = [
   },
   {
     question: 'When are you available to start?',
-    answer: getTodayMMDDYYYY('Asia/Kolkata'),
+    answer: getTodayMMDDYYYY('America/New_York'),
   },
   {
     question: 'Type to Add Skills',
@@ -1081,7 +1081,7 @@ export function lookupDefaultAnswer(label) {
     return 'I have read and agree to the Non Disclosure Agreement';
   }
   if (isCurrentDateQuestionLabel(label)) {
-    return getTodayMMDDYYYY('Asia/Kolkata');
+    return getTodayMMDDYYYY('America/New_York');
   }
   if (/please\s+check\s+one\s+of\s+the\s+boxes/i.test(norm)) {
     return 'No, I do not have a disability and have not had one in the past';

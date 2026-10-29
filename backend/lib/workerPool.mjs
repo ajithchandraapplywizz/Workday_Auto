@@ -24,7 +24,7 @@ import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClien
 import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,11 +64,11 @@ export function setWorkerPoolStop(val) {
   setGlobalStop(val);
 }
 export function getWorkerPoolStop() {
-  return workerPoolStopRequested || isGlobalStopRequested();
+  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested();
 }
 
 export async function isWorkerPoolStopRequested() {
-  return workerPoolStopRequested || isGlobalStopRequested();
+  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested();
 }
 
 /**
@@ -137,6 +137,33 @@ export function indexResolvedAnswers(profile, rawAnswersList) {
       count++;
     }
   }
+  // Hydrate profile.personal identity facts if missing
+  profile.personal = profile.personal || {};
+  const entries = Array.isArray(rawAnswersList)
+    ? rawAnswersList.map((item) => ({ q: item?.question || item?.label || item?.question_label || '', a: item?.answer ?? item?.value }))
+    : Object.entries(rawAnswersList || {}).map(([q, a]) => ({ q, a }));
+
+  for (const { q, a } of entries) {
+    if (!a) continue;
+    const cleanQ = String(q).trim();
+    const strVal = String(a).trim();
+    if (/^first\s*name/i.test(cleanQ) && !profile.personal.first_name) {
+      profile.personal.first_name = strVal;
+    }
+    if (/^last\s*name/i.test(cleanQ) && !profile.personal.last_name) {
+      profile.personal.last_name = strVal;
+    }
+    if (/^email\b/i.test(cleanQ) && !profile.personal.email) {
+      profile.personal.email = strVal;
+    }
+    if (/^phone\b/i.test(cleanQ) && !profile.personal.phone) {
+      profile.personal.phone = strVal;
+    }
+    if (/^address\s*(line\s*1)?/i.test(cleanQ) && !profile.personal.address_line_1) {
+      profile.personal.address_line_1 = strVal;
+    }
+  }
+
   return count;
 }
 
@@ -254,9 +281,26 @@ export async function executeWorkerTask({
   if (applywizzId) {
     try {
       const { loadSupabaseClientSnapshot } = await import('./supabaseClient.mjs');
-      const snap = await loadSupabaseClientSnapshot(applywizzId);
+      const cleanSnapshotId = String(applywizzId).replace(/["'\\]/g, '').trim().toUpperCase();
+      const snap = await loadSupabaseClientSnapshot(cleanSnapshotId);
       if (snap?.client) {
         candidateDbClient = snap.client;
+        profile.personal = profile.personal || {};
+        if (!profile.personal.first_name && candidateDbClient.first_name) {
+          profile.personal.first_name = candidateDbClient.first_name;
+        }
+        if (!profile.personal.last_name && candidateDbClient.last_name) {
+          profile.personal.last_name = candidateDbClient.last_name;
+        }
+        if (!profile.personal.email && (candidateDbClient.email || candidateDbClient.company_email)) {
+          profile.personal.email = candidateDbClient.email || candidateDbClient.company_email;
+        }
+        if (!profile.personal.phone && candidateDbClient.phone) {
+          profile.personal.phone = candidateDbClient.phone;
+        }
+        if (!profile.name && candidateDbClient.client_name) {
+          profile.name = candidateDbClient.client_name;
+        }
       }
     } catch {}
   }
@@ -380,19 +424,68 @@ export async function executeWorkerTask({
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
-    // Step A: Scan Form
-    appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
-    console.log(`   [${workerId}] Step 1: Scanning form fields...`);
-    let scan = await scanForm(jobUrl, {
-      browser,
-      context,
-      page,
-      keepOpen: true,
-      workdayEmail,
-      workdayPassword,
-      mode: 'signin',
-      profile,
-    });
+    const isDirectSubmission = Boolean(options.isDirectSubmission || options.isSubmissionOnly || task.isDirectSubmission || isApprovedForSubmission);
+    let status;
+    let scan = null;
+
+    if (isDirectSubmission) {
+      appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
+      console.log(`   ⚡ [${workerId}] Direct Submission Mode: Skipping scanForm & generatePlan. Filling directly from pre-resolved answers.`);
+
+      // Pick resume for candidate
+      console.log(`   [${workerId}] Preparing resume...`);
+      const resumesYml = findFilePath('config/resumes.yml');
+      let resumePath = null;
+      if (existsSync(resumesYml)) {
+        resumePath = await pickResume('', resumesYml);
+      }
+      if (resumePath) profile._resumePath = resumePath;
+
+      const plan = {
+        company: company || profile._company || 'Workday',
+        role: roleTitle || profile._roleTitle || 'Workday Application',
+        url: jobUrl,
+        answers: profile._resolvedAnswersMap ? Object.fromEntries(profile._resolvedAnswersMap.entries()) : {},
+      };
+
+      profile._onStepChange = (iteration, stepName) => {
+        appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
+      };
+
+      profile._isScanOnly = false;
+      profile._isClusterBlueprint = false;
+
+      // Step D: Fill & Submit directly
+      appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
+      console.log(`   [${workerId}] Step 4: Filling application...`);
+      status = await fillForm(jobUrl, plan, {
+        browser,
+        context,
+        page,
+        profile,
+        workdayEmail,
+        workdayPassword,
+        mode: 'signin',
+        confirmSubmit: effectiveConfirmSubmit,
+        dryRun,
+        isBatch: true,
+        isScanOnly: false,
+        isClusterBlueprint: false,
+      });
+    } else {
+      // Step A: Scan Form
+      appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
+      console.log(`   [${workerId}] Step 1: Scanning form fields...`);
+      scan = await scanForm(jobUrl, {
+        browser,
+        context,
+        page,
+        keepOpen: true,
+        workdayEmail,
+        workdayPassword,
+        mode: 'signin',
+        profile,
+      });
 
     if (scan.jobMissing || scan.jobExpired || scan.reason === 'job_expired_or_not_found' || scan.reason === 'no_apply_button' || scan.reason === 'job_expired' || scan.reason === 'empty_page') {
       // Patiently verify if the page actually displays an Apply button or is still loading!
@@ -709,23 +802,24 @@ export async function executeWorkerTask({
     profile._isScanOnly = Boolean(options.isScanOnly || options.isClusterBlueprint);
     profile._isClusterBlueprint = Boolean(options.isClusterBlueprint);
 
-    // Step D: Fill & Submit
-    appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
-    console.log(`   [${workerId}] Step 4: Filling application...`);
-    const status = await fillForm(jobUrl, plan, {
-      browser,
-      context,
-      page,
-      profile,
-      workdayEmail,
-      workdayPassword,
-      mode: 'signin',
-      confirmSubmit: effectiveConfirmSubmit,
-      dryRun,
-      isBatch: true,
-      isScanOnly: Boolean(options.isScanOnly || options.isClusterBlueprint),
-      isClusterBlueprint: Boolean(options.isClusterBlueprint),
-    });
+      // Step D: Fill & Submit
+      appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
+      console.log(`   [${workerId}] Step 4: Filling application...`);
+      status = await fillForm(jobUrl, plan, {
+        browser,
+        context,
+        page,
+        profile,
+        workdayEmail,
+        workdayPassword,
+        mode: 'signin',
+        confirmSubmit: effectiveConfirmSubmit,
+        dryRun,
+        isBatch: true,
+        isScanOnly: Boolean(options.isScanOnly || options.isClusterBlueprint),
+        isClusterBlueprint: Boolean(options.isClusterBlueprint),
+      });
+    }
 
     if (status === 'job_not_found') {
       console.log(`   ❌ [${workerId}] Job page does not exist (dead/expired URL) — capturing screenshot & purging queue for all clients.`);
@@ -788,53 +882,56 @@ export async function executeWorkerTask({
       return { status: 'job_expired', reason: 'Link Expired', screenshotUrl: expiredShotUrl, stoppedAtStep: 'Job Discovery / Link Expired' };
     }
 
-    // Step E: Save newly discovered form schema to Supabase if unique link
-    const combinedFields = [
-      ...(Array.isArray(scan.fields) ? scan.fields : []),
-      ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
-    ].filter((f) => f && f.type !== 'password' && !/password/i.test(f.name || '') && !/password/i.test(f.label || ''));
+    let combinedFields = [];
+    // Step E: Save newly discovered form schema to Supabase if unique link (only in scanning mode)
+    if (!isDirectSubmission) {
+      combinedFields = [
+        ...(Array.isArray(scan?.fields) ? scan.fields : []),
+        ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
+      ].filter((f) => f && f.type !== 'password' && !/password/i.test(f.name || '') && !/password/i.test(f.label || ''));
 
-    const existingCount = cacheResult?.schema?.fields_schema?.length || 0;
-    const existingSteps = cacheResult?.schema?.step_names || [];
-    const isPartialCache = existingCount < 20 || existingSteps.length <= 1;
-    const hasMoreFields = combinedFields.length > existingCount;
+      const existingCount = cacheResult?.schema?.fields_schema?.length || 0;
+      const existingSteps = cacheResult?.schema?.step_names || [];
+      const isPartialCache = existingCount < 20 || existingSteps.length <= 1;
+      const hasMoreFields = combinedFields.length > existingCount;
 
-    if ((!cacheHit || isPartialCache || hasMoreFields) && combinedFields.length > 0) {
-      try {
-        const saved = await recordDiscoveredJobForm({
-          jobUrl,
-          profile,
-          fields: combinedFields,
-          stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
-          company,
-          roleTitle,
-        });
+      if ((!cacheHit || isPartialCache || hasMoreFields) && combinedFields.length > 0) {
+        try {
+          const saved = await recordDiscoveredJobForm({
+            jobUrl,
+            profile,
+            fields: combinedFields,
+            stepNames: profile._discoveredSteps ? [...profile._discoveredSteps] : ['Application'],
+            company,
+            roleTitle,
+          });
 
-        // Immediately bulk-pre-resolve for all other pending clients sharing this URL (skipped in cluster mode where Phase 3 resolves in parallel)
-        if (saved && !options.isClusterBlueprint) {
-          const { loadJobFormSchema: getSchema } = await import('./supabaseClient.mjs');
-          const savedSchema = await getSchema(jobUrl).catch(() => null);
-          if (savedSchema?.fields_schema?.length) {
-            const profilePath = findFilePath('config/profile.yml');
-            bulkPreResolveForJobUrl({
-              jobUrl,
-              schema: savedSchema,
-              allowedCandidateIds,
-              loadProfileFn: async (awlId) => {
-                const p = await loadProfile(existsSync(profilePath) ? profilePath : null, { applywizzId: awlId });
-                p._applyWizzId = awlId;
-                p._canonicalJobUrl = jobUrl;
-                p._jobUrl = jobUrl;
-                if (company) p._company = company;
-                return p;
-              },
-            }).catch((err) => {
-              console.log(`   ⚠️ [${workerId}] Bulk pre-resolve error (non-fatal): ${err.message}`);
-            });
+          // Immediately bulk-pre-resolve for all other pending clients sharing this URL (skipped in cluster mode where Phase 3 resolves in parallel)
+          if (saved && !options.isClusterBlueprint) {
+            const { loadJobFormSchema: getSchema } = await import('./supabaseClient.mjs');
+            const savedSchema = await getSchema(jobUrl).catch(() => null);
+            if (savedSchema?.fields_schema?.length) {
+              const profilePath = findFilePath('config/profile.yml');
+              bulkPreResolveForJobUrl({
+                jobUrl,
+                schema: savedSchema,
+                allowedCandidateIds,
+                loadProfileFn: async (awlId) => {
+                  const p = await loadProfile(existsSync(profilePath) ? profilePath : null, { applywizzId: awlId });
+                  p._applyWizzId = awlId;
+                  p._canonicalJobUrl = jobUrl;
+                  p._jobUrl = jobUrl;
+                  if (company) p._company = company;
+                  return p;
+                },
+              }).catch((err) => {
+                console.log(`   ⚠️ [${workerId}] Bulk pre-resolve error (non-fatal): ${err.message}`);
+              });
+            }
           }
+        } catch (err) {
+          console.log(`   ⚠️ [${workerId}] Could not record job form schema to Supabase: ${err.message}`);
         }
-      } catch (err) {
-        console.log(`   ⚠️ [${workerId}] Could not record job form schema to Supabase: ${err.message}`);
       }
     }
 
@@ -859,27 +956,23 @@ export async function executeWorkerTask({
           let storagePath = null;
           let bucket = null;
           let filename = null;
+          const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
+          const cleanTaskId = String(taskId || task.id || Date.now()).replace(/["'\\]/g, '').trim();
           if (status === 'submitted') {
             bucket = 'submitted-applications';
             // Strictly flat filename directly in root of submitted-applications
-            filename = taskId
-              ? `${applywizzId}_${taskId}_submitted.png`
-              : `${applywizzId}_${task.id || Date.now()}_submitted.png`;
+            filename = `${cleanAwl}_${cleanTaskId}_submitted.png`;
             storagePath = filename;
           } else if (status === 'reached-review' || status === 'reached_review') {
             // Upload full-page Review & Submit blueprint screenshot to submitted-applications bucket for scanned_jobs
             bucket = 'submitted-applications';
-            filename = taskId
-              ? `${applywizzId}_${taskId}_review_blueprint.jpg`
-              : `${applywizzId}_${task.id || Date.now()}_review_blueprint.jpg`;
+            filename = `${cleanAwl}_${cleanTaskId}_review_blueprint.jpg`;
             storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
             bucket = 'failed-applications';
             const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-            filename = taskId
-              ? `${applywizzId}_${taskId}_failed_${effectiveStep}_${Date.now()}.png`
-              : `${applywizzId}_${Date.now()}_failed_${effectiveStep}.png`;
+            filename = `${cleanAwl}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
             storagePath = filename;
           }
 
@@ -1350,8 +1443,9 @@ export async function executeWorkerTask({
         const buf = await page.screenshot({ type: 'png' }).catch(() => null);
         if (buf) {
           const timestamp = Date.now();
-          const effectiveTaskId = taskId || task.id || timestamp;
-          const failStoragePath = `${applywizzId}_${effectiveTaskId}_failed_${timestamp}.png`;
+          const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
+          const cleanTaskId = String(taskId || task.id || timestamp).replace(/["'\\]/g, '').trim();
+          const failStoragePath = `${cleanAwl}_${cleanTaskId}_failed_${timestamp}.png`;
           errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf);
           if (errShotUrl) {
             console.log(`[${workerId}] screenshot uploaded: ${failStoragePath}`);

@@ -67,6 +67,16 @@ export async function updateSubmissionTaskWithCheck({
       }
 
       if (!data || data.length === 0) {
+        // Fallback: update by ID directly in case lease reaper or transient state reset it
+        const { data: fbData } = await supabase
+          .from('submission_tasks')
+          .update(cleanPatch)
+          .eq('id', cleanTaskId)
+          .select('*');
+        if (fbData && fbData.length > 0) {
+          console.log(`[${workerId}] task row updated via ID fallback (rows=${fbData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
+          return { success: true, data: fbData[0], rowsCount: fbData.length };
+        }
         lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} was not in 'applying' state or worker_id mismatch (expected ${workerId})`);
         console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} matched 0 rows for task #${cleanTaskId}`);
         if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
@@ -157,18 +167,17 @@ export async function syncJobDistributionsToSubmissionTasks() {
       .select('id, applywizz_id, job_url, company, role_title')
       .eq('status', 'ready_for_review');
 
-    if (distErr || !readyDists || readyDists.length === 0) return 0;
-
     const { data: existingTasks } = await supabase
       .from('submission_tasks')
-      .select('distribution_id, applywizz_id, job_url');
+      .select('applywizz_id, job_url');
 
-    const existingKeys = new Set((existingTasks || []).map((t) => `${t.applywizz_id}:::${t.job_url}`));
+    const cleanAwl = (id) => String(id || '').replace(/["'\\]/g, '').trim().toUpperCase();
+    const existingKeys = new Set((existingTasks || []).map((t) => `${cleanAwl(t.applywizz_id)}:::${t.job_url}`));
     const toInsert = readyDists
-      .filter((d) => !existingKeys.has(`${d.applywizz_id}:::${d.job_url}`))
+      .filter((d) => !existingKeys.has(`${cleanAwl(d.applywizz_id)}:::${d.job_url}`))
       .map((d) => ({
         distribution_id: d.id,
-        applywizz_id: d.applywizz_id,
+        applywizz_id: cleanAwl(d.applywizz_id),
         job_url: d.job_url,
         company: d.company,
         role_title: d.role_title,
@@ -237,14 +246,29 @@ export async function claimNextTask(workerId) {
 
   // 1. Direct atomic CAS (Compare-And-Swap on oldest ready_for_review or queued row)
   try {
-    const { data: candidates, error: candErr } = await supabase
+    // Stage 3 0th-Attempt Priority Policy:
+    // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed attempt 1)
+    let { data: candidates, error: candErr } = await supabase
       .from('submission_tasks')
       .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
       .in('status', ['ready_for_review', 'queued'])
+      .or('error_message.is.null,error_message.not.ilike.%[Attempt 1/2]%')
       .order('created_at', { ascending: true })
       .limit(10);
 
-    if (candErr || !candidates || candidates.length === 0) return null;
+    // 2. Only after all 0th attempt applications have finished processing, claim deferred Attempt 1 retries
+    if (!candidates || candidates.length === 0) {
+      const { data: retryCandidates, error: retryErr } = await supabase
+        .from('submission_tasks')
+        .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
+        .in('status', ['ready_for_review', 'queued'])
+        .ilike('error_message', '%[Attempt 1/2]%')
+        .order('created_at', { ascending: true })
+        .limit(10);
+      candidates = retryCandidates || [];
+    }
+
+    if (!candidates || candidates.length === 0) return null;
 
     for (const cand of candidates) {
       // Atomic claim on candidate row
@@ -462,6 +486,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             company: task.company,
             roleTitle: task.role_title,
             status: 'approved_for_submission',
+            isDirectSubmission: true,
             resolved_answers: preResolved,
             pre_resolved_answers: preResolved,
           },
@@ -474,6 +499,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             confirmSubmit: true,
             dryRun: false,
             taskId: task.id,
+            isDirectSubmission: true,
           },
         });
       }
@@ -491,7 +517,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           if (ctx?.page && !ctx.page.isClosed()) {
             const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
             if (buf) {
-              const cleanId = String(task.applywizz_id).trim().toUpperCase();
+              const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
               const timestamp = Date.now();
               // Zero nested folders: flat filename directly in root of failed-applications
               shotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
@@ -541,7 +567,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     let finalShotUrl = result?.screenshotUrl || null;
     let finalStoragePath = result?.screenshotPath || null;
     if (!finalStoragePath && finalShotUrl) {
-      const cleanId = String(task.applywizz_id).trim().toUpperCase();
+      const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
       // Flat filename directly in bucket root
       finalStoragePath = `${cleanId}_${task.id}.png`;
     }
@@ -709,7 +735,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       if (ctx?.page && !ctx.page.isClosed()) {
         const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
         if (buf) {
-          const cleanId = String(task.applywizz_id).trim().toUpperCase();
+          const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
           const timestamp = Date.now();
           // Flat filename directly in root of failed-applications
           errShotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;

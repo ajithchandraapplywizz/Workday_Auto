@@ -328,9 +328,13 @@ export async function ensureStorageBucket(bucketName) {
 
 export async function uploadStorageScreenshot(bucketName, filename, buffer, contentType = 'image/jpeg') {
   if (!isSupabaseConfigured() || !buffer) return null;
+  // Sanitize filename: strip quotes and invalid characters that trigger S3 400 InvalidKey
+  const cleanFilename = String(filename || '')
+    .replace(/["'\\]/g, '')
+    .replace(/[^a-zA-Z0-9._-]/g, '_');
   const { url, key } = config();
   try {
-    const res = await fetch(`${url}/storage/v1/object/${bucketName}/${filename}`, {
+    const res = await fetch(`${url}/storage/v1/object/${bucketName}/${cleanFilename}`, {
       method: 'POST',
       headers: {
         apikey: key,
@@ -344,7 +348,7 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
       // If bucket does not exist (404/400), auto-create the bucket and retry once
       if (res.status === 404 || res.status === 400) {
         await ensureStorageBucket(bucketName);
-        const retryRes = await fetch(`${url}/storage/v1/object/${bucketName}/${filename}`, {
+        const retryRes = await fetch(`${url}/storage/v1/object/${bucketName}/${cleanFilename}`, {
           method: 'POST',
           headers: {
             apikey: key,
@@ -355,7 +359,7 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
           body: buffer,
         });
         if (retryRes.ok) {
-          return `${url}/storage/v1/object/public/${bucketName}/${filename}`;
+          return `${url}/storage/v1/object/public/${bucketName}/${cleanFilename}`;
         }
       }
 
@@ -363,16 +367,16 @@ export async function uploadStorageScreenshot(bucketName, filename, buffer, cont
       console.warn(`[Supabase Storage] Upload to ${bucketName} failed (${res.status}): ${errText}`);
       if (bucketName !== 'failed-applications') {
         console.log(`[Supabase Storage] Retrying upload to failed-applications fallback bucket...`);
-        return uploadStorageScreenshot('failed-applications', filename, buffer, contentType);
+        return uploadStorageScreenshot('failed-applications', cleanFilename, buffer, contentType);
       }
       return null;
     }
-    const publicUrl = `${url}/storage/v1/object/public/${bucketName}/${filename}`;
+    const publicUrl = `${url}/storage/v1/object/public/${bucketName}/${cleanFilename}`;
     return publicUrl;
   } catch (err) {
     console.warn(`[Supabase Storage] Upload exception: ${err.message}`);
     if (bucketName !== 'failed-applications') {
-      return uploadStorageScreenshot('failed-applications', filename, buffer, contentType);
+      return uploadStorageScreenshot('failed-applications', cleanFilename, buffer, contentType);
     }
     return null;
   }

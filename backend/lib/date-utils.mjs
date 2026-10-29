@@ -1,4 +1,4 @@
-export function getTodayMMDDYYYY(timeZone = 'Asia/Kolkata', referenceDate = new Date()) {
+export function getTodayMMDDYYYY(timeZone = 'America/New_York', referenceDate = new Date()) {
   const parts = new Intl.DateTimeFormat('en-US', {
     timeZone,
     year: 'numeric',
@@ -15,7 +15,7 @@ export function getTodayMMDDYYYY(timeZone = 'Asia/Kolkata', referenceDate = new 
   return `${values.month}/${values.day}/${values.year}`;
 }
 
-export function getTodayISODate(timeZone = 'Asia/Kolkata', referenceDate = new Date()) {
+export function getTodayISODate(timeZone = 'America/New_York', referenceDate = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
     timeZone,
     year: 'numeric',
@@ -166,7 +166,7 @@ export function isCurrentDateQuestionLabel(label = '', metadata = {}) {
 export function buildCurrentDateAction(label = '', metadata = {}, referenceDate = new Date()) {
   const isAvailabilityStart = isAvailabilityStartDateLabel(label, metadata);
   if (!isAvailabilityStart && !isCurrentDateQuestionLabel(label, metadata)) return null;
-  const timeZone = metadata.timeZone || 'Asia/Kolkata';
+  const timeZone = metadata.timeZone || 'America/New_York';
   const answer = getTodayMMDDYYYY(timeZone, referenceDate);
   const rawLabel = String(label).trim();
   return {

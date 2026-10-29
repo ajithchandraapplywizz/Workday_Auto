@@ -43,7 +43,7 @@ import {
 import { runStepDomPrep } from './stepDomPrep.mjs';
 import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
 import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
-import { isGlobalStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -1875,13 +1875,16 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log('\n📋 Review step — parsing DOM before submit.');
   profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
-  if (profile?._humanRequired?.length) {
+  const realHumanRequired = (profile?._humanRequired || []).filter((item) =>
+    !/terms|read and understood|consent|agreement|statement and certify|acknowledge|state that i have read/i.test(item.label || '')
+  );
+  if (realHumanRequired.length) {
     console.log('\n  🛑 Unresolved required field(s) flagged during wizard flow:');
-    for (const item of profile._humanRequired.slice(0, 8)) {
-      console.log(`     • [${item.section}] ${String(item.label || '').slice(0, 80)} (${item.field_type || 'field'})`);
+    for (const item of realHumanRequired.slice(0, 8)) {
+      console.log(`     • [${item.section || 'field'}] ${String(item.label || '').slice(0, 80)} (${item.field_type || 'field'})`);
     }
-    if (profile._humanRequired.length > 8) {
-      console.log(`     … and ${profile._humanRequired.length - 8} more`);
+    if (realHumanRequired.length > 8) {
+      console.log(`     … and ${realHumanRequired.length - 8} more`);
     }
     if (confirmSubmit && !dryRun) {
       return 'human-required';
@@ -2008,20 +2011,20 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-  // Explicitly wait for Workday confirmation screen to render
+  // Explicitly wait 2-5 sec for Workday confirmation screen to render dynamically
   try {
     await page.waitForFunction(() => {
       const text = document.body?.innerText || '';
-      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
-             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
-    }, { timeout: 10000 });
+      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest/i.test(text) ||
+             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
+    }, { timeout: 5000, polling: 300 });
   } catch {}
-  await page.waitForTimeout(1500);
+  await page.waitForTimeout(1000);
 
   const confirmationFound = await page.evaluate(() => {
     const text = document.body?.innerText || '';
-    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted/i.test(text) ||
-           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"]');
+    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest/i.test(text) ||
+           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
   });
 
   if (confirmationFound) {
@@ -2121,16 +2124,28 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   }
   if (isApplyWizzConfigured()) {
     const facts = profileFactPresence(profile);
-    if (!facts.name || !facts.email) {
-      console.error('❌ Apply Wizz profile missing legal name or email — My Information cannot be filled from API.');
-      await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'missing_name_or_email' }).catch(() => {});
-      return 'incomplete';
+    const hasPreResolved = (profile._supabaseQa && Object.keys(profile._supabaseQa).length > 0) || (profile._answerCache && profile._answerCache.size > 0);
+    const hasCandidateName = Boolean(facts.name || profile.personal?.first_name || profile.personal?.name || profile.name);
+    const hasCandidateEmail = Boolean(facts.email || profile.personal?.email || profile.personal?.company_email || profile.email);
+    if (!hasCandidateName || !hasCandidateEmail) {
+      if (!hasPreResolved) {
+        console.error('❌ Apply Wizz profile missing legal name or email — My Information cannot be filled from API.');
+        await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'incomplete', failureReason: 'missing_name_or_email' }).catch(() => {});
+        return 'incomplete';
+      }
     }
   }
 
   if (!profile?.personal?.phone) {
     const { ensureWorkdayContactFromClient } = await import('./clientContact.mjs');
     await ensureWorkdayContactFromClient(profile);
+  }
+  if (!profile?.personal?.phone) {
+    const prePhone = profile._supabaseQa?.['Phone Number*'] || profile._supabaseQa?.['Phone Number'] || profile._supabaseQa?.['phone'];
+    if (prePhone) {
+      profile.personal = profile.personal || {};
+      profile.personal.phone = prePhone;
+    }
   }
   if (!profile?.personal?.phone) {
     console.error('❌ No phone after Apply Wizz bootstrap — set personal.phone or fix APPLYWIZZ_ID in .env');
@@ -2157,8 +2172,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
-    if (isGlobalStopRequested()) {
-      console.log('🛑 [Workday Wizard] Global stop requested! Terminating wizard loop immediately.');
+    if (isGlobalStopRequested() || isSubmitStopRequested()) {
+      console.log('🛑 [Workday Wizard] Stop requested! Terminating wizard loop immediately.');
       return 'stopped';
     }
     currentIteration++;
@@ -3051,7 +3066,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
       console.log(`\n${'─'.repeat(60)}`);
       console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status}`);
-      console.log(`   Screenshots: screenshots/`);
+      console.log(`   Screenshots: In-Memory Buffer -> Cloud Storage (Supabase)`);
       console.log(`${'─'.repeat(60)}`);
 
       // Determine hold time before browser close based on outcome:
@@ -3458,7 +3473,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
     console.log(`\n${'─'.repeat(60)}`);
     console.log(`🏁 Result: ${status}`);
-    console.log(`   Screenshots: screenshots/`);
+    console.log(`   Screenshots: In-Memory Buffer -> Cloud Storage (Supabase)`);
     console.log(`${'─'.repeat(60)}`);
 
     console.log(`\n   — Closing browser...`);

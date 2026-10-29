@@ -476,6 +476,7 @@ async function runStage3Submissions() {
   submitStatus = 'running';
   submitStopRequested = false;
   isPoolRunning = true;
+  isPoolPaused = false;
   setGlobalStop(false);
   setSubmitStop(false);
 
@@ -1868,6 +1869,7 @@ export async function initOnStartup() {
           last_action_requested: null,
           trigger_requested: false,
           is_running: true,
+          is_paused: false,
           stage: 'submitting',
           mode: 'submitting',
           submit_status: 'running',

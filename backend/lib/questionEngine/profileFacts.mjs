@@ -38,8 +38,16 @@ export function profileFactPresence(profile = {}) {
   return {
     applyWizzConfigured: isApplyWizzConfigured(),
     applyWizzHydrated: profile._applyWizzHydrated === true,
-    name: Boolean(p.first_name || p.last_name || p.full_name),
-    email: nonEmpty(p.email),
+    name: Boolean(
+      p.first_name || p.last_name || p.full_name || profile.name ||
+      qaGet(profile, 'First Name*', 'First Name', 'first_name', 'Legal Name', 'Name') ||
+      profile._preResolvedFields?.get('first_name')
+    ),
+    email: Boolean(
+      nonEmpty(p.email) || nonEmpty(profile.email) ||
+      nonEmpty(qaGet(profile, 'Email*', 'Email Address*', 'email', 'company_email')) ||
+      nonEmpty(profile._preResolvedFields?.get('email'))
+    ),
     phone: nonEmpty(p.phone),
     city: nonEmpty(p.city),
     workAuth: nonEmpty(w.authorized_us),

@@ -365,7 +365,7 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
           getNestedValue(profile, 'experience.available_to_start')
           || getNestedValue(profile, 'experience.start_date');
         if (storedDate) return String(storedDate);
-        return getTodayMMDDYYYY('Asia/Kolkata');
+        return getTodayMMDDYYYY('America/New_York');
       }
       if (path.startsWith('_static.')) {
         // Invented Yes/No/Male answers — never use. Apply Wizz or LLM must decide.
@@ -391,7 +391,7 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
           getNestedValue(profile, 'experience.available_to_start')
           || getNestedValue(profile, 'experience.start_date');
         if (storedDate) return String(storedDate);
-        return getTodayMMDDYYYY('Asia/Kolkata');
+        return getTodayMMDDYYYY('America/New_York');
       }
       if (path.startsWith('_static.')) {
         continue;
@@ -709,7 +709,7 @@ export async function resolveField(field, profile, qaStore, options = {}) {
     name: fieldObj?.name,
     automationId: fieldObj?.automationId || fieldObj?.dataAutomationId || fieldObj?.id,
     question: rawLabel,
-    timeZone: 'Asia/Kolkata',
+    timeZone: 'America/New_York',
   });
   if (dynamicDateAction) {
     return dynamicDateAction.value;
@@ -858,7 +858,7 @@ export async function generatePlan(scan, profile, { resumePath, jdText, url, qaS
       name: field.name,
       automationId: field.automationId || field.dataAutomationId || field.id,
       question: label,
-      timeZone: 'Asia/Kolkata',
+      timeZone: 'America/New_York',
     });
     if (dynamicDateAction) {
       fills.push({
