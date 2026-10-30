@@ -722,6 +722,12 @@ export async function isWorkdaySignInPage(page) {
 
 // ─── Full Workday flow ──────────────────────────────────────────────────────
 export async function handleWorkday(page, { email, password, mode = 'signin', profile = null } = {}) {
+  console.log(`   🔒 [STRICT AUTH] Target candidate email: "${email || 'NONE'}" (mode: ${mode})`);
+  if (!email || !String(email).trim()) {
+    console.error('   ❌ [STRICT AUTH GUARD] handleWorkday called with NO EMAIL. Aborting auth to protect candidate accounts.');
+    return false;
+  }
+
   if (await isWorkdayWizardVisible(page)) {
     console.log('   Already on Workday application form wizard — skipping discovery.');
     return true;

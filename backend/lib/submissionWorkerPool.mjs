@@ -475,13 +475,39 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           task.resolved_answers = preResolved;
         }
 
+        const cleanAwlId = String(task.applywizz_id || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+        const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
+        const dbClient = await getClientRecordByAwlId(cleanAwlId);
+
+        if (!dbClient || !dbClient.company_email || !String(dbClient.company_email).trim()) {
+          const errMsg = `[STRICT AUTH GUARD] Submission aborted: No valid company_email found in clients table for client "${task.applywizz_id}" (${cleanAwlId}). Refusing to authenticate with unverified/mock credentials.`;
+          console.error(`❌ [${workerId}] ${errMsg}`);
+          await updateJobDistributionWithCheck({
+            distributionId: task.distribution_id,
+            workerId,
+            patch: { status: 'failed', error_message: errMsg, updated_at: new Date().toISOString() },
+          }).catch(() => {});
+          await supabase
+            .from('submission_tasks')
+            .update({ status: 'failed', error_message: errMsg, updated_at: new Date().toISOString() })
+            .eq('id', task.id)
+            .catch(() => {});
+          return { status: 'failed', error: errMsg };
+        }
+
+        const candidateCompanyEmail = String(dbClient.company_email).trim().toLowerCase();
+        console.log(`🔒 [STRICT AUTH GUARD] [${workerId}] Verified candidate company_email from clients table: ${candidateCompanyEmail} for ${cleanAwlId} (${dbClient.client_name || ''})`);
+
+        task.candidateEmail = candidateCompanyEmail;
+        task.dbClient = dbClient;
+
         const { executeWorkerTask } = await import('./workerPool.mjs');
         return await executeWorkerTask({
           task: {
             id: task.distribution_id,
             distributionId: task.distribution_id,
             taskId: task.id,
-            applywizzId: task.applywizz_id,
+            applywizzId: cleanAwlId,
             jobUrl: task.job_url,
             company: task.company,
             roleTitle: task.role_title,
@@ -489,6 +515,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             isDirectSubmission: true,
             resolved_answers: preResolved,
             pre_resolved_answers: preResolved,
+            candidateEmail: candidateCompanyEmail,
+            dbClient,
           },
           taskId: task.id,
           workerId,

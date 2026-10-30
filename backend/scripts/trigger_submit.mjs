@@ -17,13 +17,17 @@ async function main() {
     .from('bot_control')
     .update({
       stage: 'submitting',
+      mode: 'submitting',
+      submit_status: 'running',
+      submit_enabled: true,
+      submit_stop_requested: false,
       is_running: true,
       is_paused: false,
       stop_requested: false,
       trigger_requested: true,
       last_action_requested: 'start_submit',
       active_worker_count: 2,
-      current_action: 'Submitting approved applications across 2 dedicated workers...',
+      current_action: 'Submitting approved applications across 2 dedicated workers in background...',
       updated_at: new Date().toISOString(),
     })
     .eq('id', 'primary')
@@ -34,7 +38,16 @@ async function main() {
     console.error('Trigger error:', error.message);
     process.exit(1);
   }
-  console.log('✓ Trigger sent successfully to bot_control!');
+
+  await supabase.from('worker_control').upsert({
+    key: 'submit',
+    enabled: true,
+    status: 'running',
+    stop_requested: false,
+    updated_at: new Date().toISOString(),
+  }, { onConflict: 'key' }).catch(() => {});
+
+  console.log('✓ Trigger sent successfully to bot_control and worker_control!');
   console.log('State:', data);
 }
 

@@ -276,51 +276,32 @@ export async function executeWorkerTask({
     return { status: 'profile_load_failed', error: err.message };
   }
 
-  // 3. Resolve Workday credentials for this candidate from AWL ID client record in Supabase
-  let candidateDbClient = null;
-  if (applywizzId) {
-    try {
-      const { loadSupabaseClientSnapshot } = await import('./supabaseClient.mjs');
-      const cleanSnapshotId = String(applywizzId).replace(/["'\\]/g, '').trim().toUpperCase();
-      const snap = await loadSupabaseClientSnapshot(cleanSnapshotId);
-      if (snap?.client) {
-        candidateDbClient = snap.client;
-        profile.personal = profile.personal || {};
-        if (!profile.personal.first_name && candidateDbClient.first_name) {
-          profile.personal.first_name = candidateDbClient.first_name;
-        }
-        if (!profile.personal.last_name && candidateDbClient.last_name) {
-          profile.personal.last_name = candidateDbClient.last_name;
-        }
-        if (!profile.personal.email && (candidateDbClient.email || candidateDbClient.company_email)) {
-          profile.personal.email = candidateDbClient.email || candidateDbClient.company_email;
-        }
-        if (!profile.personal.phone && candidateDbClient.phone) {
-          profile.personal.phone = candidateDbClient.phone;
-        }
-        if (!profile.name && candidateDbClient.client_name) {
-          profile.name = candidateDbClient.client_name;
-        }
-      }
-    } catch {}
+  // 3. Resolve Workday credentials STRICTLY from clients table for this candidate's AWL ID
+  const cleanCandidateAwlId = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  const { getClientRecordByAwlId, loadSupabaseClientSnapshot } = await import('./supabaseClient.mjs');
+  let candidateDbClient = task?.dbClient || (await getClientRecordByAwlId(cleanCandidateAwlId));
+
+  if (!candidateDbClient?.company_email || !String(candidateDbClient.company_email).trim()) {
+    const strictAuthErr = `[STRICT AUTH GUARD] Failed submission: No company_email found in clients table for candidate "${applywizzId}" (${cleanCandidateAwlId}). Refusing to authenticate with unverified/mock credentials.`;
+    console.error(`   ❌ [${workerId}] ${strictAuthErr}`);
+    throw new Error(strictAuthErr);
   }
 
-  const candidateEmail = candidateDbClient?.company_email ||
-    candidateDbClient?.email ||
-    (candidateDbClient ? resolveCompanyEmail(candidateDbClient, candidateDbClient.client_name) : '') ||
-    resolveCompanyEmail(profile.personal || profile, [profile.personal?.first_name, profile.personal?.last_name].filter(Boolean).join(' ') || profile.name || '');
+  const workdayEmail = String(candidateDbClient.company_email).trim().toLowerCase();
 
-  let workdayEmail = candidateEmail || profile.personal?.company_email || profile.personal?.email || profile.email || '';
-  if (!workdayEmail && applywizzId) {
-    const rawFirst = candidateDbClient?.first_name || profile.personal?.first_name || '';
-    const rawLast = candidateDbClient?.last_name || profile.personal?.last_name || '';
-    const rawName = [rawFirst, rawLast].filter(Boolean).join('.') || applywizzId.toLowerCase().replace(/[^a-z0-9]/g, '');
-    workdayEmail = `${rawName}@applywizard.ai`;
+  // Enforce candidate's company_email on all profile contact fields
+  profile.personal = profile.personal || {};
+  profile.personal.email = workdayEmail;
+  profile.personal.company_email = workdayEmail;
+  profile.email = workdayEmail;
+  if (candidateDbClient.first_name) profile.personal.first_name = candidateDbClient.first_name;
+  if (candidateDbClient.last_name) profile.personal.last_name = candidateDbClient.last_name;
+  if (candidateDbClient.mobile_number && candidateDbClient.mobile_number !== '+') {
+    profile.personal.phone = candidateDbClient.mobile_number;
   }
-  if (!workdayEmail) {
-    workdayEmail = process.env.WORKDAY_DEFAULT_USERNAME || 'Created@123';
-  }
-  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026';
+  if (candidateDbClient.client_name) profile.name = candidateDbClient.client_name;
+
+  const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
 
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
   const skillsCount = profile.skills?.length || 0;
@@ -416,6 +397,8 @@ export async function executeWorkerTask({
     locale: 'en-US',
     timezoneId: 'America/New_York',
   });
+  await context.clearCookies().catch(() => {});
+  await context.clearPermissions().catch(() => {});
   await context.addInitScript(() => {
     Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
   }).catch(() => {});

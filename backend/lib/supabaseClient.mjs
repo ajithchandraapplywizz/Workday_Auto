@@ -174,13 +174,33 @@ export async function loadSupabaseAnswers(applywizzId) {
   }) || [];
 }
 
+export async function getClientRecordByAwlId(rawAwlId) {
+  if (!isSupabaseConfigured() || !rawAwlId) return null;
+  const cleanId = String(rawAwlId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  if (!cleanId) return null;
+
+  // 1. Exact match on clean applywizz_id
+  let res = await request('clients', { query: `?applywizz_id=eq.${encode(cleanId)}&select=*&limit=1` }).catch(() => null);
+  if (res && res[0]) return res[0];
+
+  // 2. Exact match with quotes if stored quoted in db
+  res = await request('clients', { query: `?applywizz_id=eq.${encode(`"${cleanId}"`)}&select=*&limit=1` }).catch(() => null);
+  if (res && res[0]) return res[0];
+
+  // 3. Fallback ILIKE match
+  res = await request('clients', { query: `?applywizz_id=ilike.*${encode(cleanId)}*&select=*&limit=1` }).catch(() => null);
+  if (res && res[0]) return res[0];
+
+  return null;
+}
+
 export async function loadSupabaseClientSnapshot(applywizzId) {
   if (!isSupabaseConfigured() || !applywizzId) return null;
-  const [clients, answers] = await Promise.all([
-    request('clients', { query: `?applywizz_id=eq.${encode(applywizzId)}&select=*&limit=1` }),
-    loadSupabaseAnswers(applywizzId),
+  const cleanId = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  const [client, answers] = await Promise.all([
+    getClientRecordByAwlId(cleanId),
+    loadSupabaseAnswers(cleanId),
   ]);
-  const client = clients?.[0] || null;
   if (!client) return null;
   return { client, answers: answers || [] };
 }

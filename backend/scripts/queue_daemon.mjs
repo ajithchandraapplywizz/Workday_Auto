@@ -92,12 +92,13 @@ if (TEST_MODE) {
 }
 console.log(`[DAEMON] Active Service Role: "${SERVICE_ROLE.toUpperCase()}" (main = 0 workers, scanner = scan only, submitter = submit only, all = combined).`);
 
-let isPoolRunning = false;
+const defaultSubmitMode = process.env.AUTO_SUBMIT !== 'false' && process.env.SUBMIT_RUN !== 'false';
+let isPoolRunning = defaultSubmitMode;
 let isPoolPaused = false;
-let currentStage = 'idle';
-let currentMode = 'idle'; // 'idle' | 'scanning' | 'submitting' (R3 Sequence and Mode Lock)
+let currentStage = defaultSubmitMode ? 'submitting' : 'idle';
+let currentMode = defaultSubmitMode ? 'submitting' : 'idle'; // 'idle' | 'scanning' | 'submitting' (R3 Sequence and Mode Lock)
 let scanStatus = 'off';   // 'off' | 'running' | 'stopping' (R11 Independent Toggle State)
-let submitStatus = 'off'; // 'off' | 'running' | 'stopping' (R11 Independent Toggle State)
+let submitStatus = defaultSubmitMode ? 'running' : 'off'; // Continuous background submit default ON
 let scanStopRequested = false;
 let submitStopRequested = false;
 let scanCompleteMessage = null; // "Scan complete: ready for Submit."
@@ -244,6 +245,18 @@ export async function checkStage1Completion() {
           reason: `Submit toggle is refused: ${activeWorkers.length} scan/resolve worker(s) are currently active.`,
         };
       }
+    }
+  } catch {}
+
+  // If there are approved applications ready in submission_tasks, allow submission immediately
+  try {
+    const { count: readyTasksCount } = await supabase
+      .from('submission_tasks')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['ready_for_review', 'queued']);
+
+    if (readyTasksCount && readyTasksCount > 0) {
+      return { allowed: true };
     }
   } catch {}
 
@@ -508,20 +521,7 @@ async function runStage3Submissions() {
 
   const tasksCount = initialCount || 0;
   if (tasksCount === 0) {
-    console.log(`ℹ️ [DAEMON] 0 applications ready for submission.`);
-    submitStatus = 'off';
-    currentMode = 'idle';
-    currentStage = 'idle';
-    isPoolRunning = false;
-    await syncBotControlState({
-      mode: 'idle',
-      stage: 'idle',
-      submit_enabled: false,
-      submit_status: 'off',
-      is_running: false,
-      current_action: '0 applications ready for submission. Idle.',
-    });
-    return;
+    console.log(`ℹ️ [DAEMON] 0 applications ready for submission right now. Submit daemon remaining ACTIVE in background to process newly approved applications.`);
   }
 
   await syncBotControlState({
@@ -531,7 +531,7 @@ async function runStage3Submissions() {
     submit_status: 'running',
     submit_stop_requested: false,
     is_running: true,
-    current_action: `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway`,
+    current_action: `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway (Continuous background submit active)`,
     active_worker_count: maxConcurrency,
   });
 
@@ -588,7 +588,7 @@ async function runStage3Submissions() {
       }
     }
 
-    // Auto-off check: if no tasks were claimed and no workers are currently running
+    // Check remaining tasks when no workers are busy
     if (!claimedAny && activeSubmittingWorkers.size === 0) {
       const { data: remaining } = await supabase
         .from('submission_tasks')
@@ -609,8 +609,16 @@ async function runStage3Submissions() {
           continue;
         }
 
-        console.log(`\n✅ [DAEMON] All submission tasks finished. Submit toggle turning OFF automatically.`);
-        break;
+        // If continuous submission is enabled (default), do NOT turn off submit toggle!
+        // Keep waiting in the background so newly approved tasks are immediately claimed and submitted.
+        if (process.env.AUTO_OFF_ON_DRAIN === 'true') {
+          console.log(`\n✅ [DAEMON] All submission tasks finished. Submit toggle turning OFF automatically.`);
+          break;
+        } else {
+          // Pause briefly and keep loop alive in background
+          await new Promise((r) => setTimeout(r, 5000));
+          continue;
+        }
       }
     }
 
@@ -1678,27 +1686,28 @@ export async function initOnStartup() {
 
     await ensureCanonicalWorkers();
     await resetAllWorkersIdle();
+    const isAutoSubmit = process.env.AUTO_SUBMIT !== 'false' && process.env.SUBMIT_RUN !== 'false';
     if (SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
       await syncBotControlState({
-        mode: 'idle',
-        stage: 'idle',
-        is_running: false,
+        mode: isAutoSubmit ? 'submitting' : 'idle',
+        stage: isAutoSubmit ? 'submitting' : 'idle',
+        is_running: isAutoSubmit,
         is_paused: false,
         stop_requested: false,
         scan_enabled: false,
         scan_status: 'off',
         scan_stop_requested: false,
-        submit_enabled: false,
-        submit_status: 'off',
+        submit_enabled: isAutoSubmit,
+        submit_status: isAutoSubmit ? 'running' : 'off',
         submit_stop_requested: false,
         trigger_requested: false,
-        last_action_requested: null,
-        current_action: 'Idle — Ready for user trigger',
+        last_action_requested: isAutoSubmit ? 'start_submit' : null,
+        current_action: isAutoSubmit ? 'Continuous background submissions active across dedicated workers on Railway' : 'Idle — Ready for user trigger',
         active_worker_count: 0,
       });
       await updateWorkerControl('scan', { enabled: false, status: 'off', stop_requested: false }).catch(() => {});
-      await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false }).catch(() => {});
-      console.log(`[DAEMON] bot_control initialized: workers set to off/idle. Awaiting user trigger.`);
+      await updateWorkerControl('submit', { enabled: isAutoSubmit, status: isAutoSubmit ? 'running' : 'off', stop_requested: false }).catch(() => {});
+      console.log(`[DAEMON] bot_control initialized: submit status set to ${isAutoSubmit ? 'RUNNING (Continuous background submit active)' : 'off'}.`);
     } else {
       console.log(`[DAEMON] Dedicated worker container (${SERVICE_ROLE.toUpperCase()}) initialized — preserving global bot_control stage.`);
     }
@@ -1707,8 +1716,8 @@ export async function initOnStartup() {
     await reapExpiredLeases(10).catch(() => {});
     console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
 
-    if (args.includes('submit') || args.includes('--submit') || process.env.START_SUBMIT === 'true') {
-      console.log(`[DAEMON] Startup trigger detected: initiating Stage 3 Submissions across 2 workers...`);
+    if (isAutoSubmit || args.includes('submit') || args.includes('--submit') || process.env.START_SUBMIT === 'true') {
+      console.log(`[DAEMON] Continuous background submission active by default: initiating Stage 3 Submissions across 2 workers...`);
       runStage3Submissions().catch(console.error);
     }
   } catch (err) {
@@ -1808,6 +1817,7 @@ export async function initOnStartup() {
       // Gated strictly: starts ONLY after Stage 1 is complete and never if stop is requested
       const isSubmitStartRequested = (!isPoolRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && (
         (bc && (
+          bc.submit_status === 'running' ||
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
           (bc.trigger_requested && bc.stage === 'submitting') ||
