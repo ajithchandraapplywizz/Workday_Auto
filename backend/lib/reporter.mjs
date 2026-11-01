@@ -100,9 +100,13 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
   }
 
   const bucketName = isFailure ? 'failed-applications' : 'submitted-applications';
+  const cleanId = String(applywizzId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+  const rawCompany = context._company || context.company || '';
+  const cleanCompany = String(rawCompany).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  const prefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
   const filename = taskId
-    ? `${applywizzId}_${taskId}_${safeLabel}_${ts}.png`
-    : `${applywizzId}_${safeLabel}_${ts}.png`;
+    ? `${prefix}_${taskId}_${safeLabel}_${ts}.png`
+    : `${prefix}_${safeLabel}_${ts}.png`;
 
   let uploadedUrl = null;
   try {

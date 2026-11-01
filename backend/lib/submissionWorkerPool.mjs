@@ -171,7 +171,7 @@ export async function syncJobDistributionsToSubmissionTasks() {
       .from('submission_tasks')
       .select('applywizz_id, job_url');
 
-    const cleanAwl = (id) => String(id || '').replace(/["'\\]/g, '').trim().toUpperCase();
+    const cleanAwl = (id) => String(id || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
     const existingKeys = new Set((existingTasks || []).map((t) => `${cleanAwl(t.applywizz_id)}:::${t.job_url}`));
     const toInsert = readyDists
       .filter((d) => !existingKeys.has(`${cleanAwl(d.applywizz_id)}:::${d.job_url}`))
@@ -545,10 +545,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           if (ctx?.page && !ctx.page.isClosed()) {
             const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
             if (buf) {
-              const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
+              const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+              const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+              const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
               const timestamp = Date.now();
               // Zero nested folders: flat filename directly in root of failed-applications
-              shotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
+              shotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
               const { error: upErr } = await supabase.storage
                 .from('failed-applications')
                 .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
@@ -595,9 +597,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     let finalShotUrl = result?.screenshotUrl || null;
     let finalStoragePath = result?.screenshotPath || null;
     if (!finalStoragePath && finalShotUrl) {
-      const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
+      const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+      const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
       // Flat filename directly in bucket root
-      finalStoragePath = `${cleanId}_${task.id}.png`;
+      finalStoragePath = `${compPrefix}_${task.id}.png`;
     }
 
     if (isSuccess) {
@@ -689,7 +693,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             worker_id: null,
             worker_leased_at: null,
             error_message: retryMsg,
-            application_submitted_screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
@@ -702,7 +705,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
               status: 'ready_for_review',
               worker_id: null,
               error_message: retryMsg,
-              application_submitted_screenshot_url: finalShotUrl,
               updated_at: now,
             },
           });
@@ -724,9 +726,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           workerId,
           patch: {
             status: 'failed',
-            error_message: finalFailMsg,
+            error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
             completed_at: now,
-            application_submitted_screenshot_url: finalShotUrl,
             updated_at: now,
           },
         });
@@ -737,8 +738,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             workerId,
             patch: {
               status: 'failed',
-              error_message: finalFailMsg,
-              application_submitted_screenshot_url: finalShotUrl,
+              error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
               updated_at: now,
             },
           });
@@ -763,10 +763,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       if (ctx?.page && !ctx.page.isClosed()) {
         const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
         if (buf) {
-          const cleanId = String(task.applywizz_id).replace(/["'\\]/g, '').trim().toUpperCase();
+          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+          const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
           const timestamp = Date.now();
           // Flat filename directly in root of failed-applications
-          errShotPath = `${cleanId}_${task.id}_failed_${timestamp}.png`;
+          errShotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
           const { error: upErr } = await supabase.storage
             .from('failed-applications')
             .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
@@ -801,7 +803,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           worker_id: null,
           worker_leased_at: null,
           error_message: retryMsg,
-          application_submitted_screenshot_url: errShotUrl,
           updated_at: now,
         },
       });
@@ -814,7 +815,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             status: 'ready_for_review',
             worker_id: null,
             error_message: retryMsg,
-            application_submitted_screenshot_url: errShotUrl,
             updated_at: now,
           },
         });
@@ -826,9 +826,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         workerId,
         patch: {
           status: 'failed',
-          error_message: finalFailMsg,
+          error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
           completed_at: now,
-          application_submitted_screenshot_url: errShotUrl,
           updated_at: now,
         },
       });
@@ -839,8 +838,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           workerId,
           patch: {
             status: 'failed',
-            error_message: finalFailMsg,
-            application_submitted_screenshot_url: errShotUrl,
+            error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
             updated_at: now,
           },
         });

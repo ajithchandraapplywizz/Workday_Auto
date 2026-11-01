@@ -26,10 +26,29 @@ async function runPhase5Test() {
   console.log('  PHASE 5 ACCEPTANCE TEST: DASHBOARD INTEGRATION & STATE LIFECYCLE     ');
   console.log('========================================================================\n');
 
-  const CLIENT_ID = 'AWL-6451';
-  const CA_EMAIL = 'akhilakarike@applywizz.ai';
+  // 1. Discover active candidate with at least 2 tasks
+  const { data: sampleTasks } = await supabase
+    .from('submission_tasks')
+    .select('applywizz_id')
+    .limit(200);
 
-  // 1. Fetch all submission_tasks and job_distributions for candidate AWL-6451
+  const candidateCounts = {};
+  for (const t of (sampleTasks || [])) {
+    const id = t.applywizz_id;
+    candidateCounts[id] = (candidateCounts[id] || 0) + 1;
+  }
+  const CLIENT_ID = Object.keys(candidateCounts).find(k => candidateCounts[k] >= 2) || 'AWL-26694';
+
+  // Fetch candidate details and assigned CA
+  const { data: clientRow } = await supabase
+    .from('clients')
+    .select('current_ca_email')
+    .eq('applywizz_id', CLIENT_ID)
+    .maybeSingle();
+
+  const CA_EMAIL = clientRow?.current_ca_email || 'mohammadhafeez@applywizz.com';
+
+  // Fetch all submission_tasks and job_distributions for candidate
   console.log(`[TEST 1] Hydrating application model for candidate ${CLIENT_ID}...`);
   const [tasksRes, distRes] = await Promise.all([
     supabase.from('submission_tasks').select('*').eq('applywizz_id', CLIENT_ID).order('id', { ascending: true }),

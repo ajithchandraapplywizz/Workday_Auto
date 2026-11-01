@@ -204,10 +204,12 @@ export async function recordDiscoveredJobForm({
 /**
  * Pre-resolve all required answers for a candidate with full metadata & source tagging.
  */
-export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile = {} }) {
+export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile = {}, options = {} }) {
   if (!schema?.fields_schema?.length) {
     return { answersMap: {}, structuredAnswers: [], unansweredQuestions: [], isFullyAnswered: false, unansweredCount: 0, status: 'needs_answers' };
   }
+  const blockUniversalYaml = Boolean(options?.blockUniversalYaml);
+  const stage = options?.stage || 'stage1';
   const answersMap = {};
   const structuredAnswers = [];
   const unansweredQuestions = [];
@@ -234,6 +236,8 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
         tenant: schema.tenant,
         company: schema.company,
         forceLlm: true,
+        blockUniversalYaml,
+        stage,
       });
 
       if (resolved?.answer != null) {
@@ -251,9 +255,13 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           sourceTag = 'Tier 3: CRM API';
           tier = 3;
           rawSource = 'api';
-        } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter')) {
-          sourceTag = 'Tier 4: AI / LLM';
+        } else if (rawSource.includes('qa_bank') || rawSource.includes('qa bank')) {
+          sourceTag = 'Tier 4: QA Bank';
           tier = 4;
+          rawSource = 'qa_bank';
+        } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter')) {
+          sourceTag = 'Tier 5: AI / LLM';
+          tier = 5;
           rawSource = 'llm';
           if (awlId && ansVal) {
             recordNovelQABankAnswer({
@@ -272,7 +280,7 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
         }
       }
 
-      // Robust Tier 4 resolution fallback: Ensure NO question is left unanswered
+      // Robust Tier 5 resolution fallback: Ensure NO question is left unanswered
       if (!ansVal) {
         const rawOpts = Array.isArray(field.options) ? field.options : [];
         if (rawOpts.length > 0) {
@@ -285,9 +293,9 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           } else {
             ansVal = String(rawOpts[0]);
           }
-          sourceTag = 'Tier 4: AI / LLM';
-          tier = 4;
-          rawSource = 'llm';
+          sourceTag = 'Tier 5: Policy Fallback';
+          tier = 5;
+          rawSource = 'policy_fallback';
         }
       }
     } catch { }

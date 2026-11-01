@@ -251,7 +251,7 @@ export default function LoginPage() {
 
             {/* 2. Microsoft Authenticator 6-Digit Code */}
             <div className="form-group">
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '6px' }}>
+              <div className="code-header-row">
                 <label className="form-label" htmlFor="login-code" style={{ marginBottom: 0 }}>
                   MICROSOFT AUTHENTICATOR 6-DIGIT CODE
                 </label>

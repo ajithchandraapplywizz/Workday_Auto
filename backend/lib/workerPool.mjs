@@ -939,23 +939,25 @@ export async function executeWorkerTask({
           let storagePath = null;
           let bucket = null;
           let filename = null;
-          const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
-          const cleanTaskId = String(taskId || task.id || Date.now()).replace(/["'\\]/g, '').trim();
+          const cleanAwl = String(applywizzId || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          const cleanTaskId = String(taskId || task.id || Date.now()).replace(/["'\[\]\\]/g, '').trim();
+          const cleanComp = String(company || profile?._company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+          const compPrefix = cleanComp ? `${cleanAwl}_${cleanComp}` : cleanAwl;
           if (status === 'submitted') {
             bucket = 'submitted-applications';
-            // Strictly flat filename directly in root of submitted-applications
-            filename = `${cleanAwl}_${cleanTaskId}_submitted.png`;
+            // Strictly flat filename directly in root of submitted-applications (zero nested folders)
+            filename = `${compPrefix}_${cleanTaskId}_submitted.png`;
             storagePath = filename;
           } else if (status === 'reached-review' || status === 'reached_review') {
             // Upload full-page Review & Submit blueprint screenshot to submitted-applications bucket for scanned_jobs
             bucket = 'submitted-applications';
-            filename = `${cleanAwl}_${cleanTaskId}_review_blueprint.jpg`;
+            filename = `${compPrefix}_${cleanTaskId}_review_blueprint.jpg`;
             storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
             bucket = 'failed-applications';
             const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-            filename = `${cleanAwl}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
+            filename = `${compPrefix}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
             storagePath = filename;
           }
 

@@ -119,4 +119,15 @@ workday-auto-apply/data/
 *AjithchandraPC*
 **/*AjithchandraPC*
 
+# Markdown and CSV exclusions
+*.md
+**/*.md
+*.csv
+**/*.csv
+*.xlsx
+**/*.xlsx
+Data/
+**/Data/**
+
+
 

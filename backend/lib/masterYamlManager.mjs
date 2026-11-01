@@ -187,6 +187,7 @@ export async function findAnswerFromQaBankTable({
   options = [],
   tenant = 'global',
   isSubmission = false,
+  blockUniversalYaml = false,
 } = {}) {
   if (!questionLabel) return null;
   const normKey = normalizeQuestionKey(questionLabel);
@@ -198,6 +199,9 @@ export async function findAnswerFromQaBankTable({
   // 1. Check in-memory cache first
   let cached = QA_BANK_CACHE.get(`${cleanTenant}:${normKey}`) || QA_BANK_CACHE.get(`global:${normKey}`);
   if (cached) {
+    if (blockUniversalYaml && (cached.applywizz_id === 'AWL-1568' || cached.source === 'scan_placeholder')) {
+      return null;
+    }
     if (isSubmission && isGuardedField && cached.source === 'scan_placeholder') {
       return null;
     }
@@ -210,10 +214,14 @@ export async function findAnswerFromQaBankTable({
   if (isSupabaseConfigured()) {
     try {
       const rows = await request('qa_bank', {
-        query: `?normalized_question=eq.${encodeURIComponent(normKey)}&select=tenant,answer,source,options&limit=2`,
+        query: `?normalized_question=eq.${encodeURIComponent(normKey)}&select=tenant,answer,source,options,applywizz_id&limit=5`,
       });
       if (Array.isArray(rows) && rows.length > 0) {
-        const hit = rows.find((r) => r.tenant === cleanTenant) || rows[0];
+        let validRows = rows;
+        if (blockUniversalYaml) {
+          validRows = rows.filter((r) => r.applywizz_id !== 'AWL-1568' && r.source !== 'scan_placeholder');
+        }
+        const hit = validRows.find((r) => r.tenant === cleanTenant) || validRows[0];
         if (hit) {
           QA_BANK_CACHE.set(`${hit.tenant}:${normKey}`, hit);
           if (isSubmission && isGuardedField && hit.source === 'scan_placeholder') {
@@ -309,12 +317,13 @@ export async function findAnswerFromQaBank({
   tenant = 'global',
   isSubmission = false,
   isScanOnly = false,
+  blockUniversalYaml = false,
 } = {}) {
-  const fromTable = await findAnswerFromQaBankTable({ questionLabel, options, tenant, isSubmission });
+  const fromTable = await findAnswerFromQaBankTable({ questionLabel, options, tenant, isSubmission, blockUniversalYaml });
   if (fromTable) return fromTable;
 
-  // Master YAML is strictly and exclusively for Stage 1 Blueprint Scanning
-  if (isScanOnly && !isSubmission) {
+  // Master YAML is strictly and exclusively for Stage 1 Blueprint Scanning (NEVER in Stage 2/Stage 3)
+  if (isScanOnly && !isSubmission && !blockUniversalYaml) {
     const fromYaml = findAnswerFromLocalYaml({ questionLabel, options, isSubmission: false, isScanOnly: true });
     if (fromYaml) return fromYaml;
   }

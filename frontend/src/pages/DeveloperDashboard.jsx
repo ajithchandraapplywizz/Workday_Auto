@@ -75,7 +75,29 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false });
+  const [botStatus, setBotStatus] = useState(() => {
+    try {
+      const cached = sessionStorage.getItem('workday_bot_status') || localStorage.getItem('workday_bot_status');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return { isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false, isScanning: false };
+  });
+
+  // Keep local and session storage in sync for zero-flicker toggle rendering across reloads and mobile tabs
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('workday_bot_status', JSON.stringify(botStatus));
+      localStorage.setItem('workday_bot_status', JSON.stringify(botStatus));
+    } catch {}
+  }, [botStatus]);
+
+  // Fast initial check on mount for immediate toggle synchronization
+  useEffect(() => {
+    fetchBotDaemonStatus().then((res) => {
+      if (res?.success) setBotStatus(res);
+    }).catch(() => {});
+  }, []);
+
   const [isTriggering, setIsTriggering] = useState(false);
   const [isSubmitTriggering, setIsSubmitTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
@@ -236,10 +258,10 @@ export default function DeveloperDashboard() {
 
     loadData(false);
 
-    // Only poll metrics if an active pipeline is running; otherwise rely on Supabase Realtime WebSocket push
-    const pollInterval = isAnyPipelineActive ? setInterval(() => {
+    // Poll metrics dynamically: every 3s if active pipeline, or every 6s when idle for real-time mobile sync
+    const pollInterval = setInterval(() => {
       loadData(true);
-    }, 4000) : null;
+    }, isAnyPipelineActive ? 3000 : 6000);
 
     // Supabase Realtime channel for instant push updates
     const channel = supabase

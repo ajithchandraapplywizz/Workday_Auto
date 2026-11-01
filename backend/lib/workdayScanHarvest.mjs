@@ -82,25 +82,32 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
     if (!norm || seen.has(`${stepName}::${norm}`)) return;
     seen.add(`${stepName}::${norm}`);
 
-    const isRequired = isMandatoryField(item.label, item, stepName) || Boolean(item.required);
+    const isRequired = Boolean(
+      item.required
+      || item.hasRequiredMarker
+      || isMandatoryField(item.label, item, stepName)
+    );
+    if (!isRequired) return; // Strict guard: never scrape or harvest non-mandatory questions
 
     let options = normalizeOptionList(item.options);
     if (options.length === 0 && /dropdown|select|checkbox|radio|combobox/i.test(item.fieldType)) {
-      // 1. Try standard inferred options first
-      const inferred = inferStandardOptions(item.label, item.fieldType);
-      if (inferred.length > 0) {
-        options = inferred;
-      } else {
-        // 2. Safe timeout attempt to read live options
-        try {
-          const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 1200));
-          const livePromise = collectLiveFieldOptions(page, item.label, item.fieldType);
-          const liveOpts = await Promise.race([livePromise, timeoutPromise]);
-          if (Array.isArray(liveOpts) && liveOpts.length > 0) {
-            options = normalizeOptionList(liveOpts);
-          }
-        } catch (err) {
-          // ignore timeout / non-fatal
+      // 1. Safe attempt to read live Workday DOM options first
+      try {
+        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 1500));
+        const livePromise = collectLiveFieldOptions(page, item.label, item.fieldType);
+        const liveOpts = await Promise.race([livePromise, timeoutPromise]);
+        if (Array.isArray(liveOpts) && liveOpts.length > 0) {
+          options = normalizeOptionList(liveOpts);
+        }
+      } catch (err) {
+        // ignore timeout / non-fatal
+      }
+
+      // 2. If live options were empty, fallback to standard inferred options
+      if (options.length === 0) {
+        const inferred = inferStandardOptions(item.label, item.fieldType);
+        if (inferred.length > 0) {
+          options = inferred;
         }
       }
     }
@@ -113,8 +120,8 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
       fieldType: item.fieldType || 'text',
       field_type: item.fieldType || 'text',
       type: item.fieldType || 'text',
-      required: isRequired,
-      is_required: isRequired,
+      required: true,
+      is_required: true,
       options,
       step: stepName,
       company,
@@ -126,10 +133,14 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
 
   for (const q of formQuestions) {
     if (!q.label || q.label.length < 3) continue;
+    const isReq = Boolean(q.required || q.hasRequiredMarker || isMandatoryField(q.label, q, stepName));
+    if (!isReq) continue;
     await add({
       label: q.label,
       fieldType: q.fieldType,
-      required: q.required,
+      required: true,
+      hasRequiredMarker: q.hasRequiredMarker,
+      containerText: q.containerText,
       options: q.options,
       currentValue: q.currentValue,
     });
@@ -138,10 +149,12 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
   for (const f of domFields) {
     const label = f.label || f.id;
     if (!label || label.length < 3) continue;
+    const isReq = Boolean(f.required || isMandatoryField(label, f, stepName));
+    if (!isReq) continue;
     await add({
       label,
       fieldType: f.type || f.role || 'input',
-      required: f.required,
+      required: true,
       options: f.options,
       currentValue: f.currentValue,
     });

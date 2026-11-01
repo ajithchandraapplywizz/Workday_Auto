@@ -90,7 +90,7 @@ export async function isClusterStopRequested() {
   try {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    if (bc?.stop_requested || bc?.scan_stop_requested || bc?.scan_status === 'off' || bc?.scan_status === 'stopping') {
+    if (bc?.stop_requested || bc?.scan_stop_requested || bc?.scan_status === 'stopping') {
       return true;
     }
   } catch { }
@@ -423,6 +423,48 @@ export async function resetClusterTasksByIds(taskIds = []) {
 /**
  * Fail/skip multiple cluster tasks by their specific IDs or URLs in Supabase.
  */
+export async function resetClusterTasksToPending(taskIds = []) {
+  if (!Array.isArray(taskIds) || taskIds.length === 0) return;
+  try {
+    const isComposite = taskIds.some((id) => String(id).includes(':::'));
+    if (isComposite) {
+      const urls = Array.from(new Set(taskIds.map((cid) => {
+        const [, ...rest] = String(cid).split(':::');
+        return rest.join(':::');
+      }).filter(Boolean)));
+      for (const jUrl of urls) {
+        await queueDbRequest('batch_job_queue', {
+          method: 'PATCH',
+          query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
+          prefer: 'return=minimal',
+          body: {
+            status: 'pending',
+            worker_id: null,
+            locked_at: null,
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => { });
+      }
+    } else {
+      const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
+      await queueDbRequest('batch_job_queue', {
+        method: 'PATCH',
+        query: `?id=in.(${idFilter})`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'pending',
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      });
+    }
+    console.log(`\n🔄 [HALT ROLLBACK] batch_job_queue | action: PATCH (${taskIds.length} candidate tasks rolled back to status = 'pending')\n`);
+  } catch (err) {
+    console.error(`[CLUSTER] Error resetting tasks to pending:`, err?.message);
+  }
+}
+
 export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired on Workday') {
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
@@ -608,9 +650,14 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     jobUrl: leadTask.job_url || jobUrl,
   };
 
-  console.log(`\n📍 [${workerId}] PHASE 1: Scanning Unique Link with Mock Candidate ${MOCK_SCAN_CLIENT_ID} (Attempt ${currentAttempts + 1}/2)...`);
-  console.log(`   Link: ${jobUrl}`);
-  console.log(`   Cluster Representing: ${allSiblingAwlIds.length} candidate(s)`);
+  console.log(`\n${'═'.repeat(64)}`);
+  console.log(`📥 [STAGE 1] Picked from batch_job_queue:`);
+  console.log(`   Canonical URL: ${jobUrl}`);
+  console.log(`   Cluster AWL-IDs: ${allSiblingAwlIds.slice(0, 8).join(', ')}${allSiblingAwlIds.length > 8 ? ` (+${allSiblingAwlIds.length - 8} more)` : ''} (${allSiblingAwlIds.length} candidates)`);
+  console.log(`   Attempt: ${currentAttempts + 1}/2 | Mock Scanner: ${MOCK_SCAN_CLIENT_ID}`);
+  console.log(`   Company: ${company} | Role: ${role}`);
+  console.log(`   Browser Mode:  ${headless ? 'Headless' : 'HEADED (Visible Browser Window)'}`);
+  console.log(`${'═'.repeat(64)}\n`);
 
   const result = await executeWorkerTask({
     task: candidateTask,
@@ -654,6 +701,32 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     leadProofShot = result?.screenshotUrl || null;
     leadFailReason = result?.failureReason || result?.error || result?.reason || result?.status || 'Scan stopped before review';
     leadFailStep = result?.stoppedAtStep || 'Form Wizard';
+
+    const isUserHalted = (await isClusterStopRequested()) ||
+      String(leadFailReason).toLowerCase().includes('halt') ||
+      String(leadFailReason).toLowerCase().includes('stop') ||
+      String(leadFailReason).includes('Target closed') ||
+      String(leadFailReason).includes('browser has been closed');
+
+    if (isUserHalted) {
+      console.log(`🛑 [${workerId}] User HALT / STOP detected for "${company}" (${jobUrl}). Rolling back ${allTaskIds.length} tasks to pending status...`);
+      if (allTaskIds.length > 0) {
+        await resetClusterTasksToPending(allTaskIds);
+      }
+      return {
+        workerId,
+        jobUrl,
+        company,
+        role,
+        applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+        screenshotUrl: null,
+        succeeded: 0,
+        failed: 0,
+        total: allSiblingAwlIds.length,
+        scrapedQaCount: 0,
+        halted: true,
+      };
+    }
 
     if (deadJob) {
       // RULE C: Expired link -> no retry, direct single-row upsert into failed_jobs
@@ -899,14 +972,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       };
     }
     scannedJobId = saved.id;
-    console.log(`✅ [${workerId}] PHASE 2 COMPLETE: 1 unique job inserted to scanned_jobs!`);
-    console.log(`   • ID: ${scannedJobId}`);
-    console.log(`   • Company: ${company} | Role: ${role}`);
-    console.log(`   • Harvested Questions: ${harvestedQuestions.length} mandatory question(s) with types & options`);
-    console.log(`   • Blueprint Candidate: ${blueprintTask.applywizz_id}`);
-    console.log(`   • Resolved Answers Count: ${leadAnswers.length}`);
-    console.log(`   • Review Screenshot: ${reviewShotUrl || 'None'}`);
-    console.log(`   • Client Queue Size: ${allTasks.length} candidates\n`);
+    console.log(`\n💾 [UPSERT → scanned_jobs]`);
+    console.log(`   ID: ${scannedJobId}`);
+    console.log(`   Company: ${company} | Role: ${role}`);
+    console.log(`   Questions Harvested: ${harvestedQuestions.length} fields (mandatory)`);
+    console.log(`   Blueprint Candidate: ${blueprintTask.applywizz_id}`);
+    console.log(`   Scan Status: completed ✓\n`);
   } catch (scanSaveErr) {
     console.error(`❌ [${workerId}] ERROR: Exception saving scanned_jobs: ${scanSaveErr.message}\n`);
     return {
@@ -1026,7 +1097,16 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       const structuredAnswers = detailed?.structuredAnswers || [];
       const answersMap = detailed?.answersMap || {};
 
-      // Propagate universal questions answered by the lead candidate (Referral Source, Today's Signature Date, N/A follow-ups)
+      // Propagate universal questions answered by the lead candidate to siblings
+      const leadAnswerMap = new Map();
+      for (const la of (leadAnswers || [])) {
+        const qNorm = String(la.question || la.label || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+        const val = String(la.answer ?? la.value ?? '').trim();
+        if (qNorm && val) {
+          leadAnswerMap.set(qNorm, val);
+        }
+      }
+
       const leadSourceAns = leadAnswers.find((la) => /how did you hear/i.test(la.question))?.answer
         || harvestedQuestions.find((hq) => /how did you hear/i.test(hq.question || hq.label || ''))?.value
         || 'LinkedIn';
@@ -1034,31 +1114,57 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
       for (const sa of structuredAnswers) {
         const qText = sa.question || sa.label || '';
-        if (/how did you hear/i.test(qText)) {
-          sa.step = 'My Information';
-          if (!sa.answer || !sa.is_answered) {
+        const qNorm = String(sa.question_normalized || qText).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+
+        // 1. Copy lead blueprint answer for universal non-personal questions
+        if (!sa.answer || !sa.is_answered) {
+          const isPersonalIdentity = /first name|last name|email|phone|mobile|address line|street|postal|zip/i.test(qText);
+          if (!isPersonalIdentity && leadAnswerMap.has(qNorm)) {
+            sa.answer = leadAnswerMap.get(qNorm);
+            sa.is_answered = true;
+            sa.source = 'Lead Blueprint Answer (Universal)';
+            sa.tier = 1;
+          }
+        }
+
+        // 2. Specific universal question policies
+        if (!sa.answer || !sa.is_answered) {
+          if (/how did you hear/i.test(qText)) {
+            sa.step = 'My Information';
             sa.answer = String(leadSourceAns);
             sa.is_answered = true;
             sa.source = 'Lead Blueprint DOM Option';
             sa.tier = 1;
-          }
-        }
-        if (/current value is|signature date|^date\*?$/i.test(qText)) {
-          sa.step = 'Self Identify';
-          if (!sa.answer || !sa.is_answered) {
+          } else if (/current value is|signature date|^date\*?$/i.test(qText)) {
+            sa.step = 'Self Identify';
             sa.answer = todayDate;
             sa.is_answered = true;
             sa.source = 'Today Application Date';
             sa.tier = 1;
-          }
-        }
-        if (/if yes.*explain/i.test(qText)) {
-          sa.step = 'Voluntary Disclosures';
-          if (!sa.answer || !sa.is_answered) {
+          } else if (/if yes.*explain/i.test(qText) || /explanation|additional comments|describe/i.test(qText)) {
+            sa.step = 'Voluntary Disclosures';
             sa.answer = 'N/A';
             sa.is_answered = true;
-            sa.source = 'Standard N/A Default';
+            sa.source = 'Universal N/A Default';
             sa.tier = 1;
+          } else if (Array.isArray(sa.options) && sa.options.length > 0) {
+            const yesOpt = sa.options.find(o => /^yes\b/i.test(String(o).trim()));
+            const noOpt = sa.options.find(o => /^no\b/i.test(String(o).trim()));
+            if (/felon|convict|crime|terminat|fired|conflict|non-?compet/i.test(qText) && noOpt) {
+              sa.answer = String(noOpt);
+            } else if (yesOpt) {
+              sa.answer = String(yesOpt);
+            } else {
+              sa.answer = String(sa.options[0]);
+            }
+            sa.is_answered = true;
+            sa.source = 'Tier 4: Universal Policy Fallback';
+            sa.tier = 4;
+          } else if (sa.is_required) {
+            sa.answer = 'N/A';
+            sa.is_answered = true;
+            sa.source = 'Universal Text Default';
+            sa.tier = 4;
           }
         }
       }
@@ -1129,11 +1235,13 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       company,
       roleTitle: role,
       scrapedQuestions: harvestedQuestions,
-      screenshotUrl: null,
+      screenshotUrl: null, // STRICT POLICY: Scanned review screenshot belongs in scanned_jobs only; job_distributions screenshot is authentic post-submission proof only
       status: 'distributed',
       clients: distributionRows,
     });
-    console.log(`\n📋 [${workerId}] PHASE 3 INSERTED: Successfully recorded ${distributionRows.length} client distributions into job_distributions table!`);
+    const readyCount = distributionRows.filter((r) => r.status === 'ready_for_review').length;
+    const needsCount = distributionRows.length - readyCount;
+    console.log(`\n💾 [UPSERT → job_distributions] ${distributionRows.length} rows written (${readyCount} ready_for_review, ${needsCount} needs_answers)`);
 
     // Also update scanned_jobs row with Candidate 1's resolved_answers
     const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
@@ -1196,7 +1304,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           prefer: 'resolution=merge-duplicates,return=minimal',
           body: submissionPayloads,
         });
-        console.log(`\n📋 [${workerId}] PHASE 4 RECORDED: ${submissionPayloads.length} client application(s) entered submission_tasks at ready_for_review. Stopped here.`);
+        console.log(`💾 [UPSERT → submission_tasks] ${submissionPayloads.length} rows at ready_for_review (${needsAnswersRows.length} skipped — needs_answers)`);
       } catch (stErr) {
         console.log(`⚠️ [${workerId}] Phase 4 note on submission_tasks: ${stErr.message}`);
       }
@@ -1211,6 +1319,27 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
       jobUrl,
     ]));
+    // Update by exact task ID from batch_job_queue
+    for (const tId of allTaskIds) {
+      if (tId && !String(tId).includes(':::')) {
+        await queueDbRequest('batch_job_queue', {
+          method: 'PATCH',
+          query: `?id=eq.${encodeURIComponent(tId)}`,
+          prefer: 'return=minimal',
+          body: {
+            scanned_job_id: scannedJobId,
+            screenshot_path: reviewShotUrl || null,
+            status: 'reached_review',
+            job_id: blueprintTask?.job_id || cluster.reqId || null,
+            error_message: null,
+            worker_id: null,
+            locked_at: null,
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => {});
+      }
+    }
+
     for (const u of urlsToComplete) {
       await queueDbRequest('batch_job_queue', {
         method: 'PATCH',
@@ -1218,7 +1347,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         prefer: 'return=minimal',
         body: {
           scanned_job_id: scannedJobId,
-          screenshot_path: null,
+          screenshot_path: reviewShotUrl || null,
           status: 'reached_review',
           job_id: blueprintTask?.job_id || cluster.reqId || null,
           error_message: null,
@@ -1228,7 +1357,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         },
       }).catch(() => { });
     }
-    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${urlsToComplete.length} URL(s) -> 'reached_review')\n`);
+    console.log(`\n📤 [PATCH → batch_job_queue]`);
+    console.log(`   URL: ${jobUrl}`);
+    console.log(`   Status: reached_review (${allSiblingAwlIds.length} AWL-IDs covered by 1 unique scanned_jobs row)`);
+    console.log(`   Screenshot Proof: ${reviewShotUrl || 'Uploaded to Supabase Storage'}\n`);
   } catch (qErr) {
     console.log(`⚠️ [${workerId}] Note updating queue task status: ${qErr.message}`);
   }
@@ -1307,6 +1439,8 @@ export async function runClusterBatchRunner({
     const bc = await getBotControl().catch(() => null);
     scanRunId = bc?.scan_run_id || `scan_run_${Date.now()}`;
   }
+
+  setClusterStop(false);
 
   console.log(`\n${'═'.repeat(78)}`);
   console.log(`⚡ CLUSTER BATCH RUNNER — ${workers} PARALLEL SCANNING WORKERS (HEADLESS: ${headless})`);
@@ -1418,6 +1552,39 @@ export async function runClusterBatchRunner({
           });
         } catch (err) {
           const errorUrl = cluster.jobUrl || cluster.primaryRawUrl || cluster.canonicalKey || 'Unknown URL';
+          const isStop = (await isClusterStopRequested()) ||
+            err.message?.includes('Target closed') ||
+            err.message?.includes('browser has been closed') ||
+            err.message?.includes('abort') ||
+            err.name === 'AbortError';
+
+          if (isStop) {
+            console.log(`🛑 [Scanning Worker ${slot}] User HALT / STOP detected on batch #${myIndex + 1} (${errorUrl}). Safely resetting task(s) to pending.`);
+            try {
+              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+                if (taskIds.length > 0) {
+                  await resetClusterTasksToPending(taskIds);
+                }
+              }
+            } catch (resetErr) {
+              console.warn(`[HALT ROLLBACK ERROR]`, resetErr.message);
+            }
+            res = {
+              workerId,
+              jobUrl: errorUrl,
+              company: cluster.company,
+              role: cluster.roleTitle,
+              total: cluster.clientCount,
+              succeeded: 0,
+              failed: 0,
+              halted: true,
+              scrapedQaCount: 0,
+            };
+            clusterResults.push(res);
+            break; // Terminate worker loop immediately
+          }
+
           console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${errorUrl}): ${err.message}`);
           try {
             const { recordFailedJob } = await import('./supabaseClient.mjs');

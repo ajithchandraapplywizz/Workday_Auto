@@ -123,3 +123,64 @@ export function normalizeWorkdayStepName(stepName, questionLabel = '') {
   return stepName || 'Application Questions';
 }
 
+/**
+ * Detects whether the current Workday page is showing an "already applied"
+ * state — meaning this candidate (AWL-ID) has previously submitted to this job.
+ *
+ * Called immediately after page navigation, before wizard detection.
+ * Returns true → skip this AWL-ID, mark as 'already_applied', move to next.
+ *
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function detectAlreadyApplied(page) {
+  try {
+    return await page.evaluate(() => {
+      const body = (document.body?.innerText || '').toLowerCase();
+
+      // Text-based detection — covers all known Workday tenant phrasings
+      if (
+        /you have already applied/i.test(body) ||
+        /you('ve| have) already (applied|submitted)/i.test(body) ||
+        /already submitted (your|an) application/i.test(body) ||
+        /application (has already been|already) (submitted|received)/i.test(body) ||
+        /thank you.*already applied/i.test(body) ||
+        /your application (was|has been) (already )?(received|submitted)/i.test(body) ||
+        /we('ve| have) (already |previously )?received your application/i.test(body) ||
+        /duplicate application/i.test(body)
+      ) {
+        return true;
+      }
+
+      // ARIA / data-automation-id based detection for structured Workday tenants
+      if (
+        document.querySelector('[data-automation-id="alreadyApplied"]') ||
+        document.querySelector('[data-automation-id="previouslyApplied"]') ||
+        document.querySelector('[data-automation-id="applicationAlreadySubmitted"]') ||
+        document.querySelector('[data-automation-id="duplicateApplication"]')
+      ) {
+        return true;
+      }
+
+      // Page-level heading detection
+      const headings = Array.from(
+        document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"]')
+      );
+      for (const h of headings) {
+        const text = (h.textContent || '').toLowerCase();
+        if (
+          /already applied/i.test(text) ||
+          /application submitted/i.test(text) ||
+          /previously applied/i.test(text)
+        ) {
+          return true;
+        }
+      }
+
+      return false;
+    });
+  } catch {
+    // If evaluation fails (page closed/crashed), treat as not-already-applied
+    return false;
+  }
+}

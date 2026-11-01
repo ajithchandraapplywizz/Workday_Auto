@@ -97,6 +97,12 @@ function synthesizeScanMandatoryAnswer(field = {}, profile = {}) {
   if (/hours per week|desired hours/i.test(label)) {
     return '40';
   }
+  if (/hourly or salary|hourly\/salary|hourly.*position|salary.*position/i.test(label)) {
+    return 'Salary';
+  }
+  if (/type of employment|employment desired|desired employment|employment type/i.test(label)) {
+    return 'Full time';
+  }
   if (/salary|compensation|hourly rate|pay expected|expected pay/i.test(label)) {
     return '80000';
   }

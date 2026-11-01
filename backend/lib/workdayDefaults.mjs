@@ -401,6 +401,42 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (/willing.*work\s*overtime|able.*work\s*overtime|will\s+you\s+work\s+overtime/i.test(t)) {
     return 'Yes';
   }
+
+  // ── Universal Safe Answers: Tobacco / Nicotine / Drug Policy ──────────────
+  // Table A — Universal Policy applies to ALL clients, no authorization flag required.
+
+  // "Do you smoke?" / "Do you use tobacco?" / "Do you vape?" / nicotine usage questions
+  // Rationale: Standard declaration that candidate is a non-smoker / does not use tobacco.
+  // Guard: Must NOT match smoke-free / tobacco-free policy compliance questions (handled below).
+  if (/\b(smoke|tobacco|cigarette|nicotine|vape|vaping)\b/i.test(t)
+    && !/smoke[\s-]*free|tobacco[\s-]*free|comply\s+with.*smoke|agree.*smoke.*policy|smoke.*policy.*agree/i.test(t)) {
+    return 'No';
+  }
+
+  // "This is a smoke-free campus — do you agree to comply?" / tobacco-free policy acknowledgement
+  // Rationale: Candidate affirms adherence to the employer's workplace smoke-free/tobacco-free policy.
+  if (/smoke[\s-]*free|tobacco[\s-]*free|comply\s+(with\s+)?.*smoke|agree\s+to.*smoke.*policy/i.test(t)) {
+    return 'Yes';
+  }
+
+  // "Are you willing to submit to a drug test?" / "Do you consent to drug screening?"
+  // Rationale: Candidate agrees to standard pre-employment drug screening condition.
+  if (/willing\s+to\s+.*drug|submit\s+to\s+.*drug|consent\s+to\s+.*drug|agree\s+to\s+.*drug\s*(test|screen)/i.test(t)) {
+    return 'Yes';
+  }
+
+  // "Have you ever failed a drug test?" / "Have you refused a drug test?" / "Have you tested positive?"
+  // Rationale: Confirms no prior adverse drug screening records on file.
+  if (/failed\s+.*drug|refused\s+.*drug|positive\s+.*drug\s*test|drug\s*test.*positive|drug\s*test.*fail/i.test(t)) {
+    return 'No';
+  }
+
+  // "Have you used illegal drugs?" / "Are you currently using substances that could affect your duties?"
+  // Rationale: Essential employment suitability declaration — never guessed or fabricated.
+  if (/illegal\s+(use\s+of\s+)?drugs?|controlled\s+substances?\s+affecting|substances?\s+affecting\s+(your\s+)?duties|currently\s+using\s+illegal/i.test(t)) {
+    return 'No';
+  }
+
   return null;
 }
 

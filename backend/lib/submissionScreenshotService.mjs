@@ -29,6 +29,7 @@ export async function recordTaskSubmissionProof({
   applywizzId,
   workerId,
   imageBuffer,
+  company = '',
   maxRetries = 3,
 }) {
   if (!taskId || !applywizzId || !workerId || !imageBuffer) {
@@ -36,12 +37,19 @@ export async function recordTaskSubmissionProof({
   }
 
   const cleanTaskId = String(taskId).trim();
-  const cleanId = String(applywizzId).trim().toUpperCase();
-  const storagePath = `${cleanId}/${cleanTaskId}.png`;
+  const cleanId = String(applywizzId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+  const cleanCompany = String(company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+  // Strictly flat filename directly in root of submitted-applications bucket (zero nested folders)
+  const storagePath = cleanCompany
+    ? `${cleanId}_${cleanCompany}_${cleanTaskId}.png`
+    : `${cleanId}_${cleanTaskId}.png`;
 
-  // 1. Verify path contains the exact task ID before upload
+  // 1. Verify path contains the exact task ID and NO nested slashes
   if (!storagePath.includes(cleanTaskId)) {
     throw new Error(`Deterministic validation failed: Path '${storagePath}' does not contain task id '${cleanTaskId}'`);
+  }
+  if (storagePath.includes('/')) {
+    throw new Error(`Zero nested folders policy violated: Storage path '${storagePath}' must not contain forward slashes.`);
   }
 
   // 2. Upload to Supabase Storage
@@ -83,7 +91,7 @@ export async function recordTaskSubmissionProof({
     try {
       const patch = {
         status: 'submitted',
-        screenshot_path: publicUrl || storagePath,
+        application_submitted_screenshot_url: publicUrl,
         completed_at: now,
         updated_at: now,
       };
@@ -117,6 +125,23 @@ export async function recordTaskSubmissionProof({
 
   if (!updatedTask) {
     throw (lastErr || new Error(`Failed to update task #${cleanTaskId} after ${maxRetries} attempts`));
+  }
+
+  // Mirror to job_distributions if distribution_id is present
+  if (updatedTask.distribution_id) {
+    const now = new Date().toISOString();
+    try {
+      await supabase
+        .from('job_distributions')
+        .update({
+          status: 'submitted',
+          application_submitted_screenshot_url: publicUrl,
+          updated_at: now,
+        })
+        .eq('id', updatedTask.distribution_id);
+    } catch (distErr) {
+      console.warn(`[recordTaskSubmissionProof] Failed to mirror to job_distributions #${updatedTask.distribution_id}:`, distErr?.message);
+    }
   }
 
   console.log(`✅ [${workerId}] Submission proof recorded for Task #${cleanTaskId}:`);

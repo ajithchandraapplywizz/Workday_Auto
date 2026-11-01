@@ -2,8 +2,8 @@ title: Workday Auto Master Question & Answer Reference Bank
 description: Consolidated, deduplicated form questions, types, and sample
   answers captured by Blueprint Workers
 version: 1.0.0
-last_updated: 2026-10-27T17:48:28.095Z
-total_unique_questions: 3
+last_updated: 2026-11-01T13:43:14.862Z
+total_unique_questions: 63
 questions:
   are you legally authorized to work in the united states:
     question: Are you legally authorized to work in the United States?
@@ -39,3 +39,863 @@ questions:
     first_seen_role: Senior Machine Learning Engineer
     mock_client_id: AWL-1568
     created_at: 2026-10-27T17:48:28.095Z
+  type of employment desired:
+    question: Type of employment desired.*
+    field_type: dropdown
+    step: 3
+    options:
+      - Full time
+      - Part time
+      - Regular
+    sample_answer: Full time
+    source: scan_placeholder
+    tenant: swbc
+    first_seen_company: SWBC
+    first_seen_role: Careers at SWBC
+    mock_client_id: AWL-1568
+    created_at: 2026-10-30T14:39:16.288Z
+  do you desire an hourly or salary position:
+    question: Do you desire an hourly or salary position?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Salary
+      - Hourly
+    sample_answer: Salary
+    source: scan_mandatory_fallback
+    tenant: swbc
+    first_seen_company: SWBC
+    first_seen_role: Careers at SWBC
+    mock_client_id: AWL-1568
+    created_at: 2026-10-30T14:39:26.506Z
+  how did you hear about us:
+    question: How Did You Hear About Us?*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: I know someone at this company / I know someone at this company
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  whats their name or email address:
+    question: What's their name or email address?*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: sai.madhamshetty@applywizard.ai
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  have you at any time worked for ameriprise financial ameriprise india columbia threadneedle investments or any of its subsidiaries:
+    question: Have you, at any time, worked for Ameriprise Financial, Ameriprise
+      India, Columbia Threadneedle Investments, or any of its subsidiaries?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  country:
+    question: Country*
+    field_type: dropdown
+    step: My Information
+    options: []
+    sample_answer: United States of America (+1)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  first name:
+    question: First Name*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: Sai Sunai
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  last name:
+    question: Last Name*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: Madhamshetty
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  address line 1:
+    question: Address Line 1*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: 5515 North Military Trail
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  city:
+    question: City*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: boca raton
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  state:
+    question: State*
+    field_type: dropdown
+    step: My Information
+    options:
+      - India (+91)
+      - Andaman and Nicobar Islands
+      - Andhra Pradesh
+      - Arunāchal Pradesh
+      - Assam
+      - Bihār
+      - Chandīgarh
+      - Chhattīsgarh
+      - Dādra and Nagar Haveli and Damān and Diu
+      - Delhi
+      - Goa
+      - Gujarāt
+      - Haryāna
+      - Himāchal Pradesh
+      - Jammu and Kashmīr
+      - Jhārkhand
+      - Karnātaka
+      - Kerala
+      - Ladākh
+      - Lakshadweep
+      - Madhya Pradesh
+      - Mahārāshtra
+      - Manipur
+      - Meghālaya
+      - Mizoram
+      - Nāgāland
+      - Odisha
+      - Puducherry (Pondicherry)
+      - Punjab
+      - Rājasthān
+      - Sikkim
+      - Tamil Nādu
+      - Telangāna
+      - Tripura
+      - Uttarākhand
+      - Uttar Pradesh
+      - West Bengal
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  postal code:
+    question: Postal Code*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: "33496"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  phone device type:
+    question: Phone Device Type*
+    field_type: dropdown
+    step: My Information
+    options: []
+    sample_answer: Mobile
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  country phone code:
+    question: Country Phone Code*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  phone number:
+    question: Phone Number*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: "5618161324"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  this role is based in the office locations listed in the job posting are you currently able to work from the office locations listed or are you willing to relocate:
+    question: This role is based in the office location(s) listed in the job
+      posting. Are you currently able to work from the office location(s)
+      listed, or are you willing to relocate?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  this role will require you to work in the office at least four 4 days per week are you able to meet this requirement including with reasonable accommodation:
+    question: This role will require you to work in the office at least four (4)
+      days per week. Are you able to meet this requirement, including with
+      reasonable accommodation?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  please confirm your veteran status:
+    question: "Please confirm your veteran status:"
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
+    sample_answer: Not currently serving and not a veteran
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  your gender male:
+    question: "your gender: Male"
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: Male
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  your race asian not hispanic or latino united states of america:
+    question: "your race: Asian (Not Hispanic or Latino) (United States of America)"
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+      - Decline to self-identify
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  yes i have read and consent to the terms and conditions:
+    question: Yes, I have read and consent to the terms and conditions.*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - Yes, I have read and consent to the terms and conditions.*
+    sample_answer: Yes, I have read and consent to the terms and conditions.*
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  previous worker:
+    question: Previous Worker
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  country / territory phone code:
+    question: Country / Territory Phone Code
+    field_type: phone
+    step: Review
+    options: []
+    sample_answer: United States of America (+1)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  please select the ethnicity which most accurately describes how you identify yourself:
+    question: Please select the ethnicity which most accurately describes how you
+      identify yourself.
+    field_type: dropdown
+    step: Review
+    options:
+      - Asian (Not Hispanic or Latino) (United States of America)
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  please select the veteran status which most accurately describes how you identify yourself:
+    question: Please select the veteran status which most accurately describes how
+      you identify yourself.
+    field_type: dropdown
+    step: Review
+    options:
+      - Not currently serving and not a veteran
+    sample_answer: Not currently serving and not a veteran
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  gender:
+    question: Gender
+    field_type: dropdown
+    step: Review
+    options:
+      - Male
+    sample_answer: Male
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  terms and conditions consent:
+    question: Terms and Conditions consent
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  race:
+    question: Race
+    field_type: dropdown
+    step: Review
+    options:
+      - Asian (Not Hispanic or Latino) (United States of America)
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Ameriprise Financial Services, LLC
+    first_seen_role: Data Scientist Manager
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T07:10:35.983Z
+  acknowledgement if there are any changes in the responses provided herein you will promptly share those updates with your assigned recruiterplease acknowledge this by entering todays date:
+    question: "Acknowledgement: If there are any changes in the responses provided
+      herein, you will promptly share those updates with your assigned
+      recruiter.Please acknowledge this by entering today's date.*"
+    field_type: text
+    step: 4
+    options: []
+    sample_answer: N/A
+    source: scan_placeholder
+    tenant: snapchat
+    first_seen_company: Snap Inc.
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:40:06.085Z
+  current value is 12/dd/2012:
+    question: current value is 12/DD/2012
+    field_type: text
+    step: 4
+    options: []
+    sample_answer: N/A
+    source: scan_placeholder
+    tenant: snapchat
+    first_seen_company: Snap Inc.
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:40:09.520Z
+  given names:
+    question: Given Name(s)*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: null
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  family name:
+    question: Family Name*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: null
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  address line 1 - local:
+    question: Address Line 1 - Local*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: 5515 North Military Trail
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  city - local:
+    question: City - Local*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: boca raton
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  have you previously worked for zoom in any capacity employee intern contract etc if you are a current employee please navigate to jobs hub in workday to apply:
+    question: Have you previously worked for Zoom in any capacity (employee, intern,
+      contract, etc)? If you are a CURRENT EMPLOYEE, please navigate to Jobs Hub
+      in Workday to apply.*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: boca raton
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  are you authorized to work for any employer in the country where the job is posted:
+    question: Are you authorized to work for any employer in the country where the
+      job is posted?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  do you now or will you in the future require sponsorship for employment visa status eg h-1b visa status etc:
+    question: Do you now, or will you in the future, require sponsorship for
+      employment visa status (e.g., H-1B visa status, etc.)?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  please indicate if you are hispanic or latino:
+    question: Please indicate if you are Hispanic or Latino?
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  the ethnicity which most accurately describes how you identify yourself:
+    question: the ethnicity which most accurately describes how you identify yourself.*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: boca raton
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  the veteran status which most accurately describes your status:
+    question: the veteran status which most accurately describes your status.*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
+    sample_answer: I am not a veteran.
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  i agree:
+    question: I Agree*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - I Agree*
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  your gender:
+    question: your gender.
+    field_type: dropdown
+    step: Review
+    options:
+      - Male
+    sample_answer: Male
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Zoom
+    first_seen_role: AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T10:43:31.417Z
+  please specify the shifts you are available to work if applicable:
+    question: Please specify the shifts you are available to work, if applicable.
+    field_type: text
+    step: 5
+    options: []
+    sample_answer: N/A
+    source: scan_placeholder
+    tenant: tsys
+    first_seen_company: Global Payments
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:01.876Z
+  have you previously worked for global payments tsys heartland payments worldpay or any of its subsidiaries:
+    question: Have you previously worked for Global Payments, TSYS, Heartland
+      Payments, Worldpay or any of it's subsidiaries?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  are you 18 years of age or older:
+    question: Are you 18 years of age or older?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  as a condition of employment global payments will verify your highest level of education completed not attended please indicate your highest degree obtained future graduation dates do not apply:
+    question: As a condition of employment, Global Payments will verify your highest
+      level of education completed, not attended. Please indicate your highest
+      degree obtained. Future graduation dates do not apply.*
+    field_type: dropdown
+    step: Application Questions
+    options: []
+    sample_answer: Masters
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  what are your compensation expectations please list your target base salary range and any variable compensation expectations:
+    question: What are your compensation expectations? (Please list your target base
+      salary range and any variable compensation expectations.)*
+    field_type: textarea
+    step: Application Questions
+    options: []
+    sample_answer: "100000"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  are you currently authorized to work in the country in which the job is posted:
+    question: Are you currently authorized to work in the country in which the job
+      is posted?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  will you now or in the future require any type of sponsorship for an employment visa work permit residence permit or any other type of authorization to work in the united states:
+    question: Will you now or in the future require any type of sponsorship for an
+      employment visa, work permit, residence permit, or any other type of
+      authorization to work in the United States?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  are you open to relocation at this time:
+    question: Are you open to relocation at this time?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  ? an armed forces service medal veteran means a veteran who while serving on active duty in the us military ground naval or air service participated in a united states military operation for which an armed forces service medal was awarded pursuant to executive order 12985 if you believe you belong to any of the categories of protected veterans listed above please indicate by checking the appropriate box below as a government contractor subject to vevraa we request this information in order to measure the effectiveness of the outreach and positive recruitment efforts we undertake pursuant to vevraa submission of this information is voluntary and refusal to provide it will not subject you to any adverse treatment the information provided will be used only in ways that are not inconsistent with vevraa as amended we are an equal opportunity employer we do not discriminate in hiring or employment against any individual on the basis of race color gender national origin ancestry religion physical or mental disability age veteran status sexual orientation gender identity marital status pregnancy citizenship or any other factor protected by anti-discrimination laws please select your status
+  : question: An Armed Forces Service Medal Veteran means a veteran who, while
+      serving on active duty in the U.S. military, ground, naval or air service,
+      participated in a United States military operation for which an Armed
+      Forces service medal was awarded pursuant to Executive Order 12985. If you
+      believe you belong to any of the categories of protected veterans listed
+      above, please indicate by checking the appropriate box below. As a
+      Government contractor subject to VEVRAA, we request this information in
+      order to measure the effectiveness of the outreach and positive
+      recruitment efforts we undertake pursuant to VEVRAA. Submission of this
+      information is voluntary and refusal to provide it will not subject you to
+      any adverse treatment. The information provided will be used only in ways
+      that are not inconsistent with VEVRAA as amended. We are an equal
+      opportunity employer. We do not discriminate in hiring or employment
+      against any individual on the basis of race, color, gender, national
+      origin, ancestry, religion, physical or mental disability, age, veteran
+      status, sexual orientation, gender identity, marital status, pregnancy,
+      citizenship, or any other factor protected by anti-discrimination laws.
+      Please select your status.*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I identify as one or more of the classifications of protected veterans
+        listed above
+      - I identify as a veteran, just not a protected veteran
+      - I am not a veteran
+      - I do not wish self-identify
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  i’ve read and understand the privacy notice and agree to receive communications from global payments:
+    question: I’ve read and understand the Privacy Notice and agree to receive
+      communications from Global Payments*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - I’ve read and understand the Privacy Notice and agree to receive
+        communications from Global Payments*
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  are you willing to relocate at your own expense:
+    question: Are you willing to relocate at your own expense?*
+    field_type: select
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  what is your desired salary:
+    question: What is your desired salary?*
+    field_type: textarea
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: "100000"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  ethnicity:
+    question: Ethnicity
+    field_type: dropdown
+    step: Review
+    options:
+      - Asian (Not Hispanic or Latino) (United States of America)
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Global Payments
+    first_seen_role: Senior Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:09:50.804Z
+  do you have experience relevant to this role:
+    question: Do you have experience relevant to this role?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options: []
+    sample_answer: No
+    source: llm_scan_learned
+    tenant: vumc
+    first_seen_company: Vanderbilt University Medical Center
+    first_seen_role: Health Policy Data Analyst Data Management HYBRID
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:17:25.598Z
+  please indicate the areas you have experience with:
+    question: Please indicate the areas you have experience with:*
+    field_type: checkbox-group
+    step: 3
+    options:
+      - Medical Reception
+      - Patient Check-In/Check-Out
+      - Insurance Verification
+      - Medical Billing
+      - Basic Medical Terminology
+      - None of these
+    sample_answer: "true"
+    source: scan_placeholder
+    tenant: vumc
+    first_seen_company: Workday Partner
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:17:33.546Z
+  do you have lab experience outside of classroom course workplease add:
+    question: Do you have lab experience outside of classroom course work.Please add ?*
+    field_type: dropdown
+    step: 3
+    options: []
+    sample_answer: No
+    source: scan_placeholder
+    tenant: vumc
+    first_seen_company: Workday Partner
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:17:40.992Z
+  do you have experience in statistical reporting applications:
+    question: Do you have experience in statistical reporting applications.*
+    field_type: dropdown
+    step: 3
+    options: []
+    sample_answer: No
+    source: scan_placeholder
+    tenant: vumc
+    first_seen_company: Workday Partner
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:17:50.433Z
+  current value is 12/20/2012:
+    question: current value is 12/20/2012
+    field_type: text
+    step: 7
+    options: []
+    sample_answer: N/A
+    source: scan_placeholder
+    tenant: vumc
+    first_seen_company: Vanderbilt University Medical Center
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-01T13:43:14.862Z

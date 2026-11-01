@@ -53,6 +53,7 @@ export default function ApplicationSlideDrawer({
   const [editValues, setEditValues] = useState({});
   const [savingFieldId, setSavingFieldId] = useState(null);
   const [savedSuccessIds, setSavedSuccessIds] = useState(new Set());
+  const [proofToggle, setProofToggle] = useState(true);
 
   // Normalize applywizz ID and job URL
   const applywizzId = application?.applywizz_id || application?.applywizzId || '';
@@ -228,18 +229,42 @@ export default function ApplicationSlideDrawer({
   }, [fields]);
 
   // Active list of fields to display: STRICTLY AI/LLM answered questions or unresolved questions
+  // Answers from Supabase DB, Resume extraction, CRM facts, QA bank, and Blueprint are strictly halted.
   const displayedFields = useMemo(() => {
     return fields.filter((f) => {
       if (f.isPersonal) return false;
+
+      const val = editValues[f.id] !== undefined ? editValues[f.id] : f.value;
+      const isMissing = f.isUnanswered || !val || String(val).trim() === '' || val === 'null';
+      if (isMissing) return true;
+
+      const src = (f.source || '').toLowerCase();
+      const rawSrc = (f.raw_source || '').toLowerCase();
+      const srcLabel = (f.sourceLabel || '').toLowerCase();
+
+      // Strictly halt trusted / deterministic answer sources
+      if (
+        f.tier === 1 || f.tier === 2 || f.tier === 3 || f.tier === 5 ||
+        src.includes('supabase') || rawSrc === 'supabase' ||
+        src.includes('resume') || rawSrc === 'resume' ||
+        src.includes('crm') || rawSrc === 'crm' ||
+        src.includes('qa_bank') || rawSrc === 'qa_bank' ||
+        src.includes('fuzzy') || src.includes('semantic') ||
+        src.includes('blueprint') || rawSrc === 'blueprint_master'
+      ) {
+        return false;
+      }
+
+      // ONLY display if source is explicitly AI / LLM
       const isAi = f.tier === 4
-        || (f.source || '').toLowerCase() === 'ai'
-        || (f.raw_source || '').toLowerCase() === 'llm'
-        || /ai|llm/i.test(f.source || '')
-        || /ai|llm/i.test(f.sourceLabel || '');
-      const isMissing = f.isUnanswered || !f.value;
-      return isAi || isMissing;
+        || src === 'ai' || src === 'llm'
+        || rawSrc === 'ai' || rawSrc === 'llm'
+        || srcLabel.includes('ai') || srcLabel.includes('llm')
+        || /ai|llm/i.test(src) || /ai|llm/i.test(srcLabel);
+
+      return isAi;
     });
-  }, [fields]);
+  }, [fields, editValues]);
 
   // Handle saving an answer directly to qa_bank in Supabase
   const handleSaveToQaBank = async (field) => {
@@ -258,7 +283,7 @@ export default function ApplicationSlideDrawer({
         questionNormalized: field.questionNormalized,
         answer: String(val).trim(),
         fieldType: field.fieldType || 'input',
-        source: 'manual',
+        source: 'ca_answered',
         jobUrl,
         distributionId: appDetails?.id || distributionId,
       });
@@ -384,23 +409,55 @@ export default function ApplicationSlideDrawer({
                 <span>{statusLabel.toUpperCase()}</span>
               </div>
 
-              {/* View Screenshot button directly beside status badge: ONLY when submitted */}
-              {isFinalSubmitted && proofShot && (
-                <button
-                  type="button"
-                  className="sd-shot-btn-prominent"
-                  onClick={() => setSelectedScreenshot(proofShot)}
-                  style={{
-                    background: 'rgba(16, 185, 129, 0.18)',
-                    borderColor: 'rgba(16, 185, 129, 0.4)',
-                    color: '#34d399',
-                  }}
-                  title="View verified post-submission confirmation screenshot"
-                >
-                  <Eye size={13} />
-                  <span>View Submission Proof</span>
-                </button>
-              )}
+              {/* Dedicated Toggle Button for Proof Screenshot: Enabled strictly when submitted */}
+              <button
+                type="button"
+                className={`sd-shot-btn-prominent ${isFinalSubmitted ? (proofToggle ? 'proof-on' : 'proof-off') : 'proof-locked'}`}
+                onClick={() => {
+                  if (isFinalSubmitted) {
+                    setProofToggle((prev) => !prev);
+                  }
+                }}
+                disabled={!isFinalSubmitted}
+                style={{
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '4px 11px',
+                  borderRadius: '16px',
+                  fontSize: '0.74rem',
+                  fontWeight: 700,
+                  cursor: isFinalSubmitted ? 'pointer' : 'not-allowed',
+                  transition: 'all 0.15s ease',
+                  background: isFinalSubmitted
+                    ? (proofToggle ? '#10b981' : 'rgba(16, 185, 129, 0.15)')
+                    : 'rgba(51, 65, 85, 0.35)',
+                  border: isFinalSubmitted
+                    ? (proofToggle ? '1px solid #059669' : '1px solid rgba(16, 185, 129, 0.45)')
+                    : '1px solid rgba(100, 116, 139, 0.25)',
+                  color: isFinalSubmitted
+                    ? (proofToggle ? '#ffffff' : '#34d399')
+                    : '#64748b',
+                  opacity: isFinalSubmitted ? 1 : 0.6,
+                }}
+                title={
+                  isFinalSubmitted
+                    ? (proofToggle ? 'Hide Submission Proof Screenshot' : 'View Submission Proof Screenshot')
+                    : 'Screenshot proof locked — bot must submit application first'
+                }
+              >
+                {isFinalSubmitted ? (
+                  <>
+                    <Eye size={13} />
+                    <span>Proof Screenshot: {proofToggle ? 'ON' : 'OFF'}</span>
+                  </>
+                ) : (
+                  <>
+                    <span style={{ fontSize: '0.72rem' }}>🔒</span>
+                    <span>Proof (Locked)</span>
+                  </>
+                )}
+              </button>
             </div>
 
             <h2 className="sd-company-title">
@@ -473,8 +530,8 @@ export default function ApplicationSlideDrawer({
 
         {/* Content Body: Questions & Answers List */}
         <div className="slide-drawer-body">
-          {/* Authentic Post-Submission Confirmation Proof Banner inside Slide Drawer: Strictly when submitted */}
-          {(effectiveStatus === 'submitted' || effectiveStatus === 'completed') && proofShot && (
+          {/* Authentic Post-Submission Confirmation Proof Banner inside Slide Drawer: Strictly when submitted and toggled ON */}
+          {(effectiveStatus === 'submitted' || effectiveStatus === 'completed') && proofShot && proofToggle && (
             <div style={{
               background: 'linear-gradient(135deg, rgba(16, 185, 129, 0.12) 0%, rgba(5, 150, 105, 0.08) 100%)',
               border: '1px solid rgba(16, 185, 129, 0.45)',
@@ -604,6 +661,30 @@ export default function ApplicationSlideDrawer({
                     <div className="sd-q-header">
                       <span className="sd-q-num">Q{idx + 1}</span>
                       <span className="sd-q-label">{field.label || field.question || 'Application Question'}</span>
+                      <span style={{
+                        fontSize: '0.66rem',
+                        padding: '2px 8px',
+                        borderRadius: '4px',
+                        background: 'rgba(56, 189, 248, 0.15)',
+                        border: '1px solid rgba(56, 189, 248, 0.35)',
+                        color: '#38bdf8',
+                        fontWeight: 800,
+                        letterSpacing: '0.04em',
+                        textTransform: 'uppercase',
+                        marginLeft: 'auto',
+                        marginRight: '6px',
+                      }}>
+                        [TYPE: {(() => {
+                          const t = String(field.fieldType || field.type || '').toUpperCase();
+                          if (t.includes('RADIO')) return 'RADIO';
+                          if (t.includes('TEXTAREA')) return 'TEXTAREA';
+                          if (t.includes('DATE')) return 'DATE';
+                          if (t.includes('SELECT') || t.includes('DROPDOWN') || (Array.isArray(field.options) && field.options.length > 0)) {
+                            return 'DROPDOWN';
+                          }
+                          return 'TEXT';
+                        })()}]
+                      </span>
                       {(() => {
                         if (isMissing) {
                           return (
@@ -659,58 +740,36 @@ export default function ApplicationSlideDrawer({
                         )}
                       </div>
 
-                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                      <div style={{ display: 'flex', gap: '8px', alignItems: 'center', flexWrap: 'wrap' }}>
                         {(() => {
                           const hasOptions = Array.isArray(field.options) && field.options.length > 0;
-                          const isShortOptions = hasOptions && field.options.length <= 3 && field.options.every((o) => typeof o === 'string' && o.length < 20);
+                          const rawType = String(field.fieldType || field.type || '').toLowerCase();
+                          const isRadio = rawType === 'radio';
+                          const isDropdown = rawType === 'dropdown' || rawType === 'select' || rawType === 'combobox' || (!isRadio && hasOptions);
+                          const isTextarea = rawType === 'textarea';
+                          const isDate = rawType === 'date';
 
-                          if (isShortOptions || field.fieldType === 'radio') {
-                            return (
-                              <div className="sd-radio-group">
-                                {hasOptions ? (
-                                  field.options.map((opt) => {
-                                    const optStr = String(opt);
-                                    const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.trim().toLowerCase();
-                                    return (
-                                      <button
-                                        key={optStr}
-                                        type="button"
-                                        className={`sd-radio-pill ${isSelected ? 'selected' : ''}`}
-                                        onClick={() => setEditValues((prev) => ({ ...prev, [field.id]: optStr }))}
-                                        disabled
-                                      >
-                                        {optStr}
-                                      </button>
-                                    );
-                                  })
-                                ) : (
-                                  ['Yes', 'No'].map((optStr) => {
-                                    const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.toLowerCase();
-                                    return (
-                                      <button
-                                        key={optStr}
-                                        type="button"
-                                        className={`sd-radio-pill ${isSelected ? 'selected' : ''}`}
-                                        onClick={() => setEditValues((prev) => ({ ...prev, [field.id]: optStr }))}
-                                      >
-                                        {optStr}
-                                      </button>
-                                    );
-                                  })
-                                )}
-                              </div>
-                            );
-                          }
-
-                          if (hasOptions || field.fieldType === 'dropdown' || field.fieldType === 'select') {
+                          // 1. DROPDOWN: When question is a dropdown in Workday, render interactive dropdown <select> with exact options
+                          if (isDropdown) {
+                            const optionList = hasOptions ? field.options : ['Yes', 'No'];
                             return (
                               <select
                                 value={currentVal || ''}
-                                disabled
+                                onChange={(e) => setEditValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
                                 className={`sd-select-answer ${isMissing ? 'input-missing' : ''}`}
+                                style={{
+                                  flex: '1 1 240px',
+                                  padding: '8px 12px',
+                                  background: '#090d16',
+                                  border: isMissing ? '1px solid #f59e0b' : '1px solid #334155',
+                                  borderRadius: '6px',
+                                  color: '#f8fafc',
+                                  fontSize: '0.85rem',
+                                  cursor: 'pointer',
+                                }}
                               >
                                 <option value="">-- Select an Option --</option>
-                                {(field.options || []).map((opt) => {
+                                {optionList.map((opt) => {
                                   const optStr = String(typeof opt === 'string' ? opt : (opt?.text || opt?.value || ''));
                                   return (
                                     <option key={optStr} value={optStr}>
@@ -722,29 +781,146 @@ export default function ApplicationSlideDrawer({
                             );
                           }
 
-                          if (field.fieldType === 'textarea') {
+                          // 2. RADIO: When question is radio buttons in Workday, render interactive radio choices
+                          if (isRadio) {
+                            const optionList = hasOptions ? field.options : ['Yes', 'No'];
+                            return (
+                              <div className="sd-radio-group" style={{ flex: '1 1 auto', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                                {optionList.map((opt) => {
+                                  const optStr = String(typeof opt === 'string' ? opt : (opt?.text || opt?.value || ''));
+                                  const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.trim().toLowerCase();
+                                  return (
+                                    <button
+                                      key={optStr}
+                                      type="button"
+                                      className={`sd-radio-pill ${isSelected ? 'selected' : ''}`}
+                                      onClick={() => setEditValues((prev) => ({ ...prev, [field.id]: optStr }))}
+                                      style={{
+                                        padding: '5px 12px',
+                                        borderRadius: '16px',
+                                        fontSize: '0.8rem',
+                                        fontWeight: isSelected ? 700 : 500,
+                                        background: isSelected ? '#0284c7' : '#1e293b',
+                                        border: isSelected ? '1px solid #38bdf8' : '1px solid #334155',
+                                        color: isSelected ? '#ffffff' : '#cbd5e1',
+                                        cursor: 'pointer',
+                                        transition: 'all 0.15s ease',
+                                      }}
+                                    >
+                                      {optStr}
+                                    </button>
+                                  );
+                                })}
+                              </div>
+                            );
+                          }
+
+                          // 3. TEXTAREA: When question is multi-line in Workday, render textarea
+                          if (isTextarea) {
                             return (
                               <textarea
-                                rows={3}
+                                rows={2}
                                 value={currentVal}
-                                readOnly
-                                placeholder="Type answer details here..."
+                                onChange={(e) => setEditValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                                placeholder="Type candidate answer details..."
                                 className={`sd-textarea-answer ${isMissing ? 'input-missing' : ''}`}
+                                style={{
+                                  flex: '1 1 260px',
+                                  padding: '8px 12px',
+                                  background: '#090d16',
+                                  border: isMissing ? '1px solid #f59e0b' : '1px solid #334155',
+                                  borderRadius: '6px',
+                                  color: '#f8fafc',
+                                  fontSize: '0.85rem',
+                                }}
                               />
                             );
                           }
 
+                          // 4. DATE: When question is a date in Workday, render date input
+                          if (isDate) {
+                            return (
+                              <input
+                                type="text"
+                                value={currentVal}
+                                onChange={(e) => setEditValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                                placeholder="MM/DD/YYYY"
+                                className={`sd-input-answer ${isMissing ? 'input-missing' : ''}`}
+                                style={{
+                                  flex: '1 1 200px',
+                                  padding: '8px 12px',
+                                  background: '#090d16',
+                                  border: isMissing ? '1px solid #f59e0b' : '1px solid #334155',
+                                  borderRadius: '6px',
+                                  color: '#f8fafc',
+                                  fontSize: '0.85rem',
+                                }}
+                              />
+                            );
+                          }
+
+                          // 5. TEXT: When question is a standard text input in Workday, render text input
                           return (
                             <input
                               type="text"
                               value={currentVal}
-                              readOnly
-                              placeholder="Type answer here (e.g. Yes, 5 years, Authorized)..."
+                              onChange={(e) => setEditValues((prev) => ({ ...prev, [field.id]: e.target.value }))}
+                              placeholder="Type candidate answer here..."
                               className={`sd-input-answer ${isMissing ? 'input-missing' : ''}`}
+                              style={{
+                                flex: '1 1 240px',
+                                padding: '8px 12px',
+                                background: '#090d16',
+                                border: isMissing ? '1px solid #f59e0b' : '1px solid #334155',
+                                borderRadius: '6px',
+                                color: '#f8fafc',
+                                fontSize: '0.85rem',
+                              }}
                             />
                           );
                         })()}
 
+                        {/* Interactive Save to QA Bank Button */}
+                        <button
+                          type="button"
+                          className="sd-save-qa-btn"
+                          onClick={() => handleSaveToQaBank(field)}
+                          disabled={isSaving}
+                          style={{
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '5px',
+                            padding: '7px 14px',
+                            background: isSaved ? 'rgba(16, 185, 129, 0.2)' : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                            border: isSaved ? '1px solid #10b981' : 'none',
+                            borderRadius: '6px',
+                            color: isSaved ? '#34d399' : '#ffffff',
+                            fontSize: '0.78rem',
+                            fontWeight: 700,
+                            cursor: isSaving ? 'wait' : 'pointer',
+                            whiteSpace: 'nowrap',
+                            flexShrink: 0,
+                            transition: 'all 0.15s ease',
+                          }}
+                          title="Save this answer directly to candidate QA Bank (ca_answered) and update application"
+                        >
+                          {isSaving ? (
+                            <>
+                              <Sparkles size={13} className="sd-spin" />
+                              <span>Saving...</span>
+                            </>
+                          ) : isSaved ? (
+                            <>
+                              <Check size={13} />
+                              <span>Saved (CA)</span>
+                            </>
+                          ) : (
+                            <>
+                              <Save size={13} />
+                              <span>Save to QA Bank</span>
+                            </>
+                          )}
+                        </button>
                       </div>
                     </div>
                   </div>

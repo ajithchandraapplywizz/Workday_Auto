@@ -612,6 +612,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       tenant,
       isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
       isScanOnly: Boolean(opts.isScanOnly || opts.isClusterBlueprint),
+      blockUniversalYaml: Boolean(opts.blockUniversalYaml),
     });
     if (qaBankAnswer) {
       const qaHit = finish(qaBankAnswer, 'qa_bank');

@@ -84,13 +84,29 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const args = process.argv.slice(2);
 const HEADLESS = process.env.HEADLESS !== 'false' && !args.includes('--headful') && !args.includes('--headed');
 const TEST_MODE = args.includes('--test');
-const PORT = Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || 3001;
-export const SERVICE_ROLE = (process.env.SERVICE_ROLE || 'all').toLowerCase(); // 'main' | 'scanner' | 'submitter' | 'all'
+
+let envRole = (process.env.SERVICE_ROLE || '').toLowerCase();
+if (!envRole) {
+  if (args.includes('submitter') || args.includes('submit') || args.includes('--submit')) {
+    envRole = 'submitter';
+  } else if (args.includes('scanner') || args.includes('scan') || args.includes('--scan')) {
+    envRole = 'scanner';
+  } else {
+    envRole = 'all';
+  }
+}
+export const SERVICE_ROLE = envRole;
+
+let defaultPort = 3001;
+if (SERVICE_ROLE === 'submitter') {
+  defaultPort = 3002;
+}
+const PORT = Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || defaultPort;
 
 if (TEST_MODE) {
   console.log('[DAEMON] ⚠️  TEST MODE: Only 1 cluster / 1 client will be processed per Stage 1 run.');
 }
-console.log(`[DAEMON] Active Service Role: "${SERVICE_ROLE.toUpperCase()}" (main = 0 workers, scanner = scan only, submitter = submit only, all = combined).`);
+console.log(`[DAEMON] Active Service Role: "${SERVICE_ROLE.toUpperCase()}" on PORT ${PORT} (main = 0 workers, scanner = scan only, submitter = submit only, all = combined).`);
 
 let isPoolRunning = false;
 let isPoolPaused = false;
@@ -166,21 +182,26 @@ async function resetAllWorkersIdle() {
  * Synchronize global bot_control table state (R3 mode lock & R11 independent columns)
  */
 async function syncBotControlState(patch = {}) {
+  // Guard against idle service overwriting active opposite service
+  if (!isPoolRunning && !patch.is_running) {
+    const bc = await getBotControl().catch(() => null);
+    if (SERVICE_ROLE === 'scanner' && (bc?.stage === 'submitting' || bc?.last_action_requested?.includes('submit')) && bc?.is_running) {
+      return;
+    }
+    if (SERVICE_ROLE === 'submitter' && (bc?.stage === 'scanning' || bc?.stage === 'resolving' || bc?.last_action_requested?.includes('scan')) && bc?.is_running) {
+      return;
+    }
+  }
+
   await updateBotControl({
-    mode: currentMode,
-    stage: currentStage,
-    scan_enabled: scanStatus === 'running',
-    scan_status: scanStatus,
-    scan_stop_requested: scanStopRequested,
-    submit_enabled: submitStatus === 'running',
-    submit_status: submitStatus,
-    submit_stop_requested: submitStopRequested,
-    scan_message: scanCompleteMessage,
-    refusal_reason: submitRefusalReason || scanRefusalReason,
-    is_running: isPoolRunning,
-    is_paused: isPoolPaused,
-    stop_requested: isGlobalStopRequested(),
-    active_worker_count: isPoolRunning ? (currentMode === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0,
+    stage: patch.stage || currentStage,
+    is_running: patch.is_running !== undefined ? patch.is_running : isPoolRunning,
+    is_paused: patch.is_paused !== undefined ? patch.is_paused : isPoolPaused,
+    stop_requested: patch.stop_requested !== undefined ? patch.stop_requested : isGlobalStopRequested(),
+    trigger_requested: patch.trigger_requested !== undefined ? patch.trigger_requested : false,
+    last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : null,
+    current_action: patch.current_action || (isPoolRunning ? `Running ${currentStage}...` : 'Idle'),
+    active_worker_count: patch.active_worker_count !== undefined ? patch.active_worker_count : (isPoolRunning ? (currentStage === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0),
     ...patch,
   }).catch(() => { });
 }
@@ -300,6 +321,24 @@ export async function stopScanPool() {
         updateWorkerStatus(wId, { state: 'idle', current_application_id: null, stage: 'idle' })
       )
     );
+
+    // Roll back any in-flight processing tasks in batch_job_queue back to pending
+    try {
+      const { error: resetErr } = await supabase
+        .from('batch_job_queue')
+        .update({
+          status: 'pending',
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('status', 'processing');
+      if (!resetErr) {
+        console.log(`[DAEMON] All in-flight processing tasks safely rolled back to pending in batch_job_queue.`);
+      }
+    } catch (rbErr) {
+      console.warn(`[DAEMON] Note on rollback:`, rbErr.message);
+    }
   } finally {
     scanStatus = 'off';
     scanStopRequested = false;
@@ -350,6 +389,32 @@ export async function stopSubmitPool() {
         updateWorkerStatus(wId, { state: 'idle', current_application_id: null, stage: 'idle' })
       )
     );
+
+    // Roll back in-flight applying tasks back to ready_for_review
+    try {
+      const nowIso = new Date().toISOString();
+      await supabase
+        .from('submission_tasks')
+        .update({
+          status: 'ready_for_review',
+          worker_id: null,
+          worker_leased_at: null,
+          updated_at: nowIso,
+        })
+        .eq('status', 'applying');
+
+      await supabase
+        .from('job_distributions')
+        .update({
+          status: 'ready_for_review',
+          worker_id: null,
+          updated_at: nowIso,
+        })
+        .eq('status', 'applying');
+      console.log(`[DAEMON] All in-flight applying tasks safely rolled back to ready_for_review.`);
+    } catch (rbErr) {
+      console.warn(`[DAEMON] Note on submission rollback:`, rbErr.message);
+    }
   } finally {
     submitStatus = 'off';
     submitStopRequested = false;
@@ -661,12 +726,12 @@ async function runStage3Submissions() {
 /**
  * Parallel Pipeline: Scanning & Resolving run concurrently across the 2 shared workers
  */
-export async function runScanAndResolveParallel() {
+export async function runScanAndResolveParallel({ force = false } = {}) {
   if (SERVICE_ROLE === 'submitter') {
     console.log(`[DAEMON] Submitter service ignoring scan pipeline request.`);
     return { success: false, refused: true, reason: 'SERVICE_ROLE is submitter' };
   }
-  if (scanStatus === 'running' && isPoolRunning) {
+  if (!force && scanStatus === 'running' && isPoolRunning) {
     console.log(`[DAEMON] Scan pipeline is already running.`);
     return { success: true, message: 'Scan pipeline already running.' };
   }
@@ -1017,15 +1082,18 @@ const server = http.createServer(async (req, res) => {
         success: true,
         logs: submitLogs.slice(-150),
         scanLogs: [],
+        resolveLogs: [],
         submitLogs: submitLogs.slice(-150),
       }));
       return;
     }
+    // Scanner service strictly outputs scan and resolve logs, zero submit logs
     res.end(JSON.stringify({
       success: true,
       logs: daemonLogs.slice(-150),
-      scanLogs: scanLogs.slice(-150),
-      submitLogs: submitLogs.slice(-150),
+      scanLogs: scanLogs.filter((l) => l.cluster !== 'Resolve').slice(-150),
+      resolveLogs: scanLogs.filter((l) => l.cluster === 'Resolve').slice(-150),
+      submitLogs: [],
     }));
     return;
   }
@@ -1082,7 +1150,7 @@ const server = http.createServer(async (req, res) => {
         });
 
         // Run asynchronously
-        runScanAndResolveParallel().catch(console.error);
+        runScanAndResolveParallel({ force: true }).catch(console.error);
 
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
@@ -1247,7 +1315,7 @@ const server = http.createServer(async (req, res) => {
       is_running: true,
       stop_requested: false
     }).catch(() => { });
-    runScanAndResolveParallel().catch(console.error);
+    runScanAndResolveParallel({ force: true }).catch(console.error);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -1707,7 +1775,8 @@ export async function initOnStartup() {
     await reapExpiredLeases(10).catch(() => {});
     console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
 
-    if (args.includes('submit') || args.includes('--submit') || process.env.START_SUBMIT === 'true') {
+    // Only trigger immediate submissions on startup if explicitly requested via flag
+    if ((args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
       console.log(`[DAEMON] Startup trigger detected: initiating Stage 3 Submissions across 2 workers...`);
       runStage3Submissions().catch(console.error);
     }

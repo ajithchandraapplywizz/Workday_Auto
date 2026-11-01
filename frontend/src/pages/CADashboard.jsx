@@ -73,6 +73,11 @@ export default function CADashboard() {
       : 'sana@applywizz.com';
   }, [user?.email, inspectedCaEmail]);
 
+  // Real-time aggregate count of all pending applications waiting to be executed for this CA
+  const totalPendingForCA = useMemo(() => {
+    return candidateList.reduce((sum, c) => sum + (c.jobs_to_execute || 0), 0);
+  }, [candidateList]);
+
   // Workday Auto-Apply Dynamic state
   const [activeTask, setActiveTask] = useState(null);
   const [clientJobs, setClientJobs] = useState([]);
@@ -212,28 +217,74 @@ export default function CADashboard() {
 
         if (!isMounted) return;
 
+        let baseList = [];
         if (res.success && res.assignments && res.assignments.length > 0) {
-          const list = res.assignments.map((a) => ({
+          baseList = res.assignments.map((a) => ({
             applywizz_id: a.applywizz_id,
             client_name: a.client_name || a.applywizz_id,
             company_email: a.client_email || '',
             jobs_applied: a.jobs_applied || 0,
             date: a.date,
           }));
-          setCandidateList(list);
-          const firstId = list[0].applywizz_id;
-          setApplywizzId(firstId);
-          loadClientProfile(firstId);
         } else {
           // Fallback to recent onboarded clients
-          const fb = await fetchClients({ limit: 10 });
+          const fb = await fetchClients({ limit: 12 });
           if (!isMounted) return;
           if (fb.success && fb.clients && fb.clients.length > 0) {
-            setCandidateList(fb.clients);
-            const firstId = fb.clients[0].applywizz_id;
-            setApplywizzId(firstId);
-            loadClientProfile(firstId);
+            baseList = fb.clients.map((c) => ({
+              applywizz_id: c.applywizz_id,
+              client_name: c.client_name || c.applywizz_id,
+              company_email: c.company_email || c.client_email || '',
+              jobs_applied: 0,
+              date: yesterdayDate,
+            }));
           }
+        }
+
+        if (!isMounted) return;
+
+        // Enrich with real-time job_distributions counts so CA sees green execution count immediately
+        const candidateIds = baseList.map((c) => c.applywizz_id.trim().toUpperCase());
+        if (candidateIds.length > 0) {
+          try {
+            const { data: distData } = await supabase
+              .from('job_distributions')
+              .select('applywizz_id, status')
+              .in('applywizz_id', candidateIds);
+
+            const countMap = {};
+            for (const row of distData || []) {
+              const id = (row.applywizz_id || '').trim().toUpperCase();
+              if (!countMap[id]) countMap[id] = { toExecute: 0, submitted: 0, total: 0 };
+              countMap[id].total++;
+              const st = (row.status || '').toLowerCase();
+              if (st === 'submitted' || st === 'completed') {
+                countMap[id].submitted++;
+              } else {
+                countMap[id].toExecute++;
+              }
+            }
+
+            baseList = baseList.map((c) => {
+              const id = c.applywizz_id.trim().toUpperCase();
+              const counts = countMap[id] || { toExecute: 0, submitted: 0, total: 0 };
+              return {
+                ...c,
+                jobs_to_execute: counts.toExecute,
+                jobs_submitted: counts.submitted,
+                total_distributions: counts.total,
+              };
+            });
+          } catch (cntErr) {
+            console.warn('Note on fetching distribution counts for pills:', cntErr);
+          }
+        }
+
+        setCandidateList(baseList);
+        if (baseList.length > 0) {
+          const firstId = baseList[0].applywizz_id;
+          setApplywizzId(firstId);
+          loadClientProfile(firstId);
         }
       } catch (err) {
         console.error('Failed to load CA assigned clients:', err);
@@ -597,63 +648,105 @@ export default function CADashboard() {
             Live candidate profile lookup, Workday auto-apply automation engine, and semantic Q&A answer manager.
           </p>
         </div>
-        <div className="candidate-quick-pills" style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
-          <span className="quick-label" style={{ fontWeight: 'bold', color: '#94a3b8' }}>
-            ALLOTTED CLIENTS ({candidateList.length}) &bull; YESTERDAY'S WORK DATA ({yesterdayDate}):
-          </span>
-          {candidateList.length > 0 ? (
-            candidateList.map((c) => {
-              const cid = c.applywizz_id;
-              const cname = c.client_name || cid;
-              const isSelected = applywizzId === cid;
-              return (
-                <button
-                  key={cid}
-                  type="button"
-                  className={`pill-btn ${isSelected ? 'active' : ''}`}
-                  style={{
-                    display: 'inline-flex',
-                    alignItems: 'center',
-                    gap: '5px',
-                    padding: '4px 10px',
-                    borderRadius: '16px',
-                    fontSize: '0.78rem',
-                    fontWeight: isSelected ? 'bold' : 'normal',
-                    background: isSelected ? '#0284c7' : '#1e293b',
-                    color: isSelected ? '#ffffff' : '#cbd5e1',
-                    border: isSelected ? '1px solid #38bdf8' : '1px solid #334155',
-                    cursor: 'pointer',
-                    transition: 'all 0.15s ease',
-                  }}
-                  onClick={() => {
-                    setApplywizzId(cid);
-                    loadClientProfile(cid);
-                  }}
-                  title={`${cname} (${cid})`}
-                >
-                  <strong>{cid}</strong>
-                  {c.client_name && c.client_name !== cid && (
-                    <span style={{ opacity: 0.85, fontSize: '0.72rem', maxWidth: '85px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      &bull; {cname.split(' ')[0]}
+        <div className="candidate-quick-pills" style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%' }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '8px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+              <span className="quick-label" style={{ fontWeight: 'bold', color: '#cbd5e1', fontSize: '0.82rem' }}>
+                ASSIGNED CLIENTS ({candidateList.length}) &bull; YESTERDAY'S WORK DATA ({yesterdayDate}):
+              </span>
+              <span style={{
+                fontSize: '0.74rem',
+                padding: '2px 10px',
+                borderRadius: '12px',
+                background: totalPendingForCA > 0 ? 'rgba(16, 185, 129, 0.16)' : 'rgba(100, 116, 139, 0.2)',
+                border: totalPendingForCA > 0 ? '1px solid rgba(16, 185, 129, 0.45)' : '1px solid rgba(100, 116, 139, 0.3)',
+                color: totalPendingForCA > 0 ? '#34d399' : '#94a3b8',
+                fontWeight: 800,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+              }}>
+                <span>🟢</span>
+                <span>{totalPendingForCA} PENDING EXECUTION</span>
+              </span>
+            </div>
+            <span style={{ fontSize: '0.72rem', color: '#64748b' }}>
+              Green badges indicate application count to execute without opening client profile
+            </span>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+            {candidateList.length > 0 ? (
+              candidateList.map((c) => {
+                const cid = c.applywizz_id;
+                const cname = c.client_name || cid;
+                const isSelected = applywizzId === cid;
+                const toExec = c.jobs_to_execute !== undefined ? c.jobs_to_execute : Math.max(0, (c.jobs_applied || 0) - (c.jobs_submitted || 0));
+                return (
+                  <button
+                    key={cid}
+                    type="button"
+                    className={`pill-btn ${isSelected ? 'active' : ''}`}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      padding: '4px 10px',
+                      borderRadius: '16px',
+                      fontSize: '0.78rem',
+                      fontWeight: isSelected ? 'bold' : 'normal',
+                      background: isSelected ? '#0284c7' : '#1e293b',
+                      color: isSelected ? '#ffffff' : '#cbd5e1',
+                      border: isSelected ? '1px solid #38bdf8' : '1px solid #334155',
+                      cursor: 'pointer',
+                      transition: 'all 0.15s ease',
+                    }}
+                    onClick={() => {
+                      setApplywizzId(cid);
+                      loadClientProfile(cid);
+                    }}
+                    title={`${cname} (${cid}) — ${toExec} applications need execution`}
+                  >
+                    <strong>{cid}</strong>
+                    {c.client_name && c.client_name !== cid && (
+                      <span style={{ opacity: 0.85, fontSize: '0.72rem', maxWidth: '85px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        &bull; {cname.split(' ')[0]}
+                      </span>
+                    )}
+
+                    {/* Prominent Green Symbol & Execution Count */}
+                    <span style={{
+                      fontSize: '0.7rem',
+                      padding: '1px 7px',
+                      borderRadius: '10px',
+                      background: toExec > 0 ? 'rgba(16, 185, 129, 0.22)' : 'rgba(100, 116, 139, 0.25)',
+                      border: toExec > 0 ? '1px solid rgba(16, 185, 129, 0.5)' : '1px solid rgba(100, 116, 139, 0.3)',
+                      color: toExec > 0 ? '#34d399' : '#94a3b8',
+                      fontWeight: 'bold',
+                      marginLeft: '4px',
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '3px',
+                    }}>
+                      {toExec > 0 ? (
+                        <>
+                          <span style={{ color: '#10b981', fontSize: '0.68rem' }}>🟢</span>
+                          <span>{toExec} to execute</span>
+                        </>
+                      ) : (
+                        <>
+                          <span>✓</span>
+                          <span>{c.jobs_submitted || 0} done</span>
+                        </>
+                      )}
                     </span>
-                  )}
-                  <span style={{
-                    fontSize: '0.68rem',
-                    padding: '1px 6px',
-                    borderRadius: '8px',
-                    background: (c.jobs_applied || 0) > 0 ? 'rgba(56, 189, 248, 0.25)' : 'rgba(100, 116, 139, 0.25)',
-                    color: (c.jobs_applied || 0) > 0 ? '#38bdf8' : '#94a3b8',
-                    fontWeight: 'bold',
-                    marginLeft: '4px',
-                  }}>
-                    {c.jobs_applied || 0} Apps
-                  </span>
-                </button>
-              );
-            })
-          ) : (
-            <span style={{ fontSize: '0.8rem', color: '#64748b' }}>No clients allotted for today</span>
-          )}
+                  </button>
+                );
+              })
+            ) : (
+              <span style={{ fontSize: '0.8rem', color: '#64748b' }}>No clients allotted for today</span>
+            )}
+          </div>
         </div>
       </div>
 

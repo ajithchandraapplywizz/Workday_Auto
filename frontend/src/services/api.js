@@ -1463,22 +1463,109 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       ] : []),
     ];
 
-    let liveLogs = null;
-    for (const ep of endpoints) {
+    let scanningLogs = [];
+    let resolvingLogs = [];
+    let submittingLogs = [];
+    let allLogs = [];
+
+    function normalizeLog(log, defaultCluster = 'Scan') {
+      const msg = String(log.message || '');
+      const cluster = log.cluster || defaultCluster;
+      let workerId = log.worker_id || null;
+      let workerNum = log.worker_num || null;
+
+      if (!workerId) {
+        const match = msg.match(/(?:scanning_worker_|submitting_worker_|resolving_worker_|Worker\s*|Scanning Worker\s*|Submitting Worker\s*|Resolving Worker\s*)(\d+)/i);
+        if (match) {
+          workerNum = parseInt(match[1], 10);
+          workerId = `${cluster.toLowerCase()}_worker_${workerNum}`;
+        }
+      }
+
+      return {
+        id: log.id || log.ts || Math.random(),
+        ts: log.ts || log.created_at || new Date().toISOString(),
+        created_at: log.ts || log.created_at || new Date().toISOString(),
+        message: msg,
+        level: log.level || 'info',
+        cluster,
+        worker_id: workerId,
+        worker_num: workerNum,
+        step_index: log.step_index || (log.level === 'error' ? 99 : 1),
+      };
+    }
+
+    // Parallel fetch across both dedicated local services (3001 for Scanner, 3002 for Submitter)
+    const fetchLogEndpoint = async (url) => {
       try {
-        const resp = await fetch(ep, {
+        const res = await fetch(url, {
           method: 'GET',
           headers: { 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(2500),
+          signal: AbortSignal.timeout(2000),
         });
-        const contentType = resp.headers.get('content-type') || '';
-        if (resp.ok && contentType.includes('application/json')) {
-          liveLogs = await resp.json();
-          if (liveLogs && (liveLogs.logs || liveLogs.scanLogs || liveLogs.submitLogs)) {
-            break;
-          }
+        if (res.ok) {
+          const json = await res.json();
+          return json;
         }
       } catch {}
+      return null;
+    };
+
+    const localTargets = isLocal ? [
+      fetchLogEndpoint('http://localhost:3001/api/bot/logs'),
+      fetchLogEndpoint('http://localhost:3002/api/bot/logs'),
+    ] : [];
+    const baseTarget = backendBase ? [fetchLogEndpoint(`${backendBase}/api/bot/logs`)] : [];
+
+    const results = await Promise.allSettled([...localTargets, ...baseTarget]);
+    let anyLive = false;
+
+    for (const r of results) {
+      if (r.status === 'fulfilled' && r.value) {
+        const data = r.value;
+        if (Array.isArray(data.scanLogs) && data.scanLogs.length > 0) {
+          scanningLogs.push(...data.scanLogs.map((l) => normalizeLog(l, 'Scan')));
+          anyLive = true;
+        }
+        if (Array.isArray(data.resolveLogs) && data.resolveLogs.length > 0) {
+          resolvingLogs.push(...data.resolveLogs.map((l) => normalizeLog(l, 'Resolve')));
+          anyLive = true;
+        }
+        if (Array.isArray(data.submitLogs) && data.submitLogs.length > 0) {
+          submittingLogs.push(...data.submitLogs.map((l) => normalizeLog(l, 'Submit')));
+          anyLive = true;
+        }
+        if (Array.isArray(data.logs) && data.logs.length > 0) {
+          allLogs.push(...data.logs.map((l) => normalizeLog(l)));
+          anyLive = true;
+        }
+      }
+    }
+
+    if (anyLive) {
+      // Fallback partition only if an array was empty
+      if (scanningLogs.length === 0 && submittingLogs.length === 0 && allLogs.length > 0) {
+        for (const norm of allLogs) {
+          const lower = norm.message.toLowerCase();
+          if (norm.cluster === 'Submit' || lower.includes('[submit') || lower.includes('submitting') || lower.includes('wizard')) {
+            submittingLogs.push({ ...norm, cluster: 'Submit' });
+          } else if (norm.cluster === 'Resolve' || lower.includes('resolv') || lower.includes('tier') || lower.includes('answer')) {
+            resolvingLogs.push({ ...norm, cluster: 'Resolve' });
+          } else {
+            scanningLogs.push({ ...norm, cluster: 'Scan' });
+          }
+        }
+      }
+
+      return {
+        success: true,
+        batches: {
+          scanning: scanningLogs.slice(-limit),
+          resolving: resolvingLogs.slice(-limit),
+          submitting: submittingLogs.slice(-limit),
+        },
+        allLogs: allLogs.slice(-limit * 2),
+      };
     }
 
     if (liveLogs && (liveLogs.logs || liveLogs.scanLogs || liveLogs.submitLogs)) {
@@ -2676,7 +2763,7 @@ export async function triggerAutonomousBot() {
           stop_requested: false,
           trigger_requested: true,
           last_action_requested: 'start_scan',
-          current_action: 'Scanning unique job links across 3 dedicated workers...',
+          current_action: 'Scanning unique job links across dedicated workers...',
           updated_at: now,
         })
         .eq('id', 'primary');
@@ -2831,12 +2918,14 @@ export async function stopAutonomousBot() {
       })
       .in('worker_id', allDynamicIds);
 
-    // 4. Mark any actively processing tasks back to pending on stop
+    // 4. Roll back any actively processing tasks back to pending on stop
     try {
       await supabase
         .from('batch_job_queue')
         .update({
           status: 'pending',
+          worker_id: null,
+          locked_at: null,
           updated_at: now,
         })
         .eq('status', 'processing');
@@ -2869,7 +2958,7 @@ export async function triggerSubmissionStage() {
       stop_requested: false,
       trigger_requested: true,
       last_action_requested: 'start_submit',
-      current_action: 'Submitting approved applications across 2 dedicated workers...',
+      current_action: 'Submitting approved applications across dedicated workers...',
       active_worker_count: 2,
       updated_at: now,
     };
@@ -2982,6 +3071,30 @@ export async function stopSubmissionStage() {
     console.warn('Supabase stop error:', err);
   }
 
+  // Roll back in-flight submission tasks and job_distributions back to ready_for_review
+  try {
+    await supabase
+      .from('submission_tasks')
+      .update({
+        status: 'ready_for_review',
+        worker_id: null,
+        worker_leased_at: null,
+        updated_at: now,
+      })
+      .eq('status', 'applying');
+
+    await supabase
+      .from('job_distributions')
+      .update({
+        status: 'ready_for_review',
+        worker_id: null,
+        updated_at: now,
+      })
+      .eq('status', 'applying');
+  } catch (rbErr) {
+    console.warn('Note on resetting applying tasks:', rbErr?.message);
+  }
+
   try {
     await supabase.from('worker_control').upsert({
       key: 'submit',
@@ -3023,37 +3136,52 @@ export async function stopSubmissionStage() {
 
 export async function fetchBotDaemonStatus() {
   try {
+    let scannerApiRunning = false;
+    let submitterApiRunning = false;
     let daemonApiRunning = false;
     let daemonApiStage = 'idle';
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
 
-    // Universal fetch to daemon status endpoint with fast timeout across local proxy and direct ports
-    const statusUrls = [
-      ...(backendBase ? [`${backendBase}/health`, `${backendBase}/api/bot/status`] : []),
-      ...(isLocal ? [
-        'http://localhost:3002/health',
-        'http://localhost:3002/api/bot/status',
-        'http://localhost:3001/health',
-        'http://localhost:3001/api/bot/status',
-      ] : []),
-    ];
-    for (const u of statusUrls) {
+    // 1. Probe local port 3001 (Scanner) and port 3002 (Submitter) independently
+    if (isLocal) {
       try {
-        const res = await fetch(u, {
+        const res3001 = await fetch('http://localhost:3001/api/bot/status', {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(1500),
+        });
+        if (res3001.ok) {
+          const j1 = await res3001.json();
+          scannerApiRunning = Boolean(j1.isRunning || j1.stage === 'scanning' || j1.stage === 'resolving' || j1.scan_status === 'running');
+        }
+      } catch {}
+
+      try {
+        const res3002 = await fetch('http://localhost:3002/api/bot/status', {
+          headers: { 'Accept': 'application/json' },
+          signal: AbortSignal.timeout(1500),
+        });
+        if (res3002.ok) {
+          const j2 = await res3002.json();
+          submitterApiRunning = Boolean(j2.isRunning || j2.stage === 'submitting' || j2.submit_status === 'running');
+        }
+      } catch {}
+    }
+
+    if (backendBase) {
+      try {
+        const resBase = await fetch(`${backendBase}/api/bot/status`, {
           headers: { 'Accept': 'application/json' },
           signal: AbortSignal.timeout(2000),
         });
-        const contentType = res.headers.get('content-type') || '';
-        if (res.ok && contentType.includes('application/json')) {
-          const json = await res.json();
-          if (json.status === 'healthy' || json.success) {
-            daemonApiRunning = Boolean(json.isRunning);
-            daemonApiStage = json.stage || 'idle';
-            break;
-          }
+        if (resBase.ok) {
+          const jb = await resBase.json();
+          daemonApiRunning = Boolean(jb.isRunning);
+          daemonApiStage = jb.stage || 'idle';
+          if (jb.stage === 'scanning' || jb.stage === 'resolving') scannerApiRunning = true;
+          if (jb.stage === 'submitting') submitterApiRunning = true;
         }
-      } catch { }
+      } catch {}
     }
 
     const [workersRes, controlRes] = await Promise.all([
@@ -3072,29 +3200,35 @@ export async function fetchBotDaemonStatus() {
     const workers = workersRes.data || [];
     const botControl = controlRes?.data || null;
 
-    // Any worker in_flight or busy indicates active background running
-    const hasActiveWorkers = workers.some((w) => w.state === 'in_flight' || w.state === 'busy');
-
-    const isScanStopped = Boolean(botControl?.scan_stop_requested || botControl?.stop_requested);
-    const isSubmitStopped = Boolean(botControl?.submit_stop_requested || botControl?.stop_requested);
-
-    const hasActiveScanWorkers = workers.some((w) => (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id.includes('scan') || w.worker_id.includes('resolv')) && (w.state === 'in_flight' || w.state === 'busy'));
-    const hasActiveSubmitWorkers = workers.some((w) => (w.stage === 'submitting' || w.worker_id.includes('submit')) && (w.state === 'in_flight' || w.state === 'busy'));
-
-    const isScanning = !isScanStopped && Boolean(
-      hasActiveScanWorkers ||
-      botControl?.scan_status === 'running' ||
-      ((botControl?.stage === 'scanning' || botControl?.stage === 'resolving') && botControl?.is_running && (hasActiveScanWorkers || botControl?.trigger_requested))
+    const hasActiveScanWorkers = workers.some((w) =>
+      (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id?.includes('scan') || w.worker_id?.includes('resolv')) &&
+      (w.state === 'in_flight' || w.state === 'busy')
+    );
+    const hasActiveSubmitWorkers = workers.some((w) =>
+      (w.stage === 'submitting' || w.worker_id?.includes('submit')) &&
+      (w.state === 'in_flight' || w.state === 'busy')
     );
 
-    const isSubmitting = !isSubmitStopped && Boolean(
+    // Stop states: only halted if user specifically requested stop for that pipeline
+    const isScanHalted = botControl?.last_action_requested === 'stop_scan' && botControl?.stop_requested;
+    const isSubmitHalted = botControl?.last_action_requested === 'stop_submit' && botControl?.stop_requested;
+
+    const isScanning = !isScanHalted && Boolean(
+      scannerApiRunning ||
+      hasActiveScanWorkers ||
+      (botControl?.stage === 'scanning' && botControl?.is_running && !botControl?.stop_requested) ||
+      (botControl?.last_action_requested === 'start_scan' && (botControl?.trigger_requested || botControl?.is_running))
+    );
+
+    const isSubmitting = !isSubmitHalted && Boolean(
+      submitterApiRunning ||
       hasActiveSubmitWorkers ||
-      botControl?.submit_status === 'running' ||
-      (botControl?.stage === 'submitting' && botControl?.is_running && (hasActiveSubmitWorkers || botControl?.trigger_requested))
+      (botControl?.stage === 'submitting' && botControl?.is_running && !botControl?.stop_requested) ||
+      (botControl?.last_action_requested === 'start_submit' && (botControl?.trigger_requested || botControl?.is_running))
     );
 
     const isRunning = isScanning || isSubmitting || (daemonApiRunning && !botControl?.stop_requested);
-    const currentStage = isSubmitting ? 'submitting' : (isScanning ? (botControl?.stage || 'scanning') : 'idle');
+    const currentStage = isSubmitting ? 'submitting' : (isScanning ? 'scanning' : (botControl?.stage || 'idle'));
 
     return {
       success: true,
@@ -3106,7 +3240,7 @@ export async function fetchBotDaemonStatus() {
       workersAssigned: workers.length || getDynamicWorkerIds().length,
       workers,
       botControl,
-      triggeredAt: botControl?.updated_at || workers.find(w => w.state === 'in_flight')?.updated_at || null,
+      triggeredAt: botControl?.updated_at || workers.find((w) => w.state === 'in_flight')?.updated_at || null,
     };
   } catch (err) {
     return { success: false, isRunning: false, isScanning: false, isSubmitting: false, state: 'idle', workersAssigned: getDynamicWorkerIds().length, error: err.message };
@@ -3325,6 +3459,12 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
       const isMissing = !val || val === '' || val === 'null';
       const isAi = r.tier === 4 || /ai|llm/i.test(r.source || '') || /ai|llm/i.test(r.sourceLabel || '');
 
+      const meta = scrapedMetaMap.get(norm) || scrapedMetaMap.get(label.toLowerCase().trim());
+      const rawOptions = (Array.isArray(r.options) && r.options.length > 0)
+        ? r.options
+        : (Array.isArray(meta?.options) && meta.options.length > 0 ? meta.options : []);
+      const fType = r.field_type || r.fieldType || meta?.fieldType || meta?.field_type || (rawOptions.length > 0 ? 'dropdown' : 'text');
+
       allFields.push({
         id: `resolved-${norm}`,
         label,
@@ -3335,8 +3475,8 @@ export async function fetchApplicationFormReviewData({ applywizzId, jobUrl, dist
         tier: isAi ? 4 : (r.tier || 1),
         isUnanswered: isMissing,
         isPersonal: false,
-        fieldType: r.field_type || r.fieldType || (Array.isArray(r.options) && r.options.length ? 'dropdown' : 'input'),
-        options: Array.isArray(r.options) ? r.options : [],
+        fieldType: fType,
+        options: rawOptions,
       });
     }
 
@@ -3502,7 +3642,7 @@ export async function saveAnswerToQaBank({
   questionNormalized = null,
   answer,
   fieldType = 'input',
-  source = 'manual',
+  source = 'ca_answered',
   jobUrl = null,
   distributionId = null,
 }) {
@@ -3515,21 +3655,31 @@ export async function saveAnswerToQaBank({
   const norm = questionNormalized || qStr.toLowerCase().replace(/[^a-z0-9]/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');
   const ansStr = String(answer).trim();
   const now = new Date().toISOString();
+  const finalSource = source || 'ca_answered';
 
   try {
-    // 1. Only store in qa_bank if it is an eligible unique novel question (not personal info, not DOM artifact)
+    // 1. Only store in QA bank if it is an eligible unique novel question (not personal info, not DOM artifact)
     if (isEligibleForQaBank(qStr, ansStr)) {
-      // Check if already exists in qa_bank
+      // Upsert into qa_bank
       const { data: existingQa } = await supabase
         .from('qa_bank')
-        .select('id, answer')
+        .select('id')
         .eq('applywizz_id', cleanId)
         .eq('question_normalized', norm)
         .limit(1);
 
-      if (!existingQa || existingQa.length === 0) {
-        // Truly unique new unresolved question -> insert into qa_bank
-        const { error: qaErr } = await supabase
+      if (existingQa && existingQa.length > 0) {
+        await supabase
+          .from('qa_bank')
+          .update({
+            answer: ansStr,
+            field_type: fieldType,
+            source: finalSource,
+            updated_at: now,
+          })
+          .eq('id', existingQa[0].id);
+      } else {
+        await supabase
           .from('qa_bank')
           .insert({
             applywizz_id: cleanId,
@@ -3537,11 +3687,44 @@ export async function saveAnswerToQaBank({
             question_normalized: norm,
             answer: ansStr,
             field_type: fieldType,
-            source: 'manual',
+            source: finalSource,
             updated_at: now,
           });
+      }
 
-        if (qaErr) console.warn('Note on qa_bank insert:', qaErr.message);
+      // Also sync to client_questions table for universal candidate question history
+      try {
+        const { data: existingCq } = await supabase
+          .from('client_questions')
+          .select('id')
+          .eq('applywizz_id', cleanId)
+          .ilike('question_raw', qStr)
+          .limit(1);
+
+        if (existingCq && existingCq.length > 0) {
+          await supabase
+            .from('client_questions')
+            .update({
+              answer: ansStr,
+              field_type: fieldType,
+              source: finalSource,
+              updated_at: now,
+            })
+            .eq('id', existingCq[0].id);
+        } else {
+          await supabase
+            .from('client_questions')
+            .insert({
+              applywizz_id: cleanId,
+              question_raw: qStr,
+              answer: ansStr,
+              field_type: fieldType,
+              source: finalSource,
+              updated_at: now,
+            });
+        }
+      } catch (cqErr) {
+        console.warn('Note on client_questions sync:', cqErr?.message);
       }
     }
 
@@ -3566,16 +3749,28 @@ export async function saveAnswerToQaBank({
 
         const newUnansCount = filteredUnans.length;
         const resolved = Array.isArray(dist.resolved_answers) ? [...dist.resolved_answers] : [];
-        const existingIdx = resolved.findIndex((r) => (r.question_normalized || r.question) === norm);
+        const existingIdx = resolved.findIndex((r) => {
+          const rNorm = r.question_normalized || (r.question || r.label || '').toLowerCase().trim();
+          return rNorm === norm || rNorm === qStr.toLowerCase().trim();
+        });
+
         const resolvedItem = {
           question: qStr,
           question_normalized: norm,
           answer: ansStr,
-          source: 'manual',
+          field_type: fieldType,
+          source: 'ca_answered',
+          raw_source: 'ca_answered',
+          sourceLabel: 'CA Verified Answer',
+          is_answered: true,
           tier: 1,
         };
-        if (existingIdx >= 0) resolved[existingIdx] = resolvedItem;
-        else resolved.push(resolvedItem);
+
+        if (existingIdx >= 0) {
+          resolved[existingIdx] = { ...resolved[existingIdx], ...resolvedItem };
+        } else {
+          resolved.push(resolvedItem);
+        }
 
         await supabase
           .from('job_distributions')

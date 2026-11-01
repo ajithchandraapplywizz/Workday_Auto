@@ -732,7 +732,7 @@ export async function discoverFormFieldQuestions(page) {
         currentValue = dateSpin;
       }
       const hasRequiredMarker = Boolean(
-        field.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]')
+        field.querySelector('.required, .asterisk, [aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"], [data-automation-id="formLabelRequired"], [data-automation-id*="Asterisk"], [aria-label*="required" i], [class*="required" i], [class*="asterisk" i], [class*="mandatory" i]')
         || field.getAttribute('aria-required') === 'true'
         || combo?.getAttribute('aria-required') === 'true'
         || textInput?.getAttribute('aria-required') === 'true'
@@ -907,15 +907,34 @@ export async function discoverFormFieldQuestions(page) {
       if (!key || seen.has(key)) continue;
 
       let fieldType = 'text';
+      let fieldOptions = [];
       const tag = (control.tagName || '').toLowerCase();
       if (tag === 'select' || control.getAttribute('role') === 'combobox' || control.getAttribute('aria-haspopup') === 'listbox'
         || control.matches?.('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], button[aria-haspopup="listbox"]')) {
         fieldType = 'dropdown';
-      } else if (typeAttr === 'radio') fieldType = 'radio';
-      else if (typeAttr === 'checkbox') {
+        if (tag === 'select') {
+          fieldOptions = Array.from(control.querySelectorAll('option'))
+            .map((o) => (o.textContent || '').replace(/\s+/g, ' ').trim())
+            .filter((t) => t && !/^select(\s+one)?$/i.test(t));
+        }
+      } else if (tag === 'textarea') {
+        fieldType = 'textarea';
+      } else if (typeAttr === 'radio') {
+        fieldType = 'radio';
+        const radios = Array.from(groupRoot.querySelectorAll('input[type="radio"]'));
+        if (radios.length > 0) {
+          fieldOptions = radios.map((r) => {
+            const id = r.id;
+            const lab = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : r.closest('label');
+            return (lab?.textContent || r.getAttribute('aria-label') || r.value || '').replace(/\s+/g, ' ').trim();
+          }).filter((t) => t && t.length < 120);
+        }
+      } else if (typeAttr === 'checkbox') {
         const cbs = groupRoot.querySelectorAll('input[type="checkbox"]');
         fieldType = cbs.length > 1 ? 'checkbox-group' : 'checkbox';
-      } else if (typeAttr === 'date' || control.getAttribute('role') === 'spinbutton') fieldType = 'date';
+      } else if (typeAttr === 'date' || control.getAttribute('role') === 'spinbutton') {
+        fieldType = 'date';
+      }
 
       const required = Boolean(
         control.getAttribute('aria-required') === 'true'
@@ -947,7 +966,7 @@ export async function discoverFormFieldQuestions(page) {
         labelCandidates: candidates.map((c) => c.text).slice(0, 8),
         elementText: cleanLabelText(control.textContent || control.getAttribute('aria-label') || ''),
         wdQId: markerId,
-        options: [],
+        options: fieldOptions,
         source: 'full_control_walk',
       });
     }

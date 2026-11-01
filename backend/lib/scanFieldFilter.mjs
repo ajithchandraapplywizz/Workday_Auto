@@ -171,8 +171,9 @@ export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   if (text.length < 3) return false;
   if (/upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(text)) return false;
 
-  // Capture all discovered questions & form fields across all wizard pages
-  return true;
+  // STRICT REQUIREMENT: Only scrape mandatory / required questions (indicated by red asterisk, required attribute, or compliance mandate).
+  // If not mandatory, do not scrape or harvest.
+  return false;
 }
 
 /** Skip fill/prompt for optional fields (default). Set profile._fillOptionalFields = true to fill everything. */

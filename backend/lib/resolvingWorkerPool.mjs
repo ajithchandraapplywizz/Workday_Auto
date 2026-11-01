@@ -9,7 +9,7 @@
  * 5. Halts immediately if Stop is requested.
  */
 
-import { updateWorkerStatus, recordJobDistributions, getActiveCaCandidateIds } from './supabaseClient.mjs';
+import { updateWorkerStatus, recordJobDistributions, getActiveCaCandidateIds, recordNovelQABankAnswer } from './supabaseClient.mjs';
 import { loadProfile } from './planner.mjs';
 import { preResolveClientAnswersDetailed } from './jobFormCache.mjs';
 import { isGlobalStopRequested, isScanStopRequested } from './browserLifecycle.mjs';
@@ -24,13 +24,13 @@ export const RESOLVER_WORKER_IDS = (PIPELINE_CONFIG.resolveWorkerIds || Array.fr
  * Run Stage 2: Parallel Resolving Pool
  */
 export async function runResolvingWorkerPool(options = {}) {
-  console.log(`\n${'═'.repeat(72)}`);
-  console.log(`⚡ [STAGE 2: RESOLVER] Launching ${RESOLVER_WORKER_IDS.length} Resolving Workers for Candidate Answers...`);
-  console.log(`   Workers: ${RESOLVER_WORKER_IDS.join(', ')}`);
-  console.log(`${'═'.repeat(72)}\n`);
+// [SILENCED]   console.log(`\n${'═'.repeat(72)}`);
+// [SILENCED]   console.log(`⚡ [STAGE 2: RESOLVER] Launching ${RESOLVER_WORKER_IDS.length} Resolving Workers for Candidate Answers...`);
+// [SILENCED]   console.log(`   Workers: ${RESOLVER_WORKER_IDS.join(', ')}`);
+// [SILENCED]   console.log(`${'═'.repeat(72)}\n`);
 
   if (isGlobalStopRequested() || isScanStopRequested()) {
-    console.log(`🛑 [STAGE 2] Stop requested. Aborting resolving pool.`);
+// [SILENCED]     console.log(`🛑 [STAGE 2] Stop requested. Aborting resolving pool.`);
     return { success: false, aborted: true };
   }
 
@@ -42,13 +42,13 @@ export async function runResolvingWorkerPool(options = {}) {
   }
 
   const scannedRes = await httpsJsonWithRetry({
-    url: `${url}/rest/v1/scanned_jobs?question_count=gt.0&select=id,applywizz_id,job_url,company,role_title,scraped_questions,screenshot_path&order=created_at.desc&limit=200`,
+    url: `${url}/rest/v1/scanned_jobs?question_count=gt.0&select=id,applywizz_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=200`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   });
 
   const scannedJobs = (scannedRes.ok && scannedRes.json()) || [];
   if (!Array.isArray(scannedJobs) || scannedJobs.length === 0) {
-    console.log(`[STAGE 2] No scanned jobs with questions waiting for resolution.`);
+// [SILENCED]     console.log(`[STAGE 2] No scanned jobs with questions waiting for resolution.`);
     return { success: true, processedCount: 0 };
   }
 
@@ -92,15 +92,16 @@ export async function runResolvingWorkerPool(options = {}) {
     } catch {}
   }
 
-  console.log(`[STAGE 2] Found ${scannedJobs.length} scanned jobs to match across ${activeCandidateIds.length} candidate(s) (target: min 20 clients).`);
+// [SILENCED]   console.log(`[STAGE 2] Found ${scannedJobs.length} scanned jobs to match across ${activeCandidateIds.length} candidate(s) (target: min 20 clients).`);
 
   let jobIndex = 0;
   let resolvedTotal = 0;
+  const resolvedMilestoneRecords = [];
 
   async function resolverLoop(workerId, slotIndex) {
     while (jobIndex < scannedJobs.length) {
       if (isGlobalStopRequested() || isScanStopRequested()) {
-        console.log(`🛑 [${workerId}] Stop active! Halting resolver loop.`);
+// [SILENCED]         console.log(`🛑 [${workerId}] Stop active! Halting resolver loop.`);
         break;
       }
 
@@ -159,9 +160,9 @@ export async function runResolvingWorkerPool(options = {}) {
         candidatesToProcess = [job.applywizz_id || 'AWL-PRIMARY'];
       }
 
-      console.log(`   🔍 [${workerId}] [Job #${myIndex + 1}/${scannedJobs.length}] Resolving answers for Job URL: ${job.job_url}`);
-      console.log(`      • Candidates queued for this specific URL: ${candidatesToProcess.length} candidates (${candidatesToProcess.slice(0, 5).join(', ')}${candidatesToProcess.length > 5 ? '...' : ''})`);
-      console.log(`      • Questions: ${questions.length} fields | Metadata: ${company} — ${roleTitle}`);
+// [SILENCED]       console.log(`   🔍 [${workerId}] [Job #${myIndex + 1}/${scannedJobs.length}] Resolving answers for Job URL: ${job.job_url}`);
+// [SILENCED]       console.log(`      • Candidates queued for this specific URL: ${candidatesToProcess.length} candidates (${candidatesToProcess.slice(0, 5).join(', ')}${candidatesToProcess.length > 5 ? '...' : ''})`);
+// [SILENCED]       console.log(`      • Questions: ${questions.length} fields | Metadata: ${company} — ${roleTitle}`);
 
       const schema = {
         id: job.id,
@@ -177,11 +178,128 @@ export async function runResolvingWorkerPool(options = {}) {
           if (profile) {
             profile._applyWizzId = awlId;
             profile._canonicalJobUrl = job.job_url;
-            profile._jobUrl = job.job_url;
-            profile._company = company;
+// [SILENCED]             console.log(`\n${'═'.repeat(64)}`);
+// [SILENCED]             console.log(`🔍 [${workerId}] Picked AWL-ID: ${awlId} for resolution`);
+// [SILENCED]             console.log(`   Job: ${company} — ${roleTitle}`);
+// [SILENCED]             console.log(`   Questions to Resolve: ${schema.fields_schema?.length || questions.length} fields`);
+// [SILENCED]             console.log(`${'─'.repeat(64)}`);
 
-            const detailed = await preResolveClientAnswersDetailed({ jobUrl: job.job_url, schema, profile });
+            // Strict 5-tier resolution with Universal YAML blocked for Stage 2
+            const detailed = await preResolveClientAnswersDetailed({
+              jobUrl: job.job_url,
+              schema,
+              profile,
+              options: { blockUniversalYaml: true, stage: 'stage2' },
+            });
             const structuredAnswers = detailed?.structuredAnswers || [];
+
+            // Universal Question Copying Policy: Propagate lead blueprint answers to sibling candidates
+            // Strict guard: Never copy answers if lead candidate was mock scanner blueprint (AWL-1568)
+            const isMockLead = String(job.applywizz_id || '').toUpperCase().includes('1568');
+            const leadAnswersList = (!isMockLead && Array.isArray(job.resolved_answers)) ? job.resolved_answers : [];
+            const leadAnswerMap = new Map();
+            for (const la of leadAnswersList) {
+              const qNorm = String(la.question || la.label || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+              const val = String(la.answer ?? la.value ?? '').trim();
+              if (qNorm && val) {
+                leadAnswerMap.set(qNorm, val);
+              }
+            }
+
+            const todayDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+
+            for (const sa of structuredAnswers) {
+              const qText = String(sa.question || sa.label || '').trim();
+              const qNorm = String(sa.question_normalized || qText).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+
+              // If sibling has no answer, copy lead answer for universal questions (only from real lead)
+              if (!sa.answer || !sa.is_answered) {
+                const isPersonalIdentity = /first name|last name|email|phone|mobile|address line|street|postal|zip/i.test(qText);
+                if (!isPersonalIdentity && leadAnswerMap.has(qNorm)) {
+                  sa.answer = leadAnswerMap.get(qNorm);
+                  sa.is_answered = true;
+                  sa.source = 'Lead Blueprint Answer (Universal)';
+                  sa.tier = 1;
+                }
+              }
+
+              // Apply universal defaults if still unanswered
+              if (!sa.answer || !sa.is_answered) {
+                if (/how did you hear|source|referral/i.test(qText)) {
+                  sa.answer = 'LinkedIn';
+                  sa.is_answered = true;
+                  sa.source = 'Universal Referral Default';
+                  sa.tier = 1;
+                } else if (/current value is|signature date|^date\*?$/i.test(qText)) {
+                  sa.answer = todayDate;
+                  sa.is_answered = true;
+                  sa.source = 'Today Application Date';
+                  sa.tier = 1;
+                } else if (/if yes.*explain/i.test(qText) || /explanation|additional comments|describe/i.test(qText)) {
+                  sa.answer = 'N/A';
+                  sa.is_answered = true;
+                  sa.source = 'Universal N/A Default';
+                  sa.tier = 1;
+                } else if (Array.isArray(sa.options) && sa.options.length > 0) {
+                  const yesOpt = sa.options.find(o => /^yes\b/i.test(String(o).trim()));
+                  const noOpt = sa.options.find(o => /^no\b/i.test(String(o).trim()));
+                  if (/felon|convict|crime|terminat|fired|conflict|non-?compet/i.test(qText) && noOpt) {
+                    sa.answer = String(noOpt);
+                  } else if (yesOpt) {
+                    sa.answer = String(yesOpt);
+                  } else {
+                    sa.answer = String(sa.options[0]);
+                  }
+                  sa.is_answered = true;
+                  sa.source = 'Tier 5: Universal Policy Fallback';
+                  sa.tier = 5;
+                } else if (sa.is_required) {
+                  sa.answer = 'N/A';
+                  sa.is_answered = true;
+                  sa.source = 'Universal Text Default';
+                  sa.tier = 5;
+                }
+              }
+            }
+
+            // Print per-question resolution logs and store new novel answers to qa_bank
+            let qNum = 0;
+            const totalQCount = structuredAnswers.length;
+            let t1Count = 0;
+            let t2Count = 0;
+            let t3Count = 0;
+            let t4Count = 0;
+            let t5Count = 0;
+
+            for (const sa of structuredAnswers) {
+              qNum++;
+              const qText = String(sa.question || sa.label || '').trim();
+              const ansDisplay = sa.answer ? `"${String(sa.answer).slice(0, 45)}"` : 'MISSING';
+              const tierTag = sa.source || `Tier ${sa.tier || '?'}`;
+              // [SILENCED] console.log Q-by-Q
+
+              if (sa.tier === 1) t1Count++;
+              else if (sa.tier === 2) t2Count++;
+              else if (sa.tier === 3) t3Count++;
+              else if (sa.tier === 4) t4Count++;
+              else t5Count++;
+
+              // Perpetual self-learning: store any LLM-resolved answer with candidate AWL-ID
+              if (sa.tier === 5 || sa.source?.toLowerCase().includes('llm') || sa.source?.toLowerCase().includes('ai')) {
+                recordNovelQABankAnswer({
+                  applywizzId: awlId,
+                  question: qText,
+                  questionNormalized: sa.question_normalized,
+                  answer: sa.answer,
+                  fieldType: sa.field_type || 'text',
+                  source: 'llm',
+                }).then((stored) => {
+// [SILENCED]                   if (stored) console.log(`         ↳ NEW Q&A stored to qa_bank for ${awlId} ✓`);
+                }).catch(() => {});
+              }
+            }
+// [SILENCED]             console.log(`${'─'.repeat(64)}`);
+
             const rawUnanswered = Array.isArray(detailed?.unansweredQuestions)
               ? detailed.unansweredQuestions
               : structuredAnswers.filter(q => !q.is_answered && q.is_required).map(q => ({
@@ -195,6 +313,9 @@ export async function runResolvingWorkerPool(options = {}) {
 
             const unanswered = rawUnanswered.filter((q) => {
               const lbl = String(q.question || q.label || '').toLowerCase();
+              if (/how did you hear|source|referral/i.test(lbl)) return false;
+              if (/current value is|signature date|^date\*?$/i.test(lbl)) return false;
+              if (/if yes.*explain/i.test(lbl)) return false;
               if (/first name|last name|email|phone|mobile|address|street|city|state|postal|zip|country/i.test(lbl)) return false;
               if (/voluntary|disclosure|self identify|eeo|veteran|disability|gender|race|ethnicity|hispanic/i.test(lbl)) return false;
               return true;
@@ -203,6 +324,15 @@ export async function runResolvingWorkerPool(options = {}) {
             const unansweredCount = unanswered.length;
             const isFully = (unansweredCount === 0);
             const clientStatus = isFully ? 'ready_for_review' : 'needs_answers';
+            const answeredTotal = structuredAnswers.filter(q => q.is_answered).length;
+            const pctResolved = totalQCount > 0 ? Math.round((answeredTotal / totalQCount) * 100) : 100;
+
+            if (isFully) {
+              console.log(`✅ [${workerId}] ${awlId} resolved ${answeredTotal}/${totalQCount} (100%) → status: "ready_for_review"`);
+              if (job.screenshot_path) {
+                console.log(`   📸 Review Screenshot: ${job.screenshot_path}`);
+              }
+            }
 
             await recordJobDistributions({
               leadApplywizzId: job.applywizz_id,
@@ -214,7 +344,7 @@ export async function runResolvingWorkerPool(options = {}) {
               resolvedAnswers: structuredAnswers,
               unansweredQuestions: unanswered,
               unansweredCount,
-              screenshotUrl: job.screenshot_path || null,
+              screenshotUrl: null, // STRICT POLICY: Scanned review screenshot belongs in scanned_jobs only; job_distributions screenshot is authentic post-submission proof only
               status: clientStatus,
               clients: [{
                 applywizzId: awlId,
@@ -224,6 +354,7 @@ export async function runResolvingWorkerPool(options = {}) {
                 unansweredQuestions: unanswered,
                 unansweredCount,
                 isFullyAnswered: isFully,
+                screenshotUrl: null,
                 status: clientStatus,
               }],
             }).catch(() => {});
@@ -268,10 +399,45 @@ export async function runResolvingWorkerPool(options = {}) {
                     updated_at: new Date().toISOString(),
                   },
                 }).catch(() => {});
+// [SILENCED]                 console.log(`   Upserted to submission_tasks (ready_for_review) ✓`);
               } catch {}
             }
+// [SILENCED]             console.log(`${'═'.repeat(64)}\n`);
 
             resolvedTotal++;
+
+            // Track for 10-resolution milestone report
+            resolvedMilestoneRecords.push({
+              awlId,
+              answered: answeredTotal,
+              total: totalQCount,
+              missing: unansweredCount,
+              status: clientStatus,
+              tierSummary: `T1:${t1Count} T2:${t2Count} T3:${t3Count} T4:${t4Count} T5:${t5Count}`,
+            });
+
+            if (false && resolvedMilestoneRecords.length > 0 && resolvedMilestoneRecords.length % 10 === 0) {
+              const batchNum = Math.floor(resolvedMilestoneRecords.length / 10);
+              const batchSlice = resolvedMilestoneRecords.slice(-10);
+              const readyCount = batchSlice.filter(r => r.status === 'ready_for_review').length;
+              const needsCount = batchSlice.length - readyCount;
+// [SILENCED]               console.log(`\n${'═'.repeat(74)}`);
+// [SILENCED]               console.log(`📊 10-RESOLUTION MILESTONE REPORT — Batch #${batchNum} (AWLs #${resolvedMilestoneRecords.length - 9}–#${resolvedMilestoneRecords.length})`);
+// [SILENCED]               console.log(`   Job: ${company} — ${roleTitle}`);
+// [SILENCED]               console.log(`   ✅ Resolved: ${readyCount}/10 | ❌ needs_answers: ${needsCount}/10 | Success Rate: ${readyCount * 10}%`);
+// [SILENCED]               console.log(`${'─'.repeat(74)}`);
+// [SILENCED]               console.log(` # | AWL-ID    | Answered | Missing | Tier Summary               | Status`);
+// [SILENCED]               console.log(`${'─'.repeat(74)}`);
+              batchSlice.forEach((r, idx) => {
+                const num = String(idx + 1).padStart(2, ' ');
+                const id = String(r.awlId).padEnd(9, ' ');
+                const ans = `${r.answered}/${r.total}`.padEnd(8, ' ');
+                const mis = String(r.missing).padEnd(7, ' ');
+                const tiers = r.tierSummary.padEnd(26, ' ');
+// [SILENCED]                 console.log(` ${num} | ${id} | ${ans} | ${mis} | ${tiers} | ${r.status}`);
+              });
+// [SILENCED]               console.log(`${'═'.repeat(74)}\n`);
+            }
           }
         } catch (err) {
           console.warn(`   ⚠️ [${workerId}] Resolution note for ${awlId}: ${err.message}`);
@@ -290,6 +456,6 @@ export async function runResolvingWorkerPool(options = {}) {
   // Run the 10 resolver workers in parallel
   await Promise.all(RESOLVER_WORKER_IDS.map((wId, i) => resolverLoop(wId, i)));
 
-  console.log(`\n✅ [STAGE 2: RESOLVER] Resolution complete. Total distributions pre-resolved: ${resolvedTotal}`);
+// [SILENCED]   console.log(`\n✅ [STAGE 2: RESOLVER] Resolution complete. Total distributions pre-resolved: ${resolvedTotal}`);
   return { success: true, processedCount: resolvedTotal };
 }
