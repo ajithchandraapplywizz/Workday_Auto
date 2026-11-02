@@ -522,9 +522,10 @@ async function runStage3Submissions() {
   submitStatus = 'running';
   submitStopRequested = false;
   isPoolRunning = true;
-  isPoolPaused = false;
   setGlobalStop(false);
   setSubmitStop(false);
+  const { setWorkerPoolStop } = await import('../lib/workerPool.mjs');
+  setWorkerPoolStop(false);
 
   const {
     SUBMISSION_WORKER_IDS,
@@ -1876,47 +1877,44 @@ export async function initOnStartup() {
       const scanCtrl = wc?.scan;
       const submitCtrl = wc?.submit;
 
-      // 1. Primary Stop Signal from Supabase
+      // 1. Primary Stop Signal from Supabase (scoped strictly by stage and role)
+      const isScanActive = scanStatus === 'running' || (isPoolRunning && currentStage === 'scanning');
+      const isSubmitActive = submitStatus === 'running' || (isPoolRunning && currentStage === 'submitting');
+
       const hasScanStopSignal = Boolean(
         bc?.scan_stop_requested ||
         bc?.last_action_requested === 'stop_scan' ||
-        bc?.last_action_requested === 'stop' ||
-        bc?.last_action_requested === 'stop_pipeline' ||
         scanCtrl?.stop_requested ||
-        (bc?.scan_status === 'off' && (scanStatus === 'running' || isPoolRunning)) ||
-        (bc?.is_running === false && (scanStatus === 'running' || isPoolRunning))
+        (bc?.scan_status === 'off' && isScanActive)
       );
       const hasSubmitStopSignal = Boolean(
         bc?.submit_stop_requested ||
         bc?.last_action_requested === 'stop_submit' ||
-        bc?.last_action_requested === 'stop' ||
-        bc?.last_action_requested === 'stop_pipeline' ||
         submitCtrl?.stop_requested ||
-        (bc?.submit_status === 'off' && (submitStatus === 'running' || isPoolRunning)) ||
-        (bc?.is_running === false && (submitStatus === 'running' || isPoolRunning))
+        (bc?.submit_status === 'off' && isSubmitActive)
       );
       const hasGlobalStopSignal = Boolean(
         bc?.stop_requested ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_pipeline' ||
-        (bc?.is_running === false && (isPoolRunning || scanStatus === 'running' || submitStatus === 'running'))
+        (bc?.is_running === false && (isScanActive || isSubmitActive))
       );
 
-      if (hasScanStopSignal && (isPoolRunning || scanStatus === 'running')) {
+      if (SERVICE_ROLE !== 'submitter' && hasScanStopSignal && isScanActive) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping scanning workers...`);
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});
         return;
       }
 
-      if (hasSubmitStopSignal && (isPoolRunning || submitStatus === 'running')) {
+      if (SERVICE_ROLE !== 'scanner' && hasSubmitStopSignal && isSubmitActive) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping submission workers...`);
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => {});
         return;
       }
 
-      if (hasGlobalStopSignal && (isPoolRunning || scanStatus === 'running' || submitStatus === 'running')) {
+      if (hasGlobalStopSignal && (isScanActive || isSubmitActive)) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Global stop signal detected in Supabase! Stopping all workers...`);
         await stopAutonomousPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});

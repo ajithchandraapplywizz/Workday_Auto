@@ -47,9 +47,15 @@ if (fs.existsSync(configPath)) {
 // Parse CLI arguments
 const args = process.argv.slice(2);
 function getArgValue(name, defaultValue = null) {
-  const match = args.find((a) => a.startsWith(`--${name}=`));
-  if (match) return match.split('=')[1];
-  return args.includes(`--${name}`) ? true : defaultValue;
+  const eqMatch = args.find((a) => a.startsWith(`--${name}=`));
+  if (eqMatch) return eqMatch.slice(`--${name}=`.length);
+  const idx = args.indexOf(`--${name}`);
+  if (idx !== -1) {
+    const next = args[idx + 1];
+    if (next && !next.startsWith('--')) return next;
+    return true;
+  }
+  return defaultValue;
 }
 
 const mode = getArgValue('mode', 'branch'); // 'branch' | 'staged' | 'full'
@@ -627,11 +633,27 @@ function checkDependencies() {
   if (!shouldRun('dependencies')) return addResult('dependencies', 'SKIP', 'Skipped by filter');
   const issues = [];
 
-  const pkgChanged = targetFiles.some((f) => f.endsWith('package.json'));
+  const pkgFiles = targetFiles.filter((f) => f.endsWith('package.json'));
   const lockChanged = targetFiles.some((f) => f.endsWith('package-lock.json'));
 
-  if (pkgChanged && !lockChanged) {
-    issues.push('package.json was modified without updating package-lock.json. Run `npm install` to refresh lockfile.');
+  if (pkgFiles.length > 0 && !lockChanged) {
+    // Only fail if actual dependencies / devDependencies / workspaces were changed
+    let depsModified = false;
+    for (const pkgFile of pkgFiles) {
+      const added = addedLinesMap.get(pkgFile) || [];
+      const changedText = added.map((a) => a.content).join('\n');
+      if (
+        /"(dependencies|devDependencies|peerDependencies|optionalDependencies|workspaces)"/i.test(changedText) ||
+        /["^~][0-9]+\.[0-9]+/.test(changedText)
+      ) {
+        depsModified = true;
+        break;
+      }
+    }
+
+    if (depsModified) {
+      issues.push('package.json dependencies were modified without updating package-lock.json. Run `npm install` to refresh lockfile.');
+    }
   }
 
   if (issues.length > 0) {

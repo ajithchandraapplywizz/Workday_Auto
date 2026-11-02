@@ -20,6 +20,20 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
 
 export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`);
 
+/**
+ * Parse previous failed attempt count from error_message.
+ * Returns 0 for unattempted/0th-attempt rows, 1 after Attempt 1 failure, 2 after Attempt 2 failure.
+ */
+export function getSubmissionAttemptCount(errorMessage) {
+  const msg = String(errorMessage || '');
+  const match = msg.match(/\[Attempt\s*(\d+)\s*\/\s*(\d+)[^\]]*\]/i);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
+  return 0;
+}
+
+
 
 /**
  * B1 Helper: Updates submission_tasks, checks { data, error },
@@ -246,13 +260,13 @@ export async function claimNextTask(workerId) {
 
   // 1. Direct atomic CAS (Compare-And-Swap on oldest ready_for_review or queued row)
   try {
-    // Stage 3 0th-Attempt Priority Policy:
-    // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed attempt 1)
+    // Stage 3 Progressive Priority Policy (Max 3 Attempts):
+    // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt)
     let { data: candidates, error: candErr } = await supabase
       .from('submission_tasks')
       .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
       .in('status', ['ready_for_review', 'queued'])
-      .or('error_message.is.null,error_message.not.ilike.%[Attempt 1/2]%')
+      .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
       .order('created_at', { ascending: true })
       .limit(10);
 
@@ -262,10 +276,22 @@ export async function claimNextTask(workerId) {
         .from('submission_tasks')
         .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
         .in('status', ['ready_for_review', 'queued'])
-        .ilike('error_message', '%[Attempt 1/2]%')
+        .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
         .order('created_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates || [];
+    }
+
+    // 3. Only after all Attempt 1 retries have finished processing, claim deferred Attempt 2 retries
+    if (!candidates || candidates.length === 0) {
+      const { data: retryCandidates2, error: retryErr2 } = await supabase
+        .from('submission_tasks')
+        .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
+        .in('status', ['ready_for_review', 'queued'])
+        .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
+        .order('created_at', { ascending: true })
+        .limit(10);
+      candidates = retryCandidates2 || [];
     }
 
     if (!candidates || candidates.length === 0) return null;
@@ -407,6 +433,10 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
 export async function processClaimedTask({ task, workerId, headless = true, runnerFn = null, options = {} }) {
   if (!task || !workerId) return { success: false, error: 'Invalid task or workerId' };
 
+  const previousFailedAttempts = getSubmissionAttemptCount(task.error_message);
+  const currentAttempt = previousFailedAttempts + 1; // 1, 2, or 3
+  const isFinalAttempt = currentAttempt >= 3;
+
   console.log(`\n${'═'.repeat(90)}`);
   console.log(`🚀 [STAGE 3: SUBMITTER] [${workerId}] EXECUTING APPLICATION SUBMISSION`);
   console.log(`   • Task ID: #${task.id} | Distribution ID: #${task.distribution_id || 'N/A'}`);
@@ -414,6 +444,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
   console.log(`   • Company: ${task.company || 'Workday Partner'}`);
   console.log(`   • Role: ${task.role_title || 'Workday Application'}`);
   console.log(`   • Target URL: ${task.job_url}`);
+  console.log(`   • Submission Attempt: ${currentAttempt} of 3 (Max 3 Attempts)`);
   console.log(`   • Worker Concurrency: Strictly 2 Active Browsers`);
   console.log(`${'─'.repeat(90)}`);
 
@@ -486,19 +517,14 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         const dbClient = await getClientRecordByAwlId(cleanAwlId);
 
         if (!dbClient || !dbClient.company_email || !String(dbClient.company_email).trim()) {
-          const errMsg = `[STRICT AUTH GUARD] Submission aborted: No valid company_email found in clients table for client "${task.applywizz_id}" (${cleanAwlId}). Refusing to authenticate with unverified/mock credentials.`;
+          const errMsg = `[STRICT AUTH GUARD] No valid company_email found in clients table for client "${task.applywizz_id}" (${cleanAwlId}). Refusing to authenticate with unverified/mock credentials.`;
           console.error(`❌ [${workerId}] ${errMsg}`);
-          await updateJobDistributionWithCheck({
-            distributionId: task.distribution_id,
-            workerId,
-            patch: { status: 'failed', error_message: errMsg, updated_at: new Date().toISOString() },
-          }).catch(() => {});
-          await supabase
-            .from('submission_tasks')
-            .update({ status: 'failed', error_message: errMsg, updated_at: new Date().toISOString() })
-            .eq('id', task.id)
-            .catch(() => {});
-          return { status: 'failed', error: errMsg };
+          return {
+            status: 'failed',
+            error: errMsg,
+            reason: errMsg,
+            stoppedAtStep: 'Strict Auth Guard',
+          };
         }
 
         const candidateCompanyEmail = String(dbClient.company_email).trim().toLowerCase();
@@ -507,7 +533,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         task.candidateEmail = candidateCompanyEmail;
         task.dbClient = dbClient;
 
-        const { executeWorkerTask } = await import('./workerPool.mjs');
+        const { executeWorkerTask, setWorkerPoolStop } = await import('./workerPool.mjs');
+        setWorkerPoolStop(false);
         return await executeWorkerTask({
           task: {
             id: task.distribution_id,
@@ -523,6 +550,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             pre_resolved_answers: preResolved,
             candidateEmail: candidateCompanyEmail,
             dbClient,
+            currentAttempt,
+            maxAttempts: 3,
+            isFinalAttempt,
           },
           taskId: task.id,
           workerId,
@@ -534,6 +564,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             dryRun: false,
             taskId: task.id,
             isDirectSubmission: true,
+            currentAttempt,
+            maxAttempts: 3,
+            isFinalAttempt,
           },
         });
       }
@@ -548,7 +581,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         let shotUrl = null;
         try {
           const ctx = getWorkerContext(workerId);
-          if (ctx?.page && !ctx.page.isClosed()) {
+          // STRICT RULE: Only capture and upload failure screenshot strictly on 3rd attempt
+          if (isFinalAttempt && ctx?.page && !ctx.page.isClosed()) {
             const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
             if (buf) {
               const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
@@ -565,7 +599,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
                   .from('failed-applications')
                   .getPublicUrl(shotPath);
                 shotUrl = urlData?.publicUrl || null;
-                console.log(`[${workerId}] screenshot uploaded: ${shotPath}`);
+                console.log(`[${workerId}] 3rd attempt failure screenshot uploaded: ${shotPath}`);
               }
             }
           }
@@ -580,6 +614,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           isTimeout: true,
           error: 'Task timed out after 8 minutes',
+          stoppedAtStep: 'Watchdog Timeout (8 min)',
           screenshotUrl: shotUrl,
           screenshotPath: shotPath,
         });
@@ -677,17 +712,19 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         });
       }
     } else {
-      const errMsg = result?.error || result?.reason || `Submission ended with status: ${result?.status || 'failed'}`;
-      const isSecondAttempt = String(task.error_message || '').includes('[Attempt 1/2]');
+      const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
+      const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
 
-      if (!isSecondAttempt) {
-        // Attempt 1 failed: Re-queue back to ready_for_review for Attempt 2 retry (Max 2 Attempts)
-        const retryMsg = `[Attempt 1/2] ${errMsg}`;
+      if (currentAttempt < 3) {
+        // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
+        const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
         console.log(`\n${'═'.repeat(90)}`);
-        console.log(`🔄 [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION ATTEMPT 1 FAILED — QUEUING RETRY`);
+        console.log(`🔄 [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION ATTEMPT ${currentAttempt}/3 FAILED — REVERTING TO READY_FOR_REVIEW`);
         console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-        console.log(`   • Status: Reverting to ready_for_review (Attempt 1 of 2)`);
-        console.log(`   • Reason: ${errMsg}`);
+        console.log(`   • Attempt: ${currentAttempt} of 3 (Will retry up to 3 attempts before marking failed)`);
+        console.log(`   • Status: Reverting strictly to ready_for_review (DO NOT MARK FAILED)`);
+        console.log(`   • Halted At Step: ${failedStep}`);
+        console.log(`   • Reason: ${rawErrMsg}`);
         console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'ready_for_review'`);
         console.log(`${'═'.repeat(90)}\n`);
 
@@ -699,6 +736,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             worker_id: null,
             worker_leased_at: null,
             error_message: retryMsg,
+            application_submitted_screenshot_url: null,
             updated_at: now,
           },
         });
@@ -711,43 +749,91 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
               status: 'ready_for_review',
               worker_id: null,
               error_message: retryMsg,
+              application_submitted_screenshot_url: null,
               updated_at: now,
             },
           });
         }
       } else {
-        // Attempt 2 failed: Final failure recorded
-        const finalFailMsg = `[Attempt 2/2 Failed] ${errMsg}`;
+        // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
+        // "for thier third time you need to amrk it to faiuled and submit the screnshot on struclty 3 attemp why an dhere it is failing and failed"
+        let finalShotUrl = result?.screenshotUrl || null;
+        if (!finalShotUrl) {
+          try {
+            const ctx = getWorkerContext(workerId);
+            if (ctx?.page && !ctx.page.isClosed()) {
+              const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+              if (buf) {
+                const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+                const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+                const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
+                const timestamp = Date.now();
+                const shotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
+                const { error: upErr } = await supabase.storage
+                  .from('failed-applications')
+                  .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
+                if (!upErr) {
+                  const { data: urlData } = supabase.storage
+                    .from('failed-applications')
+                    .getPublicUrl(shotPath);
+                  finalShotUrl = urlData?.publicUrl || null;
+                  console.log(`[${workerId}] 3rd attempt failure screenshot uploaded: ${shotPath}`);
+                }
+              }
+            }
+          } catch (fShotErr) {
+            console.warn(`[${workerId}] 3rd attempt screenshot capture error:`, fShotErr.message);
+          }
+        }
+
+        const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
         console.log(`\n${'═'.repeat(90)}`);
-        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION FAILED (MAX 2 ATTEMPTS EXHAUSTED)`);
+        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION PERMANENTLY FAILED (MAX 3 ATTEMPTS EXHAUSTED)`);
         console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
+        console.log(`   • Attempt: 3 of 3 (Max attempts reached)`);
         console.log(`   • Status: FAILED`);
-        console.log(`   • Reason: ${finalFailMsg}`);
+        console.log(`   • Failed At Step: ${failedStep}`);
+        console.log(`   • Failure Reason: ${rawErrMsg}`);
         console.log(`   • Failure Diagnostic Screenshot: ${finalShotUrl || 'None'}`);
         console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'failed'`);
         console.log(`${'═'.repeat(90)}\n`);
 
+        const failPatch = {
+          status: 'failed',
+          error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
+          application_submitted_screenshot_url: finalShotUrl,
+          completed_at: now,
+          updated_at: now,
+        };
+
         await updateSubmissionTaskWithCheck({
           taskId: task.id,
           workerId,
-          patch: {
-            status: 'failed',
-            error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
-            completed_at: now,
-            updated_at: now,
-          },
+          patch: failPatch,
         });
 
         if (task.distribution_id) {
           await updateJobDistributionWithCheck({
             distributionId: task.distribution_id,
             workerId,
-            patch: {
-              status: 'failed',
-              error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
-              updated_at: now,
-            },
+            patch: failPatch,
           });
+        }
+
+        try {
+          const { recordFailedJob } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId: task.applywizz_id,
+            jobId: task.job_id || null,
+            jobUrl: task.job_url,
+            company: task.company || 'Workday Partner',
+            roleTitle: task.role_title || 'Workday Application',
+            failureReason: `${rawErrMsg} (Attempt 3/3 exhausted)`,
+            failedAtStep: failedStep,
+            screenshotPath: finalShotUrl,
+          });
+        } catch (recErr) {
+          console.warn(`[${workerId}] Warning writing to failed_jobs:`, recErr.message);
         }
       }
     }
@@ -758,48 +844,56 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     result = {
       status: 'failed',
       error: err?.message || 'Execution error',
+      stoppedAtStep: 'Execution Exception',
     };
     const now = new Date().toISOString();
 
-    // B3: In exception catch block, take screenshot before page closes, upload it
+    const previousFailedAttempts = getSubmissionAttemptCount(task.error_message);
+    const currentAttempt = previousFailedAttempts + 1;
+    const isFinalAttempt = currentAttempt >= 3;
+
     let errShotUrl = null;
     let errShotPath = null;
-    try {
-      const ctx = getWorkerContext(workerId);
-      if (ctx?.page && !ctx.page.isClosed()) {
-        const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
-        if (buf) {
-          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-          const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-          const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
-          const timestamp = Date.now();
-          // Flat filename directly in root of failed-applications
-          errShotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
-          const { error: upErr } = await supabase.storage
-            .from('failed-applications')
-            .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
-          if (!upErr) {
-            const { data: urlData } = supabase.storage
+
+    // STRICT RULE: Capture and upload screenshot ONLY strictly on 3rd attempt
+    if (isFinalAttempt) {
+      try {
+        const ctx = getWorkerContext(workerId);
+        if (ctx?.page && !ctx.page.isClosed()) {
+          const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+          if (buf) {
+            const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+            const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+            const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
+            const timestamp = Date.now();
+            // Flat filename directly in root of failed-applications
+            errShotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
+            const { error: upErr } = await supabase.storage
               .from('failed-applications')
-              .getPublicUrl(errShotPath);
-            errShotUrl = urlData?.publicUrl || null;
-            console.log(`[${workerId}] screenshot uploaded: ${errShotPath}`);
+              .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
+            if (!upErr) {
+              const { data: urlData } = supabase.storage
+                .from('failed-applications')
+                .getPublicUrl(errShotPath);
+              errShotUrl = urlData?.publicUrl || null;
+              console.log(`[${workerId}] 3rd attempt exception screenshot uploaded: ${errShotPath}`);
+            }
           }
         }
+      } catch (catchShotErr) {
+        console.warn(`[${workerId}] Exception screenshot capture error:`, catchShotErr.message);
       }
-    } catch (catchShotErr) {
-      console.warn(`[${workerId}] Exception screenshot capture error:`, catchShotErr.message);
     }
 
     result.screenshotUrl = errShotUrl;
     result.screenshotPath = errShotPath;
 
     const errMsg = err?.message || 'Execution error';
-    const isSecondAttempt = String(task.error_message || '').includes('[Attempt 1/2]');
+    const failedStep = 'Execution Exception';
 
-    if (!isSecondAttempt) {
-      const retryMsg = `[Attempt 1/2] ${errMsg}`;
-      console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt 1. Re-queueing task #${task.id} to ready_for_review for retry.`);
+    if (currentAttempt < 3) {
+      const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${errMsg}`;
+      console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt ${currentAttempt}/3. Re-queueing task #${task.id} to ready_for_review for retry.`);
 
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
@@ -809,6 +903,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           worker_id: null,
           worker_leased_at: null,
           error_message: retryMsg,
+          application_submitted_screenshot_url: null,
           updated_at: now,
         },
       });
@@ -821,33 +916,49 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             status: 'ready_for_review',
             worker_id: null,
             error_message: retryMsg,
+            application_submitted_screenshot_url: null,
             updated_at: now,
           },
         });
       }
     } else {
-      const finalFailMsg = `[Attempt 2/2 Failed] ${errMsg}`;
+      const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${errMsg}`;
+      const failPatch = {
+        status: 'failed',
+        error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
+        application_submitted_screenshot_url: errShotUrl,
+        completed_at: now,
+        updated_at: now,
+      };
+
       await updateSubmissionTaskWithCheck({
         taskId: task.id,
         workerId,
-        patch: {
-          status: 'failed',
-          error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
-          completed_at: now,
-          updated_at: now,
-        },
+        patch: failPatch,
       });
 
       if (task.distribution_id) {
         await updateJobDistributionWithCheck({
           distributionId: task.distribution_id,
           workerId,
-          patch: {
-            status: 'failed',
-            error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
-            updated_at: now,
-          },
+          patch: failPatch,
         });
+      }
+
+      try {
+        const { recordFailedJob } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId: task.applywizz_id,
+          jobId: task.job_id || null,
+          jobUrl: task.job_url,
+          company: task.company || 'Workday Partner',
+          roleTitle: task.role_title || 'Workday Application',
+          failureReason: `${errMsg} (Attempt 3/3 exhausted)`,
+          failedAtStep: failedStep,
+          screenshotPath: errShotUrl,
+        });
+      } catch (recErr) {
+        console.warn(`[${workerId}] Warning writing to failed_jobs:`, recErr.message);
       }
     }
   } finally {

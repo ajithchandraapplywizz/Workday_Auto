@@ -61,14 +61,24 @@ function findFilePath(relPath) {
 let workerPoolStopRequested = false;
 export function setWorkerPoolStop(val) {
   workerPoolStopRequested = Boolean(val);
-  setGlobalStop(val);
+  if (!val) {
+    setGlobalStop(false);
+  }
 }
-export function getWorkerPoolStop() {
-  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested();
+export function getWorkerPoolStop(workerId = '') {
+  if (isGlobalStopRequested() || workerPoolStopRequested) return true;
+  const w = String(workerId).toLowerCase();
+  if (w.startsWith('submitting')) {
+    return isSubmitStopRequested();
+  }
+  if (w.startsWith('scanning') || w.startsWith('resolving')) {
+    return isScanStopRequested();
+  }
+  return isSubmitStopRequested() && isScanStopRequested();
 }
 
-export async function isWorkerPoolStopRequested() {
-  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested();
+export async function isWorkerPoolStopRequested(workerId = '') {
+  return getWorkerPoolStop(workerId);
 }
 
 /**
@@ -201,7 +211,7 @@ export async function executeWorkerTask({
   console.log(`   🔗 URL: ${jobUrl}`);
   console.log(`${'─'.repeat(70)}`);
 
-  if (await isWorkerPoolStopRequested()) {
+  if (await isWorkerPoolStopRequested(workerId)) {
     console.log(`   🛑 [${workerId}] Stop requested! Aborting task execution.`);
     return { status: 'stopped', error: 'Stopped by user' };
   }
@@ -955,10 +965,14 @@ export async function executeWorkerTask({
             storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
-            bucket = 'failed-applications';
-            const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-            filename = `${compPrefix}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
-            storagePath = filename;
+            // STRICT RULE: If isDirectSubmission is true, only upload on final attempt (Attempt 3):
+            const isSubmissionRetry = Boolean(isDirectSubmission && options.isFinalAttempt === false);
+            if (!isSubmissionRetry) {
+              bucket = 'failed-applications';
+              const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+              filename = `${compPrefix}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
+              storagePath = filename;
+            }
           }
 
           if (bucket && filename && buf) {
@@ -1046,7 +1060,7 @@ export async function executeWorkerTask({
       });
     }
 
-    if (!isSuccessStatus && !options.isClusterBlueprint) {
+    if (!isSuccessStatus && !options.isClusterBlueprint && !isDirectSubmission) {
       if (shouldRetryMiddleStep) {
         console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${currentAttempt}/3). Retrying — will NOT record to failed_jobs until 3 attempts are exhausted.`);
       } else {

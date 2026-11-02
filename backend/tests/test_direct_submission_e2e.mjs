@@ -40,7 +40,7 @@ test('Phase 3 Direct Submission: Attempt 0 Queue Priority', async (t) => {
   assert.ok(!error, `Failed to query submission_tasks: ${error?.message}`);
   assert.ok(readyTasks && readyTasks.length > 0, 'There should be tasks ready_for_review');
 
-  const unattempted = readyTasks.filter(t => !String(t.error_message || '').includes('[Attempt 1/2]'));
+  const unattempted = readyTasks.filter(t => !String(t.error_message || '').includes('[Attempt'));
   console.log(`  ✓ Database has ${readyTasks.length} sample ready_for_review tasks (${unattempted.length} unattempted 0th attempt)`);
 });
 
