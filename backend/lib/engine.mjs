@@ -43,7 +43,7 @@ import {
 import { runStepDomPrep } from './stepDomPrep.mjs';
 import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
 import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -2172,7 +2172,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
-    if (isGlobalStopRequested() || isSubmitStopRequested()) {
+    if (isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested()) {
       console.log('🛑 [Workday Wizard] Stop requested! Terminating wizard loop immediately.');
       return 'stopped';
     }

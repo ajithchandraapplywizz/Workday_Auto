@@ -1725,27 +1725,55 @@ export async function updateBotControl(patch = {}) {
 
   if (!isSupabaseConfigured()) return true;
 
+  const coreBody = {
+    stage: patch.stage || patch.mode || memoryBotControl.stage || 'idle',
+    is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
+    is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
+    stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested),
+    trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested),
+    last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : (memoryBotControl.last_action_requested || null),
+    active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
+    current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
+    updated_at: now,
+  };
+
+  const fullBody = {
+    ...coreBody,
+    mode: patch.mode || patch.stage || memoryBotControl.mode || 'idle',
+    scan_status: patch.scan_status ?? memoryBotControl.scan_status ?? 'off',
+    submit_status: patch.submit_status ?? memoryBotControl.submit_status ?? 'off',
+    scan_enabled: Boolean(patch.scan_enabled ?? memoryBotControl.scan_enabled ?? false),
+    submit_enabled: Boolean(patch.submit_enabled ?? memoryBotControl.submit_enabled ?? false),
+    scan_stop_requested: Boolean(patch.scan_stop_requested ?? memoryBotControl.scan_stop_requested ?? false),
+    submit_stop_requested: Boolean(patch.submit_stop_requested ?? memoryBotControl.submit_stop_requested ?? false),
+  };
+  if (patch.scan_run_id || memoryBotControl.scan_run_id) {
+    fullBody.scan_run_id = patch.scan_run_id || memoryBotControl.scan_run_id;
+  }
+  if (patch.scan_run_started_at || memoryBotControl.scan_run_started_at) {
+    fullBody.scan_run_started_at = patch.scan_run_started_at || memoryBotControl.scan_run_started_at;
+  }
+
   try {
-    const validBody = {
-      stage: patch.stage || patch.mode || memoryBotControl.stage || 'idle',
-      is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
-      is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
-      stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested),
-      trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested),
-      last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : (memoryBotControl.last_action_requested || null),
-      active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
-      current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
-      updated_at: now,
-    };
     await request('bot_control', {
       method: 'PATCH',
       query: '?id=eq.primary',
       prefer: 'return=minimal',
-      body: validBody,
+      body: fullBody,
     });
     return true;
   } catch {
-    return false;
+    try {
+      await request('bot_control', {
+        method: 'PATCH',
+        query: '?id=eq.primary',
+        prefer: 'return=minimal',
+        body: coreBody,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 

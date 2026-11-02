@@ -18,7 +18,7 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
-export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`)).slice(0, 2);
+export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`);
 
 
 /**
@@ -473,6 +473,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         }
         if (preResolved) {
           task.resolved_answers = preResolved;
+        }
+
+        const { isGlobalStopRequested, isSubmitStopRequested } = await import('./browserLifecycle.mjs');
+        if (isGlobalStopRequested() || isSubmitStopRequested()) {
+          console.log(`🛑 [${workerId}] Halting claimed submission task #${task.id}: Stop requested.`);
+          return { status: 'stopped', message: 'Stop requested by user' };
         }
 
         const cleanAwlId = String(task.applywizz_id || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();

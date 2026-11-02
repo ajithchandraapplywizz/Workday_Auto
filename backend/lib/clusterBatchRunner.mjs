@@ -90,7 +90,15 @@ export async function isClusterStopRequested() {
   try {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    if (bc?.stop_requested || bc?.scan_stop_requested || bc?.scan_status === 'stopping') {
+    if (
+      bc?.stop_requested ||
+      bc?.scan_stop_requested ||
+      bc?.scan_status === 'stopping' ||
+      bc?.scan_status === 'off' ||
+      bc?.is_running === false ||
+      bc?.last_action_requested === 'stop' ||
+      bc?.last_action_requested === 'stop_scan'
+    ) {
       return true;
     }
   } catch { }

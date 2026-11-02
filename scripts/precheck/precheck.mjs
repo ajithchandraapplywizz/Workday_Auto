@@ -687,8 +687,13 @@ function checkSmokeImport() {
     });
 
     if (res.status !== 0) {
-      const errOut = (res.stderr || res.stdout || res.error?.message || 'Process terminated with non-zero exit code').trim();
-      issues.push(`Smoke import failed for ${file}:\n      ${errOut.split('\n')[0]}`);
+      const allLines = (res.stderr || res.stdout || res.error?.message || 'Process terminated with non-zero exit code')
+        .trim()
+        .split('\n')
+        .map((l) => l.trim())
+        .filter(Boolean);
+      const meaningfulErr = allLines.find((l) => !l.startsWith('⚠️') && !l.startsWith('(node:')) || allLines[0] || 'Unknown error';
+      issues.push(`Smoke import failed for ${file}:\n      ${meaningfulErr}`);
     }
   }
 

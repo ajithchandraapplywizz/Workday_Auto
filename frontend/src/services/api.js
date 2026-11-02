@@ -78,7 +78,20 @@ export async function fetchCAEmails() {
     const data = await res.json();
     return { success: true, count: data.count || (data.users || []).length, users: data.users || [] };
   } catch (err) {
-    console.error('Failed to fetch CA emails:', err);
+    console.warn('[CA Roster] External Vercel API unreachable, falling back to Supabase operators:', err?.message || err);
+    try {
+      const { data: dbOps, error } = await supabase
+        .from('operators')
+        .select('id, name, email, role, status')
+        .order('name', { ascending: true });
+      if (!error && dbOps && dbOps.length > 0) {
+        return {
+          success: true,
+          count: dbOps.length,
+          users: dbOps.map((o) => ({ id: o.id, name: o.name, email: o.email, role: o.role, status: o.status })),
+        };
+      }
+    } catch {}
     return { success: false, error: err.message, users: [] };
   }
 }
@@ -232,7 +245,12 @@ export async function saveClientQuestion({ applywizzId, questionRaw, answer, fie
  */
 export async function fetchBatchQueue() {
   try {
-    const { data, error } = await supabase.from('batch_job_queue').select('*').order('created_at', { ascending: false }).limit(50);
+    const { data, error } = await supabase
+      .from('job_distributions')
+      .select('id, applywizz_id, job_url, company, role_title, status, created_at, updated_at')
+      .in('status', ['ready_to_review', 'ready_for_review', 'review_and_submit', 'queued', 'queued_for_submission', 'distributed', 'pending', 'approved_for_submission', 'needs_answers'])
+      .order('created_at', { ascending: false })
+      .limit(100);
     if (error) throw error;
     return { success: true, queue: data || [] };
   } catch (err) {
@@ -305,11 +323,13 @@ export async function checkAllApiHealth() {
         // 1. Try local or backend proxy
         try {
           const backendBase = getBackendBaseUrl();
-          const ep = backendBase ? `${backendBase}/api/bot/health` : '/api/zoho-health';
-          const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
-          if (res.ok) {
-            const latency = Math.max(1, Math.round(performance.now() - start));
-            return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
+          const ep = backendBase ? `${backendBase}/api/bot/health` : (isLocalEnvironment() ? '/api/zoho-health' : null);
+          if (ep) {
+            const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
+            if (res.ok) {
+              const latency = Math.max(1, Math.round(performance.now() - start));
+              return { ok: true, status: 'OK', time: latency, meta: 'Zoho Mail Gateway online' };
+            }
           }
         } catch { }
 
@@ -331,11 +351,13 @@ export async function checkAllApiHealth() {
         const start = performance.now();
         try {
           const backendBase = getBackendBaseUrl();
-          const ep = backendBase ? `${backendBase}/api/bot/health` : '/api/zoho-health';
-          const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
-          if (res.ok) {
-            const latency = Math.max(1, Math.round(performance.now() - start));
-            return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
+          const ep = backendBase ? `${backendBase}/api/bot/health` : (isLocalEnvironment() ? '/api/zoho-health' : null);
+          if (ep) {
+            const res = await fetch(ep, { signal: AbortSignal.timeout(3500) });
+            if (res.ok) {
+              const latency = Math.max(1, Math.round(performance.now() - start));
+              return { ok: true, status: 'OK', time: latency, meta: 'HTTP 200 (live connected)' };
+            }
           }
         } catch { }
 
@@ -687,8 +709,8 @@ export function getEnvWorkerCounts() {
   }
   const scanCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SCAN_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SCAN_WORKER_COUNT, 10) : count;
   const resolveCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RESOLVE_WORKER_COUNT) ? parseInt(import.meta.env.VITE_RESOLVE_WORKER_COUNT, 10) : count;
-  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : count;
-  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || count };
+  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : (count < 4 ? 4 : count);
+  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || 4 };
 }
 
 export function getDynamicWorkerIds() {
@@ -831,353 +853,98 @@ export async function fetchApplicationsDynamic({
   limit = 200,
 } = {}) {
   try {
-    let rawApps = [];
-    try {
-      let query = supabase.from('job_distributions').select('*').order('updated_at', { ascending: false }).limit(limit);
+    let query = supabase.from('job_distributions').select('*').order('updated_at', { ascending: false }).limit(limit);
 
-      if (status && status !== 'All') {
-        if (status.toLowerCase() === 'applying' || status.toLowerCase() === 'in_progress') {
-          query = query.in('status', ['in_progress', 'started', 'applying']);
-        } else {
-          query = query.eq('status', status.toLowerCase());
-        }
-      }
-
-      if (errorCategory && errorCategory !== 'All') {
-        query = query.ilike('error_category', `${errorCategory}%`);
-      }
-
-      if (managerId && managerId !== 'All') {
-        query = query.eq('manager_id', managerId);
-      }
-
-      if (caEmail && caEmail !== 'All') {
-        query = query.eq('ca_id', caEmail);
-      }
-
-      if (applywizzId) {
-        query = query.eq('applywizz_id', applywizzId);
-      }
-
-      if (dateStr && timeframe) {
-        const bounds = getISTDateBounds(dateStr, timeframe);
-        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
-      }
-
-      const { data, error } = await query;
-      if (!error && data && data.length > 0) {
-        rawApps = data;
+    if (status && status !== 'All') {
+      const s = status.toLowerCase();
+      if (s === 'applying' || s === 'in_progress' || s === 'in_flight') {
+        query = query.in('status', ['in_progress', 'started', 'applying', 'in_flight']);
+      } else if (s === 'queued' || s === 'pending') {
+        query = query.in('status', ['queued', 'queued_for_submission', 'pending', 'distributed', 'ready_for_review', 'ready_to_review', 'review_and_submit', 'approved_for_submission']);
+      } else if (s === 'ready_for_review' || s === 'ready_to_review') {
+        query = query.in('status', ['ready_for_review', 'ready_to_review', 'distributed', 'review_and_submit']);
       } else {
-        // Fallback: Query batch_job_queue and failed_jobs directly from the database
-        const [qRes, fRes, assignRes, opsRes] = await Promise.all([
-          supabase.from('batch_job_queue').select('*').order('updated_at', { ascending: false }).limit(limit),
-          supabase.from('failed_jobs').select('*').order('updated_at', { ascending: false }).limit(limit),
-          supabase.from('client_assignment_log').select('applywizz_id, manager_id, ca_email'),
-          supabase.from('operators').select('email, manager_id')
-        ]);
-
-        const clientManagerMap = new Map();
-        (assignRes.data || []).forEach((c) => {
-          const norm = (c.applywizz_id || '').toUpperCase().trim();
-          if (norm && c.manager_id) clientManagerMap.set(norm, c.manager_id);
-        });
-
-        const opManagerMap = new Map();
-        (opsRes.data || []).forEach((o) => {
-          const em = (o.email || '').toLowerCase().trim();
-          if (em && o.manager_id) opManagerMap.set(em, o.manager_id);
-        });
-
-        const merged = [];
-        if (qRes.data) {
-          qRes.data.forEach((j) => {
-            const normAwl = (j.applywizz_id || '').toUpperCase().trim();
-            const jobMgrId = clientManagerMap.get(normAwl) || null;
-            if (managerId && managerId !== 'All' && jobMgrId && jobMgrId !== managerId) {
-              return; // Exclude jobs not belonging to this manager
-            }
-            merged.push({
-              id: j.id,
-              applywizz_id: j.applywizz_id,
-              client_id: j.client_id || j.applywizz_id,
-              job_id: j.job_id,
-              company: j.company,
-              role_title: j.role_title,
-              ats: 'workday',
-              job_url: j.job_url,
-              status: j.status || 'queued',
-              manager_id: jobMgrId,
-              error_category: null,
-              failure_reason: null,
-              created_at: j.created_at,
-              updated_at: j.updated_at,
-              resolved_answers: j.resolved_answers,
-              screenshot_url: j.screenshot_path || null
-            });
-          });
-        }
-        if (fRes.data) {
-          fRes.data.forEach((f) => {
-            const normAwl = (f.applywizz_id || '').toUpperCase().trim();
-            const jobMgrId = clientManagerMap.get(normAwl) || null;
-            if (managerId && managerId !== 'All' && jobMgrId && jobMgrId !== managerId) {
-              return; // Exclude jobs not belonging to this manager
-            }
-            merged.push({
-              id: f.id,
-              applywizz_id: f.applywizz_id,
-              client_id: f.client_id || f.applywizz_id,
-              job_id: f.job_id,
-              company: f.company,
-              role_title: f.role_title,
-              ats: 'workday',
-              job_url: f.job_url,
-              status: 'failed',
-              manager_id: jobMgrId,
-              failure_reason: f.failure_reason,
-              failed_client_count: typeof f.failed_client_count === 'number' ? f.failed_client_count : 1,
-              client_ids: Array.isArray(f.client_ids)
-                ? f.client_ids
-                : (typeof f.client_ids === 'string'
-                    ? (() => { try { const p = JSON.parse(f.client_ids); return Array.isArray(p) ? p : [f.client_ids]; } catch { return [f.client_ids]; } })()
-                    : (f.applywizz_id ? [f.applywizz_id] : [])),
-              created_at: f.created_at,
-              updated_at: f.updated_at,
-              screenshot_url: f.screenshot_path || null,
-              failure_screenshot_url: f.screenshot_path || null
-            });
-          });
-        }
-        rawApps = merged;
+        query = query.eq('status', s);
       }
-    } catch {}
-
-    let list = rawApps.map((item) => {
-      // Auto-extract screenshot and step from failure_reason if embedded
-      if (item.failure_reason) {
-        if (!item.failure_screenshot_url) {
-          const matchShot = item.failure_reason.match(/\[screenshot:\s*([^\]\s]+)\]/i) || item.failure_reason.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
-          if (matchShot) {
-            item.failure_screenshot_url = matchShot[1] || matchShot[0];
-            item.screenshot_url = item.failure_screenshot_url;
-          }
-        }
-        if (!item.stopped_at_step) {
-          const matchStep = item.failure_reason.match(/\[step:\s*([^\]]+)\]/i) || item.failure_reason.match(/stopped at\s+([^)\],]+)/i);
-          if (matchStep) {
-            item.stopped_at_step = matchStep[1].trim();
-          }
-        }
-      }
-      // If marked submitted without real screenshot proof, correct it to queued
-      const hasProof = Boolean(item.screenshot_url || item.screenshot_path || item.failure_screenshot_url);
-      if ((item.status === 'submitted' || item.status === 'completed') && !hasProof) {
-        item.status = 'queued';
-      }
-      return item;
-    });
-
-    // If zero applications matched the specific date bounds, strictly keep list empty (no legacy data fallback)
-
-    // Query job_distributions for pre-resolved answers, queued/applying states, and proof screenshots
-    try {
-      let distQuery = supabase
-        .from('job_distributions')
-        .select('*')
-        .order('updated_at', { ascending: false })
-        .limit(applywizzId ? 50 : 100);
-
-      if (applywizzId) {
-        distQuery = distQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
-      }
-      if (dateStr && timeframe) {
-        const bounds = getISTDateBounds(dateStr, timeframe);
-        distQuery = distQuery.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
-      }
-
-      const { data: distTasks } = await distQuery;
-      if (distTasks && distTasks.length > 0) {
-        const itemByUrl = new Map();
-        for (const item of list) {
-          const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
-          if (u) itemByUrl.set(u, item);
-        }
-
-        for (const dt of distTasks) {
-          const cleanDtUrl = (dt.job_url || '').split('?')[0].trim().toLowerCase();
-          if (!cleanDtUrl) continue;
-
-          const existing = itemByUrl.get(cleanDtUrl);
-          const proofShot = dt.application_submitted_screenshot_url || dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
-
-          if (existing && typeof existing === 'object') {
-            existing.is_fully_answered = dt.is_fully_answered;
-            existing.resolved_answers_json = dt.resolved_answers;
-            existing.unanswered_questions = dt.unanswered_questions;
-            existing.unanswered_count = dt.unanswered_count;
-            if (proofShot) {
-              existing.screenshot_url = proofShot;
-              existing.screenshot_path = proofShot;
-              existing.applied_screenshot = dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url;
-              existing.original_application_screenshot_successful = dt.original_application_screenshot_successful || dt.final_submission_screenshot_url;
-            }
-            if (dt.status === 'submitted') {
-              existing.status = 'submitted';
-            } else if (dt.status === 'ready_for_review' || dt.status === 'distributed') {
-              existing.status = 'ready_for_review';
-            } else if (dt.status === 'queued' || dt.status === 'queued_for_submission') {
-              existing.status = 'queued';
-            } else if (dt.status === 'applying') {
-              existing.status = 'in_flight';
-            }
-          } else {
-            const newItem = {
-              id: dt.id,
-              applywizz_id: dt.applywizz_id,
-              job_url: dt.job_url,
-              company: dt.company || 'Workday Tenant',
-              role_title: dt.role_title || 'Workday Application',
-              ats: 'Workday',
-              status: dt.status === 'queued' || dt.status === 'queued_for_submission' ? 'queued' : (dt.status === 'applying' ? 'in_flight' : (dt.status === 'distributed' ? 'ready_for_review' : dt.status)),
-              screenshot_url: proofShot || null,
-              screenshot_path: proofShot || null,
-              applied_screenshot: dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
-              original_application_screenshot_successful: dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
-              resolved_answers_json: dt.resolved_answers,
-              unanswered_questions: dt.unanswered_questions,
-              unanswered_count: dt.unanswered_count || 0,
-              is_fully_answered: dt.is_fully_answered,
-              updated_at: dt.updated_at,
-              created_at: dt.created_at,
-            };
-            list.push(newItem);
-            itemByUrl.set(cleanDtUrl, newItem);
-          }
-        }
-
-        // Deduplicate final list: strictly 1 row per unique normalized job URL!
-        const uniqueUrls = new Set();
-        list = list.filter((item) => {
-          const norm = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
-          if (!norm || uniqueUrls.has(norm)) return false;
-          uniqueUrls.add(norm);
-          return true;
-        });
-      }
-    } catch (e) {
-      // Non-fatal fallback
     }
 
-    // Always merge active queue tasks from batch_job_queue so live tasks & proof screenshots appear dynamically
-    let queueQuery = supabase
-      .from('batch_job_queue')
-      .select('*')
-      .order('updated_at', { ascending: false })
-      .limit(applywizzId ? 50 : 100);
+    if (errorCategory && errorCategory !== 'All') {
+      query = query.ilike('error_category', `${errorCategory}%`);
+    }
+
+    if (managerId && managerId !== 'All') {
+      query = query.eq('manager_id', managerId);
+    }
+
+    if (caEmail && caEmail !== 'All') {
+      query = query.or(`ca_id.eq.${caEmail},ca_email.eq.${caEmail}`);
+    }
 
     if (applywizzId) {
-      queueQuery = queueQuery.eq('applywizz_id', String(applywizzId).trim().toUpperCase());
+      query = query.eq('applywizz_id', applywizzId);
     }
 
-    const { data: queueTasks } = await queueQuery;
-    if (queueTasks && queueTasks.length > 0) {
-      const itemByUrl = new Map();
-      for (const item of list) {
-        const u = (item.job_url || item.url || '').split('?')[0].trim().toLowerCase();
-        if (u) itemByUrl.set(u, item);
-      }
-
-      for (const qt of queueTasks) {
-        const cleanQtUrl = (qt.job_url || '').split('?')[0].trim().toLowerCase();
-        if (!cleanQtUrl) continue;
-
-        const existing = itemByUrl.get(cleanQtUrl);
-        if (existing && typeof existing === 'object') {
-          // Reconcile status & screenshot from queue task
-          if (qt.screenshot_path) {
-            existing.failure_screenshot_url = qt.screenshot_path;
-            existing.screenshot_url = qt.screenshot_path;
-            existing.screenshot_path = qt.screenshot_path;
-          }
-          const hasProof = Boolean(existing.failure_screenshot_url || existing.screenshot_url || existing.screenshot_path || qt.screenshot_path);
-          if ((qt.status === 'submitted' || qt.status === 'completed') && !hasProof) {
-            // Fake submitted state without real screenshot proof: correct to queued
-            if (existing.status !== 'ready_for_review') {
-              existing.status = 'queued';
-            }
-          } else if (qt.status === 'submitted' || qt.status === 'failed' || qt.status === 'skipped' || qt.status === 'reached_review' || qt.status === 'ready_for_review') {
-            existing.status = qt.status;
-          } else if ((existing.status === 'in_progress' || existing.status === 'started') && qt.status === 'pending') {
-            existing.status = 'pending';
-          }
-          if (qt.error_message && (!existing.failure_reason || existing.failure_reason === 'wizard_did_not_reach_review')) {
-            existing.failure_reason = qt.error_message;
-          }
-        } else {
-          // Extract company and role from URL if null
-          let parsedCompany = qt.company;
-          let parsedTitle = qt.role_title;
-          if ((!parsedCompany || !parsedTitle) && qt.job_url) {
-            try {
-              const u = new URL(qt.job_url);
-              if (!parsedCompany) {
-                const hostParts = u.hostname.split('.');
-                const pathParts = u.pathname.split('/').filter(Boolean);
-                const tenantSlug = pathParts[0] || hostParts[0];
-                parsedCompany = tenantSlug.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());
-              }
-              if (!parsedTitle) {
-                const segments = u.pathname.split('/').filter(Boolean);
-                const lastSeg = segments[segments.length - 1] || '';
-                parsedTitle = decodeURIComponent(lastSeg)
-                  .replace(/[-_]+/g, ' ')
-                  .replace(/\b(REQ|JR|R)?\d+(-\d+)?\b/gi, '')
-                  .replace(/\s+/g, ' ')
-                  .trim();
-              }
-            } catch (_) { }
-          }
-
-          const hasProof = Boolean(qt.screenshot_path);
-          let finalStatus = qt.status || 'pending';
-          if ((finalStatus === 'submitted' || finalStatus === 'completed') && !hasProof) {
-            finalStatus = 'pending';
-          }
-
-          const newItem = {
-            id: qt.id,
-            applywizz_id: qt.applywizz_id,
-            job_title: parsedTitle || 'Workday Position',
-            company: parsedCompany || 'Workday Employer',
-            ats: 'Workday',
-            status: finalStatus,
-            job_url: qt.job_url,
-            pre_resolved_answers: qt.pre_resolved_answers,
-            screenshot_url: qt.screenshot_path || null,
-            failure_screenshot_url: qt.screenshot_path || null,
-            failure_reason: qt.error_message || null,
-            created_at: qt.created_at,
-            updated_at: qt.completed_at || qt.created_at,
-          };
-          itemByUrl.set(cleanQtUrl, newItem);
-        }
-      }
+    if (dateStr && timeframe) {
+      const bounds = getISTDateBounds(dateStr, timeframe);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
     }
 
-    // In 1-worker mode, at most ONE item can ever be in-flight simultaneously across the client's queue.
-    // If multiple stale items have in-flight statuses, preserve at most the most recent 1 and mark the rest as queued.
-    let foundInFlight = false;
-    list = list.map((item) => {
-      const isFlight = ['in_flight', 'processing', 'in_progress', 'started', 'applying', 'running'].includes((item.status || '').toLowerCase());
-      if (isFlight) {
-        if (!foundInFlight) {
-          foundInFlight = true;
-          return item;
-        } else {
-          return { ...item, status: 'queued' };
-        }
+    const { data, error } = await query;
+    if (error) {
+      console.error('Error fetching applications from job_distributions:', error);
+    }
+    const rawApps = data || [];
+
+    let list = rawApps.map((dt) => {
+      const proofShot = dt.application_submitted_screenshot_url || dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
+
+      const rawSt = (dt.status || 'pending').toLowerCase();
+      let normalizedStatus = rawSt;
+      if (rawSt === 'submitted' || rawSt === 'completed') {
+        normalizedStatus = 'submitted';
+      } else if (['ready_for_review', 'ready_to_review', 'distributed', 'review_and_submit'].includes(rawSt)) {
+        normalizedStatus = 'ready_for_review';
+      } else if (['queued', 'queued_for_submission', 'pending', 'approved_for_submission'].includes(rawSt)) {
+        normalizedStatus = 'queued';
+      } else if (['applying', 'in_flight', 'in_progress', 'started'].includes(rawSt)) {
+        normalizedStatus = 'in_flight';
+      } else if (rawSt === 'failed') {
+        normalizedStatus = 'failed';
       }
-      return item;
+
+      return {
+        id: dt.id,
+        applywizz_id: dt.applywizz_id,
+        job_url: dt.job_url,
+        company: dt.company || 'Workday Tenant',
+        role_title: dt.role_title || 'Workday Application',
+        ats: 'Workday',
+        status: normalizedStatus,
+        screenshot_url: proofShot || null,
+        screenshot_path: proofShot || null,
+        applied_screenshot: dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
+        original_application_screenshot_successful: dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
+        resolved_answers_json: dt.resolved_answers,
+        unanswered_questions: dt.unanswered_questions,
+        unanswered_count: dt.unanswered_count || 0,
+        is_fully_answered: dt.is_fully_answered,
+        failure_reason: dt.failure_reason || null,
+        failure_screenshot_url: dt.failure_screenshot_url || null,
+        stopped_at_step: dt.stopped_at_step || null,
+        manager_id: dt.manager_id || null,
+        ca_id: dt.ca_id || dt.ca_email || null,
+        updated_at: dt.updated_at || dt.created_at,
+        created_at: dt.created_at,
+      };
+    });
+
+    // Deduplicate list: strictly 1 row per unique normalized job URL + applywizz_id
+    const seen = new Set();
+    list = list.filter((item) => {
+      const norm = `${item.applywizz_id}_${(item.job_url || '').split('?')[0].trim().toLowerCase()}`;
+      if (seen.has(norm)) return false;
+      seen.add(norm);
+      return true;
     });
 
     return { success: true, applications: list };
@@ -1192,94 +959,78 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let allApps = [];
-    try {
-      let query = supabase.from('job_distributions').select('id, status, created_at, updated_at');
+    let query = supabase.from('job_distributions').select('id, status, application_submitted_screenshot_url, created_at, updated_at');
 
-      if (managerId && managerId !== 'All') {
-        query = query.eq('manager_id', managerId);
-      }
-      if (caEmail && caEmail !== 'All') {
-        query = query.eq('ca_id', caEmail);
-      }
-      if (dateStr && timeframe) {
-        const bounds = getISTDateBounds(dateStr, timeframe);
-        query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
-      }
+    if (managerId && managerId !== 'All') {
+      query = query.eq('manager_id', managerId);
+    }
+    if (caEmail && caEmail !== 'All') {
+      query = query.or(`ca_id.eq.${caEmail},ca_email.eq.${caEmail}`);
+    }
+    if (dateStr && timeframe) {
+      const bounds = getISTDateBounds(dateStr, timeframe);
+      query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
+    }
 
-      const { data: apps, error: appsErr } = await query;
-      if (!appsErr && apps && apps.length > 0) {
-        allApps = apps;
-      } else {
-        const [qRes, fRes] = await Promise.all([
-          supabase.from('batch_job_queue').select('id, status, created_at, updated_at'),
-          supabase.from('failed_jobs').select('id, created_at, updated_at')
-        ]);
-        const fallbackApps = [];
-        if (qRes.data) {
-          qRes.data.forEach((j) => fallbackApps.push({ id: j.id, status: j.status || 'queued', created_at: j.created_at, updated_at: j.updated_at }));
-        }
-        if (fRes.data) {
-          fRes.data.forEach((f) => fallbackApps.push({ id: f.id, status: 'failed', created_at: f.created_at, updated_at: f.updated_at }));
-        }
-        allApps = fallbackApps;
-      }
-    } catch {}
+    const { data: apps, error: appsErr } = await query;
+    if (appsErr) {
+      console.error('Error fetching job_distributions KPIs:', appsErr);
+    }
+    const allApps = apps || [];
     const now = Date.now();
 
-    // Reconcile real-time stats directly from job_distributions and applications in Supabase
-    let distSubmitted = 0;
-    let distFailed = 0;
-    let distQueued = 0;
-    try {
-      let dQuery = supabase.from('job_distributions').select('status, application_submitted_screenshot_url, created_at');
-      if (caEmail && caEmail !== 'All') {
-        dQuery = dQuery.eq('ca_email', caEmail);
-      }
-      if (dateStr && timeframe) {
-        const bounds = getISTDateBounds(dateStr, timeframe);
-        dQuery = dQuery.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
-      }
-      const { data: dRows } = await dQuery;
-      if (dRows && Array.isArray(dRows)) {
-        distSubmitted = dRows.filter((d) => (d.status === 'submitted') && Boolean(d.application_submitted_screenshot_url)).length;
-        distFailed = dRows.filter((d) => d.status === 'failed').length;
-        distQueued = dRows.filter((d) => ['queued', 'distributed', 'ready_for_review'].includes(d.status)).length;
-      }
-    } catch { }
+    // 1. Submitted: status in ('submitted', 'completed')
+    const submitted = allApps.filter((a) => {
+      const st = (a.status || '').toLowerCase();
+      return st === 'submitted' || st === 'completed';
+    }).length;
 
-    const submitted = Math.max(allApps.filter((a) => a.status === 'submitted').length, distSubmitted);
-
-    // Check live worker_status table: if 0 submitting workers are in_flight, applying is strictly 0!
+    // 2. Applying: strictly bounded by live submitting workers in flight across all 4 workers
     let liveWorkersInFlight = 0;
     try {
       const { data: wRows } = await supabase
         .from('worker_status')
         .select('worker_id, state, updated_at')
-        .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3']);
+        .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4']);
       if (wRows && Array.isArray(wRows)) {
         liveWorkersInFlight = wRows.filter((w) => {
           const last = new Date(w.updated_at || 0).getTime();
-          return w.state === 'in_flight' && last && (now - last < 5 * 60 * 1000);
+          return (w.state === 'in_flight' || w.state === 'running') && last && (now - last < 5 * 60 * 1000);
         }).length;
       }
     } catch { }
 
-    // Active applying count for the Stage 3 submitting worker execution pool
     const activeApplying = allApps.filter((a) => {
-      if (!['in_progress', 'started', 'applying'].includes(a.status)) return false;
+      const st = (a.status || '').toLowerCase();
+      if (!['in_progress', 'started', 'applying', 'in_flight'].includes(st)) return false;
       const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
       return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
     });
 
-    // Applying count is strictly bounded by live submitting workers currently in active flight
     const applying = liveWorkersInFlight > 0
       ? Math.min(activeApplying.length > 0 ? activeApplying.length : liveWorkersInFlight, liveWorkersInFlight)
       : 0;
 
-    const failed = Math.max(allApps.filter((a) => a.status === 'failed').length, distFailed);
-    const skipped = allApps.filter((a) => a.status === 'skipped').length;
-    const queued = Math.max(allApps.filter((a) => a.status === 'queued' || a.status === 'pending').length, distQueued);
+    // 3. Failed: strictly status === 'failed' in job_distributions
+    const failed = allApps.filter((a) => (a.status || '').toLowerCase() === 'failed').length;
+
+    // 4. Queued: ready_to_review / ready_for_review / queued / distributed / pending / etc.
+    const queued = allApps.filter((a) => {
+      const st = (a.status || '').toLowerCase();
+      return [
+        'ready_to_review',
+        'ready_for_review',
+        'review_and_submit',
+        'queued',
+        'queued_for_submission',
+        'distributed',
+        'pending',
+        'approved_for_submission',
+        'needs_answers'
+      ].includes(st);
+    }).length;
+
+    const skipped = allApps.filter((a) => (a.status || '').toLowerCase() === 'skipped').length;
 
     // Answer source percentages from qa_bank
     let totalAnswers = 0;
@@ -1311,6 +1062,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       applying,
       failed,
       queued,
+      skipped,
       answerSources: {
         total: totalAnswers,
         supabasePct,
@@ -2735,22 +2487,7 @@ export async function triggerAutonomousBot() {
   try {
     const now = new Date().toISOString();
 
-    // 1. Unpause any queue tasks that were paused by the user
-    try {
-      await supabase
-        .from('batch_job_queue')
-        .update({
-          status: 'pending',
-          error_message: null,
-          updated_at: now,
-        })
-        .eq('status', 'skipped')
-        .eq('error_message', 'PAUSED_BY_USER');
-    } catch (qErr) {
-      console.warn('Note on unpausing batch_job_queue:', qErr?.message);
-    }
-
-    // 2. Supabase signal: mark scanning workers as in_flight & update bot_control
+    // 1. Supabase signal: mark scanning workers as in_flight & update bot_control
     let supabaseSuccess = false;
     const actionNonce = Date.now().toString();
     try {
@@ -2858,14 +2595,20 @@ export async function stopAutonomousBot() {
     const now = new Date().toISOString();
     const actionNonce = Date.now().toString();
 
-    // 1. Webhook stop call to daemon (POST /api/bot/stop / /api/bot/scan/stop)
+    // 1. Webhook stop call to daemon (POST /api/bot/stop / /api/bot/scan/stop / /api/bot/controls)
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
     const stopEndpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/scan/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+      ...(backendBase ? [
+        `${backendBase}/api/bot/scan/stop`,
+        `${backendBase}/api/bot/stop`,
+        `${backendBase}/api/bot/webhook`,
+        `${backendBase}/api/bot/controls`,
+      ] : []),
       ...(isLocal ? [
         'http://localhost:3001/api/bot/scan/stop',
         'http://localhost:3001/api/bot/stop',
+        'http://localhost:3001/api/bot/controls',
       ] : []),
     ];
     await Promise.any(
@@ -2873,23 +2616,32 @@ export async function stopAutonomousBot() {
         fetch(u, {
           method: 'POST',
           headers: getStaffAuthHeaders(),
-          body: JSON.stringify({ action: 'stop_scan', stop: true, nonce: actionNonce, timestamp: now }),
+          body: JSON.stringify({ key: 'scan', action: 'stop', stop_requested: true, stop: true, nonce: actionNonce, timestamp: now }),
           signal: AbortSignal.timeout(1500),
         })
       )
     ).catch(() => {});
 
-    // 2. Set bot_control stop signal in Supabase
+    // 2. Set authoritative bot_control and worker_control stop signals in Supabase
     try {
       await supabase
         .from('bot_control')
         .update({
           stage: 'idle',
+          mode: 'idle',
           is_running: false,
+          is_paused: true,
           stop_requested: true,
+          scan_stop_requested: true,
+          submit_stop_requested: true,
+          scan_status: 'off',
+          scan_enabled: false,
+          submit_status: 'off',
+          submit_enabled: false,
           trigger_requested: false,
-          last_action_requested: 'stop_scan',
-          current_action: 'Scan & Resolve stopped by user.',
+          last_action_requested: 'stop',
+          current_action: 'Workers stopped by user.',
+          active_worker_count: 0,
           updated_at: now,
         })
         .eq('id', 'primary');
@@ -2898,13 +2650,10 @@ export async function stopAutonomousBot() {
     }
 
     try {
-      await supabase.from('worker_control').upsert({
-        key: 'scan',
-        enabled: false,
-        status: 'off',
-        stop_requested: true,
-        updated_at: now,
-      }, { onConflict: 'key' }).catch(() => {});
+      await supabase.from('worker_control').upsert([
+        { key: 'scan', enabled: false, status: 'off', stop_requested: true, updated_at: now },
+        { key: 'submit', enabled: false, status: 'off', stop_requested: true, updated_at: now },
+      ], { onConflict: 'key' }).catch(() => {});
     } catch {}
 
     // 3. Mark all active worker rows idle in Supabase worker_status
@@ -3058,11 +2807,17 @@ export async function stopSubmissionStage() {
       .from('bot_control')
       .update({
         stage: 'idle',
+        mode: 'idle',
         is_running: false,
+        is_paused: true,
+        submit_status: 'off',
+        submit_enabled: false,
+        submit_stop_requested: true,
         stop_requested: true,
         trigger_requested: false,
         last_action_requested: 'stop_submit',
         current_action: 'Submissions stopped by user.',
+        active_worker_count: 0,
         updated_at: now,
       })
       .eq('id', 'primary');
@@ -3070,6 +2825,16 @@ export async function stopSubmissionStage() {
   } catch (err) {
     console.warn('Supabase stop error:', err);
   }
+
+  try {
+    await supabase.from('worker_control').upsert({
+      key: 'submit',
+      enabled: false,
+      status: 'off',
+      stop_requested: true,
+      updated_at: now,
+    }, { onConflict: 'key' }).catch(() => {});
+  } catch {}
 
   // Roll back in-flight submission tasks and job_distributions back to ready_for_review
   try {
@@ -3108,12 +2873,19 @@ export async function stopSubmissionStage() {
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
   const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/stop`, `${backendBase}/api/bot/stop`, `${backendBase}/api/bot/webhook`] : []),
+    ...(backendBase ? [
+      `${backendBase}/api/bot/submit/stop`,
+      `${backendBase}/api/bot/stop`,
+      `${backendBase}/api/bot/webhook`,
+      `${backendBase}/api/bot/controls`,
+    ] : []),
     ...(isLocal ? [
       'http://localhost:3002/api/bot/submit/stop',
       'http://localhost:3002/api/bot/stop',
+      'http://localhost:3002/api/bot/controls',
       'http://localhost:3001/api/bot/submit/stop',
       'http://localhost:3001/api/bot/stop',
+      'http://localhost:3001/api/bot/controls',
     ] : []),
   ];
 
@@ -3122,7 +2894,7 @@ export async function stopSubmissionStage() {
       const resp = await fetch(ep, {
         method: 'POST',
         headers: getStaffAuthHeaders(),
-        body: JSON.stringify({ action: 'stop_submit', stage: 'submitting', nonce: actionNonce, timestamp: now }),
+        body: JSON.stringify({ key: 'submit', action: 'stop', stop_requested: true, stop: true, stage: 'submitting', nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(2000),
       });
       if (resp.ok) {

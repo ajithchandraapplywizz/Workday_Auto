@@ -212,22 +212,20 @@ async function syncBotControlState(patch = {}) {
  * batch_job_queue / job_distributions work, no active scan or resolve worker).
  */
 export async function checkStage1Completion() {
-  if (SERVICE_ROLE === 'submitter') {
-    // Submitter service is dedicated to submissions.
-    try {
-      const { count: pendingBatchCount, error: bqErr } = await supabase
-        .from('batch_job_queue')
-        .select('*', { count: 'exact', head: true })
-        .in('status', ['pending', 'processing']);
+  let pendingBatchCount = 0;
+  try {
+    const { count, error: bqErr } = await supabase
+      .from('batch_job_queue')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['pending', 'processing']);
 
-      if (!bqErr && typeof pendingBatchCount === 'number' && pendingBatchCount > 0) {
-        return {
-          allowed: false,
-          reason: `Submit toggle is refused: Stage 1 is not fully complete (${pendingBatchCount} pending or in-progress batch items remaining). Scan & Resolve must complete first.`,
-        };
-      }
-    } catch {}
-    return { allowed: true };
+    if (!bqErr && typeof count === 'number') {
+      pendingBatchCount = count;
+    }
+  } catch {}
+
+  if (pendingBatchCount > 0) {
+    console.log(`[DAEMON] Note: ${pendingBatchCount} batch item(s) pending/processing in Stage 1. Proceeding with submissions for all ready/approved applications.`);
   }
 
   // If submit is explicitly requested while scanning, halt scan pool automatically to switch cleanly
@@ -236,15 +234,10 @@ export async function checkStage1Completion() {
     if (bc?.last_action_requested === 'start_submit' || bc?.stage === 'submitting' || bc?.submit_status === 'running') {
       console.log(`[DAEMON] Submit requested: automatically halting active scan pool to switch cleanly to submissions.`);
       await stopScanPool().catch(() => {});
-    } else {
-      return {
-        allowed: false,
-        reason: 'Submit toggle is refused while mode = scanning. Wait for Stage 1 (Scan & Resolve) to complete or stop scanning.',
-      };
     }
   }
 
-  // Check active scan/resolve workers in worker_status
+  // Check active scan/resolve workers in worker_status and reset to idle if submit is requested
   try {
     const { data: activeWorkers } = await supabase
       .from('worker_status')
@@ -253,37 +246,18 @@ export async function checkStage1Completion() {
       .eq('state', 'in_flight');
 
     if (activeWorkers && activeWorkers.length > 0) {
-      const bc = await getBotControl().catch(() => null);
-      if (bc?.last_action_requested === 'start_submit' || bc?.stage === 'submitting' || bc?.submit_status === 'running') {
-        console.log(`[DAEMON] Resetting ${activeWorkers.length} active scan/resolve worker(s) to idle to switch to submissions.`);
-        for (const w of activeWorkers) {
-          await updateWorkerStatus(w.worker_id, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => {});
-        }
-      } else {
-        return {
-          allowed: false,
-          reason: `Submit toggle is refused: ${activeWorkers.length} scan/resolve worker(s) are currently active.`,
-        };
+      console.log(`[DAEMON] Resetting ${activeWorkers.length} active scan/resolve worker(s) to idle to switch cleanly to submissions.`);
+      for (const w of activeWorkers) {
+        await updateWorkerStatus(w.worker_id, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => {});
       }
     }
   } catch {}
 
-  // Check pending or processing in batch_job_queue
-  try {
-    const { count: pendingBatchCount, error: bqErr } = await supabase
-      .from('batch_job_queue')
-      .select('*', { count: 'exact', head: true })
-      .in('status', ['pending', 'processing']);
-
-    if (!bqErr && typeof pendingBatchCount === 'number' && pendingBatchCount > 0) {
-      return {
-        allowed: false,
-        reason: `Submit toggle is refused: Stage 1 is not fully complete (${pendingBatchCount} pending or in-progress batch items remaining). Scan & Resolve must complete first.`,
-      };
-    }
-  } catch {}
-
-  return { allowed: true };
+  return {
+    allowed: true,
+    pendingBatchCount,
+    statusNote: pendingBatchCount > 0 ? `${pendingBatchCount} items pending scan & resolve` : 'Stage 1 complete',
+  };
 }
 
 /**
@@ -342,8 +316,8 @@ export async function stopScanPool() {
   } finally {
     scanStatus = 'off';
     scanStopRequested = false;
-    setScanStop(false);
-    setClusterStop(false);
+    // Note: setScanStop(true) and setClusterStop(true) remain active to halt any in-flight loop
+    // They are reset to false strictly when a new runScanAndResolveParallel is invoked.
 
     if (currentMode === 'scanning') {
       currentMode = 'idle';
@@ -358,6 +332,8 @@ export async function stopScanPool() {
       scan_status: 'off',
       scan_stop_requested: false,
       last_action_requested: null,
+      trigger_requested: false,
+      stop_requested: false,
       is_running: isPoolRunning,
       current_action: 'Scan & Resolve stopped by user',
     }).catch(() => {});
@@ -418,7 +394,8 @@ export async function stopSubmitPool() {
   } finally {
     submitStatus = 'off';
     submitStopRequested = false;
-    setSubmitStop(false);
+    // Note: setSubmitStop(true) remains active to halt any in-flight loop
+    // It is reset to false strictly when a new runStage3Submissions is invoked.
 
     if (currentMode === 'submitting') {
       currentMode = 'idle';
@@ -432,6 +409,10 @@ export async function stopSubmitPool() {
       submit_enabled: false,
       submit_status: 'off',
       submit_stop_requested: false,
+      last_action_requested: null,
+      trigger_requested: false,
+      stop_requested: false,
+      is_running: isPoolRunning,
       current_action: 'Submissions stopped by user',
     }).catch(() => {});
   }
@@ -683,11 +664,19 @@ async function runStage3Submissions() {
     await new Promise((r) => setTimeout(r, 2000));
   }
 
-  // Await any remaining active submitting workers before terminating
-  while (activeSubmittingWorkers.size > 0) {
-    console.log(`[DAEMON] Waiting for ${activeSubmittingWorkers.size} active worker(s) to wrap up...`);
-    await new Promise((r) => setTimeout(r, 2000));
+  // Await any remaining active submitting workers before terminating (fast-abort if stop requested)
+  let waitLoops = 0;
+  while (activeSubmittingWorkers.size > 0 && waitLoops < 3) {
+    if (isGlobalStopRequested() || isSubmitStopRequested()) {
+      console.log(`[DAEMON] Fast-aborting ${activeSubmittingWorkers.size} active worker(s)...`);
+      await abortAllActiveBrowsers().catch(() => {});
+    } else {
+      console.log(`[DAEMON] Waiting for ${activeSubmittingWorkers.size} active worker(s) to wrap up...`);
+    }
+    await new Promise((r) => setTimeout(r, 1000));
+    waitLoops++;
   }
+  activeSubmittingWorkers.clear();
 
   // Print final milestone report for any remaining items in the cycle
   if (submissionCycleResults.length > 0) {
@@ -750,6 +739,8 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
   isPoolRunning = true;
   isPoolPaused = false;
   setGlobalStop(false);
+  setScanStop(false);
+  setClusterStop(false);
 
   // Generate unique scan_run_id in bot_control when Scan starts (R10)
   const scanRunId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
@@ -796,9 +787,48 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
       console.log(`🛑 [DAEMON] Pipeline stopped.`);
       scanCompleteMessage = 'Scan & Resolve stopped by user request.';
     } else {
-      scanCompleteMessage = `Scan & Resolve complete: Unique links scanned and candidate answers resolved to ready_for_review. Submissions halted until user trigger.`;
+      scanCompleteMessage = `Scan & Resolve complete: Unique links scanned and candidate answers resolved to ready_for_review.`;
       console.log(`\n✅ [DAEMON] ${scanCompleteMessage}`);
-      console.log(`🛑 [DAEMON] Stopped at ready_for_review. Applications waiting for review. Auto-submissions are OFF. Submissions will only start when 'Trigger Submissions' is clicked.`);
+
+      // Check if candidate applications are ready in job_distributions
+      const { count: readyCount } = await supabase
+        .from('job_distributions')
+        .select('*', { count: 'exact', head: true })
+        .eq('status', 'ready_for_review');
+
+      if (readyCount && readyCount > 0) {
+        console.log(`\n🚀 [PIPELINE AUTO-TRANSITION] ${readyCount} applications ready in job_distributions! Transitioning immediately to Stage 3 Submissions...`);
+        scanStatus = 'completed';
+        currentStage = 'submitting';
+        currentMode = 'submitting';
+        submitStatus = 'running';
+        isPoolRunning = true;
+
+        await syncBotControlState({
+          mode: 'submitting',
+          stage: 'submitting',
+          scan_status: 'completed',
+          scan_enabled: false,
+          submit_status: 'running',
+          submit_enabled: true,
+          last_action_requested: 'start_submit',
+          trigger_requested: true,
+          is_running: true,
+          stop_requested: false,
+          current_action: `Stage 1 & 2 complete. Auto-launching submissions for ${readyCount} applications across dedicated submitting workers.`,
+        });
+
+        if (SERVICE_ROLE === 'scanner') {
+          console.log(`\n⚡ [SCANNER SERVICE] Signal written to Supabase! Submitter Service will pick up Stage 3 immediately.`);
+          return;
+        }
+
+        // Launch Stage 3 Submissions immediately
+        runStage3Submissions().catch(console.error);
+        return;
+      } else {
+        console.log(`ℹ️ [DAEMON] 0 ready applications in job_distributions. Idling until new tasks arrive.`);
+      }
     }
   } catch (err) {
     console.error(`❌ [DAEMON] Pipeline error:`, err?.message || err);
@@ -1252,7 +1282,7 @@ const server = http.createServer(async (req, res) => {
   }
 
   // 3. Global Stop Webhook (Admin & Developer)
-  if (pathname === '/api/bot/stop' || (pathname === '/api/bot/webhook' && body.action === 'stop')) {
+  if (pathname === '/api/bot/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop' || body.action === 'stop_pipeline' || body.action === 'stop_all'))) {
     const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
     if (!authUser) return;
     await stopAutonomousPool();
@@ -1261,6 +1291,36 @@ const server = http.createServer(async (req, res) => {
       success: true,
       message: `All ${WORKER_COUNT} workers stopped instantly. Active browser contexts aborted.`,
       isRunning: false,
+    }));
+    return;
+  }
+
+  // 3b. Dedicated Scan Stop Webhook
+  if (pathname === '/api/bot/scan/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop_scan' || body.action === 'scan_stop'))) {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
+    await stopScanPool();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'Scanning and resolving workers safely stopped. Active browser contexts aborted.',
+      scanStatus: 'off',
+      isRunning: submitStatus === 'running',
+    }));
+    return;
+  }
+
+  // 3c. Dedicated Submit Stop Webhook
+  if (pathname === '/api/bot/submit/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop_submit' || body.action === 'submit_stop'))) {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
+    await stopSubmitPool();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'Submission workers safely halted. Active browser contexts aborted.',
+      submitStatus: 'off',
+      isRunning: scanStatus === 'running',
     }));
     return;
   }
@@ -1375,8 +1435,8 @@ const server = http.createServer(async (req, res) => {
     const nowIso = new Date().toISOString();
     const cleanId = (applywizzId || '').toUpperCase().trim();
 
-    // Check availability across the 3 submitting workers (submitting_worker_1, 2, 3)
-    const submitWorkerIds = PIPELINE_CONFIG.submitWorkerIds || ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3'];
+    // Check availability across the submitting workers (submitting_worker_1, 2, 3, 4)
+    const submitWorkerIds = PIPELINE_CONFIG.submitWorkerIds || ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
     let chosenWorkerId = null;
 
     try {
@@ -1683,7 +1743,7 @@ export async function dispatchQueuedSubmissions() {
  * this daemon's submitting workers to 'failed' with 'Interrupted: daemon restarted'.
  */
 export async function recoverInterruptedSubmissionTasks() {
-  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
+  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 4 }, (_, i) => `submitting_worker_${i + 1}`);
   const now = new Date().toISOString();
 
   try {
@@ -1817,26 +1877,47 @@ export async function initOnStartup() {
       const submitCtrl = wc?.submit;
 
       // 1. Primary Stop Signal from Supabase
-      const hasScanStopSignal = Boolean(bc?.scan_stop_requested || scanCtrl?.stop_requested);
-      const hasSubmitStopSignal = Boolean(bc?.submit_stop_requested || submitCtrl?.stop_requested);
-      const hasGlobalStopSignal = Boolean(bc?.stop_requested);
+      const hasScanStopSignal = Boolean(
+        bc?.scan_stop_requested ||
+        bc?.last_action_requested === 'stop_scan' ||
+        bc?.last_action_requested === 'stop' ||
+        bc?.last_action_requested === 'stop_pipeline' ||
+        scanCtrl?.stop_requested ||
+        (bc?.scan_status === 'off' && (scanStatus === 'running' || isPoolRunning)) ||
+        (bc?.is_running === false && (scanStatus === 'running' || isPoolRunning))
+      );
+      const hasSubmitStopSignal = Boolean(
+        bc?.submit_stop_requested ||
+        bc?.last_action_requested === 'stop_submit' ||
+        bc?.last_action_requested === 'stop' ||
+        bc?.last_action_requested === 'stop_pipeline' ||
+        submitCtrl?.stop_requested ||
+        (bc?.submit_status === 'off' && (submitStatus === 'running' || isPoolRunning)) ||
+        (bc?.is_running === false && (submitStatus === 'running' || isPoolRunning))
+      );
+      const hasGlobalStopSignal = Boolean(
+        bc?.stop_requested ||
+        bc?.last_action_requested === 'stop' ||
+        bc?.last_action_requested === 'stop_pipeline' ||
+        (bc?.is_running === false && (isPoolRunning || scanStatus === 'running' || submitStatus === 'running'))
+      );
 
       if (hasScanStopSignal && (isPoolRunning || scanStatus === 'running')) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'scan_stop_requested' in Supabase! Stopping scanning workers...`);
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping scanning workers...`);
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});
         return;
       }
 
       if (hasSubmitStopSignal && (isPoolRunning || submitStatus === 'running')) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'submit_stop_requested' in Supabase! Stopping submission workers...`);
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping submission workers...`);
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => {});
         return;
       }
 
-      if (hasGlobalStopSignal && isPoolRunning) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER] Detected 'stop_requested' in Supabase! Stopping all workers...`);
+      if (hasGlobalStopSignal && (isPoolRunning || scanStatus === 'running' || submitStatus === 'running')) {
+        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Global stop signal detected in Supabase! Stopping all workers...`);
         await stopAutonomousPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => {});
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => {});
@@ -1844,11 +1925,11 @@ export async function initOnStartup() {
       }
 
       // 2. Scan & Resolve Start Signal from Supabase
-      // Gated strictly: never trigger if scan_stop_requested, or stop is active
-      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && (
-        (bc && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.trigger_requested && bc.stage === 'scanning'))) ||
-        (scanCtrl && scanCtrl.enabled === true) ||
-        (SERVICE_ROLE === 'scanner' && bc?.scan_status === 'running')
+      // Gated strictly: never trigger if stop is active or requested
+      const isScanStartRequested = (!isPoolRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
+        (bc && bc.is_running !== false && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.trigger_requested && bc.stage === 'scanning'))) ||
+        (scanCtrl && scanCtrl.enabled === true && !scanCtrl.stop_requested) ||
+        (SERVICE_ROLE === 'scanner' && bc?.scan_status === 'running' && bc?.is_running !== false)
       );
 
       if (isScanStartRequested) {
@@ -1875,15 +1956,15 @@ export async function initOnStartup() {
 
       // 3. Submissions Start Signal from Supabase
       // Gated strictly: starts ONLY after Stage 1 is complete and never if stop is requested
-      const isSubmitStartRequested = (!isPoolRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && (
-        (bc && (
+      const isSubmitStartRequested = (!isPoolRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
+        (bc && bc.is_running !== false && (
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
           (bc.trigger_requested && bc.stage === 'submitting') ||
-          (SERVICE_ROLE === 'submitter' && bc.stage === 'submitting' && bc.is_running !== false)
+          (SERVICE_ROLE === 'submitter' && bc.submit_status === 'running')
         )) ||
-        (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running')) ||
-        (SERVICE_ROLE === 'submitter' && (bc?.stage === 'submitting' || bc?.current_action?.toLowerCase().includes('submitting')))
+        (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested) ||
+        (SERVICE_ROLE === 'submitter' && bc?.submit_status === 'running' && bc?.is_running !== false)
       );
 
       if (isSubmitStartRequested) {

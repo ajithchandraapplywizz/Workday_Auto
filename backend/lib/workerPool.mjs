@@ -24,7 +24,7 @@ import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClien
 import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -64,11 +64,11 @@ export function setWorkerPoolStop(val) {
   setGlobalStop(val);
 }
 export function getWorkerPoolStop() {
-  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested();
+  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested();
 }
 
 export async function isWorkerPoolStopRequested() {
-  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested();
+  return workerPoolStopRequested || isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested();
 }
 
 /**

@@ -36,10 +36,10 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Setup Node.js (v20)
+      - name: Setup Node.js (v22)
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: 'npm'
 
       - name: Install Workspace Dependencies

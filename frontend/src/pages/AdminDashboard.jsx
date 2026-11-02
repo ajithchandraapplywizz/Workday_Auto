@@ -9,7 +9,6 @@ import {
   fetchDynamicKPIMetrics,
   fetchApplicationsDynamic,
   syncGlobalCompanyData,
-  supabase,
 } from '../services/api';
 import CAClientDetailsModal from '../components/CAClientDetailsModal';
 import OperatorDetailsPage from './OperatorDetailsPage';
@@ -89,19 +88,9 @@ export default function AdminDashboard() {
       loadData(true);
     }, 3000);
 
-    // Supabase Realtime channel for instant push updates
-    const channel = supabase
-      .channel('admin-dashboard-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'applications' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'batch_job_queue' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'client_assignment_log' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'operators' }, () => loadData(true))
-      .subscribe();
-
     return () => {
       isMounted = false;
       clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
   }, [loadData]);
 

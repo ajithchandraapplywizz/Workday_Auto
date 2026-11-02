@@ -263,22 +263,9 @@ export default function DeveloperDashboard() {
       loadData(true);
     }, isAnyPipelineActive ? 3000 : 6000);
 
-    // Supabase Realtime channel for instant push updates
-    const channel = supabase
-      .channel('dev-dashboard-realtime')
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'job_distributions' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'submission_tasks' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'worker_status' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'bot_control' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'batch_job_queue' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'scanned_jobs' }, () => loadData(true))
-      .on('postgres_changes', { event: '*', schema: 'public', table: 'failed_jobs' }, () => loadData(true))
-      .subscribe();
-
     return () => {
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
-      supabase.removeChannel(channel);
     };
   }, [date, timeframe, isAnyPipelineActive]);
 
@@ -1361,7 +1348,7 @@ export default function DeveloperDashboard() {
                 <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                   <span style={{ fontSize: '1.1rem' }}>🚀</span>
                   <strong style={{ color: '#34d399', fontSize: '0.9rem', letterSpacing: '0.03em' }}>
-                    POOL 2: SUBMISSIONS ONLY (3 WORKERS)
+                    POOL 2: SUBMISSIONS ONLY (4 WORKERS)
                   </strong>
                 </div>
                 <span style={{
@@ -1373,12 +1360,12 @@ export default function DeveloperDashboard() {
                   color: (workerPool.submittingActive || 0) > 0 ? '#34d399' : '#94a3b8',
                   border: (workerPool.submittingActive || 0) > 0 ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.25)',
                 }}>
-                  {(workerPool.submittingActive || 0)} / 3 ACTIVE
+                  {(workerPool.submittingActive || 0)} / 4 ACTIVE
                 </span>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {[1, 2, 3].map((slot) => {
+                {[1, 2, 3, 4].map((slot) => {
                   const wid = `submitting_worker_${slot}`;
                   const w = (workerPool.submitWorkers || []).find((row) => row.worker_id === wid) ||
                     (workerPool.workers || []).find((row) => row.worker_id === wid);
@@ -1731,10 +1718,11 @@ export default function DeveloperDashboard() {
                   {/* Worker Sub-Filter */}
                   <div style={{ display: 'flex', gap: '4px' }}>
                     {[
-                      { id: 'all', label: 'All Submissions (W1-3)' },
+                      { id: 'all', label: 'All Submissions (W1-4)' },
                       { id: 'submitting_worker_1', label: 'Worker 1' },
                       { id: 'submitting_worker_2', label: 'Worker 2' },
                       { id: 'submitting_worker_3', label: 'Worker 3' },
+                      { id: 'submitting_worker_4', label: 'Worker 4' },
                     ].map((w) => (
                       <button
                         key={w.id}
@@ -1807,7 +1795,7 @@ export default function DeveloperDashboard() {
                       const numMatch = (log.worker_num) || String(log.message || '').match(/(?:Worker\s*|submitting_worker_)(\d+)/i)?.[1];
                       if (numMatch) {
                         tagLabel = `Submit W${numMatch}`;
-                        tagColor = numMatch === '1' ? '#34d399' : (numMatch === '2' ? '#a3e635' : '#2dd4bf');
+                        tagColor = numMatch === '1' ? '#34d399' : (numMatch === '2' ? '#a3e635' : (numMatch === '3' ? '#2dd4bf' : '#38bdf8'));
                       }
 
                       return (

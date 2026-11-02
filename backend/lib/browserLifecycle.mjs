@@ -67,6 +67,9 @@ export function isGlobalStopRequested() {
 
 export function setScanStop(val) {
   scanStopRequested = Boolean(val);
+  if (scanStopRequested) {
+    abortAllActiveBrowsers();
+  }
 }
 
 export function isScanStopRequested() {
@@ -75,6 +78,9 @@ export function isScanStopRequested() {
 
 export function setSubmitStop(val) {
   submitStopRequested = Boolean(val);
+  if (submitStopRequested) {
+    abortAllActiveBrowsers();
+  }
 }
 
 export function isSubmitStopRequested() {
