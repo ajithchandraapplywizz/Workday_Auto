@@ -1469,9 +1469,9 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
  * Strictly 10 shared canonical workers (worker_1 through worker_10).
  */
 const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || [
-  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
-  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3',
-  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3',
+  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
+  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
+  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
 ];
 
 export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
@@ -1504,7 +1504,7 @@ export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
   if (CANONICAL_10_WORKERS.has(cleanId)) return cleanId;
 
   const numMatch = cleanId.match(/\d+/);
-  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), 3) : 1;
+  const num = numMatch ? Math.min(Math.max(parseInt(numMatch[0], 10), 1), 10) : 1;
 
   if (cleanId.includes('scan') || defaultStage === 'scanning') return `scanning_worker_${num}`;
   if (cleanId.includes('resolv') || defaultStage === 'resolving') return `resolving_worker_${num}`;

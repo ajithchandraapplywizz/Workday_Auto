@@ -2202,10 +2202,11 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       }
     }
 
+    const widTag = profile?._workerId ? `[${profile._workerId}] ` : '';
     if (refreshed) {
-      console.log(`\n📍 [Wizard Step ${currentIteration}] Page refreshed; re-detected Page: "${stepName}"`);
+      console.log(`\n📍 ${widTag}[Wizard Step ${currentIteration}] Page refreshed; re-detected Page: "${stepName}"`);
     } else {
-      console.log(`\n📍 [Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
+      console.log(`\n📍 ${widTag}[Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
     }
     profile._currentStep = stepName;
     profile._currentStepIndex = currentIteration;

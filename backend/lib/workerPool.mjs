@@ -441,8 +441,18 @@ export async function executeWorkerTask({
         answers: profile._resolvedAnswersMap ? Object.fromEntries(profile._resolvedAnswersMap.entries()) : {},
       };
 
+      profile._workerId = workerId;
       profile._onStepChange = (iteration, stepName) => {
         appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
+        console.log(`\n📍 [${workerId}] ──────────────────────────────────────────────────────────`);
+        console.log(`📍 [${workerId}] 🚶 WIZARD STEP ${iteration}: "${String(stepName || '').toUpperCase()}"`);
+        console.log(`📍 [${workerId}]    Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+        console.log(`📍 [${workerId}] ──────────────────────────────────────────────────────────\n`);
+        updateWorkerStatus(workerId, {
+          state: 'in_flight',
+          current_application_id: `${applywizzId} [Step ${iteration}: ${stepName}]`,
+          stage: 'submitting',
+        }).catch(() => {});
       };
 
       profile._isScanOnly = false;
@@ -781,8 +791,18 @@ export async function executeWorkerTask({
     appLog(7, `LLM Reasoning: Generating structured answers for ${questionsCount} form fields using candidate knowledge and JD context.`);
 
     // Hook wizard step changes for live frontend execution trace
+    profile._workerId = workerId;
     profile._onStepChange = (iteration, stepName) => {
       appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
+      console.log(`\n📍 [${workerId}] ──────────────────────────────────────────────────────────`);
+      console.log(`📍 [${workerId}] 🚶 WIZARD STEP ${iteration}: "${String(stepName || '').toUpperCase()}"`);
+      console.log(`📍 [${workerId}]    Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+      console.log(`📍 [${workerId}] ──────────────────────────────────────────────────────────\n`);
+      updateWorkerStatus(workerId, {
+        state: 'in_flight',
+        current_application_id: `${applywizzId} [Step ${iteration}: ${stepName}]`,
+        stage: 'scanning',
+      }).catch(() => {});
     };
 
     // Save local plan backup

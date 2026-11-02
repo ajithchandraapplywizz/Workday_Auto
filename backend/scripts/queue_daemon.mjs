@@ -536,20 +536,17 @@ async function runStage3Submissions() {
     print10SubmissionMilestoneReport,
   } = await import('../lib/submissionWorkerPool.mjs');
 
-  const submitWorkers = (SUBMISSION_WORKER_IDS || []).slice(0, 2);
-  const maxConcurrency = Math.min(submitWorkers.length, 2);
+  const submitWorkers = (SUBMISSION_WORKER_IDS || []);
+  const maxConcurrency = submitWorkers.length;
 
   console.log(`\n🚀 [DAEMON] Checking for ready applications to submit across ${maxConcurrency} parallel workers (${submitWorkers.join(', ')})...`);
 
   // 1. Recover any interrupted tasks from previous daemon lifecycle
   await recoverInterruptedSubmissionTasks().catch(() => {});
 
-  // 2. Sync all ready_for_review applications from job_distributions into submission_tasks
-  await syncJobDistributionsToSubmissionTasks().catch(console.error);
-
-  // 3. Check remaining tasks count
+  // 2. Check remaining tasks count directly from job_distributions (no pre-sync needed)
   const { count: initialCount } = await supabase
-    .from('submission_tasks')
+    .from('job_distributions')
     .select('*', { count: 'exact', head: true })
     .in('status', ['ready_for_review', 'queued', 'applying']);
 
@@ -612,7 +609,7 @@ async function runStage3Submissions() {
               company: claimedTask.company,
               status: res?.status || 'submitted',
               reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
-              screenshotUrl: res?.screenshotUrl || null,
+              screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
             });
             totalSubmissionsCompleted++;
             if (submissionCycleResults.length >= 10) {
@@ -638,24 +635,12 @@ async function runStage3Submissions() {
     // Auto-off check: if no tasks were claimed and no workers are currently running
     if (!claimedAny && activeSubmittingWorkers.size === 0) {
       const { data: remaining } = await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .select('id')
         .in('status', ['ready_for_review', 'queued', 'applying'])
         .limit(1);
 
       if (!remaining || remaining.length === 0) {
-        // Double check job_distributions in case unsynced rows exist
-        const { data: moreDists } = await supabase
-          .from('job_distributions')
-          .select('id')
-          .eq('status', 'ready_for_review')
-          .limit(1);
-
-        if (moreDists && moreDists.length > 0) {
-          await syncJobDistributionsToSubmissionTasks().catch(() => {});
-          continue;
-        }
-
         console.log(`\n✅ [DAEMON] All submission tasks finished. Submit toggle turning OFF automatically.`);
         break;
       }
@@ -1649,9 +1634,9 @@ export async function dispatchQueuedSubmissions() {
   try {
     const { SUBMISSION_WORKER_IDS, claimNextTask, processClaimedTask, moveReadyTasksToQueued, print10SubmissionMilestoneReport } = await import('../lib/submissionWorkerPool.mjs');
 
-    // Strictly 2 submitting workers batch-wise
-    const submitWorkers = (SUBMISSION_WORKER_IDS || []).slice(0, 2);
-    const maxConcurrency = Math.min(submitWorkers.length, 2);
+    // Submitting workers assigned to this service
+    const submitWorkers = (SUBMISSION_WORKER_IDS || []);
+    const maxConcurrency = submitWorkers.length;
     // Workers claim directly from ready_for_review -> applying without bulk queueing.
 
     let claimedAny = false;
@@ -1680,7 +1665,7 @@ export async function dispatchQueuedSubmissions() {
               company: claimedTask.company,
               status: res?.status || 'submitted',
               reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
-              screenshotUrl: res?.screenshotUrl || null,
+              screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
             });
             totalSubmissionsCompleted++;
             if (submissionCycleResults.length >= 10) {
@@ -1706,7 +1691,7 @@ export async function dispatchQueuedSubmissions() {
     // Auto-off: when no tasks claimed and no active workers, check if any ready_for_review or queued remain
     if (!claimedAny && activeSubmittingWorkers.size === 0) {
       const { data: remaining } = await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .select('id')
         .in('status', ['ready_for_review', 'queued', 'applying'])
         .limit(1);

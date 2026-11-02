@@ -1154,24 +1154,37 @@ export async function fetchAutomationTrace(param = {}) {
  * - Batch 2: Resolving (resolving_worker_1, 2, 3)
  * - Batch 3: Submitting (submitting_worker_1, 2, 3)
  */
-export function getBackendBaseUrl() {
-  let url = '';
-  if (typeof window !== 'undefined') {
-    const custom = window.localStorage.getItem('WORKDAY_BACKEND_URL') || window.localStorage.getItem('VITE_BACKEND_URL');
-    if (custom && custom.trim()) {
-      url = custom.trim();
+export function getBackendBaseUrls() {
+  const urls = [];
+  function add(raw) {
+    if (!raw) return;
+    const parts = String(raw).split(',').map((s) => s.trim()).filter(Boolean);
+    for (let u of parts) {
+      u = u.replace(/\/+$/, '');
+      if (!u.startsWith('http://') && !u.startsWith('https://')) {
+        u = 'https://' + u;
+      }
+      if (!urls.includes(u)) urls.push(u);
     }
   }
-  if (!url) {
-    const envUrl = (typeof import.meta !== 'undefined' && (import.meta.env?.VITE_BACKEND_URL || import.meta.env?.VITE_API_URL)) || '';
-    url = String(envUrl).trim();
+
+  if (typeof window !== 'undefined') {
+    add(window.localStorage.getItem('WORKDAY_BACKEND_URL'));
+    add(window.localStorage.getItem('VITE_BACKEND_URL'));
+    add(window.localStorage.getItem('WORKDAY_BACKEND_URL_2'));
+    add(window.localStorage.getItem('VITE_BACKEND_URL_2'));
   }
-  if (!url) return '';
-  url = url.replace(/\/+$/, '');
-  if (!url.startsWith('http://') && !url.startsWith('https://')) {
-    url = 'https://' + url;
+  if (typeof import.meta !== 'undefined' && import.meta.env) {
+    add(import.meta.env.VITE_BACKEND_URL);
+    add(import.meta.env.VITE_API_URL);
+    add(import.meta.env.VITE_BACKEND_URL_2);
   }
-  return url;
+  return urls;
+}
+
+export function getBackendBaseUrl() {
+  const urls = getBackendBaseUrls();
+  return urls.length > 0 ? urls[0] : '';
 }
 
 export function isLocalEnvironment() {
@@ -1263,13 +1276,14 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       return null;
     };
 
+    const baseUrls = getBackendBaseUrls();
     const localTargets = isLocal ? [
       fetchLogEndpoint('http://localhost:3001/api/bot/logs'),
       fetchLogEndpoint('http://localhost:3002/api/bot/logs'),
     ] : [];
-    const baseTarget = backendBase ? [fetchLogEndpoint(`${backendBase}/api/bot/logs`)] : [];
+    const remoteTargets = baseUrls.map((b) => fetchLogEndpoint(`${b}/api/bot/logs`));
 
-    const results = await Promise.allSettled([...localTargets, ...baseTarget]);
+    const results = await Promise.allSettled([...localTargets, ...remoteTargets]);
     let anyLive = false;
 
     for (const r of results) {
@@ -1402,7 +1416,7 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         supabase.from('bot_control').select('*').eq('id', 'primary').maybeSingle(),
         supabase.from('scanned_jobs').select('id, company, role_title, job_url, question_count, scraped_questions, created_at, updated_at').order('created_at', { ascending: false }).limit(30),
         supabase.from('job_distributions').select('id, applywizz_id, company, role_title, status, created_at, updated_at').order('updated_at', { ascending: false }).limit(30),
-        supabase.from('submission_tasks').select('id, applywizz_id, company, role_title, status, error_message, created_at, updated_at').order('updated_at', { ascending: false }).limit(30),
+        supabase.from('submission_tasks').select('id, applywizz_id, company, role_title, status, error_message, worker_id, created_at, updated_at').order('updated_at', { ascending: false }).limit(40),
       ]);
 
       const scanningLogs = [];
@@ -1496,15 +1510,19 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
           const isBusy = st.status === 'applying';
           const icon = isDone ? '✅' : (isFail ? '❌' : (isBusy ? '🚀' : '📋'));
 
+          const wid = String(st.worker_id || '').trim() || 'submitting_worker_1';
+          const match = wid.match(/\d+/);
+          const workerNum = match ? parseInt(match[0], 10) : 1;
+
           submittingLogs.push({
             id: 'st-' + st.id,
             ts: st.updated_at || st.created_at || new Date().toISOString(),
             created_at: st.updated_at || st.created_at || new Date().toISOString(),
-            message: `[Submissions Pool] ${icon} [${String(st.status || '').toUpperCase()}] ${st.applywizz_id} @ ${st.company || 'Employer'} - "${st.role_title || 'Role'}" ${st.error_message ? `| Info: ${st.error_message}` : ''}`,
+            message: `[Submissions Pool] ${icon} [${String(st.status || '').toUpperCase()}] [${wid}] ${st.applywizz_id} @ ${st.company || 'Employer'} - "${st.role_title || 'Role'}" ${st.error_message ? `| Info: ${st.error_message}` : ''}`,
             level: isFail ? 'error' : 'info',
             cluster: 'Submit',
-            worker_id: 'submitting_worker_1',
-            worker_num: 1,
+            worker_id: wid,
+            worker_num: workerNum,
             step_index: isDone ? 5 : (isFail ? 99 : 4),
           });
         }

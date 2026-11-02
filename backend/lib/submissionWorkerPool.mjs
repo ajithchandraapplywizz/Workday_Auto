@@ -81,14 +81,22 @@ export async function updateSubmissionTaskWithCheck({
       }
 
       if (!data || data.length === 0) {
-        // Fallback: update by ID directly in case lease reaper or transient state reset it
-        const { data: fbData } = await supabase
+        // Fallback: update by distribution_id or id directly in case lease reaper or transient state reset it
+        let { data: fbData } = await supabase
           .from('submission_tasks')
           .update(cleanPatch)
-          .eq('id', cleanTaskId)
+          .eq('distribution_id', cleanTaskId)
           .select('*');
+        if (!fbData || fbData.length === 0) {
+          const res = await supabase
+            .from('submission_tasks')
+            .update(cleanPatch)
+            .eq('id', cleanTaskId)
+            .select('*');
+          fbData = res.data;
+        }
         if (fbData && fbData.length > 0) {
-          console.log(`[${workerId}] task row updated via ID fallback (rows=${fbData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
+          console.log(`[${workerId}] task row updated via ID/distId fallback (rows=${fbData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
           return { success: true, data: fbData[0], rowsCount: fbData.length };
         }
         lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} was not in 'applying' state or worker_id mismatch (expected ${workerId})`);
@@ -171,55 +179,10 @@ export async function updateJobDistributionWithCheck({
 
 /**
  * Synchronize all ready_for_review applications from job_distributions into submission_tasks.
+ * Bypass: User explicit policy — tasks are picked directly from job_distributions without comparison or pre-sync.
  */
 export async function syncJobDistributionsToSubmissionTasks() {
-  if (!supabase) return 0;
-  const now = new Date().toISOString();
-  try {
-    const { data: readyDists, error: distErr } = await supabase
-      .from('job_distributions')
-      .select('id, applywizz_id, job_url, company, role_title')
-      .eq('status', 'ready_for_review');
-
-    const { data: existingTasks } = await supabase
-      .from('submission_tasks')
-      .select('applywizz_id, job_url');
-
-    const cleanAwl = (id) => String(id || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-    const existingKeys = new Set((existingTasks || []).map((t) => `${cleanAwl(t.applywizz_id)}:::${t.job_url}`));
-    const toInsert = readyDists
-      .filter((d) => !existingKeys.has(`${cleanAwl(d.applywizz_id)}:::${d.job_url}`))
-      .map((d) => ({
-        distribution_id: d.id,
-        applywizz_id: cleanAwl(d.applywizz_id),
-        job_url: d.job_url,
-        company: d.company,
-        role_title: d.role_title,
-        status: 'ready_for_review',
-        created_at: now,
-        updated_at: now,
-      }));
-
-    if (toInsert.length > 0) {
-      console.log(`[SUBMISSION POOL] Syncing ${toInsert.length} ready_for_review application(s) from job_distributions into submission_tasks...`);
-      for (let i = 0; i < toInsert.length; i += 100) {
-        const chunk = toInsert.slice(i, i + 100);
-        try {
-          const { error } = await supabase
-            .from('submission_tasks')
-            .upsert(chunk, { onConflict: 'distribution_id', ignoreDuplicates: true });
-          if (error) console.warn('[SUBMISSION POOL] Sync chunk error:', error.message);
-        } catch (err) {
-          console.warn('[SUBMISSION POOL] Sync chunk exception:', err.message);
-        }
-      }
-      console.log(`[SUBMISSION POOL] Successfully synced ${toInsert.length} applications into submission_tasks.`);
-    }
-    return toInsert.length;
-  } catch (err) {
-    console.warn('[SUBMISSION POOL] syncJobDistributionsToSubmissionTasks error:', err.message);
-    return 0;
-  }
+  return 0;
 }
 
 /**
@@ -244,12 +207,15 @@ export async function claimNextTask(workerId) {
   const controls = await getWorkerControls().catch(() => null);
   if (controls?.submit?.stop_requested) return null;
   const now = new Date().toISOString();
-  const maxConcurrent = Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
+  const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
+    Number(process.env.GLOBAL_WORKER_COUNT) ||
+    Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
+    Math.max(4, (Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2) * 2);
 
-  // R4 Rule: Refuse immediately if maxConcurrent rows are already applying
+  // Cluster Concurrency Guard: Refuse only if global cluster capacity is reached
   try {
     const { count: applyingCount } = await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .select('*', { count: 'exact', head: true })
       .eq('status', 'applying');
 
@@ -258,13 +224,13 @@ export async function claimNextTask(workerId) {
     }
   } catch {}
 
-  // 1. Direct atomic CAS (Compare-And-Swap on oldest ready_for_review or queued row)
+  // 1. Direct atomic CAS on job_distributions (Candidate picking strictly from job_distributions without pre-sync)
   try {
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
     // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt)
     let { data: candidates, error: candErr } = await supabase
-      .from('submission_tasks')
-      .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
+      .from('job_distributions')
+      .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
       .in('status', ['ready_for_review', 'queued'])
       .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
       .order('created_at', { ascending: true })
@@ -272,9 +238,9 @@ export async function claimNextTask(workerId) {
 
     // 2. Only after all 0th attempt applications have finished processing, claim deferred Attempt 1 retries
     if (!candidates || candidates.length === 0) {
-      const { data: retryCandidates, error: retryErr } = await supabase
-        .from('submission_tasks')
-        .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
+      const { data: retryCandidates } = await supabase
+        .from('job_distributions')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
         .order('created_at', { ascending: true })
@@ -284,9 +250,9 @@ export async function claimNextTask(workerId) {
 
     // 3. Only after all Attempt 1 retries have finished processing, claim deferred Attempt 2 retries
     if (!candidates || candidates.length === 0) {
-      const { data: retryCandidates2, error: retryErr2 } = await supabase
-        .from('submission_tasks')
-        .select('id, status, distribution_id, applywizz_id, job_url, company, role_title, error_message')
+      const { data: retryCandidates2 } = await supabase
+        .from('job_distributions')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
         .order('created_at', { ascending: true })
@@ -297,14 +263,12 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) return null;
 
     for (const cand of candidates) {
-      // Atomic claim on candidate row
+      // Atomic claim directly on job_distributions row
       const { data: claimed, error: claimErr } = await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .update({
           status: 'applying',
           worker_id: workerId,
-          started_at: now,
-          worker_leased_at: now,
           updated_at: now,
         })
         .eq('id', cand.id)
@@ -312,41 +276,49 @@ export async function claimNextTask(workerId) {
         .select('*');
 
       if (!claimErr && claimed && claimed.length > 0) {
-        const claimedTask = claimed[0];
+        const claimedDist = claimed[0];
 
-        // CRITICAL ANTI-COLLISION: Atomically lock matching job_distributions record to 'applying'
+        // Format task object for worker execution
+        const claimedTask = {
+          id: claimedDist.id,
+          distribution_id: claimedDist.id,
+          applywizz_id: claimedDist.applywizz_id,
+          job_url: claimedDist.job_url,
+          company: claimedDist.company,
+          role_title: claimedDist.role_title,
+          status: 'applying',
+          error_message: claimedDist.error_message,
+          resolved_answers: claimedDist.resolved_answers || claimedDist.resolved_answers_json,
+          worker_id: workerId,
+          started_at: now,
+        };
+
+        // Mirror status to submission_tasks table without requiring prior sync
         try {
-          if (claimedTask.distribution_id) {
-            await supabase
-              .from('job_distributions')
-              .update({
-                status: 'applying',
-                worker_id: workerId,
-                updated_at: now,
-              })
-              .eq('id', claimedTask.distribution_id)
-              .in('status', ['ready_for_review', 'queued']);
-          } else if (claimedTask.applywizz_id && claimedTask.job_url) {
-            await supabase
-              .from('job_distributions')
-              .update({
-                status: 'applying',
-                worker_id: workerId,
-                updated_at: now,
-              })
-              .eq('applywizz_id', claimedTask.applywizz_id)
-              .eq('job_url', claimedTask.job_url)
-              .in('status', ['ready_for_review', 'queued']);
-          }
-        } catch (distLockErr) {
-          console.warn(`[${workerId}] Warning updating job_distributions status to applying:`, distLockErr?.message);
+          const cleanAwl = String(claimedDist.applywizz_id || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          await supabase
+            .from('submission_tasks')
+            .upsert({
+              distribution_id: claimedDist.id,
+              applywizz_id: cleanAwl,
+              job_url: claimedDist.job_url,
+              company: claimedDist.company,
+              role_title: claimedDist.role_title,
+              status: 'applying',
+              worker_id: workerId,
+              started_at: now,
+              worker_leased_at: now,
+              updated_at: now,
+            }, { onConflict: 'distribution_id' });
+        } catch (stErr) {
+          console.warn(`[${workerId}] Warning updating submission_tasks to applying:`, stErr?.message);
         }
 
         return claimedTask;
       }
     }
   } catch (err) {
-    console.warn(`[claimNextTask] Error claiming for ${workerId}:`, err.message);
+    console.warn(`[claimNextTask] Error claiming directly from job_distributions for ${workerId}:`, err.message);
   }
 
   return null;
@@ -635,7 +607,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       /already applied|already submitted/i.test(result?.reason || '')
     );
 
-    let finalShotUrl = result?.screenshotUrl || null;
+    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || null;
     let finalStoragePath = result?.screenshotPath || null;
     if (!finalStoragePath && finalShotUrl) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
@@ -643,6 +615,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
       // Flat filename directly in bucket root
       finalStoragePath = `${compPrefix}_${task.id}.png`;
+    }
+    if (result && typeof result === 'object') {
+      result.screenshotUrl = finalShotUrl;
+      result.screenshotPath = finalStoragePath;
     }
 
     if (isSuccess) {
@@ -1010,8 +986,19 @@ export function print10ClientSubmissionMilestoneReport({ cycleIndex = 1, cycleSt
     const isSuccess = item.status === 'submitted' || item.status === 'success';
     const st = (isSuccess ? 'SUBMITTED' : 'FAILED').padEnd(12);
     const reason = String(item.reason || item.error || (isSuccess ? 'Application Confirmed' : 'Submission error')).slice(0, 28).padEnd(28);
-    const shot = item.screenshotUrl || item.screenshotPath || 'None';
+    const shot = item.screenshotUrl || item.screenshotPath || item.application_submitted_screenshot_url || 'None';
     console.log(`${num} | ${awlId} | ${comp} | ${st} | ${reason} | ${shot}`);
+  });
+
+  console.log(`\n📸 [10-SUBMISSION BATCH PROOF SCREENSHOTS — CYCLE #${cycleIndex}]`);
+  items.forEach((item, idx) => {
+    const num = cycleStartNum + idx;
+    const awl = item.applywizz_id || item.applywizzId || 'AWL';
+    const comp = item.company || 'Workday Partner';
+    const shot = item.screenshotUrl || item.screenshotPath || item.application_submitted_screenshot_url || 'No screenshot captured';
+    const isSuccess = item.status === 'submitted' || item.status === 'success';
+    const stIcon = isSuccess ? '✅ SUBMITTED' : '❌ FAILED';
+    console.log(`   [#${num}] ${stIcon} | ${awl} @ ${comp} ➔ Screenshot URL: ${shot}`);
   });
 
   console.log(`${'─'.repeat(120)}`);
