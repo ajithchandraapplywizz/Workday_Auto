@@ -62,25 +62,11 @@ export async function getApplicationsList({
   // 1. Fetch job_distributions
   const { data: jobDists, error: jdErr } = await supabase
     .from('job_distributions')
-    .select('id, applywizz_id, job_url, company, role_title, status, error_message, updated_at, created_at, application_submitted_screenshot_url');
+    .select('id, applywizz_id, job_url, company, role_title, status, error_message, updated_at, created_at, completed_at, application_submitted_screenshot_url');
 
   if (jdErr) throw jdErr;
 
-  // 2. Fetch submission_tasks
-  const { data: subTasks, error: stErr } = await supabase
-    .from('submission_tasks')
-    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, error_message, created_at, started_at, completed_at, updated_at, screenshot_path');
-
-  if (stErr) throw stErr;
-
-  const taskMap = new Map();
-  for (const t of subTasks || []) {
-    if (t.distribution_id) {
-      taskMap.set(t.distribution_id, t);
-    }
-  }
-
-  // 3. Mapping setup: clients -> operators -> managers
+  // 2. Mapping setup: clients -> operators -> managers
   const { data: allClients, error: clientsErr } = await supabase
     .from('clients')
     .select('applywizz_id, current_ca_email, ca_email');
@@ -117,8 +103,7 @@ export async function getApplicationsList({
   const matchedApps = [];
 
   for (const jd of jobDists || []) {
-    const task = taskMap.get(jd.id);
-    let effectiveStatus = String((task ? task.status : jd.status) || 'unknown').toLowerCase().trim();
+    let effectiveStatus = String(jd.status || 'unknown').toLowerCase().trim();
     if (effectiveStatus === 'ready_to_review') effectiveStatus = 'ready_for_review';
 
     // Status filter
@@ -130,7 +115,7 @@ export async function getApplicationsList({
     if (normStatus === 'running' && effectiveStatus !== 'running' && effectiveStatus !== 'applying') continue;
 
     // Timestamp resolution
-    const statusTimeIso = task?.completed_at || task?.updated_at || jd.updated_at || jd.created_at || new Date().toISOString();
+    const statusTimeIso = jd.completed_at || jd.updated_at || jd.created_at || new Date().toISOString();
 
     // CA / Manager lookup
     const client = clientMap.get(jd.applywizz_id);
@@ -155,32 +140,30 @@ export async function getApplicationsList({
     // 'all' has no date constraint
 
     // Error and screenshot metadata
-    const rawError = task?.error_message || jd.error_message || '';
+    const rawError = jd.error_message || '';
     const failureCategory = effectiveStatus === 'failed' ? classifyFailure(rawError) : null;
     const errorSnippet = rawError ? String(rawError).slice(0, 120) : '';
 
-    const screenshotLink = task?.screenshot_path ||
-      jd.application_submitted_screenshot_url ||
-      null;
+    const screenshotLink = jd.application_submitted_screenshot_url || null;
     const hasScreenshot = Boolean(screenshotLink);
 
     // CA field: blank string if unassigned
     const caDisplay = op?.name ? op.name : (caEmail ? caEmail : '');
 
     matchedApps.push({
-      id: task?.id || jd.id,
+      id: jd.id,
       distribution_id: jd.id,
       status: effectiveStatus,
-      applywizz_id: jd.applywizz_id || task?.applywizz_id || '',
-      company: jd.company || task?.company || 'Unknown Company',
-      role: jd.role_title || task?.role_title || 'Workday Application',
+      applywizz_id: jd.applywizz_id || '',
+      company: jd.company || 'Unknown Company',
+      role: jd.role_title || 'Workday Application',
       status_time: statusTimeIso,
       ca: caDisplay,
       failure_category: failureCategory,
       error_message: errorSnippet,
       has_screenshot: hasScreenshot,
       screenshot_link: screenshotLink,
-      job_url: jd.job_url || task?.job_url || null,
+      job_url: jd.job_url || null,
     });
   }
 

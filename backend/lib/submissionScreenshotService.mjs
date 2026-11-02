@@ -79,9 +79,9 @@ export async function recordTaskSubmissionProof({
     throw new Error(`Public URL verification failed: URL '${publicUrl}' does not contain task id '${cleanTaskId}'`);
   }
 
-  // 5. Single atomic statement:
-  // UPDATE submission_tasks SET status='submitted', application_submitted_screenshot_url=:URL,
-  // screenshot_path=:path, completed_at=now(), updated_at=now()
+  // 5. Single atomic statement directly on job_distributions:
+  // UPDATE job_distributions SET status='submitted', application_submitted_screenshot_url=:URL,
+  // completed_at=now(), updated_at=now()
   // WHERE id=:taskId AND status='applying' AND worker_id=:workerId
   let updatedTask = null;
   let lastErr = null;
@@ -96,7 +96,7 @@ export async function recordTaskSubmissionProof({
         updated_at: now,
       };
       const { data: rows, error: updateErr } = await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .update(patch)
         .eq('id', cleanTaskId)
         .eq('status', 'applying')
@@ -114,8 +114,17 @@ export async function recordTaskSubmissionProof({
         updatedTask = rows[0];
         break;
       } else {
-        // Zero rows updated (could be worker lease race or status change)
-        lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} may not be in 'applying' state for worker ${workerId}`);
+        // Fallback: update without status/worker_id condition if already updated
+        const { data: fbRows } = await supabase
+          .from('job_distributions')
+          .update(patch)
+          .eq('id', cleanTaskId)
+          .select('*');
+        if (fbRows && fbRows.length > 0) {
+          updatedTask = fbRows[0];
+          break;
+        }
+        lastErr = new Error(`Zero rows updated. job_distributions #${cleanTaskId} may not be in 'applying' state for worker ${workerId}`);
       }
     } catch (err) {
       lastErr = err;
@@ -124,24 +133,7 @@ export async function recordTaskSubmissionProof({
   }
 
   if (!updatedTask) {
-    throw (lastErr || new Error(`Failed to update task #${cleanTaskId} after ${maxRetries} attempts`));
-  }
-
-  // Mirror to job_distributions if distribution_id is present
-  if (updatedTask.distribution_id) {
-    const now = new Date().toISOString();
-    try {
-      await supabase
-        .from('job_distributions')
-        .update({
-          status: 'submitted',
-          application_submitted_screenshot_url: publicUrl,
-          updated_at: now,
-        })
-        .eq('id', updatedTask.distribution_id);
-    } catch (distErr) {
-      console.warn(`[recordTaskSubmissionProof] Failed to mirror to job_distributions #${updatedTask.distribution_id}:`, distErr?.message);
-    }
+    throw (lastErr || new Error(`Failed to update job_distributions #${cleanTaskId} after ${maxRetries} attempts`));
   }
 
   console.log(`✅ [${workerId}] Submission proof recorded for Task #${cleanTaskId}:`);

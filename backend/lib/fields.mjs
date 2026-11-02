@@ -7,17 +7,56 @@
 
 import { isRiskyMisclickButton, safeClick, readButtonName } from './safeClick.mjs';
 
-// ─── Fuzzy text matching ────────────────────────────────────────────────────
+// ─── Fuzzy text matching & Single-Word Token Reference ─────────────────────────
 // Score how well two strings match (0 = no match, 1 = exact)
 export function fuzzyScore(needle, haystack) {
-  const a = needle.toLowerCase().trim();
-  const b = haystack.toLowerCase().trim();
-  if (a === b) return 1;
-  if (b.includes(a) || a.includes(b)) return 0.8;
-  const aWords = a.split(/\s+/);
-  const bWords = b.split(/\s+/);
+  if (!needle || !haystack) return 0;
+  const aRaw = String(needle).toLowerCase().trim();
+  const bRaw = String(haystack).toLowerCase().trim();
+  if (aRaw === bRaw) return 1;
+
+  // Normalized (strip punctuation, apostrophes like bachelor's -> bachelors)
+  const normA = aRaw.replace(/[’'"]/g, '').replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  const normB = bRaw.replace(/[’'"]/g, '').replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (normA === normB) return 1;
+
+  // Direct containment (e.g. "Bachelors" inside "Bachelor of Science" or vice-versa)
+  if (normB.includes(normA) || normA.includes(normB)) return 0.95;
+
+  // Single-word reference matching for high-frequency Workday question tokens:
+  // e.g. "bachelor", "master", "yes", "no", "authorized", "referral"
+  const KEYWORD_ROOTS = [
+    'bachelor', 'master', 'doctor', 'phd', 'associate', 'high school',
+    'yes', 'no',
+    'authorized', 'authorization', 'sponsorship', 'citizen',
+    'veteran', 'disability', 'hispanic', 'latino',
+    'male', 'female', 'decline',
+    'referral', 'linkedin', 'indeed', 'glassdoor', 'website'
+  ];
+
+  for (const root of KEYWORD_ROOTS) {
+    const hasA = normA.includes(root);
+    const hasB = normB.includes(root);
+    if (hasA && hasB) {
+      return 0.93;
+    }
+  }
+
+  // Single word token reference: if needle has a core word (length >= 3) and it appears in haystack
+  const aWords = normA.split(/\s+/).filter(w => w.length >= 3);
+  const bWords = normB.split(/\s+/).filter(w => w.length >= 3);
+
+  const hasExactWordMatch = aWords.some(aw => bWords.includes(aw));
+  if (hasExactWordMatch) {
+    return 0.88;
+  }
+
   const overlap = aWords.filter(w => bWords.some(bw => bw.includes(w) || w.includes(bw)));
-  return overlap.length / Math.max(aWords.length, bWords.length) * 0.6;
+  if (overlap.length > 0) {
+    return (overlap.length / Math.max(aWords.length, bWords.length, 1)) * 0.75;
+  }
+
+  return 0;
 }
 
 /**
@@ -706,7 +745,9 @@ export async function handleDropdown(page, element, value, label) {
 
       if (bestMatch && bestScore >= 0.3) {
         await bestMatch.click();
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(200);
+        await page.keyboard.press('Enter').catch(() => {});
+        await page.waitForTimeout(300);
         try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
 
         const optVerified = await verifyDropdownFilled(page, element, value);
@@ -749,7 +790,9 @@ export async function handleDropdown(page, element, value, label) {
 
     if (bestMatch && bestScore >= 0.3) {
       await bestMatch.click();
-      await page.waitForTimeout(600);
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(400);
       const verified = await verifyDropdownFilled(page, element, value);
       return { success: verified, method: verified ? 'click-scan' : 'click-scan-unverified', score: bestScore };
     }

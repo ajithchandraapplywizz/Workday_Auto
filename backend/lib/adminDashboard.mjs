@@ -315,51 +315,11 @@ export async function getAdminDashboardData(opts = 'all', optFrom = null, optTo 
     };
   });
 
-  // 3. Execution Tasks from submission_tasks (Source of Truth)
-  // Date filter applies to submission_tasks.updated_at
-  let subQuery = supabase
-    .from('submission_tasks')
-    .select('id, status, error_message, updated_at, created_at, completed_at');
-
-  if (boundsStartIso) {
-    subQuery = subQuery.gte('updated_at', boundsStartIso);
-  }
-  if (boundsEndIso) {
-    subQuery = subQuery.lte('updated_at', boundsEndIso);
-  }
-
-  const { data: subTasks, error: subErr } = await subQuery;
-  if (subErr) throw subErr;
-
-  const taskCounts = {
-    submitted: 0,
-    failed: 0,
-    ready_for_review: 0,
-    queued: 0,
-    applying: 0,
-  };
-
-  let zohoUnlinkedCount = 0;
-
-  for (const t of subTasks || []) {
-    const s = String(t.status || '').toLowerCase().trim();
-    if (s === 'submitted') taskCounts.submitted++;
-    else if (s === 'failed') taskCounts.failed++;
-    else if (s === 'ready_for_review') taskCounts.ready_for_review++;
-    else if (s === 'queued') taskCounts.queued++;
-    else if (s === 'applying') taskCounts.applying++;
-
-    const errMsg = String(t.error_message || '').toLowerCase();
-    if (errMsg.includes('zoho') || errMsg.includes('mailbox')) {
-      zohoUnlinkedCount++;
-    }
-  }
-
-  // Also read needs_answers from job_distributions
+  // 3. Execution Tasks from job_distributions (Single Source of Truth)
+  // Date filter applies to job_distributions.updated_at
   let distQuery = supabase
     .from('job_distributions')
-    .select('id, status, updated_at')
-    .eq('status', 'needs_answers');
+    .select('id, status, error_message, updated_at, created_at, completed_at');
 
   if (boundsStartIso) {
     distQuery = distQuery.gte('updated_at', boundsStartIso);
@@ -368,9 +328,36 @@ export async function getAdminDashboardData(opts = 'all', optFrom = null, optTo 
     distQuery = distQuery.lte('updated_at', boundsEndIso);
   }
 
-  const { data: needsAnswersRows, error: distErr } = await distQuery;
+  const { data: jobDists, error: distErr } = await distQuery;
   if (distErr) throw distErr;
-  const needsAnswersCount = (needsAnswersRows || []).length;
+
+  const taskCounts = {
+    submitted: 0,
+    failed: 0,
+    ready_for_review: 0,
+    queued: 0,
+    applying: 0,
+    needs_answers: 0,
+  };
+
+  let zohoUnlinkedCount = 0;
+
+  for (const t of jobDists || []) {
+    const s = String(t.status || '').toLowerCase().trim();
+    if (s === 'submitted') taskCounts.submitted++;
+    else if (s === 'failed') taskCounts.failed++;
+    else if (s === 'ready_for_review' || s === 'ready_to_review') taskCounts.ready_for_review++;
+    else if (s === 'queued') taskCounts.queued++;
+    else if (s === 'applying') taskCounts.applying++;
+    else if (s === 'needs_answers') taskCounts.needs_answers++;
+
+    const errMsg = String(t.error_message || '').toLowerCase();
+    if (errMsg.includes('zoho') || errMsg.includes('mailbox')) {
+      zohoUnlinkedCount++;
+    }
+  }
+
+  const needsAnswersCount = taskCounts.needs_answers;
 
   // 4. Answer Sources Breakdown
   const answerSources = await computeAnswerSources(boundsStartIso, boundsEndIso, range);
@@ -408,7 +395,7 @@ export async function getAdminDashboardData(opts = 'all', optFrom = null, optTo 
       queued: taskCounts.queued,
       applying: taskCounts.applying,
       needs_answers: needsAnswersCount,
-      timestamp_column: 'submission_tasks.updated_at',
+      timestamp_column: 'job_distributions.updated_at',
     },
     answerSources,
     integrations,

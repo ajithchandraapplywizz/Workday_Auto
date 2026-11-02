@@ -119,6 +119,30 @@ export function matchDemographicOption(answer, options = []) {
       || n.startsWith(`${wanted},`) || n.startsWith(`${stripped},`);
   });
   if (uniquePrefix.length === 1) return uniquePrefix[0];
+
+  // Aggressive single-token / root-word match (e.g. "Asian" ↔ "Asian (Not Hispanic or Latino)")
+  const significantTokens = (wanted || '')
+    .split(/[\s,()/-]+/)
+    .map((t) => t.trim().toLowerCase())
+    .filter((t) => t.length >= 3 && !['not', 'and', 'the', 'for', 'are', 'you'].includes(t));
+
+  for (const tok of significantTokens) {
+    const tokenHits = cleaned.filter((o) => {
+      const n = normalizeDemoText(o);
+      const optTokens = n.split(/[\s,()/-]+/).map((x) => x.trim().toLowerCase());
+      return optTokens.includes(tok) || n.startsWith(tok);
+    });
+    if (tokenHits.length === 1) return tokenHits[0];
+  }
+
+  // Reverse match: if an option itself is a single root word present in wanted
+  for (const opt of cleaned) {
+    const n = normalizeDemoText(opt);
+    if (n.length >= 3 && wanted.includes(n)) {
+      return opt;
+    }
+  }
+
   return null;
 }
 

@@ -1624,12 +1624,13 @@ export async function verifyAndRepairPageValidation(page, stepName = '') {
       await page.keyboard.press('Escape').catch(() => {});
     }
 
-    // 2. Scan for fields that have text typed but show validation errors (uncommitted inputs)
-    const uncommittedInputs = await page.$$('input[aria-invalid="true"], textarea[aria-invalid="true"], [data-automation-id*="error"] input');
+    // 2. Scan for fields that have text typed but show validation errors or uncommitted required inputs
+    const uncommittedInputs = await page.$$(
+      'input[aria-invalid="true"], textarea[aria-invalid="true"], [data-automation-id*="error"] input, input[aria-required="true"]:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea[aria-required="true"]'
+    );
     for (const inp of uncommittedInputs) {
       const val = await inp.inputValue().catch(() => '');
       if (val && val.trim().length > 0) {
-        console.log(`  🔧 Pre-advance: re-committing uncommitted field with value "${val.slice(0, 25)}"...`);
         await inp.focus().catch(() => {});
         await page.keyboard.press('Enter').catch(() => {});
         await inp.evaluate((el) => {
@@ -1637,7 +1638,7 @@ export async function verifyAndRepairPageValidation(page, stepName = '') {
           el.dispatchEvent(new Event('change', { bubbles: true }));
           el.dispatchEvent(new Event('blur', { bubbles: true }));
         }).catch(() => {});
-        await page.waitForTimeout(150);
+        await page.waitForTimeout(100);
       }
     }
   } catch (err) {
@@ -1888,9 +1889,11 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       console.log(`     … and ${realHumanRequired.length - 8} more`);
     }
     if (confirmSubmit && !dryRun) {
-      return 'human-required';
+      console.log('  ⚡ [Direct Submission Policy] Human-required check bypassed at Review step. Proceeding immediately to submit application without blocking.');
+      // Direct submission mode: proceed straight to submit
+    } else {
+      console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
     }
-    console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
   }
 
   console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
@@ -2012,21 +2015,71 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   await waitForDomSettled(page);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
-  // Explicitly wait 2-5 sec for Workday confirmation screen to render dynamically
-  try {
-    await page.waitForFunction(() => {
-      const text = document.body?.innerText || '';
-      return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest/i.test(text) ||
-             !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
-    }, { timeout: 5000, polling: 300 });
-  } catch {}
-  await page.waitForTimeout(1000);
+  // Dynamic wait up to 25 seconds for Workday confirmation screen or URL redirect
+  console.log('  ⏳ Waiting dynamically for Workday confirmation screen or URL redirect (up to 25s)...');
+  profile?._onLog?.(5, 'Step 5: Waiting dynamically for Workday confirmation screen or URL redirect (up to 25s)...');
 
-  const confirmationFound = await page.evaluate(() => {
-    const text = document.body?.innerText || '';
-    return /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest/i.test(text) ||
-           !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
-  });
+  const confirmStart = Date.now();
+  let confirmationFound = false;
+  let isAlreadyApplied = false;
+
+  while (Date.now() - confirmStart < 25000) {
+    const checkState = await page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      const href = window.location.href || '';
+
+      const isSuccess =
+        /thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest/i.test(text) ||
+        /\/submitted|\/thankyou|\/application-submitted/i.test(href) ||
+        !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
+
+      const isApplied =
+        /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied|duplicate\s*application/i.test(text) ||
+        !!document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
+        Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim()));
+
+      const needsVerification =
+        /verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(text);
+
+      return { isSuccess, isApplied, needsVerification };
+    }).catch(() => ({ isSuccess: false, isApplied: false, needsVerification: false }));
+
+    if (checkState.isSuccess) {
+      confirmationFound = true;
+      break;
+    }
+    if (checkState.isApplied) {
+      isAlreadyApplied = true;
+      break;
+    }
+
+    if (checkState.needsVerification) {
+      console.log('  📧 Post-submit verification challenge detected — invoking Zoho Mail Reader...');
+      profile?._onLog?.(5, 'Step 5: Post-submit verification required. Polling Zoho Mail Reader for verification code/link...');
+      try {
+        const { resolveWorkdayVerification } = await import('./workdayVerification.mjs');
+        const email = profile?.personal?.email || profile?.personal?.company_email || profile?.email || '';
+        const pwd = profile?._workdayPassword || process.env.WORKDAY_PASSWORD || '';
+        const verResult = await resolveWorkdayVerification(page, {
+          email,
+          password: pwd,
+          company: profile?._company || '',
+          startTime: confirmStart - 30000,
+          timeoutMs: 50000,
+        });
+        if (verResult?.success) {
+          console.log('  ✅ Verification challenge solved via Zoho Mail! Resuming confirmation wait...');
+          await page.waitForTimeout(2000);
+          try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+          continue;
+        }
+      } catch (vErr) {
+        console.warn(`  ⚠️ Zoho verification error: ${vErr.message}`);
+      }
+    }
+
+    await page.waitForTimeout(400);
+  }
 
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
@@ -2042,14 +2095,6 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'submitted';
   }
 
-  // Detect if application was already submitted on Workday
-  const isAlreadyApplied = await page.evaluate(() => {
-    const text = document.body?.innerText || '';
-    return /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied|duplicate\s*application/i.test(text) ||
-           !!document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
-           Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim()));
-  }).catch(() => false);
-
   if (isAlreadyApplied) {
     profile?._onLog?.(5, 'Step 5: Workday verified: candidate has already applied to this position.');
     console.log('ℹ️ Application already applied on Workday!');
@@ -2063,14 +2108,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'already_applied';
   }
 
-  const bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-  if (/verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(bodyText)) {
-    console.log('Post-submit verification appeared — mailbox OTP is not connected (Zoho Mail can be added later).');
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'in_progress', failureReason: 'needs_manual_verification' }).catch(() => {});
-    return 'needs-manual-verification';
-  }
-
-  console.log('❌ Workday submission confirmation was not detected on page.');
+  console.log('❌ Workday submission confirmation was not detected on page within 25 seconds.');
   const failShot = await takeScreenshot(page, 'failed-submit-confirmation-missing', profile).catch(() => null);
   await recordClientApplication(profile, { url: canonicalJobUrl, status: 'failed', failureReason: 'submission_confirmation_missing', screenshotUrl: failShot }).catch(() => {});
   await cleanupClientResume(profile);
@@ -2229,6 +2267,23 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
           }
           if (authOk === 'mailbox_not_connected') return 'skipped';
           if (!authOk) return 'auth-failed';
+        }
+      }
+      if (!await isWorkdayWizardVisible(page)) {
+        const curUrl = page.url();
+        if (curUrl.includes('/candidate-home') || curUrl.includes('/home') || curUrl.endsWith('.com/') || curUrl.endsWith('.com')) {
+          console.log(`   🔄 Post-auth redirected to home page (${curUrl}) — re-navigating to canonical jobUrl and refreshing DOM...`);
+          await page.goto(profile._canonicalJobUrl, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+          await page.waitForTimeout(2000);
+          await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+          await page.waitForTimeout(2000);
+        } else {
+          const bodyLen = await page.evaluate(() => document.body?.innerText?.trim()?.length || 0).catch(() => 0);
+          if (bodyLen < 150) {
+            console.log('   🔄 Post-auth page content sparse (<150 chars) — refreshing page once...');
+            await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
+            await page.waitForTimeout(2000);
+          }
         }
       }
       stepName = await detectWorkdayStep(page);

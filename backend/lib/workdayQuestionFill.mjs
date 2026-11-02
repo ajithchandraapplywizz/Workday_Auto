@@ -890,6 +890,22 @@ async function pickWorkdayPromptOption(page, answer, labelText = '') {
     if (await clickFirstVisible(loose)) return true;
   }
 
+  // Aggressive single-token match: if candidate has a key root word like "Asian", match any option containing it
+  const isYesNo = /^(yes|no)$/i.test(String(answer || '').trim());
+  if (!isYesNo) {
+    const rawTokens = [String(answer), ...candidates]
+      .join(' ')
+      .split(/[\s,()/-]+/)
+      .map((t) => t.trim())
+      .filter((t) => t.length >= 3 && !/^(not|and|the|for|are|you|with|from|this|that|have|been|will|would|please|select)$/i.test(t));
+    const uniqueTokens = [...new Set(rawTokens)];
+
+    for (const tok of uniqueTokens) {
+      const tokenMatch = page.locator(OPTION_SELECTOR).filter({ hasText: new RegExp(`\\b${escapeRe(tok)}\\b`, 'i') });
+      if (await clickFirstVisible(tokenMatch)) return true;
+    }
+  }
+
   if (!looseCandidates.length) return false;
   const picked = await clickVisiblePromptOption(page, looseCandidates);
   return Boolean(picked);
@@ -2226,32 +2242,67 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         }
       }
     } else if (fieldType === 'radio') {
-      const escaped = String(answer).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-      // A bare "No" must anchor to the leading word, otherwise it also matches
-      // a "Yes, I have been notified" option.
-      const answerRe = leadingYesNo(answer)
-        ? new RegExp(`^\\s*${escaped}\\b`, 'i')
-        : new RegExp(escaped, 'i');
+      const aStr = String(answer || '').trim();
+      const isYes = /^yes\b/i.test(aStr);
+      const isNo = /^no\b/i.test(aStr);
+      const isBachelor = /bachelor/i.test(aStr);
+      const isMaster = /master/i.test(aStr);
+
+      const escaped = aStr.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const answerRe = isYes
+        ? /^\s*yes\b/i
+        : isNo
+          ? /^\s*no\b/i
+          : isBachelor
+            ? /\bbachelor/i
+            : isMaster
+              ? /\bmaster/i
+              : leadingYesNo(aStr)
+                ? new RegExp(`^\\s*${escaped}\\b`, 'i')
+                : new RegExp(escaped, 'i');
+
       const radio = fieldBox.getByRole('radio', { name: answerRe }).first();
       if (await radio.isVisible({ timeout: 800 }).catch(() => false)) {
         await radio.click({ force: true });
+        await page.waitForTimeout(150);
+        await page.keyboard.press('Enter').catch(() => {});
         ok = true;
       } else {
         const opt = fieldBox.locator('label').filter({ hasText: answerRe }).first();
         if (await opt.isVisible().catch(() => false)) {
           await opt.click({ force: true });
+          await page.waitForTimeout(150);
+          await page.keyboard.press('Enter').catch(() => {});
           ok = true;
+        }
+      }
+      if (!ok) {
+        // Fallback: Check all radio labels in fieldBox using single-word token matching
+        const allRadios = await fieldBox.locator('label, [role="radio"]').all().catch(() => []);
+        for (const r of allRadios) {
+          const txt = (await r.textContent().catch(() => '') || '').trim();
+          if (txt && fuzzyScore(aStr, txt) >= 0.8) {
+            await r.click({ force: true }).catch(() => {});
+            await page.waitForTimeout(150);
+            await page.keyboard.press('Enter').catch(() => {});
+            ok = true;
+            break;
+          }
         }
       }
       if (!ok && /please\s+check\s+one\s+of\s+the\s+boxes|disability/i.test(label)) {
         const pageRadio = page.getByRole('radio', { name: answerRe }).first();
         if (await pageRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
           await pageRadio.click({ force: true });
+          await page.waitForTimeout(150);
+          await page.keyboard.press('Enter').catch(() => {});
           ok = true;
         } else {
           const pageLabel = page.locator('label').filter({ hasText: answerRe }).first();
           if (await pageLabel.isVisible({ timeout: 1000 }).catch(() => false)) {
             await pageLabel.click({ force: true });
+            await page.waitForTimeout(150);
+            await page.keyboard.press('Enter').catch(() => {});
             ok = true;
           }
         }
@@ -2382,6 +2433,11 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       skipped++;
       continue;
     }
+
+      if (shouldSkipOptionalFill(questionLabel, q, profile, stepName)) {
+        skipped++;
+        continue;
+      }
 
       const optionPreview = (q.options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean);
       console.log(`    🔎 Live parse [${q.fieldType}]: "${questionLabel.slice(0, 70)}"${optionPreview.length ? ` | options: ${optionPreview.slice(0, 6).join(', ')}${optionPreview.length > 6 ? ', ...' : ''}` : ' | input field'}`);

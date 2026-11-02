@@ -228,7 +228,7 @@ export async function pollZohoWorkdayAuth({
   company = '',
   cutoffTime = null,
   timeoutMs = 60000,
-  pollIntervalMs = 3000,
+  pollIntervalMs = 1000,
 }) {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail) return { found: false, reason: 'missing_email' };
@@ -236,7 +236,7 @@ export async function pollZohoWorkdayAuth({
   const deadline = Date.now() + timeoutMs;
   const cutoff = cutoffTime || (Date.now() - 5 * 60 * 1000); // default last 5 minutes
 
-  console.log(`   📧 [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail} (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
+  console.log(`   📧 [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail} every 1s (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
 
   // 1. Verify user connection in Zoho
   let userAccountId = null;
@@ -245,20 +245,26 @@ export async function pollZohoWorkdayAuth({
     userAccountId = user.accountId;
     console.log(`   ✓ [ZohoMail] Candidate account verified in Zoho: ${cleanEmail} (Connected: ${user.connected})`);
     if (user.connected === false) {
-      console.log(`   ⚠️ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
+      console.log(`   ❌ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
+      return { found: false, reason: 'mailbox_not_connected' };
+    }
+  } else {
+    // If listZohoUsers was null/timed out on Render cold start, verify directly via getZohoInbox probe
+    const probeInbox = await getZohoInbox(cleanEmail, { limit: 1, start: 1 });
+    if (probeInbox && probeInbox.accountId) {
+      userAccountId = probeInbox.accountId;
+      console.log(`   ✓ [ZohoMail] Candidate inbox probe confirmed active: ${cleanEmail} (AccountId: ${userAccountId})`);
+    } else {
+      console.log(`   ❌ [ZohoMail] Candidate ${cleanEmail} is not connected in Zoho Mail Reader!`);
+      return { found: false, reason: 'mailbox_not_connected' };
     }
   }
-
-  let notConnectedCount = 0;
 
   while (Date.now() < deadline) {
     try {
       const inboxData = await getZohoInbox(cleanEmail, { limit: 5, start: 1 });
       if (!inboxData) {
-        notConnectedCount++;
-        if (notConnectedCount >= 4) {
-          return { found: false, reason: 'mailbox_not_connected' };
-        }
+        // Transient network glitch during polling - keep retrying every second until deadline
         await new Promise((r) => setTimeout(r, pollIntervalMs));
         continue;
       }

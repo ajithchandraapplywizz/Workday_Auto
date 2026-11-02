@@ -507,7 +507,7 @@ async function checkIfAlreadyOnApplicationWizard(page) {
   }).catch(() => false);
 }
 
-export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 50000 }) {
+export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 75000 }) {
   // Fast path: if the page is already on the application form (e.g. My Information), skip polling immediately!
   if (await checkIfAlreadyOnApplicationWizard(page)) {
     console.log('   🎉 [WorkdayBot] Application Wizard / My Information is ALREADY ACTIVE! Skipping email verification polling.');
@@ -524,7 +524,7 @@ export async function resolveWorkdayVerification(page, { email, password, compan
     company: effectiveCompany,
     cutoffTime: cutoff,
     timeoutMs,
-    pollIntervalMs: 3000,
+    pollIntervalMs: 1000,
   });
 
   if (pollRes?.found) {
@@ -612,8 +612,8 @@ export async function resolveWorkdayVerification(page, { email, password, compan
   }
 
   if (pollRes?.reason === 'mailbox_not_connected') {
-    console.log(`   ℹ️  [WorkdayBot] Candidate ${email} mailbox is not connected in Zoho Mail Reader.`);
-    return { success: false, reason: 'mailbox_not_connected' };
+    console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is not connected in Zoho Mail Reader.`);
+    return { success: false, reason: 'zoho mail not connected' };
   }
 
   console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout (${pollRes?.reason || 'timeout'}).`);

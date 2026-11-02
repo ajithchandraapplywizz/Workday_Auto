@@ -561,19 +561,6 @@ export async function executeWorkerTask({
       }
 
       const now = new Date().toISOString();
-      const directTaskId = options.taskId || task.taskId || task.id;
-      if (directTaskId) {
-        const { supabase } = await import('./supabaseClient.mjs');
-        if (supabase) {
-          await supabase.from('submission_tasks').update({
-            status: 'already_applied',
-            completed_at: now,
-            error_message: null,
-            application_submitted_screenshot_url: alreadyShotUrl,
-            updated_at: now,
-          }).eq('id', directTaskId).catch(() => {});
-        }
-      }
       const distId = task.distribution_id || task.distributionId;
       const { supabase } = await import('./supabaseClient.mjs');
       if (supabase) {
@@ -657,19 +644,6 @@ export async function executeWorkerTask({
             await updateQueueTaskStatus(queueTaskId, { status: 'already_applied', errorMessage: null, screenshotPath: alreadyShotUrl });
           }
           const now = new Date().toISOString();
-          const directTaskId = options.taskId || task.taskId || task.id;
-          if (directTaskId) {
-            const { supabase } = await import('./supabaseClient.mjs');
-            if (supabase) {
-              await supabase.from('submission_tasks').update({
-                status: 'already_applied',
-                completed_at: now,
-                error_message: null,
-                application_submitted_screenshot_url: alreadyShotUrl,
-                updated_at: now,
-              }).eq('id', directTaskId).catch(() => {});
-            }
-          }
           const distId = task.distribution_id || task.distributionId;
           if (distId) {
             const { supabase } = await import('./supabaseClient.mjs');
@@ -854,20 +828,7 @@ export async function executeWorkerTask({
         }
 
         const now = new Date().toISOString();
-        const directTaskId = options.taskId || task.taskId || task.id;
-        if (directTaskId) {
-          const { supabase } = await import('./supabaseClient.mjs');
-          if (supabase) {
-            await supabase.from('submission_tasks').update({
-              status: 'already_applied',
-              completed_at: now,
-              error_message: 'Application already submitted on Workday',
-              application_submitted_screenshot_url: alreadyShotUrl,
-              updated_at: now,
-            }).eq('id', directTaskId).catch(() => {});
-          }
-        }
-        const distId = task.distribution_id || task.distributionId;
+        const distId = task.distribution_id || task.distributionId || task.id;
         if (distId) {
           const { supabase } = await import('./supabaseClient.mjs');
           if (supabase) {
@@ -896,7 +857,7 @@ export async function executeWorkerTask({
         console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
         console.log(`   • Status: ALREADY_APPLIED`);
         console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-        console.log(`   • Dual-Table Sync: submission_tasks #${directTaskId || 'N/A'} & job_distributions #${distId || 'N/A'} -> 'already_applied'`);
+        console.log(`   • Table: job_distributions #${distId || 'N/A'} -> 'already_applied'`);
         console.log(`${'═'.repeat(90)}\n`);
 
         return {
@@ -950,9 +911,10 @@ export async function executeWorkerTask({
         // Attempt Zoho Mail email verification and password reset recovery
         console.log(`   🔐 [${workerId}] Auth gateway requires verification or password setup. Invoking Zoho Mail recovery...`);
         let recovered = false;
+        let vRes = null;
         try {
           const { resolveWorkdayVerification } = await import('./workdayVerification.mjs');
-          const vRes = await resolveWorkdayVerification(page, {
+          vRes = await resolveWorkdayVerification(page, {
             email: workdayEmail,
             password: workdayPassword,
             company,
@@ -997,14 +959,23 @@ export async function executeWorkerTask({
             }).catch(() => null);
           } catch {}
 
-          const isLinkExpired = isPageDead || Boolean(domSpecificReason?.includes('Link Expired') || /expired|does not exist|doesn't exist|404/i.test(authErrorMsg || ''));
-          const effectiveReason = isLinkExpired
-            ? (domSpecificReason || 'Link Expired: The page you are looking for does not exist on Workday')
-            : (domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check');
+          const isZohoNotConnected = (vRes?.reason === 'zoho mail not connected');
+          const zohoReason = `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${workdayEmail})`;
 
-          const failReasonText = isLinkExpired ? effectiveReason : `Authentication / Gateway check: ${effectiveReason}`;
-          const failedStepName = isLinkExpired ? 'Job Discovery / Link Expired' : 'Auth Gateway (Sign In / Sign Up)';
-          const shotPrefix = isLinkExpired ? 'job_expired' : 'gateway_fail';
+          const isLinkExpired = isPageDead || Boolean(domSpecificReason?.includes('Link Expired') || /expired|does not exist|doesn't exist|404/i.test(authErrorMsg || ''));
+          const effectiveReason = isZohoNotConnected
+            ? zohoReason
+            : (isLinkExpired
+              ? (domSpecificReason || 'Link Expired: The page you are looking for does not exist on Workday')
+              : (domSpecificReason || authErrorMsg || 'Authentication failed: Unable to access application wizard after credentials check'));
+
+          const failReasonText = isZohoNotConnected
+            ? zohoReason
+            : (isLinkExpired ? effectiveReason : `Authentication / Gateway check: ${effectiveReason}`);
+          const failedStepName = isZohoNotConnected
+            ? 'Auth Gateway / Zoho Mail Verification'
+            : (isLinkExpired ? 'Job Discovery / Link Expired' : 'Auth Gateway (Sign In / Sign Up)');
+          const shotPrefix = isZohoNotConnected ? 'zoho_disconnected' : (isLinkExpired ? 'job_expired' : 'gateway_fail');
           console.log(`   ❌ [${workerId}] ${failReasonText}`);
 
           let authShotUrl = null;
@@ -1653,22 +1624,7 @@ export async function executeWorkerTask({
             await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
           }
         }
-        // Dual-Table Sync: Also update submission_tasks
-        try {
-          const subTaskUpdate = {
-            status: 'submitted',
-            application_submitted_screenshot_url: completionShotUrl,
-            completed_at: completionTimestamp,
-            error_message: null,
-            updated_at: completionTimestamp,
-          };
-          if (task.taskId) {
-            await supabase.from('submission_tasks').update(subTaskUpdate).eq('id', task.taskId);
-          } else {
-            await supabase.from('submission_tasks').update(subTaskUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
-          }
-        } catch {}
-        console.log(`   ✅ [${workerId}] Dual-table sync complete: job_distributions & submission_tasks marked 'submitted' with proof screenshot.`);
+        console.log(`   ✅ [${workerId}] job_distributions marked 'submitted' with proof screenshot.`);
       } catch (err) {
         console.warn(`   ⚠️ [${workerId}] Error writing submitted status to tables:`, err.message);
       }
@@ -1701,22 +1657,7 @@ export async function executeWorkerTask({
             await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
           }
         }
-        // Dual-Table Sync: Also update submission_tasks
-        try {
-          const subTaskUpdate = {
-            status: 'already_applied',
-            application_submitted_screenshot_url: completionShotUrl,
-            completed_at: completionTimestamp,
-            error_message: 'Application already submitted on Workday',
-            updated_at: completionTimestamp,
-          };
-          if (task.taskId) {
-            await supabase.from('submission_tasks').update(subTaskUpdate).eq('id', task.taskId);
-          } else {
-            await supabase.from('submission_tasks').update(subTaskUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
-          }
-        } catch {}
-        console.log(`   ℹ️ [${workerId}] Dual-table sync complete: job_distributions & submission_tasks marked 'already_applied' with proof screenshot.`);
+        console.log(`   ℹ️ [${workerId}] job_distributions marked 'already_applied' with proof screenshot.`);
       } catch (err) {
         console.warn(`   ⚠️ [${workerId}] Error writing already_applied status to tables:`, err.message);
       }
@@ -2459,13 +2400,6 @@ export async function executeSingleTargetedSubmission({
       reviewed_at: now,
       updated_at: now,
     }).eq('id', distributionId).catch(() => {});
-
-    await supabase.from('submission_tasks').update({
-      status: 'applying',
-      worker_id: workerId,
-      started_at: now,
-      updated_at: now,
-    }).eq('distribution_id', distributionId).catch(() => {});
   } else {
     await supabase.from('job_distributions').update({
       status: 'applying',
@@ -2524,13 +2458,6 @@ export async function executeSingleTargetedSubmission({
       const { error: dErr } = await supabase.from('job_distributions').update(updateBody).eq('id', distributionId);
       if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
       else console.log(`   ✅ [${workerId}] job_distributions record #${distributionId} updated to 'submitted' with proof: ${finalProofShot || 'saved'}`);
-
-      await supabase.from('submission_tasks').update({
-        status: 'submitted',
-        application_submitted_screenshot_url: finalProofShot,
-        completed_at: completionTimestamp,
-        updated_at: completionTimestamp,
-      }).eq('distribution_id', distributionId).catch(() => {});
     } else {
       const { error: dErr } = await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl);
       if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions:`, dErr.message);
@@ -2548,13 +2475,6 @@ export async function executeSingleTargetedSubmission({
     };
     if (distributionId) {
       await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
-      await supabase.from('submission_tasks').update({
-        status: targetStatus,
-        error_message: updateBody.error_message,
-        application_submitted_screenshot_url: finalProofShot,
-        completed_at: completionTimestamp,
-        updated_at: completionTimestamp,
-      }).eq('distribution_id', distributionId).catch(() => {});
     }
     if (finalApplywizzId && finalJobUrl) {
       await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
@@ -2572,7 +2492,7 @@ export async function executeSingleTargetedSubmission({
   // 6. FIFO Next-in-Queue Auto Dispatcher: Pick next queued task
   try {
     const { data: nextQueue } = await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .select('*')
       .eq('status', 'queued')
       .order('created_at', { ascending: true })
@@ -2580,9 +2500,9 @@ export async function executeSingleTargetedSubmission({
 
     if (nextQueue && nextQueue.length > 0) {
       const nextItem = nextQueue[0];
-      console.log(`\n⚡ [FIFO QUEUE] Next queued application #${nextItem.distribution_id} found! Triggering ${workerId}...`);
+      console.log(`\n⚡ [FIFO QUEUE] Next queued application #${nextItem.id} found! Triggering ${workerId}...`);
       executeSingleTargetedSubmission({
-        distributionId: nextItem.distribution_id,
+        distributionId: nextItem.id,
         applywizzId: nextItem.applywizz_id,
         jobUrl: nextItem.job_url,
         workerId,

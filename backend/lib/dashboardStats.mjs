@@ -130,19 +130,15 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
     return cached.data;
   }
 
-  // 1. Fetch job_distributions, submission_tasks, and batch_job_queue in parallel
+  // 1. Fetch job_distributions and batch_job_queue in parallel
   const [
     { data: jobDists, error: jdErr },
-    { data: subTasks, error: stErr },
     { data: queueRows, error: qErr },
     { count: exactQueuedCount }
   ] = await Promise.all([
     supabase
       .from('job_distributions')
-      .select('id, applywizz_id, status, updated_at, created_at, resolved_answers'),
-    supabase
-      .from('submission_tasks')
-      .select('id, distribution_id, applywizz_id, status, error_message, created_at, started_at, completed_at, updated_at, worker_id'),
+      .select('id, applywizz_id, status, error_message, updated_at, created_at, completed_at, worker_id, worker_leased_at, resolved_answers'),
     supabase
       .from('batch_job_queue')
       .select('id, applywizz_id, status, created_at')
@@ -154,16 +150,7 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
   ]);
 
   if (jdErr) throw jdErr;
-  if (stErr) throw stErr;
   if (qErr) console.warn('[STATS] batch_job_queue fetch note:', qErr.message);
-
-  // Map submission_tasks by distribution_id
-  const taskMap = new Map();
-  for (const t of subTasks || []) {
-    if (t.distribution_id) {
-      taskMap.set(t.distribution_id, t);
-    }
-  }
 
   // 3. Mapping setup: clients -> operators -> managers
   const { data: allClients, error: clientsErr } = await supabase
@@ -228,12 +215,10 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
   let ansOther = 0;
 
   for (const jd of jobDists || []) {
-    const task = taskMap.get(jd.id);
-    const effectiveStatus = String((task ? task.status : jd.status) || 'unknown').toLowerCase().trim();
+    const effectiveStatus = String(jd.status || 'unknown').toLowerCase().trim();
 
     // Event timestamp:
-    // ST has completed_at for completed rows, fallback to task.updated_at, fallback to jd.updated_at
-    const eventTimeIso = task?.completed_at || task?.updated_at || jd.updated_at || jd.created_at;
+    const eventTimeIso = jd.completed_at || jd.updated_at || jd.created_at;
 
     // Manager / CA mapping
     const client = clientMap.get(jd.applywizz_id);
@@ -268,21 +253,19 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
       readyForReviewCount++;
     } else if (effectiveStatus === 'queued') {
       queuedCount++;
-      if (task) queuedRows.push(task);
+      queuedRows.push(jd);
     } else if (effectiveStatus === 'applying') {
       applyingCount++;
-      if (task) {
-        const startedTime = task.started_at ? new Date(task.started_at).getTime() : (task.updated_at ? new Date(task.updated_at).getTime() : 0);
-        if (startedTime > 0 && (now - startedTime > 10 * 60 * 1000)) {
-          stalledApplyingRows.push({
-            task_id: task.id,
-            distribution_id: task.distribution_id,
-            applywizz_id: task.applywizz_id,
-            worker_id: task.worker_id,
-            started_at: task.started_at,
-            duration_minutes: Math.round((now - startedTime) / 60000),
-          });
-        }
+      const startedTime = jd.worker_leased_at ? new Date(jd.worker_leased_at).getTime() : (jd.updated_at ? new Date(jd.updated_at).getTime() : 0);
+      if (startedTime > 0 && (now - startedTime > 10 * 60 * 1000)) {
+        stalledApplyingRows.push({
+          task_id: jd.id,
+          distribution_id: jd.id,
+          applywizz_id: jd.applywizz_id,
+          worker_id: jd.worker_id,
+          started_at: jd.worker_leased_at || jd.updated_at,
+          duration_minutes: Math.round((now - startedTime) / 60000),
+        });
       }
     }
     // PERIOD BUCKETS (counted if status event time is inside from..to)
@@ -301,11 +284,9 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
       }
       if (inPeriod) {
         failedCount++;
-        if (task) failureRows.push(task);
-        else failureRows.push({ error_message: jd.error_message || 'Application failed' });
+        failureRows.push(jd);
       }
-      if (task) failureRowsAll.push(task);
-      else failureRowsAll.push({ error_message: jd.error_message || 'Application failed' });
+      failureRowsAll.push(jd);
     }
     // OTHER BUCKETS (any unrecognized or new status, never dropped)
     else {

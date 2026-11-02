@@ -1383,20 +1383,18 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       };
     }
 
-    // Supabase Cloud Fallback: Synthesize live logs directly from worker_status, scanned_jobs, job_distributions, and submission_tasks
+    // Supabase Cloud Fallback: Synthesize live logs directly from worker_status, scanned_jobs, and job_distributions
     try {
       const [
         { data: wsData },
         { data: bcData },
         { data: sjData },
         { data: jdData },
-        { data: stData },
       ] = await Promise.all([
         supabase.from('worker_status').select('*').order('updated_at', { ascending: false }).limit(20),
         supabase.from('bot_control').select('*').eq('id', 'primary').maybeSingle(),
         supabase.from('scanned_jobs').select('id, company, role_title, job_url, question_count, scraped_questions, created_at, updated_at').order('created_at', { ascending: false }).limit(30),
-        supabase.from('job_distributions').select('id, applywizz_id, company, role_title, status, created_at, updated_at').order('updated_at', { ascending: false }).limit(30),
-        supabase.from('submission_tasks').select('id, applywizz_id, company, role_title, status, error_message, worker_id, created_at, updated_at').order('updated_at', { ascending: false }).limit(40),
+        supabase.from('job_distributions').select('id, applywizz_id, company, role_title, status, error_message, worker_id, created_at, updated_at').order('updated_at', { ascending: false }).limit(50),
       ]);
 
       const scanningLogs = [];
@@ -1482,9 +1480,10 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
         }
       }
 
-      // 5. Live Application Submissions Activity
-      if (stData && stData.length > 0) {
-        for (const st of stData) {
+      // 5. Live Application Submissions Activity (from job_distributions)
+      if (jdData && jdData.length > 0) {
+        const subDistRows = jdData.filter((d) => ['submitted', 'already_applied', 'failed', 'applying', 'queued'].includes(d.status));
+        for (const st of subDistRows) {
           const isDone = st.status === 'submitted' || st.status === 'already_applied';
           const isFail = st.status === 'failed';
           const isBusy = st.status === 'applying';
@@ -1495,7 +1494,7 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
           const workerNum = match ? parseInt(match[0], 10) : 1;
 
           submittingLogs.push({
-            id: 'st-' + st.id,
+            id: 'jd-sub-' + st.id,
             ts: st.updated_at || st.created_at || new Date().toISOString(),
             created_at: st.updated_at || st.created_at || new Date().toISOString(),
             message: `[Submissions Pool] ${icon} [${String(st.status || '').toUpperCase()}] [${wid}] ${st.applywizz_id} @ ${st.company || 'Employer'} - "${st.role_title || 'Role'}" ${st.error_message ? `| Info: ${st.error_message}` : ''}`,
@@ -2780,10 +2779,10 @@ export async function stopSubmissionStage() {
     console.warn('Supabase stop error:', err);
   }
 
-  // Roll back in-flight submission tasks and job_distributions back to ready_for_review
+  // Roll back in-flight applications on job_distributions back to ready_for_review
   try {
     await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .update({
         status: 'ready_for_review',
         worker_id: null,
@@ -2791,17 +2790,8 @@ export async function stopSubmissionStage() {
         updated_at: now,
       })
       .eq('status', 'applying');
-
-    await supabase
-      .from('job_distributions')
-      .update({
-        status: 'ready_for_review',
-        worker_id: null,
-        updated_at: now,
-      })
-      .eq('status', 'applying');
   } catch (rbErr) {
-    console.warn('Note on resetting applying tasks:', rbErr?.message);
+    console.warn('Note on resetting applying job_distributions:', rbErr?.message);
   }
 
   try {

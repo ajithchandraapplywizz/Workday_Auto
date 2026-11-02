@@ -75,19 +75,15 @@ export async function getUnifiedDashboardStats({ forceRefresh = false } = {}) {
     clientNameMap.set(cleanId, name);
   }
 
-  // 3. Fetch job_distributions, submission_tasks, and batch_job_queue in parallel
+  // 3. Fetch job_distributions and batch_job_queue in parallel
   const [
     { data: jobDists, error: jdErr },
-    { data: subTasks, error: stErr },
     { data: queueRows, error: qErr },
     { count: exactQueuedCount }
   ] = await Promise.all([
     supabase
       .from('job_distributions')
       .select('id, applywizz_id, job_url, company, role_title, status, created_at, updated_at, application_submitted_screenshot_url, error_message'),
-    supabase
-      .from('submission_tasks')
-      .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, created_at, started_at, completed_at, updated_at, screenshot_path, error_message'),
     supabase
       .from('batch_job_queue')
       .select('id, applywizz_id, job_url, company, role_title, status, created_at, updated_at')
@@ -99,16 +95,7 @@ export async function getUnifiedDashboardStats({ forceRefresh = false } = {}) {
   ]);
 
   if (jdErr) throw jdErr;
-  if (stErr) throw stErr;
   if (qErr) console.warn('[STATS] batch_job_queue query warning:', qErr.message);
-
-  // Index submission tasks by distribution_id
-  const taskMap = new Map();
-  for (const st of subTasks || []) {
-    if (st.distribution_id) {
-      taskMap.set(st.distribution_id, st);
-    }
-  }
 
   // Global Primary Stats
   let submittedCount = 0;
@@ -149,8 +136,7 @@ export async function getUnifiedDashboardStats({ forceRefresh = false } = {}) {
 
   // 1. Process all job distributions
   for (const jd of jobDists || []) {
-    const task = taskMap.get(jd.id);
-    const effectiveStatus = String((task ? task.status : jd.status) || 'unknown').toLowerCase().trim();
+    const effectiveStatus = String(jd.status || 'unknown').toLowerCase().trim();
     const cleanAwlId = String(jd.applywizz_id || '').toUpperCase().trim();
     const cStats = cleanAwlId ? clientStatsMap.get(cleanAwlId) : null;
 
@@ -284,20 +270,7 @@ export async function getClientApplications({ awlId } = {}) {
 
   if (jdErr) throw jdErr;
 
-  // 2. Fetch submission tasks for this client
-  const { data: subTasks, error: stErr } = await supabase
-    .from('submission_tasks')
-    .select('id, distribution_id, applywizz_id, job_url, company, role_title, status, created_at, started_at, completed_at, updated_at, screenshot_path, error_message')
-    .ilike('applywizz_id', cleanAwlId);
 
-  if (stErr) throw stErr;
-
-  const taskMap = new Map();
-  for (const st of subTasks || []) {
-    if (st.distribution_id) {
-      taskMap.set(st.distribution_id, st);
-    }
-  }
 
   // 3. Client Name lookup
   const { data: clientRow } = await supabase
@@ -315,28 +288,25 @@ export async function getClientApplications({ awlId } = {}) {
 
   const applications = [];
   for (const jd of jobDists || []) {
-    const task = taskMap.get(jd.id);
-    const effectiveStatus = String((task ? task.status : jd.status) || 'unknown').toLowerCase().trim();
+    const effectiveStatus = String(jd.status || 'unknown').toLowerCase().trim();
 
     if (!ELIGIBLE_STATUSES.has(effectiveStatus)) {
       continue;
     }
 
-    const screenshotUrl = task?.screenshot_path ||
-      jd.application_submitted_screenshot_url ||
-      null;
+    const screenshotUrl = jd.application_submitted_screenshot_url || null;
 
     applications.push({
-      id: task?.id || jd.id,
+      id: jd.id,
       distribution_id: jd.id,
       applywizz_id: cleanAwlId,
-      job_url: task?.job_url || jd.job_url,
-      company: task?.company || jd.company,
-      role_title: task?.role_title || jd.role_title,
+      job_url: jd.job_url,
+      company: jd.company || 'Unknown Company',
+      role_title: jd.role_title || 'Workday Application',
       status: effectiveStatus,
       screenshot_url: screenshotUrl,
-      error_message: task?.error_message || jd.error_message || null,
-      updated_at: task?.completed_at || task?.updated_at || jd.updated_at || jd.created_at,
+      error_message: jd.error_message || null,
+      updated_at: jd.completed_at || jd.updated_at || jd.created_at,
       created_at: jd.created_at,
     });
   }

@@ -339,7 +339,7 @@ export async function stopSubmitPool() {
     try {
       const nowIso = new Date().toISOString();
       await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .update({
           status: 'ready_for_review',
           worker_id: null,
@@ -347,16 +347,7 @@ export async function stopSubmitPool() {
           updated_at: nowIso,
         })
         .eq('status', 'applying');
-
-      await supabase
-        .from('job_distributions')
-        .update({
-          status: 'ready_for_review',
-          worker_id: null,
-          updated_at: nowIso,
-        })
-        .eq('status', 'applying');
-      console.log(`[DAEMON] All in-flight applying tasks safely rolled back to ready_for_review.`);
+      console.log(`[DAEMON] All in-flight applying tasks safely rolled back to ready_for_review on job_distributions.`);
     } catch (rbErr) {
       console.warn(`[DAEMON] Note on submission rollback:`, rbErr.message);
     }
@@ -1033,7 +1024,7 @@ const server = http.createServer(async (req, res) => {
 
     let applyingCount = activeSubmittingWorkers.size;
     try {
-      const { count } = await supabase.from('submission_tasks').select('*', { count: 'exact', head: true }).eq('status', 'applying');
+      const { count } = await supabase.from('job_distributions').select('*', { count: 'exact', head: true }).eq('status', 'applying');
       if (typeof count === 'number') applyingCount = count;
     } catch {}
 
@@ -1431,19 +1422,6 @@ const server = http.createServer(async (req, res) => {
         await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).catch(() => { });
       }
 
-      // 3. Upsert into submission_tasks table with status 'applying'
-      if (distributionId) {
-        await supabase.from('submission_tasks').upsert({
-          distribution_id: distributionId,
-          applywizz_id: cleanId,
-          job_url: jobUrl,
-          status: 'applying',
-          worker_id: chosenWorkerId,
-          reviewed_by: 'Career Associate',
-          started_at: nowIso,
-          updated_at: nowIso,
-        }, { onConflict: 'distribution_id' }).catch(() => { });
-      }
 
       const { executeSingleTargetedSubmission } = await import('../lib/workerPool.mjs');
       // Dispatch in background
@@ -1470,24 +1448,12 @@ const server = http.createServer(async (req, res) => {
       // All 3 submitting workers are currently in_flight -> Queue this application!
       console.log(`\n⏳ [DAEMON WEBHOOK] All 3 submitting workers are busy. Queuing application for ${cleanId}...`);
 
-      if (distributionId) {
-        await supabase.from('job_distributions').update({
-          status: 'queued',
-          reviewed_by: 'Career Associate',
-          reviewed_at: nowIso,
-          updated_at: nowIso,
-        }).eq('id', distributionId).catch(() => { });
-
-        await supabase.from('submission_tasks').upsert({
-          distribution_id: distributionId,
-          applywizz_id: cleanId,
-          job_url: jobUrl,
-          status: 'queued',
-          reviewed_by: 'Career Associate',
-          created_at: nowIso,
-          updated_at: nowIso,
-        }, { onConflict: 'distribution_id' }).catch(() => { });
-      }
+      await supabase.from('job_distributions').update({
+        status: 'queued',
+        reviewed_by: 'Career Associate',
+        reviewed_at: nowIso,
+        updated_at: nowIso,
+      }).eq('id', distributionId).catch(() => { });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -1703,7 +1669,7 @@ export async function recoverInterruptedSubmissionTasks() {
 
   try {
     const { data: interrupted, error } = await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .update({
         status: 'ready_for_review',
         worker_id: null,
@@ -1716,13 +1682,13 @@ export async function recoverInterruptedSubmissionTasks() {
       .select('*');
 
     if (error) {
-      console.warn('[DAEMON RECOVERY] Error recovering interrupted tasks:', error.message);
+      console.warn('[DAEMON RECOVERY] Error recovering interrupted tasks on job_distributions:', error.message);
       return 0;
     }
 
     const count = interrupted ? interrupted.length : 0;
     if (count > 0) {
-      console.log(`[DAEMON RECOVERY] Safely reverted ${count} interrupted task(s) to ready_for_review with possibly_submitted=true.`);
+      console.log(`[DAEMON RECOVERY] Safely reverted ${count} interrupted application(s) on job_distributions to ready_for_review.`);
     }
     return count;
   } catch (err) {

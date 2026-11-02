@@ -225,14 +225,14 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
     // Fall through to query execution
   }
 
-  // 2. Direct SQL Query execution
+  // 2. Direct SQL Query execution on job_distributions (sole source of truth)
   const [liveRunningRes, liveQueuedRes, liveReadyRes, windowTasksRes] = await Promise.all([
-    supabase.from('submission_tasks').select('*', { count: 'exact', head: true }).eq('status', 'applying'),
-    supabase.from('submission_tasks').select('*', { count: 'exact', head: true }).eq('status', 'queued'),
-    supabase.from('submission_tasks').select('*', { count: 'exact', head: true }).eq('status', 'ready_for_review'),
-    supabase.from('submission_tasks')
-      .select('id, status, completed_at, distribution_id')
-      .in('status', ['submitted', 'failed'])
+    supabase.from('job_distributions').select('*', { count: 'exact', head: true }).in('status', ['applying', 'processing', 'in_progress']),
+    supabase.from('job_distributions').select('*', { count: 'exact', head: true }).eq('status', 'queued'),
+    supabase.from('job_distributions').select('*', { count: 'exact', head: true }).eq('status', 'ready_for_review'),
+    supabase.from('job_distributions')
+      .select('id, status, completed_at, resolved_answers')
+      .in('status', ['submitted', 'failed', 'already_applied'])
       .gte('completed_at', window.startIso)
       .lte('completed_at', window.endIso),
   ]);
@@ -245,11 +245,9 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
   let submitted = 0;
   let failed = 0;
 
-  const distributionIds = [];
   for (const t of windowTasks) {
-    if (t.status === 'submitted') submitted++;
+    if (t.status === 'submitted' || t.status === 'already_applied') submitted++;
     if (t.status === 'failed') failed++;
-    if (t.distribution_id) distributionIds.push(t.distribution_id);
   }
 
   let pooled0 = 0;
@@ -264,17 +262,13 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
   let sumAvg4 = 0;
   let appsIncluded = 0;
 
-  if (distributionIds.length > 0) {
-    const { data: distRows } = await supabase
-      .from('job_distributions')
-      .select('id, resolved_answers')
-      .in('id', distributionIds);
-
-    const distMap = new Map();
-    (distRows || []).forEach((d) => distMap.set(d.id, d.resolved_answers));
+  const distMap = new Map();
+  for (const t of windowTasks) {
+    if (t.id) distMap.set(t.id, t.resolved_answers);
+  }
 
     for (const t of windowTasks) {
-      const answers = distMap.get(t.distribution_id) || [];
+      const answers = distMap.get(t.distribution_id || t.id) || t.resolved_answers || [];
       if (!Array.isArray(answers) || answers.length === 0) continue;
 
       let t0 = 0;
@@ -309,7 +303,6 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
         appsIncluded++;
       }
     }
-  }
 
   const totalAnswered = pooled1 + pooled2 + pooled3 + pooled4;
 

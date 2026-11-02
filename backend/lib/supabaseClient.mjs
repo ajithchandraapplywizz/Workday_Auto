@@ -439,26 +439,19 @@ export async function updateRecordScreenshot({
   const now = new Date().toISOString();
   let updatedCount = 0;
 
-  // 1. submission_tasks (by taskId)
+  // 1. job_distributions (by taskId / distribution id)
   if (taskId) {
     try {
-      const patch = failed
-        ? {
-            screenshot_path: screenshotUrl,
-            application_submitted_screenshot_url: null,
-            updated_at: now,
-          }
-        : {
-            screenshot_path: screenshotUrl,
-            application_submitted_screenshot_url: screenshotUrl,
-            updated_at: now,
-          };
-      await request('submission_tasks', {
+      const patch = {
+        application_submitted_screenshot_url: screenshotUrl,
+        updated_at: now,
+      };
+      await request('job_distributions', {
         method: 'PATCH',
         query: `?id=eq.${encode(taskId)}`,
         body: patch,
       });
-      console.log(`  💾 [Database] Updated table "submission_tasks" (id: ${taskId}) -> screenshot_path: ${screenshotUrl}`);
+      console.log(`  💾 [Database] Updated table "job_distributions" (id: ${taskId}) -> screenshot: ${screenshotUrl}`);
       updatedCount++;
     } catch {}
   }
@@ -2520,19 +2513,6 @@ export async function completeSubmittedTask({
       console.log(`   ⚠️ [job_distributions] completeSubmittedTask error: ${err?.message?.slice(0, 140)}`);
     });
 
-    // Also update submission_tasks table
-    await request('submission_tasks', {
-      method: 'PATCH',
-      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}`,
-      prefer: 'return=minimal',
-      body: {
-        status: 'submitted',
-        application_submitted_screenshot_url: screenshotUrl || null,
-        screenshot_path: screenshotUrl || null,
-        completed_at: now,
-        updated_at: now,
-      },
-    }).catch(() => {});
 
     // And batch_job_queue for full consistency
     await request('batch_job_queue', {
@@ -2918,58 +2898,6 @@ export async function recordJobDistributions({
     const readyReviewCount = dedupedRows.filter(r => r.status === 'ready_for_review').length;
     const needsAnswersCount = dedupedRows.filter(r => r.status === 'needs_answers').length;
 
-    // Automatically record ready_for_review rows into submission_tasks and stop there
-    const readyToReviewRows = dedupedRows.filter((r) => r.status === 'ready_for_review');
-    const needsAnswersRows = dedupedRows.filter((r) => r.status === 'needs_answers');
-
-    // Purge any stale submission_tasks for candidates requiring answers
-    if (needsAnswersRows.length > 0) {
-      for (const nr of needsAnswersRows) {
-        const cleanAwl = String(nr.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-        await request('submission_tasks', {
-          method: 'DELETE',
-          query: `?applywizz_id=eq.${encode(cleanAwl)}&job_url=eq.${encode(cleanUrl)}&status=eq.ready_for_review`,
-        }).catch(() => {});
-      }
-    }
-
-    if (readyToReviewRows.length > 0) {
-      try {
-        const jdIds = await request('job_distributions', {
-          query: `?job_url=eq.${encode(cleanUrl)}&select=id,applywizz_id,job_url`,
-        }).catch(() => []);
-        const jdMap = new Map((jdIds || []).map((j) => [`${String(j.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()}:::${j.job_url}`, j.id]));
-
-        const submissionRows = readyToReviewRows.map((r) => {
-          const cleanAwl = String(r.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-          return {
-            distribution_id: jdMap.get(`${cleanAwl}:::${r.job_url}`) || null,
-            applywizz_id: cleanAwl,
-            job_url: r.job_url,
-            company: r.company || cleanCompany,
-            role_title: r.role_title || cleanRole,
-            status: 'ready_for_review',
-            created_at: r.created_at || now,
-            updated_at: r.updated_at || now,
-          };
-        });
-        await request('submission_tasks', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: submissionRows,
-        }).catch(async (primaryErr) => {
-          await request('submission_tasks', {
-            method: 'POST',
-            prefer: 'return=minimal',
-            body: submissionRows,
-          }).catch(() => {});
-        });
-        console.log(`   📋 [submission_tasks] Recorded ${submissionRows.length} 'ready_for_review' application(s) into submission_tasks. Stopped here.`);
-      } catch (stErr) {
-        console.log(`   ⚠️ [submission_tasks] Note on mirroring to submission_tasks: ${stErr?.message?.slice(0, 140)}`);
-      }
-    }
 
     console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);
     console.log(`   • Company & Role:       ${cleanCompany} — ${cleanRole}`);

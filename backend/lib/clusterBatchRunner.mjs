@@ -1366,54 +1366,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       console.log(`💾 [${workerId}] PHASE 2 REFINED: Updated scanned_jobs with ${leadRow.resolvedAnswers.length} master resolved answers from lead blueprint candidate.`);
     }
 
-    // PHASE 4: Populate submission_tasks table with status 'ready_for_review' and STOP HERE
+    // PHASE 4: Single source of truth is job_distributions with status 'ready_for_review'
     const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_for_review');
     const needsAnswersRows = distributionRows.filter((r) => r.status === 'needs_answers');
-
-    // Purge any stale submission_tasks for candidates requiring answers
-    if (needsAnswersRows.length > 0) {
-      for (const nr of needsAnswersRows) {
-        const cleanAwl = String(nr.applywizzId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-        await queueDbRequest('submission_tasks', {
-          method: 'DELETE',
-          query: `?applywizz_id=eq.${encodeURIComponent(cleanAwl)}&job_url=eq.${encodeURIComponent(jobUrl)}&status=eq.ready_for_review`,
-        }).catch(() => {});
-      }
-    }
-
-    if (readyToReviewRows.length > 0) {
-      try {
-        const jdIds = await queueDbRequest('job_distributions', {
-          query: `?job_url=eq.${encodeURIComponent(jobUrl)}&select=id,applywizz_id,job_url`,
-        }).catch(() => []);
-        const jdMap = new Map((jdIds || []).map((j) => [`${String(j.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()}:::${j.job_url}`, j.id]));
-
-        const submissionPayloads = readyToReviewRows.map((r) => {
-          const cleanAwl = String(r.applywizzId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-          const targetUrl = r.jobUrl || jobUrl;
-          return {
-            distribution_id: jdMap.get(`${cleanAwl}:::${targetUrl}`) || null,
-            applywizz_id: cleanAwl,
-            job_url: targetUrl,
-            company: r.company || company,
-            role_title: r.roleTitle || role,
-            status: 'ready_for_review',
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          };
-        });
-
-        await queueDbRequest('submission_tasks', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: submissionPayloads,
-        });
-        console.log(`💾 [UPSERT → submission_tasks] ${submissionPayloads.length} rows at ready_for_review (${needsAnswersRows.length} skipped — needs_answers)`);
-      } catch (stErr) {
-        console.log(`⚠️ [${workerId}] Phase 4 note on submission_tasks: ${stErr.message}`);
-      }
-    }
+    console.log(`💾 [SINGLE TABLE: job_distributions] ${readyToReviewRows.length} applications ready for submission (${needsAnswersRows.length} pending answers)`);
   } catch (distErr) {
     console.log(`⚠️ [${workerId}] Phase 3 note on job_distributions / scanned_jobs: ${distErr.message}`);
   }

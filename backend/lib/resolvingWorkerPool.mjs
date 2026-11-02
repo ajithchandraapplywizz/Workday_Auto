@@ -459,49 +459,7 @@ export async function runResolvingWorkerPool(options = {}) {
               }],
             }).catch(() => {});
 
-            // Scan and resolving workers may ONLY create submission_tasks rows as ready_for_review (R3)
-            if (isFully) {
-              try {
-                const cleanAwl = String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-                // Fetch distribution_id from job_distributions to maintain 1:1 foreign key linkage
-                let distributionId = null;
-                try {
-                  const distRes = await httpsJsonWithRetry({
-                    url: `${url}/rest/v1/job_distributions?applywizz_id=eq.${encodeURIComponent(cleanAwl)}&job_url=eq.${encodeURIComponent(job.job_url)}&select=id&limit=1`,
-                    method: 'GET',
-                    headers: {
-                      apikey: key,
-                      Authorization: `Bearer ${key}`,
-                    },
-                  });
-                  const distRows = (distRes && distRes.ok) ? distRes.json() : [];
-                  if (Array.isArray(distRows) && distRows.length > 0) {
-                    distributionId = distRows[0].id;
-                  }
-                } catch { }
-
-                await httpsJsonWithRetry({
-                  url: `${url}/rest/v1/submission_tasks?on_conflict=applywizz_id,job_url`,
-                  method: 'POST',
-                  headers: {
-                    apikey: key,
-                    Authorization: `Bearer ${key}`,
-                    Prefer: 'resolution=merge-duplicates,return=minimal',
-                  },
-                  body: {
-                    distribution_id: distributionId,
-                    applywizz_id: cleanAwl,
-                    job_url: job.job_url,
-                    company,
-                    role_title: roleTitle,
-                    status: 'ready_for_review',
-                    created_at: new Date().toISOString(),
-                    updated_at: new Date().toISOString(),
-                  },
-                }).catch(() => {});
-// [SILENCED]                 console.log(`   Upserted to submission_tasks (ready_for_review) ✓`);
-              } catch {}
-            }
+            // In single-table architecture, recordJobDistributions already sets job_distributions to ready_for_review.
 // [SILENCED]             console.log(`${'═'.repeat(64)}\n`);
 
             resolvedTotal++;

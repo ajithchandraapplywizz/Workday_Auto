@@ -1,7 +1,6 @@
 /**
  * Service for CA Submission Tasks
- * Single identity end-to-end: submission_tasks.id
- * No write path ever filters by applywizz_id.
+ * Single identity end-to-end: job_distributions.id
  */
 
 import { loadLocalEnvOnce } from './supabaseClient.mjs';
@@ -65,13 +64,12 @@ export async function isCaAssignedToClient(caIdentifier, applywizzId) {
 
 /**
  * Click Submission Handler:
- * - Takes taskId only
- * - Validates CA assignment to task client
- * - Single atomic statement:
- *     UPDATE submission_tasks SET status='queued', reviewed_by=:ca, updated_at=now()
+ * - Takes distributionId / taskId
+ * - Validates CA assignment to client
+ * - Single atomic statement on job_distributions:
+ *     UPDATE job_distributions SET status='queued', reviewed_by=:ca, updated_at=now()
  *     WHERE id=:taskId AND status='ready_for_review' RETURNING *
  * - Zero rows returned means already queued or taken -> returns current status without error
- * - Never filters write path by applywizz_id
  */
 export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
   if (!taskId) {
@@ -80,25 +78,24 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
 
   const cleanTaskId = String(taskId).trim();
 
-  // 1. Fetch task row by taskId ONLY (read path)
+  // 1. Fetch row by id from job_distributions
   const { data: task, error: tErr } = await supabase
-    .from('submission_tasks')
-    .select('id, distribution_id, applywizz_id, status, job_url, company, role_title')
+    .from('job_distributions')
+    .select('id, applywizz_id, status, job_url, company, role_title')
     .eq('id', cleanTaskId)
     .maybeSingle();
 
   if (tErr) {
-    return { success: false, statusCode: 500, error: 'Database error fetching task: ' + tErr.message };
+    return { success: false, statusCode: 500, error: 'Database error fetching job distribution: ' + tErr.message };
   }
   if (!task) {
-    return { success: false, statusCode: 404, error: `Task not found with id: ${cleanTaskId}` };
+    return { success: false, statusCode: 404, error: `Job distribution not found with id: ${cleanTaskId}` };
   }
 
   // 2. Validate that CA is assigned to this task's client
   const caNameOrEmail = String(ca).trim();
   const isAssigned = await isCaAssignedToClient(caNameOrEmail, task.applywizz_id);
   if (!isAssigned) {
-    // Also allow if generic 'Career Associate' or dev testing
     const isDevOrGeneric = caNameOrEmail === 'Career Associate' || caNameOrEmail === 'Developer';
     if (!isDevOrGeneric) {
       return {
@@ -109,12 +106,10 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
     }
   }
 
-  // 3. Single atomic statement:
-  // UPDATE submission_tasks SET status='queued', reviewed_by=:ca, updated_at=now()
-  // WHERE id=:taskId AND status='ready_for_review' RETURNING *
+  // 3. Single atomic statement on job_distributions:
   const now = new Date().toISOString();
   const { data: updatedRows, error: updateErr } = await supabase
-    .from('submission_tasks')
+    .from('job_distributions')
     .update({
       status: 'queued',
       reviewed_by: caNameOrEmail,
@@ -125,15 +120,14 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
     .select('*');
 
   if (updateErr) {
-    return { success: false, statusCode: 500, error: 'Failed to queue task: ' + updateErr.message };
+    return { success: false, statusCode: 500, error: 'Failed to queue application: ' + updateErr.message };
   }
 
   // 4. Zero rows returned means already queued, applying, or submitted:
-  // Return the current status and DO NOT error (safe against double-clicks & refreshes)
   if (!updatedRows || updatedRows.length === 0) {
     const { data: currentTask } = await supabase
-      .from('submission_tasks')
-      .select('id, distribution_id, applywizz_id, status, worker_id, updated_at')
+      .from('job_distributions')
+      .select('id, applywizz_id, status, worker_id, updated_at')
       .eq('id', cleanTaskId)
       .maybeSingle();
 
@@ -141,18 +135,17 @@ export async function queueSubmissionTask({ taskId, ca = 'Career Associate' }) {
       success: true,
       statusCode: 200,
       changed: false,
-      message: 'Task is already queued or in progress',
+      message: 'Application is already queued or in progress',
       status: currentTask?.status || 'unknown',
       task: currentTask,
     };
   }
 
-  // Exactly one row was atomically updated to 'queued'
   return {
     success: true,
     statusCode: 200,
     changed: true,
-    message: 'Task successfully queued for worker pickup',
+    message: 'Application successfully queued for worker pickup',
     status: 'queued',
     task: updatedRows[0],
   };

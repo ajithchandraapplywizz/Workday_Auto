@@ -36,86 +36,24 @@ export function getSubmissionAttemptCount(errorMessage) {
 
 
 /**
- * B1 Helper: Updates submission_tasks, checks { data, error },
- * verifies rows changed > 0, retries up to 3 times, and logs error.
+ * B1 Helper: Updates job_distributions directly (submission_tasks dropped in favor of single-table architecture).
  */
 export async function updateSubmissionTaskWithCheck({
   taskId,
-  workerId,
+  distributionId,
+  applywizzId,
+  jobUrl,
+  workerId = 'worker',
   patch,
   maxRetries = 3,
 }) {
-  let lastErr = null;
-  const cleanTaskId = String(taskId).trim();
-
-  const cleanPatch = { ...patch };
-  // submission_tasks schema has application_submitted_screenshot_url (no screenshot_path)
-  if ('screenshot_path' in cleanPatch) {
-    if (!cleanPatch.application_submitted_screenshot_url && cleanPatch.screenshot_path) {
-      cleanPatch.application_submitted_screenshot_url = cleanPatch.screenshot_path;
-    }
-    delete cleanPatch.screenshot_path;
-  }
-  if ('screenshot_url' in cleanPatch) {
-    if (!cleanPatch.application_submitted_screenshot_url && cleanPatch.screenshot_url) {
-      cleanPatch.application_submitted_screenshot_url = cleanPatch.screenshot_url;
-    }
-    delete cleanPatch.screenshot_url;
-  }
-
-  for (let attempt = 1; attempt <= maxRetries; attempt++) {
-    try {
-      const { data, error } = await supabase
-        .from('submission_tasks')
-        .update(cleanPatch)
-        .eq('id', cleanTaskId)
-        .eq('status', 'applying')
-        .eq('worker_id', workerId)
-        .select('*');
-
-      if (error) {
-        lastErr = new Error(`Supabase update error: ${error.message} (code: ${error.code || 'unknown'})`);
-        console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} failed: ${error.message}`);
-        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
-        continue;
-      }
-
-      if (!data || data.length === 0) {
-        // Fallback: update by distribution_id or id directly in case lease reaper or transient state reset it
-        let { data: fbData } = await supabase
-          .from('submission_tasks')
-          .update(cleanPatch)
-          .eq('distribution_id', cleanTaskId)
-          .select('*');
-        if (!fbData || fbData.length === 0) {
-          const res = await supabase
-            .from('submission_tasks')
-            .update(cleanPatch)
-            .eq('id', cleanTaskId)
-            .select('*');
-          fbData = res.data;
-        }
-        if (fbData && fbData.length > 0) {
-          console.log(`[${workerId}] task row updated via ID/distId fallback (rows=${fbData.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
-          return { success: true, data: fbData[0], rowsCount: fbData.length };
-        }
-        lastErr = new Error(`Zero rows updated. Task #${cleanTaskId} was not in 'applying' state or worker_id mismatch (expected ${workerId})`);
-        console.warn(`[${workerId}] Warning: updateSubmissionTaskWithCheck attempt ${attempt}/${maxRetries} matched 0 rows for task #${cleanTaskId}`);
-        if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
-        continue;
-      }
-
-      console.log(`[${workerId}] task row updated (rows=${data.length}) for task #${cleanTaskId} -> status: ${patch.status || 'updated'}`);
-      return { success: true, data: data[0], rowsCount: data.length };
-    } catch (err) {
-      lastErr = err;
-      if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
-    }
-  }
-
-  const finalErrMsg = `[${workerId}] ERROR: Failed to update submission_task #${cleanTaskId} after ${maxRetries} attempts: ${lastErr?.message}`;
-  console.error(finalErrMsg);
-  return { success: false, error: lastErr || new Error(finalErrMsg) };
+  return await updateJobDistributionWithCheck({
+    distributionId: distributionId || taskId,
+    applywizzId,
+    jobUrl,
+    workerId,
+    patch,
+  });
 }
 
 /**
@@ -294,6 +232,7 @@ export async function claimNextTask(workerId) {
         .update({
           status: 'applying',
           worker_id: workerId,
+          worker_leased_at: now,
           updated_at: now,
         })
         .eq('id', cand.id)
@@ -303,7 +242,7 @@ export async function claimNextTask(workerId) {
       if (!claimErr && claimed && claimed.length > 0) {
         const claimedDist = claimed[0];
 
-        // Format task object for worker execution
+        // Format task object for worker execution directly from job_distributions
         const claimedTask = {
           id: claimedDist.id,
           distribution_id: claimedDist.id,
@@ -318,27 +257,6 @@ export async function claimNextTask(workerId) {
           started_at: now,
         };
 
-        // Mirror status to submission_tasks table without requiring prior sync
-        try {
-          const cleanAwl = String(claimedDist.applywizz_id || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-          await supabase
-            .from('submission_tasks')
-            .upsert({
-              distribution_id: claimedDist.id,
-              applywizz_id: cleanAwl,
-              job_url: claimedDist.job_url,
-              company: claimedDist.company,
-              role_title: claimedDist.role_title,
-              status: 'applying',
-              worker_id: workerId,
-              started_at: now,
-              worker_leased_at: now,
-              updated_at: now,
-            }, { onConflict: 'distribution_id' });
-        } catch (stErr) {
-          console.warn(`[${workerId}] Warning updating submission_tasks to applying:`, stErr?.message);
-        }
-
         return claimedTask;
       }
     }
@@ -350,14 +268,14 @@ export async function claimNextTask(workerId) {
 }
 
 /**
- * Heartbeat: Updates worker_leased_at while worker is processing.
+ * Heartbeat: Updates worker_leased_at on job_distributions while worker is processing.
  */
 export async function sendTaskHeartbeat(taskId, workerId) {
   if (!taskId || !workerId) return false;
   const now = new Date().toISOString();
   try {
     const { error } = await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .update({
         worker_leased_at: now,
         updated_at: now,
@@ -373,8 +291,8 @@ export async function sendTaskHeartbeat(taskId, workerId) {
 }
 
 /**
- * Reaper (R6, R14, Amendment C): Reverts tasks with expired lease (> timeoutMinutes) back to 'ready_for_review'
- * with possibly_submitted = true. NEVER sets 'failed'. NEVER touches ready_for_review or queued.
+ * Reaper: Reverts tasks with expired lease (> timeoutMinutes) back to 'ready_for_review'
+ * on job_distributions directly. NEVER sets 'failed'.
  */
 export async function reapExpiredLeases(timeoutMinutes = 10) {
   if (!supabase) return [];
@@ -383,7 +301,7 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
     const now = new Date().toISOString();
 
     const { data: expired, error: selErr } = await supabase
-      .from('submission_tasks')
+      .from('job_distributions')
       .select('id, worker_id, applywizz_id')
       .eq('status', 'applying')
       .lt('worker_leased_at', cutoff);
@@ -392,9 +310,9 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
 
     const reapedRows = [];
     for (const exp of expired) {
-      // Single-ID CAS update checking previous status 'applying' (R5, R6)
+      // Single-ID CAS update checking previous status 'applying'
       const { data: updated, error: updErr } = await supabase
-        .from('submission_tasks')
+        .from('job_distributions')
         .update({
           status: 'ready_for_review',
           worker_id: null,
@@ -412,7 +330,7 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
     }
 
     if (reapedRows.length > 0) {
-      console.log(`🧹 [REAPER] Safely reverted ${reapedRows.length} expired task(s) to ready_for_review with possibly_submitted=true:`, reapedRows.map(r => r.id));
+      console.log(`🧹 [REAPER] Safely reverted ${reapedRows.length} expired task(s) on job_distributions to ready_for_review:`, reapedRows.map(r => r.id));
     }
     return reapedRows;
   } catch (err) {
@@ -690,23 +608,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
       console.log(`   • Status: SUBMITTED`);
       console.log(`   • Proof Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'submitted'`);
+      console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'submitted'`);
       console.log(`${'═'.repeat(90)}\n`);
 
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
-        workerId,
-        patch: {
-          status: 'submitted',
-          completed_at: now,
-          error_message: null,
-          application_submitted_screenshot_url: finalShotUrl,
-          updated_at: now,
-        },
-      });
-
       await updateJobDistributionWithCheck({
-        distributionId: task.distribution_id,
+        distributionId: task.distribution_id || task.id,
         applywizzId: task.applywizz_id,
         jobUrl: task.job_url,
         workerId,
@@ -714,6 +620,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'submitted',
           error_message: null,
           application_submitted_screenshot_url: finalShotUrl,
+          completed_at: now,
           updated_at: now,
         },
       });
@@ -724,23 +631,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
       console.log(`   • Status: ALREADY_APPLIED`);
       console.log(`   • Proof Screenshot: ${finalShotUrl || 'None'}`);
-      console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'already_applied'`);
+      console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'already_applied'`);
       console.log(`${'═'.repeat(90)}\n`);
 
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
-        workerId,
-        patch: {
-          status: 'already_applied',
-          completed_at: now,
-          error_message: 'Application already submitted on Workday',
-          application_submitted_screenshot_url: finalShotUrl,
-          updated_at: now,
-        },
-      });
-
       await updateJobDistributionWithCheck({
-        distributionId: task.distribution_id,
+        distributionId: task.distribution_id || task.id,
         applywizzId: task.applywizz_id,
         jobUrl: task.job_url,
         workerId,
@@ -748,12 +643,32 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'already_applied',
           error_message: 'Application already submitted on Workday',
           application_submitted_screenshot_url: finalShotUrl,
+          completed_at: now,
           updated_at: now,
         },
       });
     } else {
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
+
+      // Immediate fail if Zoho mailbox is not connected
+      if (String(rawErrMsg || '').includes('zoho mail not connected')) {
+        console.log(`\n❌ [STAGE 3: SUBMITTER] [${workerId}] Candidate mailbox is disconnected in Zoho Mail Reader. Marking permanently failed immediately.`);
+        const failPatch = {
+          status: 'failed',
+          error_message: rawErrMsg,
+          completed_at: now,
+          updated_at: now,
+        };
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: failPatch,
+        });
+        return { success: false, status: 'failed', reason: rawErrMsg };
+      }
 
       if (currentAttempt < 3) {
         // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
@@ -765,11 +680,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         console.log(`   • Status: Reverting strictly to ready_for_review (DO NOT MARK FAILED)`);
         console.log(`   • Halted At Step: ${failedStep}`);
         console.log(`   • Reason: ${rawErrMsg}`);
-        console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'ready_for_review'`);
+        console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'ready_for_review'`);
         console.log(`${'═'.repeat(90)}\n`);
 
-        await updateSubmissionTaskWithCheck({
-          taskId: task.id,
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
           workerId,
           patch: {
             status: 'ready_for_review',
@@ -780,23 +697,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             updated_at: now,
           },
         });
-
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          applywizzId: task.applywizz_id,
-          jobUrl: task.job_url,
-          workerId,
-          patch: {
-            status: 'ready_for_review',
-            worker_id: null,
-            error_message: retryMsg,
-            application_submitted_screenshot_url: null,
-            updated_at: now,
-          },
-        });
       } else {
         // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
-        // "for thier third time you need to amrk it to faiuled and submit the screnshot on struclty 3 attemp why an dhere it is failing and failed"
         let finalShotUrl = result?.screenshotUrl || null;
         if (!finalShotUrl) {
           try {
@@ -835,7 +737,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         console.log(`   • Failed At Step: ${failedStep}`);
         console.log(`   • Failure Reason: ${rawErrMsg}`);
         console.log(`   • Failure Diagnostic Screenshot: ${finalShotUrl || 'None'}`);
-        console.log(`   • Dual-Table Sync: submission_tasks #${task.id} & job_distributions #${task.distribution_id || 'N/A'} -> 'failed'`);
+        console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'failed'`);
         console.log(`${'═'.repeat(90)}\n`);
 
         const failPatch = {
@@ -846,14 +748,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           updated_at: now,
         };
 
-        await updateSubmissionTaskWithCheck({
-          taskId: task.id,
-          workerId,
-          patch: failPatch,
-        });
-
         await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
+          distributionId: task.distribution_id || task.id,
           applywizzId: task.applywizz_id,
           jobUrl: task.job_url,
           workerId,
@@ -906,7 +802,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
             const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
             const timestamp = Date.now();
-            // Flat filename directly in root of failed-applications
             errShotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
             const { error: upErr } = await supabase.storage
               .from('failed-applications')
@@ -933,10 +828,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     if (currentAttempt < 3) {
       const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${errMsg}`;
-      console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt ${currentAttempt}/3. Re-queueing task #${task.id} to ready_for_review for retry.`);
+      console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt ${currentAttempt}/3. Re-queueing job_distributions #${task.distribution_id || task.id} to ready_for_review for retry.`);
 
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id || task.id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
         workerId,
         patch: {
           status: 'ready_for_review',
@@ -947,20 +844,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           updated_at: now,
         },
       });
-
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'ready_for_review',
-            worker_id: null,
-            error_message: retryMsg,
-            application_submitted_screenshot_url: null,
-            updated_at: now,
-          },
-        });
-      }
     } else {
       const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${errMsg}`;
       const failPatch = {
@@ -971,19 +854,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         updated_at: now,
       };
 
-      await updateSubmissionTaskWithCheck({
-        taskId: task.id,
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id || task.id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
         workerId,
         patch: failPatch,
       });
-
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: failPatch,
-        });
-      }
 
       try {
         const { recordFailedJob } = await import('./supabaseClient.mjs');
