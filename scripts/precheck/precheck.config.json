@@ -22,6 +22,7 @@
   "smokeImportPrefixes": [
     "backend/lib"
   ],
+  "smokeImportTimeoutMs": 60000,
   "smokeImportExclude": [
     "backend/lib/clusterBatchRunner.mjs",
     "backend/lib/workerPool.mjs",

@@ -16,7 +16,7 @@
 import { chromium } from 'playwright';
 import { writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
-import { discoverApplicationForm, detectATS, isWorkdayWizardVisible, isWorkdayJobPageMissing } from './discovery.mjs';
+import { discoverApplicationForm, detectATS, isWorkdayWizardVisible, isWorkdayJobPageMissing, isWorkdayAlreadyApplied } from './discovery.mjs';
 import { handleWorkday } from './workday.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 import { registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
@@ -406,7 +406,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     ],
   });
   if (ownBrowser) {
-    registerActiveBrowser(browser);
+    registerActiveBrowser(browser, { role: 'scan' });
   }
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -444,6 +444,23 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
       await page.waitForTimeout(1000);
     }
 
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log(`   ℹ️ [Scanner] Candidate has ALREADY APPLIED to this job — skipping scan: ${url}`);
+      return {
+        url: page.url(),
+        original_url: url,
+        jobMissing: false,
+        jobExpired: false,
+        alreadyApplied: true,
+        reason: 'already_applied',
+        title: await page.title().catch(() => ''),
+        scanned_at: new Date().toISOString(),
+        field_count: 0,
+        fields: [],
+        submit_buttons: [],
+      };
+    }
+
     if (await isWorkdayJobPageMissing(page)) {
       console.log(`   ❌ [Scanner] Job page does not exist (dead/expired URL) — skipping: ${url}`);
       return {
@@ -464,6 +481,22 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     console.log(`   Discovering application form for ${ats}...`);
     const foundForm = await discoverApplicationForm(page, url, { mode, profile });
     if (foundForm && typeof foundForm === 'object' && foundForm.ok === false) {
+      if (foundForm.reason === 'already_applied') {
+        console.log(`   ℹ️ [Scanner] Candidate has ALREADY APPLIED to this job: ${url}`);
+        return {
+          url: page.url(),
+          original_url: url,
+          jobMissing: false,
+          jobExpired: false,
+          alreadyApplied: true,
+          reason: 'already_applied',
+          title: await page.title().catch(() => ''),
+          scanned_at: new Date().toISOString(),
+          field_count: 0,
+          fields: [],
+          submit_buttons: [],
+        };
+      }
       console.log(`   ❌ Job unapplyable / expired: ${foundForm.reason} (${foundForm.message})`);
       return {
         url: page.url(),

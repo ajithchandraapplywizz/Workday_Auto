@@ -49,6 +49,8 @@ export function releaseBrowserSlot(workerId = 'worker') {
   }
 }
 
+const browserRoles = new Map();
+
 export function setGlobalStop(val) {
   globalStopRequested = Boolean(val);
   if (globalStopRequested) {
@@ -68,7 +70,7 @@ export function isGlobalStopRequested() {
 export function setScanStop(val) {
   scanStopRequested = Boolean(val);
   if (scanStopRequested) {
-    abortAllActiveBrowsers();
+    abortScanBrowsers();
   }
 }
 
@@ -79,7 +81,7 @@ export function isScanStopRequested() {
 export function setSubmitStop(val) {
   submitStopRequested = Boolean(val);
   if (submitStopRequested) {
-    abortAllActiveBrowsers();
+    abortSubmitBrowsers();
   }
 }
 
@@ -87,19 +89,26 @@ export function isSubmitStopRequested() {
   return submitStopRequested || globalStopRequested;
 }
 
-export function registerActiveBrowser(browser) {
+export function registerActiveBrowser(browser, meta = {}) {
   if (browser) {
     activeBrowsers.add(browser);
+    const role = meta.role || (meta.workerId && String(meta.workerId).includes('submit') ? 'submit' : 'scan');
+    browserRoles.set(browser, role);
   }
 }
 
 export function unregisterActiveBrowser(browser, workerId = null) {
   if (browser) {
     activeBrowsers.delete(browser);
+    browserRoles.delete(browser);
   }
   if (workerId) {
     releaseBrowserSlot(workerId);
   }
+}
+
+export function getActiveBrowserCount() {
+  return activeBrowsers.size;
 }
 
 const activeWorkerContexts = new Map();
@@ -121,6 +130,46 @@ export function getWorkerContext(workerId) {
 }
 
 /**
+ * Forcefully and immediately close scanning Playwright browser instances.
+ */
+export async function abortScanBrowsers() {
+  console.log(`\n🛑 [LIFECYCLE] Aborting scanning Playwright browser(s)...`);
+  const closePromises = [];
+  for (const browser of Array.from(activeBrowsers)) {
+    const role = browserRoles.get(browser);
+    if (!role || role === 'scan') {
+      try {
+        closePromises.push(browser.close().catch(() => {}));
+      } catch {}
+      activeBrowsers.delete(browser);
+      browserRoles.delete(browser);
+    }
+  }
+  await Promise.allSettled(closePromises);
+  console.log(`✅ [LIFECYCLE] Scanning browser instances closed.`);
+}
+
+/**
+ * Forcefully and immediately close submission Playwright browser instances.
+ */
+export async function abortSubmitBrowsers() {
+  console.log(`\n🛑 [LIFECYCLE] Aborting submission Playwright browser(s)...`);
+  const closePromises = [];
+  for (const browser of Array.from(activeBrowsers)) {
+    const role = browserRoles.get(browser);
+    if (!role || role === 'submit') {
+      try {
+        closePromises.push(browser.close().catch(() => {}));
+      } catch {}
+      activeBrowsers.delete(browser);
+      browserRoles.delete(browser);
+    }
+  }
+  await Promise.allSettled(closePromises);
+  console.log(`✅ [LIFECYCLE] Submission browser instances closed.`);
+}
+
+/**
  * Forcefully and immediately close all open Playwright browser instances.
  * Terminates active pages, network connections, and visible windows in <500ms.
  */
@@ -136,6 +185,7 @@ export async function abortAllActiveBrowsers() {
       );
     } catch {}
     activeBrowsers.delete(browser);
+    browserRoles.delete(browser);
   }
   activeSlots.clear();
   while (waitingQueue.length > 0) {

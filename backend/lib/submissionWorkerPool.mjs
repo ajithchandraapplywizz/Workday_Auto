@@ -230,7 +230,7 @@ export async function claimNextTask(workerId) {
     // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt)
     let { data: candidates, error: candErr } = await supabase
       .from('job_distributions')
-      .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
+      .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
       .in('status', ['ready_for_review', 'queued'])
       .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
       .order('created_at', { ascending: true })
@@ -240,7 +240,7 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) {
       const { data: retryCandidates } = await supabase
         .from('job_distributions')
-        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
         .order('created_at', { ascending: true })
@@ -252,7 +252,7 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) {
       const { data: retryCandidates2 } = await supabase
         .from('job_distributions')
-        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, resolved_answers_json')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
         .order('created_at', { ascending: true })
@@ -457,18 +457,17 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         let preResolved = task.resolved_answers || task.resolved_answers_json || null;
         if (!preResolved) {
           try {
-            const { getResolvedAnswersById, getResolvedAnswers } = await import('./supabaseClient.mjs');
             let distRow = null;
             if (task.distribution_id) {
-              distRow = await getResolvedAnswersById(task.distribution_id);
+              const { data: dRow } = await supabase.from('job_distributions').select('resolved_answers').eq('id', task.distribution_id).maybeSingle();
+              distRow = dRow;
             }
             if (!distRow && task.applywizz_id && task.job_url) {
-              distRow = await getResolvedAnswers(task.applywizz_id, task.job_url);
+              const { data: dRow } = await supabase.from('job_distributions').select('resolved_answers').eq('applywizz_id', task.applywizz_id).eq('job_url', task.job_url).maybeSingle();
+              distRow = dRow;
             }
             if (distRow?.resolved_answers && Array.isArray(distRow.resolved_answers) && distRow.resolved_answers.length > 0) {
               preResolved = distRow.resolved_answers;
-            } else if (distRow?.resolved_answers_json && Array.isArray(distRow.resolved_answers_json) && distRow.resolved_answers_json.length > 0) {
-              preResolved = distRow.resolved_answers_json;
             }
           } catch (fetchErr) {
             console.warn(`[${workerId}] Warning loading pre-resolved answers for task #${task.id}:`, fetchErr?.message);
@@ -624,6 +623,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     if (isSuccess) {
       console.log(`\n${'═'.repeat(90)}`);
       console.log(`✅ [STAGE 3: SUBMITTER] [${workerId}] APPLICATION SUBMITTED SUCCESSFULLY!`);
+      console.log(`✅ [STAGE 3: SUBMITTER] [${workerId}] This application was submitted with screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
       console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
       console.log(`   • Status: SUBMITTED`);
       console.log(`   • Proof Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
@@ -657,6 +657,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     } else if (isAlreadyApplied) {
       console.log(`\n${'═'.repeat(90)}`);
       console.log(`ℹ️ [STAGE 3: SUBMITTER] [${workerId}] APPLICATION ALREADY APPLIED ON WORKDAY`);
+      console.log(`ℹ️ [STAGE 3: SUBMITTER] [${workerId}] This application was ALREADY APPLIED with screenshot: ${finalShotUrl || 'None'}`);
       console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
       console.log(`   • Status: ALREADY_APPLIED`);
       console.log(`   • Proof Screenshot: ${finalShotUrl || 'None'}`);

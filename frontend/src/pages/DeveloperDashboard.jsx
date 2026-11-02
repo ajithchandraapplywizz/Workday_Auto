@@ -540,20 +540,9 @@ export default function DeveloperDashboard() {
   };
 
   // Handle triggering autonomous 3-worker pipeline (Scan & Resolve)
-  // If Submissions is active, automatically terminate it and switch cleanly
   const handleTriggerBot = async () => {
     setIsTriggering(true);
     try {
-      if (isSubmitActive) {
-        setTriggerToast({
-          type: 'info',
-          text: '🔄 Halting active Submissions to switch to Scan & Resolve...',
-        });
-        await stopSubmissionStage();
-        setBotStatus((prev) => ({ ...prev, isSubmitting: false }));
-        await new Promise((r) => setTimeout(r, 600));
-      }
-
       setTriggerToast({ type: 'info', text: '⚡ Dispatching 3-Worker Pipeline trigger (Scan & Resolve)...' });
       const res = await triggerAutonomousBot();
       if (res.success) {
@@ -565,9 +554,8 @@ export default function DeveloperDashboard() {
           ...prev,
           isRunning: true,
           isScanning: true,
-          isSubmitting: false,
-          state: 'scanning',
-          stage: 'scanning',
+          state: prev.isSubmitting ? 'submitting' : 'scanning',
+          stage: prev.isSubmitting ? 'submitting' : 'scanning',
         }));
       } else {
         setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch signal') });
@@ -618,7 +606,7 @@ export default function DeveloperDashboard() {
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ All background workers and browser contexts STOPPED immediately and set to idle.',
+          text: '✓ All scanning workers and browser contexts STOPPED immediately and set to idle.',
         });
       } else {
         setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop workers') });
@@ -632,20 +620,9 @@ export default function DeveloperDashboard() {
   };
 
   // Handle triggering submission pipeline for all approved applications
-  // If Scan & Resolve is active, automatically terminate it and switch cleanly
   const handleTriggerSubmissions = async () => {
     setIsSubmitTriggering(true);
     try {
-      if (isScanActive) {
-        setTriggerToast({
-          type: 'info',
-          text: '🔄 Halting active Scan & Resolve to switch to Submissions...',
-        });
-        await stopAutonomousBot();
-        setBotStatus((prev) => ({ ...prev, isScanning: false, isRunning: false, state: 'idle' }));
-        await new Promise((r) => setTimeout(r, 600));
-      }
-
       setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across 3 dedicated workers...' });
       const res = await triggerSubmissionStage();
       if (res.success) {
@@ -658,7 +635,6 @@ export default function DeveloperDashboard() {
           ...prev,
           isRunning: true,
           isSubmitting: true,
-          isScanning: false,
           state: 'submitting',
           stage: 'submitting',
         }));
@@ -827,7 +803,7 @@ export default function DeveloperDashboard() {
             <button
               type="button"
               onClick={handleTriggerBot}
-              disabled={isTriggering || isSubmitTriggering}
+              disabled={isTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -839,7 +815,7 @@ export default function DeveloperDashboard() {
                 color: '#ffffff',
                 fontSize: '0.88rem',
                 fontWeight: 700,
-                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                cursor: isTriggering ? 'not-allowed' : 'pointer',
                 boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
                 transition: 'all 0.15s ease',
               }}
@@ -877,7 +853,7 @@ export default function DeveloperDashboard() {
             <button
               type="button"
               onClick={handleTriggerSubmissions}
-              disabled={isTriggering || isSubmitTriggering}
+              disabled={isSubmitTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
@@ -889,7 +865,7 @@ export default function DeveloperDashboard() {
                 color: '#ffffff',
                 fontSize: '0.88rem',
                 fontWeight: 700,
-                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                cursor: isSubmitTriggering ? 'not-allowed' : 'pointer',
                 boxShadow: '0 4px 12px rgba(16, 185, 129, 0.35)',
                 transition: 'all 0.15s ease',
               }}

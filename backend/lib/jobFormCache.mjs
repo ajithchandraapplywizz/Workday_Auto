@@ -286,12 +286,38 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
         if (rawOpts.length > 0) {
           const yesOpt = rawOpts.find((o) => /^yes\b/i.test(String(o).trim()));
           const noOpt = rawOpts.find((o) => /^no\b/i.test(String(o).trim()));
-          if (/felon|convict|crime|terminat|fired|sue|litigat|conflict|non-?compet|non-?solicit/i.test(rawLabel) && noOpt) {
+          if (/family|romantic|relative|partner|felon|convict|crime|terminat|fired|sue|litigat|conflict|non-?compet|non-?solicit/i.test(rawLabel) && noOpt) {
             ansVal = String(noOpt);
           } else if (yesOpt) {
             ansVal = String(yesOpt);
           } else {
             ansVal = String(rawOpts[0]);
+          }
+          sourceTag = 'Tier 5: Policy Fallback';
+          tier = 5;
+          rawSource = 'policy_fallback';
+        } else {
+          // Freeform text / textarea fields
+          const lowerLabel = String(rawLabel).toLowerCase();
+          const spellMatch = rawLabel.match(/spell\s+[‘'"]?([a-zA-Z0-9_-]+)[’'"]?/i) || rawLabel.match(/type\s+(?:the\s+word\s+)?[‘'"]?([a-zA-Z0-9_-]+)[’'"]?/i);
+          if (spellMatch) {
+            ansVal = spellMatch[1];
+          } else if (/job\s*title|current\s*title|position/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.job_title || profile?.job_title || profile?._roleTitle || profile?.experience?.[0]?.title || 'Software Engineer';
+          } else if (/regionsubdivision|state|province/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.state || profile?.personal?.region || profile?.state || 'Connecticut';
+          } else if (/if\s*yes|company\s*name|previous\s*company/i.test(lowerLabel)) {
+            ansVal = 'N/A';
+          } else if (/postal|zip/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.postal_code || profile?.personal?.zip || '06085';
+          } else if (/city/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.city || 'Hartford';
+          } else if (/address/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.address_line_1 || profile?.personal?.address || '88 South Main Street';
+          } else if (/salary|compensation/i.test(lowerLabel)) {
+            ansVal = '90000';
+          } else {
+            ansVal = 'N/A';
           }
           sourceTag = 'Tier 5: Policy Fallback';
           tier = 5;

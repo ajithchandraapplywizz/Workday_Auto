@@ -969,7 +969,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     }
     if (dateStr && timeframe) {
       const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.gte('created_at', bounds.startIso).lte('created_at', bounds.endIso);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
     }
 
     const { data: apps, error: appsErr } = await query;
@@ -2513,9 +2513,13 @@ export async function triggerAutonomousBot() {
         .from('bot_control')
         .update({
           stage: 'scanning',
+          mode: 'scanning',
           is_running: true,
           is_paused: false,
           stop_requested: false,
+          scan_status: 'running',
+          scan_enabled: true,
+          scan_stop_requested: false,
           trigger_requested: true,
           last_action_requested: 'start_scan',
           current_action: 'Scanning unique job links across dedicated workers...',
@@ -2527,16 +2531,6 @@ export async function triggerAutonomousBot() {
     } catch (bcErr) {
       console.warn('Note on updating bot_control:', bcErr?.message);
     }
-
-    try {
-      await supabase.from('worker_control').upsert({
-        key: 'scan',
-        enabled: true,
-        status: 'running',
-        stop_requested: false,
-        updated_at: now,
-      }, { onConflict: 'key' }).catch(() => {});
-    } catch {}
 
     const { scan } = getEnvWorkerCounts();
     const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
@@ -2640,26 +2634,24 @@ export async function stopAutonomousBot() {
       )
     ).catch(() => {});
 
-    // 2. Set authoritative bot_control and worker_control stop signals in Supabase
+    // 2. Set authoritative bot_control scan stop signals in Supabase
     try {
+      const { data: curBc } = await supabase.from('bot_control').select('submit_status, is_running').eq('id', 'primary').maybeSingle();
+      const isSubmitting = curBc?.submit_status === 'running';
       await supabase
         .from('bot_control')
         .update({
-          stage: 'idle',
-          mode: 'idle',
-          is_running: false,
-          is_paused: true,
-          stop_requested: true,
-          scan_stop_requested: true,
-          submit_stop_requested: true,
+          stage: isSubmitting ? 'submitting' : 'idle',
+          mode: isSubmitting ? 'submitting' : 'idle',
+          is_running: isSubmitting,
+          is_paused: false,
+          stop_requested: false,
           scan_status: 'off',
           scan_enabled: false,
-          submit_status: 'off',
-          submit_enabled: false,
+          scan_stop_requested: true,
           trigger_requested: false,
-          last_action_requested: 'stop',
-          current_action: 'Workers stopped by user.',
-          active_worker_count: 0,
+          last_action_requested: 'stop_scan',
+          current_action: isSubmitting ? 'Submissions in progress (Scan stopped by user).' : 'Scan & Resolve stopped by user.',
           updated_at: now,
         })
         .eq('id', 'primary');
@@ -2667,23 +2659,19 @@ export async function stopAutonomousBot() {
       console.warn('Note on updating bot_control stop state:', bcErr?.message);
     }
 
-    try {
-      await supabase.from('worker_control').upsert([
-        { key: 'scan', enabled: false, status: 'off', stop_requested: true, updated_at: now },
-        { key: 'submit', enabled: false, status: 'off', stop_requested: true, updated_at: now },
-      ], { onConflict: 'key' }).catch(() => {});
-    } catch {}
-
-    // 3. Mark all active worker rows idle in Supabase worker_status
-    const allDynamicIds = getDynamicWorkerIds();
+    // 3. Mark scanning & resolving worker rows idle in Supabase worker_status
+    const { scan } = getEnvWorkerCounts();
+    const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
+    const resolvingWorkerIds = Array.from({ length: 4 }, (_, i) => `resolving_worker_${i + 1}`);
     await supabase
       .from('worker_status')
       .update({
         state: 'idle',
         current_application_id: null,
+        stage: 'idle',
         updated_at: now,
       })
-      .in('worker_id', allDynamicIds);
+      .in('worker_id', [...scanningWorkerIds, ...resolvingWorkerIds]);
 
     // 4. Roll back any actively processing tasks back to pending on stop
     try {
@@ -2720,6 +2708,10 @@ export async function triggerSubmissionStage() {
   try {
     const basePayload = {
       stage: 'submitting',
+      mode: 'submitting',
+      submit_status: 'running',
+      submit_enabled: true,
+      submit_stop_requested: false,
       is_running: true,
       is_paused: false,
       stop_requested: false,
@@ -2742,46 +2734,8 @@ export async function triggerSubmissionStage() {
     console.warn('Supabase bot_control error:', err);
   }
 
-  try {
-    await supabase.from('worker_control').upsert({
-      key: 'submit',
-      enabled: true,
-      status: 'running',
-      stop_requested: false,
-      updated_at: now,
-    }, { onConflict: 'key' }).catch(() => {});
-  } catch {}
-
-  try {
-    await supabase.from('worker_control').upsert({
-      key: 'scan',
-      enabled: false,
-      status: 'off',
-      stop_requested: true,
-      updated_at: now,
-    }, { onConflict: 'key' }).catch(() => {});
-  } catch {}
-
   const backendBase = getBackendBaseUrl();
   const isLocal = isLocalEnvironment();
-
-  // Stop scanner endpoint call to ensure backend daemon halts scanning cluster immediately
-  const stopScanEndpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/scan/stop`] : []),
-    ...(isLocal ? [
-      'http://localhost:3001/api/bot/scan/stop',
-    ] : []),
-  ];
-  for (const ep of stopScanEndpoints) {
-    try {
-      await fetch(ep, {
-        method: 'POST',
-        headers: getStaffAuthHeaders(),
-        body: JSON.stringify({ action: 'stop_scan', nonce: actionNonce, timestamp: now }),
-        signal: AbortSignal.timeout(1500),
-      });
-    } catch {}
-  }
 
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
@@ -2821,21 +2775,23 @@ export async function stopSubmissionStage() {
   const actionNonce = Date.now().toString();
   let supabaseSuccess = false;
   try {
+    const { data: curBc } = await supabase.from('bot_control').select('scan_status, is_running').eq('id', 'primary').maybeSingle();
+    const isScanning = curBc?.scan_status === 'running';
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
-        stage: 'idle',
-        mode: 'idle',
-        is_running: false,
-        is_paused: true,
+        stage: isScanning ? 'scanning' : 'idle',
+        mode: isScanning ? 'scanning' : 'idle',
+        is_running: isScanning,
+        is_paused: false,
+        stop_requested: false,
         submit_status: 'off',
         submit_enabled: false,
         submit_stop_requested: true,
-        stop_requested: true,
         trigger_requested: false,
         last_action_requested: 'stop_submit',
-        current_action: 'Submissions stopped by user.',
-        active_worker_count: 0,
+        current_action: isScanning ? 'Scanning in progress (Submissions stopped by user).' : 'Submissions stopped by user.',
+        active_worker_count: isScanning ? 3 : 0,
         updated_at: now,
       })
       .eq('id', 'primary');
@@ -2843,16 +2799,6 @@ export async function stopSubmissionStage() {
   } catch (err) {
     console.warn('Supabase stop error:', err);
   }
-
-  try {
-    await supabase.from('worker_control').upsert({
-      key: 'submit',
-      enabled: false,
-      status: 'off',
-      stop_requested: true,
-      updated_at: now,
-    }, { onConflict: 'key' }).catch(() => {});
-  } catch {}
 
   // Roll back in-flight submission tasks and job_distributions back to ready_for_review
   try {
@@ -3000,12 +2946,13 @@ export async function fetchBotDaemonStatus() {
     );
 
     // Stop states: only halted if user specifically requested stop for that pipeline
-    const isScanHalted = botControl?.last_action_requested === 'stop_scan' && botControl?.stop_requested;
-    const isSubmitHalted = botControl?.last_action_requested === 'stop_submit' && botControl?.stop_requested;
+    const isScanHalted = botControl?.scan_status === 'off' || (botControl?.last_action_requested === 'stop_scan' && botControl?.scan_stop_requested);
+    const isSubmitHalted = botControl?.submit_status === 'off' || (botControl?.last_action_requested === 'stop_submit' && botControl?.submit_stop_requested);
 
     const isScanning = !isScanHalted && Boolean(
       scannerApiRunning ||
       hasActiveScanWorkers ||
+      botControl?.scan_status === 'running' ||
       (botControl?.stage === 'scanning' && botControl?.is_running && !botControl?.stop_requested) ||
       (botControl?.last_action_requested === 'start_scan' && (botControl?.trigger_requested || botControl?.is_running))
     );
@@ -3013,6 +2960,7 @@ export async function fetchBotDaemonStatus() {
     const isSubmitting = !isSubmitHalted && Boolean(
       submitterApiRunning ||
       hasActiveSubmitWorkers ||
+      botControl?.submit_status === 'running' ||
       (botControl?.stage === 'submitting' && botControl?.is_running && !botControl?.stop_requested) ||
       (botControl?.last_action_requested === 'start_submit' && (botControl?.trigger_requested || botControl?.is_running))
     );

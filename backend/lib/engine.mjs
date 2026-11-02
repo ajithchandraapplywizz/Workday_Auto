@@ -2033,6 +2033,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     // Only capture full-page screenshot when application submission is 100% complete
     const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
     profile._submissionScreenshotUrl = finalProofUrl;
+    console.log(`\n${'═'.repeat(90)}`);
+    console.log(`✅ This application was submitted with screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
+    console.log(`${'═'.repeat(90)}\n`);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';
@@ -2041,8 +2044,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   // Detect if application was already submitted on Workday
   const isAlreadyApplied = await page.evaluate(() => {
     const text = document.body?.innerText || '';
-    return /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied/i.test(text) ||
-           !!document.querySelector('[data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]');
+    return /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied|duplicate\s*application/i.test(text) ||
+           !!document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
+           Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim()));
   }).catch(() => false);
 
   if (isAlreadyApplied) {
@@ -2050,6 +2054,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     console.log('ℹ️ Application already applied on Workday!');
     const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
     profile._submissionScreenshotUrl = alreadyProofUrl;
+    console.log(`\n${'═'.repeat(90)}`);
+    console.log(`ℹ️ This application was ALREADY APPLIED with screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
+    console.log(`${'═'.repeat(90)}\n`);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
     return 'already_applied';
@@ -2172,8 +2179,10 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const stepStuck = { name: '', count: 0, lastUnfilled: -1 };
 
   while (currentIteration < maxSteps) {
-    if (isGlobalStopRequested() || isSubmitStopRequested() || isScanStopRequested()) {
-      console.log('🛑 [Workday Wizard] Stop requested! Terminating wizard loop immediately.');
+    const isScanOperation = Boolean(profile?._isScanning || mode === 'scan' || mode === 'scanning');
+    const isStop = isGlobalStopRequested() || (isScanOperation ? isScanStopRequested() : isSubmitStopRequested());
+    if (isStop) {
+      console.log(`🛑 [Workday Wizard] Stop requested (${isScanOperation ? 'SCAN' : 'SUBMIT'})! Terminating wizard loop immediately.`);
       return 'stopped';
     }
     currentIteration++;
@@ -2960,7 +2969,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   const ats = detectATS(url);
   const ownBrowser = !existingBrowser;
   const browser = existingBrowser || await chromium.launch({ headless });
-  if (ownBrowser) registerActiveBrowser(browser);
+  if (ownBrowser) registerActiveBrowser(browser, { role: isScanOnly ? 'scan' : 'submit' });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',

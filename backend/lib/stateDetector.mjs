@@ -138,26 +138,35 @@ export async function detectAlreadyApplied(page) {
     return await page.evaluate(() => {
       const body = (document.body?.innerText || '').toLowerCase();
 
+      // ARIA / data-automation-id based detection for structured Workday tenants
+      if (
+        document.querySelector('[data-automation-id="appliedButton"]') ||
+        document.querySelector('[data-automation-id="alreadyApplied"]') ||
+        document.querySelector('[data-automation-id="previouslyApplied"]') ||
+        document.querySelector('[data-automation-id="applicationAlreadySubmitted"]') ||
+        document.querySelector('[data-automation-id="duplicateApplication"]')
+      ) {
+        return true;
+      }
+
+      // Button / badge elements explicitly saying "Applied"
+      const buttons = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
+      if (buttons.some(b => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((b.textContent || '').trim()))) {
+        return true;
+      }
+
       // Text-based detection — covers all known Workday tenant phrasings
       if (
         /you have already applied/i.test(body) ||
         /you('ve| have) already (applied|submitted)/i.test(body) ||
+        /already applied (?:for|to) this (?:job|position)/i.test(body) ||
         /already submitted (your|an) application/i.test(body) ||
         /application (has already been|already) (submitted|received)/i.test(body) ||
         /thank you.*already applied/i.test(body) ||
         /your application (was|has been) (already )?(received|submitted)/i.test(body) ||
         /we('ve| have) (already |previously )?received your application/i.test(body) ||
+        /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(body) ||
         /duplicate application/i.test(body)
-      ) {
-        return true;
-      }
-
-      // ARIA / data-automation-id based detection for structured Workday tenants
-      if (
-        document.querySelector('[data-automation-id="alreadyApplied"]') ||
-        document.querySelector('[data-automation-id="previouslyApplied"]') ||
-        document.querySelector('[data-automation-id="applicationAlreadySubmitted"]') ||
-        document.querySelector('[data-automation-id="duplicateApplication"]')
       ) {
         return true;
       }

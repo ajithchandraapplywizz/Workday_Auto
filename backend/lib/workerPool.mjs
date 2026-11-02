@@ -18,7 +18,7 @@ import { readFile, writeFile } from 'fs/promises';
 import { scanForm, slugify } from './scanner.mjs';
 import { fillForm } from './engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './planner.mjs';
-import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible } from './discovery.mjs';
+import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible, isWorkdayAlreadyApplied } from './discovery.mjs';
 import { inferStandardOptions } from './workdayScanHarvest.mjs';
 import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClient.mjs';
 import { normalizeLabel } from './qaStore.mjs';
@@ -400,7 +400,10 @@ export async function executeWorkerTask({
       '--window-size=1280,900',
     ],
   });
-  registerActiveBrowser(browser);
+  registerActiveBrowser(browser, {
+    role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
+    workerId,
+  });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
     userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -490,6 +493,94 @@ export async function executeWorkerTask({
         profile,
       });
 
+    // Pre-wizard check: detect if candidate has already applied to this position
+    const isAlreadyApplied = Boolean(
+      scan.alreadyApplied ||
+      scan.reason === 'already_applied' ||
+      await isWorkdayAlreadyApplied(page)
+    );
+
+    if (isAlreadyApplied) {
+      console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job (${company || 'Workday'}). Capturing proof screenshot...`);
+      let alreadyShotUrl = null;
+      try {
+        if (page && !page.isClosed()) {
+          await page.evaluate(() => {
+            const el = document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]') ||
+              Array.from(document.querySelectorAll('button, a, div, h1, h2, h3, p')).find(e => /^\s*applied\s*$/i.test(e.textContent || '') || /already applied|application submitted/i.test(e.textContent || ''));
+            if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
+          }).catch(() => {});
+          await page.waitForTimeout(300);
+          const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+          if (buf) {
+            alreadyShotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+          }
+        }
+      } catch {}
+
+      await browser.close().catch(() => {});
+
+      if (queueTaskId) {
+        await updateQueueTaskStatus(queueTaskId, {
+          status: 'already_applied',
+          errorMessage: null,
+          screenshotPath: alreadyShotUrl,
+        });
+      }
+
+      const now = new Date().toISOString();
+      const directTaskId = options.taskId || task.taskId || task.id;
+      if (directTaskId) {
+        const { supabase } = await import('./supabaseClient.mjs');
+        if (supabase) {
+          await supabase.from('submission_tasks').update({
+            status: 'already_applied',
+            completed_at: now,
+            error_message: null,
+            application_submitted_screenshot_url: alreadyShotUrl,
+            updated_at: now,
+          }).eq('id', directTaskId).catch(() => {});
+        }
+      }
+      const distId = task.distribution_id || task.distributionId;
+      if (distId) {
+        const { supabase } = await import('./supabaseClient.mjs');
+        if (supabase) {
+          await supabase.from('job_distributions').update({
+            status: 'already_applied',
+            error_message: null,
+            application_submitted_screenshot_url: alreadyShotUrl,
+            updated_at: now,
+          }).eq('id', distId).catch(() => {});
+        }
+      }
+
+      await upsertSupabaseApplication({
+        applywizzId,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+        status: 'already_applied',
+        failureReason: alreadyShotUrl ? `[screenshot: ${alreadyShotUrl}]` : null,
+        failureScreenshotUrl: alreadyShotUrl,
+        stoppedAtStep: 'Job Discovery / Already Applied',
+      }).catch(() => {});
+
+      console.log(`\n${'═'.repeat(90)}`);
+      console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+      console.log(`   • Status: ALREADY_APPLIED`);
+      console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`${'═'.repeat(90)}\n`);
+
+      return {
+        status: 'already_applied',
+        reason: 'already_applied',
+        screenshotUrl: alreadyShotUrl,
+        stoppedAtStep: 'Job Discovery / Already Applied',
+      };
+    }
+
     if (scan.jobMissing || scan.jobExpired || scan.reason === 'job_expired_or_not_found' || scan.reason === 'no_apply_button' || scan.reason === 'job_expired' || scan.reason === 'empty_page') {
       // Patiently verify if the page actually displays an Apply button or is still loading!
       try {
@@ -511,6 +602,72 @@ export async function executeWorkerTask({
         scan.jobExpired = false;
         delete scan.reason;
       } else {
+        // Re-check already applied before treating as dead/expired
+        const recheckAlreadyApplied = await isWorkdayAlreadyApplied(page);
+        if (recheckAlreadyApplied) {
+          console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job (${company || 'Workday'}). Capturing proof screenshot...`);
+          let alreadyShotUrl = null;
+          try {
+            if (page && !page.isClosed()) {
+              const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+              if (buf) {
+                alreadyShotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+              }
+            }
+          } catch {}
+
+          await browser.close().catch(() => {});
+          if (queueTaskId) {
+            await updateQueueTaskStatus(queueTaskId, { status: 'already_applied', errorMessage: null, screenshotPath: alreadyShotUrl });
+          }
+          const now = new Date().toISOString();
+          const directTaskId = options.taskId || task.taskId || task.id;
+          if (directTaskId) {
+            const { supabase } = await import('./supabaseClient.mjs');
+            if (supabase) {
+              await supabase.from('submission_tasks').update({
+                status: 'already_applied',
+                completed_at: now,
+                error_message: null,
+                application_submitted_screenshot_url: alreadyShotUrl,
+                updated_at: now,
+              }).eq('id', directTaskId).catch(() => {});
+            }
+          }
+          const distId = task.distribution_id || task.distributionId;
+          if (distId) {
+            const { supabase } = await import('./supabaseClient.mjs');
+            if (supabase) {
+              await supabase.from('job_distributions').update({
+                status: 'already_applied',
+                error_message: null,
+                application_submitted_screenshot_url: alreadyShotUrl,
+                updated_at: now,
+              }).eq('id', distId).catch(() => {});
+            }
+          }
+
+          await upsertSupabaseApplication({
+            applywizzId,
+            jobUrl,
+            company,
+            roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+            status: 'already_applied',
+            failureReason: alreadyShotUrl ? `[screenshot: ${alreadyShotUrl}]` : null,
+            failureScreenshotUrl: alreadyShotUrl,
+            stoppedAtStep: 'Job Discovery / Already Applied',
+          }).catch(() => {});
+
+          console.log(`\n${'═'.repeat(90)}`);
+          console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+          console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+          console.log(`   • Status: ALREADY_APPLIED`);
+          console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+          console.log(`${'═'.repeat(90)}\n`);
+
+          return { status: 'already_applied', reason: 'already_applied', screenshotUrl: alreadyShotUrl, stoppedAtStep: 'Job Discovery / Already Applied' };
+        }
+
         const genuineExpired = await page.evaluate(() => {
           const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
           return /(?:the page you are looking (?:for )?)?(?:doesn'?t|does not) exist|job (?:posting )?(?:has (?:been )?)?(?:filled|closed|expired|removed|inactive)|no longer accepting applications|\b(?:error\s*)?404\b/i.test(text);
@@ -534,7 +691,9 @@ export async function executeWorkerTask({
           }
         } catch {}
 
-        await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
+        if (genuineExpired) {
+          await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
+        }
 
         await browser.close().catch(() => {});
         if (queueTaskId) {
@@ -978,6 +1137,10 @@ export async function executeWorkerTask({
             // Strictly flat filename directly in root of submitted-applications (zero nested folders)
             filename = `${compPrefix}_${cleanTaskId}_submitted.png`;
             storagePath = filename;
+          } else if (status === 'already_applied') {
+            bucket = 'submitted-applications';
+            filename = `${compPrefix}_${cleanTaskId}_already_applied.jpg`;
+            storagePath = filename;
           } else if (status === 'reached-review' || status === 'reached_review') {
             // Upload full-page Review & Submit blueprint screenshot to submitted-applications bucket for scanned_jobs
             bucket = 'submitted-applications';
@@ -1004,21 +1167,42 @@ export async function executeWorkerTask({
         }
       } catch {}
 
+    if (status === 'submitted') {
+      console.log(`\n${'═'.repeat(90)}`);
+      console.log(`✅ [${workerId}] This application was submitted with screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+      console.log(`   • Status: SUBMITTED`);
+      console.log(`   • Proof Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`${'═'.repeat(90)}\n`);
+    } else if (status === 'already_applied') {
+      console.log(`\n${'═'.repeat(90)}`);
+      console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+      console.log(`   • Status: ALREADY_APPLIED`);
+      console.log(`   • Proof Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
+      console.log(`${'═'.repeat(90)}\n`);
+    }
+
     const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
     const isSuccessStatus = (
       status === 'submitted' ||
+      status === 'already_applied' ||
       status === 'reached-review' ||
       status === 'reached_review' ||
       status === 'ready_for_review' ||
       (status === 'human-required' && onReviewPage) ||
       onReviewPage
     );
-    const stoppedBlock = isSuccessStatus
-      ? 'Step 5: Review & Submit'
-      : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+    const stoppedBlock = (status === 'already_applied')
+      ? 'Already Applied'
+      : isSuccessStatus
+        ? 'Step 5: Review & Submit'
+        : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
 
     let fullFailureReason = null;
-    if (!isSuccessStatus) {
+    if (status === 'already_applied') {
+      fullFailureReason = completionShotUrl ? `[screenshot: ${completionShotUrl}]` : null;
+    } else if (!isSuccessStatus) {
       fullFailureReason = `wizard_did_not_reach_review (stopped at ${stoppedBlock}) [step: ${stoppedBlock}]`;
       if (completionShotUrl) {
         fullFailureReason += ` [screenshot: ${completionShotUrl}]`;
@@ -1029,9 +1213,11 @@ export async function executeWorkerTask({
 
     const appStatus = (status === 'submitted')
       ? 'submitted'
-      : (status === 'reached-review' || status === 'reached_review' || isSuccessStatus)
-        ? 'ready_for_review'
-        : status;
+      : (status === 'already_applied')
+        ? 'already_applied'
+        : (status === 'reached-review' || status === 'reached_review' || isSuccessStatus)
+          ? 'ready_for_review'
+          : status;
 
     await upsertSupabaseApplication({
       applywizzId,
@@ -1312,13 +1498,25 @@ export async function executeWorkerTask({
             const { error: dErr } = await supabase.from('job_distributions').update(distUpdate).eq('id', task.id);
             if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions by id:`, dErr.message);
           }
-        } else {
-          const { error: dErr } = await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
-          if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions by applywizz_id/url:`, dErr.message);
         }
-        console.log(`   ✅ [${workerId}] job_distributions record updated to 'submitted' with proof screenshot: ${completionShotUrl || 'saved'}`);
+        // Dual-Table Sync: Also update submission_tasks
+        try {
+          const subTaskUpdate = {
+            status: 'submitted',
+            application_submitted_screenshot_url: completionShotUrl,
+            completed_at: completionTimestamp,
+            error_message: null,
+            updated_at: completionTimestamp,
+          };
+          if (task.taskId) {
+            await supabase.from('submission_tasks').update(subTaskUpdate).eq('id', task.taskId);
+          } else {
+            await supabase.from('submission_tasks').update(subTaskUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+          }
+        } catch {}
+        console.log(`   ✅ [${workerId}] Dual-table sync complete: job_distributions & submission_tasks marked 'submitted' with proof screenshot.`);
       } catch (err) {
-        console.warn(`   ⚠️ [${workerId}] Error writing submitted status to job_distributions:`, err.message);
+        console.warn(`   ⚠️ [${workerId}] Error writing submitted status to tables:`, err.message);
       }
       appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
     } else if (status === 'reached-review' || status === 'reached_review') {

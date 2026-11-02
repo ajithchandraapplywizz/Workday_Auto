@@ -700,13 +700,25 @@ function checkSmokeImport() {
     if (!fs.existsSync(fullPath)) continue;
 
     const fileUrl = pathToFileURL(fullPath).href;
-    const res = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${fileUrl}').then(() => process.exit(0)).catch((e) => { console.error(e?.stack || e); process.exit(1); })`], {
+    const timeoutMs = config.smokeImportTimeoutMs || 60000;
+    let res = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${fileUrl}').then(() => process.exit(0)).catch((e) => { console.error(e?.stack || e); process.exit(1); })`], {
       cwd: rootDir,
       env: dummyEnv,
-      timeout: config.smokeImportTimeoutMs || 30000,
+      timeout: timeoutMs,
       encoding: 'utf8',
       windowsHide: true,
     });
+
+    if (res.status !== 0 && res.error?.code === 'ETIMEDOUT') {
+      // Retry once on transient OS / Windows Defender spawn timeout
+      res = spawnSync(process.execPath, ['--input-type=module', '-e', `import('${fileUrl}').then(() => process.exit(0)).catch((e) => { console.error(e?.stack || e); process.exit(1); })`], {
+        cwd: rootDir,
+        env: dummyEnv,
+        timeout: Math.round(timeoutMs * 1.5),
+        encoding: 'utf8',
+        windowsHide: true,
+      });
+    }
 
     if (res.status !== 0) {
       const allLines = (res.stderr || res.stdout || res.error?.message || 'Process terminated with non-zero exit code')

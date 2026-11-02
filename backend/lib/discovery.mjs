@@ -252,6 +252,48 @@ export async function isWorkdayJobPageMissing(page) {
   }).catch(() => false);
 }
 
+/**
+ * Workday "Already Applied" check — strictly verified via DOM.
+ * Detects whether this candidate has previously applied to this job.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function isWorkdayAlreadyApplied(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  return await page.evaluate(() => {
+    // 1. Data-automation-id tags specifically signaling already applied
+    if (
+      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]')
+    ) {
+      return true;
+    }
+
+    // 2. Buttons, badges, or links where text is "Applied" or "Already Applied"
+    const elements = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
+    const hasAppliedEl = elements.some(el => {
+      const txt = (el.textContent || '').trim();
+      return /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test(txt);
+    });
+    if (hasAppliedEl) return true;
+
+    // 3. Document body or alert text indicating application already received
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    if (!text || text.length < 20) return false;
+
+    return (
+      /you('ve| have) already (applied|submitted)/i.test(text) ||
+      /already applied (?:for|to) this (?:job|position)/i.test(text) ||
+      /already submitted (?:your|an) application/i.test(text) ||
+      /application (?:has already been|already) (?:submitted|received)/i.test(text) ||
+      /thank you.*already applied/i.test(text) ||
+      /duplicate application/i.test(text) ||
+      /we('ve| have) (?:already |previously )?received your application/i.test(text) ||
+      /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(text) ||
+      /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(text)
+    );
+  }).catch(() => false);
+}
+
 const WORKDAY_WIZARD_SELECTORS = [
   'button[data-automation-id="pageFooterNextButton"]',
   'button[data-automation-id="bottom-navigation-next-button"]',
@@ -837,35 +879,55 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         (document.querySelector('[data-automation-id="jobPostingPage"], [data-automation-id="jobPostingHeader"], main, h1, h2') || text.length > 80) &&
         !/loading\.\.\./i.test(text)
       );
+      const isAlreadyApplied = Boolean(
+        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
+        Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim())) ||
+        /you('ve| have) already (applied|submitted)|already applied (?:for|to) this|already submitted (?:your|an) application|duplicate application|we('ve| have) (?:already |previously )?received your application/i.test(text)
+      );
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|page not found|404\b/i.test(text);
 
-      return hasApply || hasWizard || hasJobContent || isExpired;
+      return hasApply || hasWizard || hasJobContent || isExpired || isAlreadyApplied;
     }, { timeout: 30000 }).catch(() => null);
 
     // Settle time for React / Workday hydration
     await page.waitForTimeout(1500);
 
-    // Check if page is truly expired AFTER waiting up to 30s
+    // Check if page is already applied or truly expired AFTER waiting up to 30s
     const pageCheck = await page.evaluate(() => {
       // 1. If an Apply button is present, it is definitively active and NOT expired
       const hasApply = Boolean(
         document.querySelector('a[data-automation-id*="apply" i], button[data-automation-id*="apply" i], a[data-automation-id="adventureButton"], a[data-automation-id="continueApplication"], button[data-automation-id="continueApplication"], [data-automation-id="jobPostingApplyButton"]') ||
         Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
       );
-      if (hasApply) return { expired: false };
+      if (hasApply) return { expired: false, alreadyApplied: false };
 
       // 2. If wizard is active, not expired
       const hasWizard = Boolean(
         document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
       );
-      if (hasWizard) return { expired: false };
+      if (hasWizard) return { expired: false, alreadyApplied: false };
 
       const text = (document.body?.innerText || '').trim();
       const lower = text.toLowerCase();
+
+      // 3. Check for candidate "Already Applied" state
+      const isAlreadyApplied = Boolean(
+        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
+        Array.from(document.querySelectorAll('button, a, span, div[role="button"]')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim())) ||
+        /you('ve| have) already (applied|submitted)|already applied (?:for|to) this|already submitted (?:your|an) application|duplicate application|we('ve| have) (?:already |previously )?received your application|you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(lower)
+      );
+      if (isAlreadyApplied) return { expired: false, alreadyApplied: true, reason: 'already_applied' };
+
+      // 4. Check for dead / expired link
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking (?:for )?(?:doesn'?t|does not) exist|page (?:you are looking (?:for )?)?(?:doesn'?t|does not) exist|(?:doesn'?t|does not) exist|page not found|\b(?:error\s*)?404\b/i.test(lower);
-      if (isExpired) return { expired: true, reason: 'job_expired' };
-      return { expired: false };
-    }).catch(() => ({ expired: false }));
+      if (isExpired) return { expired: true, alreadyApplied: false, reason: 'job_expired' };
+      return { expired: false, alreadyApplied: false };
+    }).catch(() => ({ expired: false, alreadyApplied: false }));
+
+    if (pageCheck.alreadyApplied) {
+      console.log('   ℹ️ Workday: Candidate has ALREADY APPLIED to this position.');
+      return { ok: false, reason: 'already_applied', message: 'Candidate has already applied to this position' };
+    }
 
     if (pageCheck.expired) {
       console.log('   ❌ Workday Job Inactive/Dead: Job expired or no longer accepting applications');
@@ -1064,6 +1126,17 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       await handleAdaptiveGateway(page, mode);
       await page.waitForTimeout(1000);
       return page.url();
+    }
+
+    if (!applyBtn) {
+      if (await isWorkdayAlreadyApplied(page)) {
+        console.log('   ℹ️ Workday: Candidate has ALREADY APPLIED to this position (no active Apply button).');
+        return { ok: false, reason: 'already_applied', message: 'Candidate has already applied to this position' };
+      }
+      if (await isWorkdayJobPageMissing(page)) {
+        console.log('   ❌ Workday Job Inactive/Dead: Job expired or no longer accepting applications');
+        return { ok: false, reason: 'job_expired', message: 'Job expired or no longer accepting applications' };
+      }
     }
 
     return page.url();
