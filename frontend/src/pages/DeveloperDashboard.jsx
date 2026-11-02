@@ -195,11 +195,10 @@ export default function DeveloperDashboard() {
         }
 
         if (kpiRes.success) {
-          // Double-guard: If 0 workers are in active state, applying is strictly 0
-          const reconciledApplying = activeWorkersCount > 0 ? Math.min(kpiRes.applying, activeWorkersCount) : 0;
+          // Direct DB sync: strictly use actual applying count from job_distributions
           setKpis({
             submitted: kpiRes.submitted,
-            applying: reconciledApplying,
+            applying: kpiRes.applying,
             failed: kpiRes.failed,
             queued: kpiRes.queued,
             total: kpiRes.total,
@@ -258,14 +257,29 @@ export default function DeveloperDashboard() {
 
     loadData(false);
 
-    // Poll metrics dynamically: every 3s if active pipeline, or every 6s when idle for real-time mobile sync
+    // Realtime channel for instant sub-second DB synchronization on job_distributions
+    const realtimeChannel = supabase
+      ?.channel('dev_job_distributions_realtime')
+      ?.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'job_distributions' },
+        () => {
+          loadData(true);
+        }
+      )
+      ?.subscribe();
+
+    // Direct dynamic polling every 1s for immediate real-time synchronization with DB
     const pollInterval = setInterval(() => {
       loadData(true);
-    }, isAnyPipelineActive ? 3000 : 6000);
+    }, 1000);
 
     return () => {
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
+      if (realtimeChannel && supabase?.removeChannel) {
+        supabase.removeChannel(realtimeChannel);
+      }
     };
   }, [date, timeframe, isAnyPipelineActive]);
 

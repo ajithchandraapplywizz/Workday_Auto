@@ -83,10 +83,10 @@ export default function AdminDashboard() {
     let isMounted = true;
     loadData(false);
 
-    // Dynamic 3s interval for live updates
+    // Dynamic 1s interval for real-time live updates
     const pollInterval = setInterval(() => {
       loadData(true);
-    }, 3000);
+    }, 1000);
 
     return () => {
       isMounted = false;

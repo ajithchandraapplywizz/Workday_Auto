@@ -145,6 +145,7 @@ export async function fillStateFromDom(page, profile = {}) {
         if (tagName === 'input' || tagName === 'textarea') {
           await input.click({ force: true });
           await input.fill(state);
+          await input.press('Enter').catch(() => {});
           await input.press('Tab').catch(() => {});
         } else {
           await input.click({ force: true });

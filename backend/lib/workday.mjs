@@ -23,6 +23,7 @@ import {
   clickContinueApplicationIfPresent,
   ensureWorkdayApplicationWizard,
   extractWorkdayCompanyName,
+  isWorkdayAlreadyApplied,
 } from './discovery.mjs';
 import {
   resolveWorkdayVerification,
@@ -120,6 +121,12 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
   await page.waitForTimeout(3000);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
+  // 0. Detect if candidate has already applied to this position on Workday post-login
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Post-login check: Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
   // 1. Recover immediately if Workday displays transient "Something went wrong"
   let bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
   if (/something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText)) {
@@ -127,6 +134,10 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(4000);
     try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
   }
 
   if (await isWorkdayWizardVisible(page)) {
@@ -135,6 +146,10 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
   }
 
   const continued = await clickContinueApplicationIfPresent(page);
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
   if (continued && await isWorkdayWizardVisible(page)) {
     console.log('   Logged in — resumed draft via Continue Application.');
     return true;
@@ -154,8 +169,16 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
   if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
     console.log('   Logged in, on JD page — entering application wizard...');
     await ensureWorkdayApplicationWizard(page, { mode, profile });
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
   } else if (!continued) {
     await clickContinueApplicationIfPresent(page);
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
   }
 
   if (await isWorkdayWizardVisible(page)) {
@@ -171,10 +194,20 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
     await page.waitForTimeout(4000);
     try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+
     if (await isWorkdayWizardVisible(page)) {
       console.log('   ✅ Successfully verified on application wizard after reload.');
       return true;
     }
+  }
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
   }
 
   const onWizard = await isWorkdayWizardVisible(page);
@@ -201,6 +234,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
 
   await page.waitForTimeout(2000);
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
 
   // 1. Check if application wizard is already active
   if (await isWorkdayWizardVisible(page)) {
@@ -733,11 +771,21 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
     return true;
   }
 
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
   if (!await isWorkdayLogin(page)) {
     const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
     if (entry.entered) {
       console.log(`   Entered application wizard (${entry.method}).`);
     }
+  }
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
   }
 
   if (await isWorkdayWizardVisible(page)) {
@@ -747,6 +795,10 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
   if (!await isWorkdayLogin(page)) {
     await handleAdaptiveGateway(page, mode);
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
     if (await isWorkdayWizardVisible(page)) {
       console.log('   Already authenticated on Workday application form.');
       return true;

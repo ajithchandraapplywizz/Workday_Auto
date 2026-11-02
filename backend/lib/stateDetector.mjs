@@ -19,6 +19,17 @@ export const WORKDAY_STATES = {
  */
 export async function detectWorkdayStep(page) {
   return await page.evaluate(() => {
+    // 0. Detect "Already Applied" state immediately
+    const fullBody = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+    if (
+      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"], [data-automation-id*="viewMyApplications" i]') ||
+      /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(fullBody) ||
+      /already applied (?:for|to) this (?:job|position)/i.test(fullBody) ||
+      (/view my applications/i.test(fullBody) && /applied/i.test(fullBody))
+    ) {
+      return 'Already Applied';
+    }
+
     // 1. If visible password/auth fields or Create Account/Sign In active step exist, it is NOT a wizard form step
     const pwdVisible = Array.from(document.querySelectorAll('input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"]'))
       .some((el) => el.offsetParent !== null);
@@ -136,7 +147,7 @@ export function normalizeWorkdayStepName(stepName, questionLabel = '') {
 export async function detectAlreadyApplied(page) {
   try {
     return await page.evaluate(() => {
-      const body = (document.body?.innerText || '').toLowerCase();
+      const body = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
 
       // ARIA / data-automation-id based detection for structured Workday tenants
       if (
@@ -144,43 +155,45 @@ export async function detectAlreadyApplied(page) {
         document.querySelector('[data-automation-id="alreadyApplied"]') ||
         document.querySelector('[data-automation-id="previouslyApplied"]') ||
         document.querySelector('[data-automation-id="applicationAlreadySubmitted"]') ||
-        document.querySelector('[data-automation-id="duplicateApplication"]')
+        document.querySelector('[data-automation-id="duplicateApplication"]') ||
+        document.querySelector('[data-automation-id*="viewMyApplications" i]')
       ) {
         return true;
       }
 
-      // Button / badge elements explicitly saying "Applied"
+      // Button / badge elements explicitly saying "Applied" or "View My Applications"
       const buttons = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
-      if (buttons.some(b => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((b.textContent || '').trim()))) {
+      if (buttons.some(b => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((b.textContent || '').trim()) || /^\s*view my applications\s*$/i.test((b.textContent || '').trim()))) {
         return true;
       }
 
       // Text-based detection — covers all known Workday tenant phrasings
       if (
-        /you have already applied/i.test(body) ||
-        /you('ve| have) already (applied|submitted)/i.test(body) ||
+        /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(body) ||
         /already applied (?:for|to) this (?:job|position)/i.test(body) ||
-        /already submitted (your|an) application/i.test(body) ||
-        /application (has already been|already) (submitted|received)/i.test(body) ||
+        /already submitted (?:your|an) application/i.test(body) ||
+        /application (?:has already been|already) (?:submitted|received)/i.test(body) ||
         /thank you.*already applied/i.test(body) ||
-        /your application (was|has been) (already )?(received|submitted)/i.test(body) ||
-        /we('ve| have) (already |previously )?received your application/i.test(body) ||
+        /duplicate application/i.test(body) ||
+        /we(?:'ve|\s*have)?\s*(?:already |previously )?received your application/i.test(body) ||
         /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(body) ||
-        /duplicate application/i.test(body)
+        /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(body) ||
+        (/view my applications/i.test(body) && /applied/i.test(body))
       ) {
         return true;
       }
 
-      // Page-level heading detection
+      // Page-level heading or paragraph detection
       const headings = Array.from(
-        document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"]')
+        document.querySelectorAll('h1, h2, h3, h4, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"], p')
       );
       for (const h of headings) {
-        const text = (h.textContent || '').toLowerCase();
+        const text = (h.textContent || '').trim();
         if (
           /already applied/i.test(text) ||
           /application submitted/i.test(text) ||
-          /previously applied/i.test(text)
+          /previously applied/i.test(text) ||
+          /you've already applied/i.test(text)
         ) {
           return true;
         }

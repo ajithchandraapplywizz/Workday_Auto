@@ -121,13 +121,20 @@ export async function updateSubmissionTaskWithCheck({
 /**
  * B7 Helper: Checked update for job_distributions
  */
+/**
+ * B7 Helper: Checked update for job_distributions
+ */
 export async function updateJobDistributionWithCheck({
   distributionId,
+  applywizzId,
+  jobUrl,
   workerId = 'worker',
   patch,
   maxRetries = 3,
 }) {
-  if (!distributionId) return { success: false, error: new Error('No distributionId provided') };
+  if (!distributionId && (!applywizzId || !jobUrl)) {
+    return { success: false, error: new Error('Neither distributionId nor (applywizzId and jobUrl) provided') };
+  }
   let lastErr = null;
 
   const cleanPatch = { ...patch };
@@ -139,16 +146,21 @@ export async function updateJobDistributionWithCheck({
     delete cleanPatch.screenshot_url;
   }
   if ('screenshot_path' in cleanPatch) {
+    if (!cleanPatch.application_submitted_screenshot_url && cleanPatch.screenshot_path) {
+      cleanPatch.application_submitted_screenshot_url = cleanPatch.screenshot_path;
+    }
     delete cleanPatch.screenshot_path;
   }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
     try {
-      const { data, error } = await supabase
-        .from('job_distributions')
-        .update(cleanPatch)
-        .eq('id', distributionId)
-        .select('*');
+      let query = supabase.from('job_distributions').update(cleanPatch);
+      if (distributionId) {
+        query = query.eq('id', distributionId);
+      } else {
+        query = query.eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+      }
+      const { data, error } = await query.select('*');
 
       if (error) {
         lastErr = new Error(`Supabase update error on job_distributions: ${error.message}`);
@@ -158,13 +170,26 @@ export async function updateJobDistributionWithCheck({
       }
 
       if (!data || data.length === 0) {
-        lastErr = new Error(`Zero rows updated on job_distributions for #${distributionId}`);
-        console.warn(`[${workerId}] Warning: updateJobDistributionWithCheck attempt ${attempt}/${maxRetries} matched 0 rows for #${distributionId}`);
+        // If matched 0 rows by distributionId, attempt fallback by applywizz_id + job_url if available
+        if (distributionId && applywizzId && jobUrl) {
+          const { data: fbData, error: fbErr } = await supabase
+            .from('job_distributions')
+            .update(cleanPatch)
+            .eq('applywizz_id', applywizzId)
+            .eq('job_url', jobUrl)
+            .select('*');
+          if (!fbErr && fbData && fbData.length > 0) {
+            console.log(`[${workerId}] job_distributions record updated via fallback (applywizz_id=${applywizzId}) to '${patch.status || 'updated'}'`);
+            return { success: true, data: fbData[0], rowsCount: fbData.length };
+          }
+        }
+        lastErr = new Error(`Zero rows updated on job_distributions for #${distributionId || `${applywizzId}/${jobUrl}`}`);
+        console.warn(`[${workerId}] Warning: updateJobDistributionWithCheck attempt ${attempt}/${maxRetries} matched 0 rows`);
         if (attempt < maxRetries) await new Promise((r) => setTimeout(r, 200 * attempt));
         continue;
       }
 
-      console.log(`[${workerId}] job_distributions record updated to '${patch.status || 'updated'}' (rows=${data.length}) for dist #${distributionId}`);
+      console.log(`[${workerId}] job_distributions record updated to '${patch.status || 'updated'}' (rows=${data.length}) for dist #${distributionId || applywizzId}`);
       return { success: true, data: data[0], rowsCount: data.length };
     } catch (err) {
       lastErr = err;
@@ -172,7 +197,7 @@ export async function updateJobDistributionWithCheck({
     }
   }
 
-  const finalErrMsg = `[${workerId}] ERROR: Failed to update job_distributions #${distributionId} after ${maxRetries} attempts: ${lastErr?.message}`;
+  const finalErrMsg = `[${workerId}] ERROR: Failed to update job_distributions #${distributionId || applywizzId} after ${maxRetries} attempts: ${lastErr?.message}`;
   console.error(finalErrMsg);
   return { success: false, error: lastErr || new Error(finalErrMsg) };
 }
@@ -601,13 +626,51 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const isAlreadyApplied = (
       result?.status === 'already_applied' ||
       result?.status === 'applied' ||
+      result?.reason === 'already_applied' ||
       result?.isAlreadyApplied === true ||
+      result?.alreadyApplied === true ||
       /already applied|already submitted/i.test(result?.error || '') ||
-      /already applied|already submitted/i.test(result?.reason || '')
+      /already applied|already submitted/i.test(result?.reason || '') ||
+      /already applied|already submitted/i.test(result?.failureReason || '')
     );
 
-    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || null;
+    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || result?.failureScreenshotUrl || null;
     let finalStoragePath = result?.screenshotPath || null;
+
+    // MANDATORY Screenshot: If candidate already applied, ensure proof screenshot is captured even on attempt 1
+    if (isAlreadyApplied && !finalShotUrl) {
+      try {
+        const ctx = getWorkerContext(workerId);
+        if (ctx?.page && !ctx.page.isClosed()) {
+          const buf = await ctx.page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+          if (buf) {
+            const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+            const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+            const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
+            finalStoragePath = `${compPrefix}_${task.id}_already_applied_${Date.now()}.jpg`;
+            const { error: upErr } = await supabase.storage
+              .from('submitted-applications')
+              .upload(finalStoragePath, buf, { contentType: 'image/jpeg', upsert: true });
+            if (!upErr) {
+              const { data: urlData } = supabase.storage
+                .from('submitted-applications')
+                .getPublicUrl(finalStoragePath);
+              finalShotUrl = urlData?.publicUrl || null;
+            }
+          }
+        }
+      } catch {}
+    }
+
+    if (isAlreadyApplied) {
+      try {
+        const ctx = getWorkerContext(workerId);
+        if (ctx?.browser) {
+          await ctx.browser.close().catch(() => {});
+        }
+      } catch {}
+    }
+
     if (!finalStoragePath && finalShotUrl) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
       const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
@@ -642,18 +705,18 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         },
       });
 
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'submitted',
-            error_message: null,
-            application_submitted_screenshot_url: finalShotUrl,
-            updated_at: now,
-          },
-        });
-      }
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
+        workerId,
+        patch: {
+          status: 'submitted',
+          error_message: null,
+          application_submitted_screenshot_url: finalShotUrl,
+          updated_at: now,
+        },
+      });
     } else if (isAlreadyApplied) {
       console.log(`\n${'═'.repeat(90)}`);
       console.log(`ℹ️ [STAGE 3: SUBMITTER] [${workerId}] APPLICATION ALREADY APPLIED ON WORKDAY`);
@@ -676,18 +739,18 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         },
       });
 
-      if (task.distribution_id) {
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id,
-          workerId,
-          patch: {
-            status: 'already_applied',
-            error_message: 'Application already submitted on Workday',
-            application_submitted_screenshot_url: finalShotUrl,
-            updated_at: now,
-          },
-        });
-      }
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
+        workerId,
+        patch: {
+          status: 'already_applied',
+          error_message: 'Application already submitted on Workday',
+          application_submitted_screenshot_url: finalShotUrl,
+          updated_at: now,
+        },
+      });
     } else {
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
@@ -718,19 +781,19 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           },
         });
 
-        if (task.distribution_id) {
-          await updateJobDistributionWithCheck({
-            distributionId: task.distribution_id,
-            workerId,
-            patch: {
-              status: 'ready_for_review',
-              worker_id: null,
-              error_message: retryMsg,
-              application_submitted_screenshot_url: null,
-              updated_at: now,
-            },
-          });
-        }
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            error_message: retryMsg,
+            application_submitted_screenshot_url: null,
+            updated_at: now,
+          },
+        });
       } else {
         // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
         // "for thier third time you need to amrk it to faiuled and submit the screnshot on struclty 3 attemp why an dhere it is failing and failed"
@@ -789,13 +852,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           patch: failPatch,
         });
 
-        if (task.distribution_id) {
-          await updateJobDistributionWithCheck({
-            distributionId: task.distribution_id,
-            workerId,
-            patch: failPatch,
-          });
-        }
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: failPatch,
+        });
 
         try {
           const { recordFailedJob } = await import('./supabaseClient.mjs');

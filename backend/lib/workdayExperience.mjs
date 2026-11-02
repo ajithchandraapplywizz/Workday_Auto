@@ -715,6 +715,7 @@ async function fillTextAggressive(page, fieldLoc, value, label) {
   if (await input.count() && await input.isVisible({ timeout: 500 }).catch(() => false)) {
     await input.click({ force: true }).catch(() => {});
     await input.fill(str);
+    await input.press('Enter').catch(() => {});
     await input.press('Tab').catch(() => {});
     const actual = await input.inputValue().catch(() => '');
     if (valuesMatch(actual, str)) {

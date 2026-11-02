@@ -2145,6 +2145,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           await input.scrollIntoViewIfNeeded().catch(() => {});
           await input.click({ force: true }).catch(() => {});
           await input.fill(formattedDate || String(answer));
+          await input.press('Enter').catch(() => {});
           await input.press('Tab').catch(() => {});
           ok = true;
         }

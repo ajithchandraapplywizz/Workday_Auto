@@ -531,6 +531,23 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           profile,
         });
 
+        if (authOk === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+          console.log(`   ℹ️ [Scanner] Candidate has ALREADY APPLIED to this job after auth: ${url}`);
+          return {
+            url: page.url(),
+            original_url: url,
+            jobMissing: false,
+            jobExpired: false,
+            alreadyApplied: true,
+            reason: 'already_applied',
+            title: await page.title().catch(() => ''),
+            scanned_at: new Date().toISOString(),
+            field_count: 0,
+            fields: [],
+            submit_buttons: [],
+          };
+        }
+
         if (!authOk || authOk === 'mailbox_not_connected') {
           console.log('   ⚠️  Workday authentication was not completed — skipping premature gateway scan.');
           return {

@@ -263,34 +263,49 @@ export async function isWorkdayAlreadyApplied(page) {
   return await page.evaluate(() => {
     // 1. Data-automation-id tags specifically signaling already applied
     if (
-      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]')
+      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"], [data-automation-id*="viewMyApplications" i]')
     ) {
       return true;
     }
 
-    // 2. Buttons, badges, or links where text is "Applied" or "Already Applied"
+    // 2. Buttons, badges, or links where text is "Applied", "Already Applied", or "View My Applications"
     const elements = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
     const hasAppliedEl = elements.some(el => {
       const txt = (el.textContent || '').trim();
-      return /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test(txt);
+      return /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test(txt) ||
+             /^\s*view my applications\s*$/i.test(txt);
     });
     if (hasAppliedEl) return true;
 
-    // 3. Document body or alert text indicating application already received
+    // 3. Document body or alert text indicating application already received / already applied
     const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!text || text.length < 20) return false;
+    if (!text) return false;
 
-    return (
-      /you('ve| have) already (applied|submitted)/i.test(text) ||
+    if (
+      /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(text) ||
       /already applied (?:for|to) this (?:job|position)/i.test(text) ||
       /already submitted (?:your|an) application/i.test(text) ||
       /application (?:has already been|already) (?:submitted|received)/i.test(text) ||
       /thank you.*already applied/i.test(text) ||
       /duplicate application/i.test(text) ||
-      /we('ve| have) (?:already |previously )?received your application/i.test(text) ||
+      /we(?:'ve|\s*have)?\s*(?:already |previously )?received your application/i.test(text) ||
       /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(text) ||
-      /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(text)
-    );
+      /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(text) ||
+      (/view my applications/i.test(text) && /applied/i.test(text))
+    ) {
+      return true;
+    }
+
+    // 4. Heading or paragraph-level checks
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"], p'));
+    for (const h of headings) {
+      const hText = (h.textContent || '').trim();
+      if (/already applied/i.test(hText) || /previously applied/i.test(hText) || /you've already applied/i.test(hText)) {
+        return true;
+      }
+    }
+
+    return false;
   }).catch(() => false);
 }
 
@@ -472,6 +487,20 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
   const retried = await clickContinueApplicationIfPresent(page);
   if (retried && await isWorkdayWizardVisible(page)) {
     return { entered: true, method: 'continue-application-retry' };
+  }
+
+  // Mandatory Refresh Fallback: If fields/wizard not displaying post-navigation/login, reload page once to trigger Workday client hydration
+  if (!await isWorkdayWizardVisible(page)) {
+    console.log('   🔄 [ensureWorkdayApplicationWizard] Wizard fields not displaying — refreshing page to trigger Workday client hydration...');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(3000);
+    if (await isWorkdayWizardVisible(page)) {
+      return { entered: true, method: 'post-refresh-wizard' };
+    }
+    const postRefreshContinued = await clickContinueApplicationIfPresent(page);
+    if (postRefreshContinued && await isWorkdayWizardVisible(page)) {
+      return { entered: true, method: 'post-refresh-continue' };
+    }
   }
 
   return { entered: false, method: 'none' };

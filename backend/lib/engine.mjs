@@ -22,6 +22,7 @@ import {
   ensureWorkdayApplicationWizard,
   extractWorkdayCompanyName,
   extractJobRoleFromDom,
+  isWorkdayAlreadyApplied,
 } from './discovery.mjs';
 import { findField, handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, verifyDropdownFilled, fuzzyScore } from './fields.mjs';
 import { takeScreenshot, logToCSV } from './reporter.mjs';
@@ -2190,22 +2191,55 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     const refreshed = await refreshWorkdayPageOnce(page);
     let stepName = await detectWorkdayStep(page);
 
+    if (stepName === 'Already Applied' || await isWorkdayAlreadyApplied(page)) {
+      profile?._onLog?.(currentIteration, 'Step 1: Workday verified: candidate has already applied to this position.');
+      console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
+      const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+      profile._submissionScreenshotUrl = alreadyProofUrl;
+      await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+      return 'already_applied';
+    }
+
     if (stepName === 'Unknown' && !await isWorkdayWizardVisible(page)) {
       console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply / Auth Gateway...');
       const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
       if (entry.entered) {
         console.log(`  ✅ Entered wizard via ${entry.method}`);
       }
+      if (await isWorkdayAlreadyApplied(page)) {
+        profile?._onLog?.(currentIteration, 'Step 1: Workday verified: candidate has already applied to this position.');
+        console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
+        const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+        profile._submissionScreenshotUrl = alreadyProofUrl;
+        await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+        return 'already_applied';
+      }
       if (!await isWorkdayWizardVisible(page)) {
         const effEmail = workdayEmail || profile?.personal?.email || '';
         const effPwd = workdayPassword || process.env.WORKDAY_PASSWORD || '';
         if (effEmail && effPwd) {
           const authOk = await handleWorkday(page, { email: effEmail, password: effPwd, mode, profile });
+          if (authOk === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+            profile?._onLog?.(currentIteration, 'Step 1: Workday verified: candidate has already applied to this position.');
+            console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday after signin.');
+            const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+            profile._submissionScreenshotUrl = alreadyProofUrl;
+            await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+            return 'already_applied';
+          }
           if (authOk === 'mailbox_not_connected') return 'skipped';
           if (!authOk) return 'auth-failed';
         }
       }
       stepName = await detectWorkdayStep(page);
+      if (stepName === 'Already Applied' || await isWorkdayAlreadyApplied(page)) {
+        profile?._onLog?.(currentIteration, 'Step 1: Workday verified: candidate has already applied to this position.');
+        console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
+        const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+        profile._submissionScreenshotUrl = alreadyProofUrl;
+        await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+        return 'already_applied';
+      }
       if (await isWorkdayWizardVisible(page)) {
         await tryUsePreviousApplication(page, profile).catch(() => false);
       }
@@ -3019,6 +3053,15 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
     // Handle Workday multi-step wizard
     if (ats === 'workday') {
+      if (await isWorkdayAlreadyApplied(page)) {
+        console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday (pre-auth check).');
+        const proofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+        profile._submissionScreenshotUrl = proofUrl;
+        await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
+        if (ownBrowser) await browser.close().catch(() => {});
+        return { status: 'already_applied', screenshotUrl: proofUrl };
+      }
+
       if (!await isWorkdayWizardVisible(page)) {
         const wdOk = await handleWorkday(page, {
           email: workdayEmail,
@@ -3026,6 +3069,14 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           mode,
           profile,
         });
+        if (wdOk === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+          console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday (post-auth check).');
+          const proofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+          profile._submissionScreenshotUrl = proofUrl;
+          await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
+          if (ownBrowser) await browser.close().catch(() => {});
+          return { status: 'already_applied', screenshotUrl: proofUrl };
+        }
         if (!wdOk || wdOk === 'mailbox_not_connected') {
           if (wdOk === 'mailbox_not_connected') {
             console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — skipping client cleanly.');
@@ -3038,9 +3089,25 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         }
       }
       if (!await isWorkdayWizardVisible(page)) {
+        if (await isWorkdayAlreadyApplied(page)) {
+          console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
+          const proofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+          profile._submissionScreenshotUrl = proofUrl;
+          await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
+          if (ownBrowser) await browser.close().catch(() => {});
+          return { status: 'already_applied', screenshotUrl: proofUrl };
+        }
         const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
         if (entry.entered) {
           console.log(`  ✅ Entered application wizard via ${entry.method}`);
+        }
+        if (await isWorkdayAlreadyApplied(page)) {
+          console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
+          const proofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+          profile._submissionScreenshotUrl = proofUrl;
+          await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
+          if (ownBrowser) await browser.close().catch(() => {});
+          return { status: 'already_applied', screenshotUrl: proofUrl };
         }
         if (!await isWorkdayWizardVisible(page)) {
           const wdRetry = await handleWorkday(page, {
@@ -3049,6 +3116,14 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
             mode,
             profile,
           });
+          if (wdRetry === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+            console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday (post-retry-auth).');
+            const proofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+            profile._submissionScreenshotUrl = proofUrl;
+            await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
+            if (ownBrowser) await browser.close().catch(() => {});
+            return { status: 'already_applied', screenshotUrl: proofUrl };
+          }
           if (wdRetry === 'mailbox_not_connected') {
             if (ownBrowser) await browser.close();
             return 'skipped';

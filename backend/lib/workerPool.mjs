@@ -172,6 +172,33 @@ export function indexResolvedAnswers(profile, rawAnswersList) {
     if (/^address\s*(line\s*1)?/i.test(cleanQ) && !profile.personal.address_line_1) {
       profile.personal.address_line_1 = strVal;
     }
+
+    // Hydrate profile.experience facts from pre-resolved answers
+    profile.experience = profile.experience || {};
+    if (/job\s*title/i.test(cleanQ) && !profile.experience.current_title) {
+      profile.experience.current_title = strVal;
+      profile.experience.role = strVal;
+    }
+    if (/^company/i.test(cleanQ) && !profile.experience.current_company) {
+      profile.experience.current_company = strVal;
+      profile.experience.company = strVal;
+    }
+    if (/^location\b/i.test(cleanQ) && !profile.experience.location) {
+      profile.experience.location = strVal;
+    }
+
+    // Hydrate profile.education facts from pre-resolved answers
+    profile.education = profile.education || {};
+    if (/school\s*or\s*university|^school$/i.test(cleanQ) && !profile.education.university) {
+      profile.education.university = strVal;
+    }
+    if (/^degree\b/i.test(cleanQ) && !profile.education.degree) {
+      profile.education.degree = strVal;
+    }
+    if (/field\s*of\s*study|^major$/i.test(cleanQ) && !profile.education.major) {
+      profile.education.major = strVal;
+      profile.education.field_of_study_hierarchy = [strVal];
+    }
   }
 
   return count;
@@ -478,6 +505,11 @@ export async function executeWorkerTask({
         isScanOnly: false,
         isClusterBlueprint: false,
       });
+
+      if (status && typeof status === 'object') {
+        if (status.screenshotUrl) completionShotUrl = status.screenshotUrl;
+        status = status.status || 'unknown';
+      }
     } else {
       // Step A: Scan Form
       appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
@@ -543,15 +575,19 @@ export async function executeWorkerTask({
         }
       }
       const distId = task.distribution_id || task.distributionId;
-      if (distId) {
-        const { supabase } = await import('./supabaseClient.mjs');
-        if (supabase) {
-          await supabase.from('job_distributions').update({
-            status: 'already_applied',
-            error_message: null,
-            application_submitted_screenshot_url: alreadyShotUrl,
-            updated_at: now,
-          }).eq('id', distId).catch(() => {});
+      const { supabase } = await import('./supabaseClient.mjs');
+      if (supabase) {
+        const distPatch = {
+          status: 'already_applied',
+          error_message: null,
+          application_submitted_screenshot_url: alreadyShotUrl,
+          updated_at: now,
+        };
+        if (distId) {
+          await supabase.from('job_distributions').update(distPatch).eq('id', distId).catch(() => {});
+        }
+        if (applywizzId && jobUrl) {
+          await supabase.from('job_distributions').update(distPatch).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
         }
       }
 
@@ -776,10 +812,99 @@ export async function executeWorkerTask({
         if (isAuthScreen) {
           console.log(`   🔑 [${workerId}] Login screen detected — submitting credentials for ${workdayEmail}...`);
           const { handleWorkday } = await import('./workday.mjs');
-          await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
+          const authRes = await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
           await page.waitForTimeout(1500);
-          wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+          if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+            console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
+            scan.alreadyApplied = true;
+            scan.reason = 'already_applied';
+            wizardNow = false;
+          } else {
+            wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+          }
         }
+      }
+
+      if (scan.alreadyApplied || scan.reason === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+        console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job (${company || 'Workday'}). Capturing mandatory proof screenshot...`);
+        let alreadyShotUrl = null;
+        try {
+          if (page && !page.isClosed()) {
+            await page.evaluate(() => {
+              const el = document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]') ||
+                Array.from(document.querySelectorAll('button, a, div, h1, h2, h3, p')).find(e => /^\s*applied\s*$/i.test(e.textContent || '') || /already applied|application submitted/i.test(e.textContent || ''));
+              if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
+            }).catch(() => {});
+            await page.waitForTimeout(300);
+            const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
+            if (buf) {
+              alreadyShotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
+            }
+          }
+        } catch {}
+
+        await browser.close().catch(() => {});
+
+        if (queueTaskId) {
+          await updateQueueTaskStatus(queueTaskId, {
+            status: 'already_applied',
+            errorMessage: null,
+            screenshotPath: alreadyShotUrl,
+          });
+        }
+
+        const now = new Date().toISOString();
+        const directTaskId = options.taskId || task.taskId || task.id;
+        if (directTaskId) {
+          const { supabase } = await import('./supabaseClient.mjs');
+          if (supabase) {
+            await supabase.from('submission_tasks').update({
+              status: 'already_applied',
+              completed_at: now,
+              error_message: 'Application already submitted on Workday',
+              application_submitted_screenshot_url: alreadyShotUrl,
+              updated_at: now,
+            }).eq('id', directTaskId).catch(() => {});
+          }
+        }
+        const distId = task.distribution_id || task.distributionId;
+        if (distId) {
+          const { supabase } = await import('./supabaseClient.mjs');
+          if (supabase) {
+            await supabase.from('job_distributions').update({
+              status: 'already_applied',
+              error_message: 'Application already submitted on Workday',
+              application_submitted_screenshot_url: alreadyShotUrl,
+              updated_at: now,
+            }).eq('id', distId).catch(() => {});
+          }
+        }
+
+        await upsertSupabaseApplication({
+          applywizzId,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+          status: 'already_applied',
+          failureReason: alreadyShotUrl ? `[screenshot: ${alreadyShotUrl}]` : null,
+          failureScreenshotUrl: alreadyShotUrl,
+          stoppedAtStep: 'Job Discovery / Already Applied',
+        }).catch(() => {});
+
+        console.log(`\n${'═'.repeat(90)}`);
+        console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+        console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
+        console.log(`   • Status: ALREADY_APPLIED`);
+        console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
+        console.log(`   • Dual-Table Sync: submission_tasks #${directTaskId || 'N/A'} & job_distributions #${distId || 'N/A'} -> 'already_applied'`);
+        console.log(`${'═'.repeat(90)}\n`);
+
+        return {
+          status: 'already_applied',
+          reason: 'already_applied',
+          screenshotUrl: alreadyShotUrl,
+          stoppedAtStep: 'Job Discovery / Already Applied',
+        };
       }
 
       // Check if still loading
@@ -789,6 +914,28 @@ export async function executeWorkerTask({
         } catch {}
         await page.waitForTimeout(1000);
         wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+      }
+
+      // Mandatory Post-Login Hydration Recovery: If fields/wizard are not displaying, refresh page
+      if (!wizardNow) {
+        console.log(`   🔄 [${workerId}] Fields/wizard not displaying post-login — refreshing page to trigger Workday client hydration...`);
+        await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+        await page.waitForTimeout(3000);
+        wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+
+        // If redirected to home page (e.g. /External or tenant landing without /job/), navigate to exact canonical jobUrl
+        if (!wizardNow) {
+          const currentUrl = page.url();
+          if (!currentUrl.includes('/job/') && jobUrl.includes('/job/')) {
+            console.log(`   🔄 [${workerId}] Landed on home page (${currentUrl}) instead of job page — re-navigating to canonical job URL: ${jobUrl}...`);
+            await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
+            await page.waitForTimeout(3000);
+            const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
+            await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile }).catch(() => {});
+            await page.waitForTimeout(2000);
+            wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
+          }
+        }
       }
 
       if (wizardNow) {
@@ -1250,9 +1397,11 @@ export async function executeWorkerTask({
     if (queueTaskId) {
       const finalStatus = (status === 'submitted')
         ? 'submitted'
-        : (status === 'reached-review' || status === 'reached_review')
-          ? 'ready_for_review'
-          : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
+        : (status === 'already_applied')
+          ? 'already_applied'
+          : (status === 'reached-review' || status === 'reached_review')
+            ? 'ready_for_review'
+            : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
       const answersMap = {
         ...(profile._scrapedReviewMap || {}),
         ...(profile._supabaseQa || {}),
@@ -1486,17 +1635,22 @@ export async function executeWorkerTask({
           worker_id: workerId,
           updated_at: completionTimestamp,
         };
-        if (task.id) {
-          try {
-            const { updateJobDistributionWithCheck } = await import('./submissionWorkerPool.mjs');
-            await updateJobDistributionWithCheck({
-              distributionId: task.id,
-              workerId,
-              patch: distUpdate,
-            });
-          } catch {
-            const { error: dErr } = await supabase.from('job_distributions').update(distUpdate).eq('id', task.id);
-            if (dErr) console.warn(`   ⚠️ [${workerId}] Warning updating job_distributions by id:`, dErr.message);
+        const distId = task.distribution_id || task.distributionId || task.id;
+        try {
+          const { updateJobDistributionWithCheck } = await import('./submissionWorkerPool.mjs');
+          await updateJobDistributionWithCheck({
+            distributionId: distId,
+            applywizzId,
+            jobUrl,
+            workerId,
+            patch: distUpdate,
+          });
+        } catch {
+          if (distId) {
+            await supabase.from('job_distributions').update(distUpdate).eq('id', distId).catch(() => {});
+          }
+          if (applywizzId && jobUrl) {
+            await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
           }
         }
         // Dual-Table Sync: Also update submission_tasks
@@ -1519,6 +1673,54 @@ export async function executeWorkerTask({
         console.warn(`   ⚠️ [${workerId}] Error writing submitted status to tables:`, err.message);
       }
       appLog(16, `Playwright: Application submitted successfully! Verified confirmation screen ('Alright... Application Submitted'). Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
+    } else if (status === 'already_applied') {
+      try {
+        const completionTimestamp = new Date().toISOString();
+        const distUpdate = {
+          status: 'already_applied',
+          application_submitted_screenshot_url: completionShotUrl,
+          worker_id: workerId,
+          error_message: 'Application already submitted on Workday',
+          updated_at: completionTimestamp,
+        };
+        const distId = task.distribution_id || task.distributionId || task.id;
+        try {
+          const { updateJobDistributionWithCheck } = await import('./submissionWorkerPool.mjs');
+          await updateJobDistributionWithCheck({
+            distributionId: distId,
+            applywizzId,
+            jobUrl,
+            workerId,
+            patch: distUpdate,
+          });
+        } catch {
+          if (distId) {
+            await supabase.from('job_distributions').update(distUpdate).eq('id', distId).catch(() => {});
+          }
+          if (applywizzId && jobUrl) {
+            await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
+          }
+        }
+        // Dual-Table Sync: Also update submission_tasks
+        try {
+          const subTaskUpdate = {
+            status: 'already_applied',
+            application_submitted_screenshot_url: completionShotUrl,
+            completed_at: completionTimestamp,
+            error_message: 'Application already submitted on Workday',
+            updated_at: completionTimestamp,
+          };
+          if (task.taskId) {
+            await supabase.from('submission_tasks').update(subTaskUpdate).eq('id', task.taskId);
+          } else {
+            await supabase.from('submission_tasks').update(subTaskUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+          }
+        } catch {}
+        console.log(`   ℹ️ [${workerId}] Dual-table sync complete: job_distributions & submission_tasks marked 'already_applied' with proof screenshot.`);
+      } catch (err) {
+        console.warn(`   ⚠️ [${workerId}] Error writing already_applied status to tables:`, err.message);
+      }
+      appLog(16, `Playwright: Candidate has already applied to this job on Workday. Screenshot proof saved to Supabase Storage: ${completionShotUrl || 'Supabase'}`);
     } else if (status === 'reached-review' || status === 'reached_review') {
       const isClusterBlueprint = Boolean(options.isClusterBlueprint || options.skipJobDistribution);
       if (!isClusterBlueprint) {
@@ -2336,22 +2538,25 @@ export async function executeSingleTargetedSubmission({
     }
   } else {
     console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
+    const targetStatus = result?.status === 'already_applied' ? 'already_applied' : 'failed';
     const updateBody = {
-      status: 'failed',
-      error_message: result?.failureReason || result?.error || 'Submission failed',
+      status: targetStatus,
+      error_message: result?.failureReason || result?.error || (targetStatus === 'already_applied' ? 'Application already submitted on Workday' : 'Submission failed'),
+      application_submitted_screenshot_url: finalProofShot,
       worker_id: workerId,
       updated_at: completionTimestamp,
     };
     if (distributionId) {
       await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
       await supabase.from('submission_tasks').update({
-        status: 'failed',
-        error_message: result?.failureReason || result?.error || 'Submission failed',
+        status: targetStatus,
+        error_message: updateBody.error_message,
         application_submitted_screenshot_url: finalProofShot,
         completed_at: completionTimestamp,
         updated_at: completionTimestamp,
       }).eq('distribution_id', distributionId).catch(() => {});
-    } else {
+    }
+    if (finalApplywizzId && finalJobUrl) {
       await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
     }
   }

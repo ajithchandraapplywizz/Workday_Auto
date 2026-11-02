@@ -1739,10 +1739,14 @@ export async function initOnStartup() {
   }
   isInitialized = true;
   console.log(`\n${'═'.repeat(72)}`);
-  console.log(`  AUTONOMOUS WORKDAY PIPELINE DAEMON — 2-WORKER SEQUENTIAL ENGINE`);
-  console.log(`  Schedule 1: Scanning & Resolving (2 Workers: worker_1, worker_2)`);
-  console.log(`  Schedule 2: Submissions (2 Workers: worker_1, worker_2)`);
-  console.log(`  Mutual Exclusion: Non-overlapping schedules (Low RAM Consumption)`);
+  const roleLabel = SERVICE_ROLE === 'scanner' ? 'SCANNER' : SERVICE_ROLE === 'submitter' ? 'SUBMITTER' : 'COMBINED (SCANNER + SUBMITTER)';
+  console.log(`  AUTONOMOUS WORKDAY PIPELINE DAEMON — SERVICE ROLE: ${roleLabel}`);
+  if (SERVICE_ROLE === 'scanner' || SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
+    console.log(`  ▸ Stage 1: Scanning & Resolving (${PIPELINE_CONFIG.scanWorkerIds.length} scan workers, ${PIPELINE_CONFIG.resolveWorkerIds.length} resolve workers)`);
+  }
+  if (SERVICE_ROLE === 'submitter' || SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
+    console.log(`  ▸ Stage 3: Submissions (${PIPELINE_CONFIG.submitWorkerIds.length} submit workers)`);
+  }
   console.log(`  Mode: ${HEADLESS ? 'HEADLESS' : 'HEADFUL'} | Webhook Port: ${PORT}`);
   console.log(`${'═'.repeat(72)}\n`);
 
@@ -1802,8 +1806,14 @@ export async function initOnStartup() {
   if (!server.listening) {
     server.listen(PORT, '0.0.0.0', () => {
       console.log(`[DAEMON WEBHOOK SERVER] Listening on http://0.0.0.0:${PORT}`);
-      console.log(`[DAEMON] Worker pool configured with WORKER_COUNT=${PIPELINE_CONFIG.workersCount}: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning workers, ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers, ${PIPELINE_CONFIG.submitWorkerIds.length} submitting workers (${PIPELINE_CONFIG.allWorkerIds.join(', ')}).`);
-      console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) & Supabase bot_control signals — ${PIPELINE_CONFIG.workersCount}-Worker Pipeline Active.\n`);
+      if (SERVICE_ROLE === 'scanner') {
+        console.log(`[DAEMON] Active workers: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}), ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving (${PIPELINE_CONFIG.resolveWorkerIds.join(', ')}).`);
+      } else if (SERVICE_ROLE === 'submitter') {
+        console.log(`[DAEMON] Active workers: ${PIPELINE_CONFIG.submitWorkerIds.length} submitting (${PIPELINE_CONFIG.submitWorkerIds.join(', ')}).`);
+      } else {
+        console.log(`[DAEMON] Worker pool configured with WORKER_COUNT=${PIPELINE_CONFIG.workersCount}: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning, ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving, ${PIPELINE_CONFIG.submitWorkerIds.length} submitting workers.`);
+      }
+      console.log(`[DAEMON] Ready for instant webhooks (POST /api/bot/webhook) & Supabase bot_control signals — Active.\n`);
     });
   }
 

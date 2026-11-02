@@ -969,7 +969,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     }
     if (dateStr && timeframe) {
       const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.applying`);
     }
 
     const { data: apps, error: appsErr } = await query;
@@ -985,31 +985,11 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return st === 'submitted' || st === 'completed';
     }).length;
 
-    // 2. Applying: strictly bounded by live submitting workers in flight across all 4 workers
-    let liveWorkersInFlight = 0;
-    try {
-      const { data: wRows } = await supabase
-        .from('worker_status')
-        .select('worker_id, state, updated_at')
-        .in('worker_id', ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4']);
-      if (wRows && Array.isArray(wRows)) {
-        liveWorkersInFlight = wRows.filter((w) => {
-          const last = new Date(w.updated_at || 0).getTime();
-          return (w.state === 'in_flight' || w.state === 'running') && last && (now - last < 5 * 60 * 1000);
-        }).length;
-      }
-    } catch { }
-
-    const activeApplying = allApps.filter((a) => {
+    // 2. Applying: strictly direct sync to database status ('applying', 'in_flight', 'in_progress', 'started')
+    const applying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      if (!['in_progress', 'started', 'applying', 'in_flight'].includes(st)) return false;
-      const lastUpdate = new Date(a.updated_at || a.created_at || 0).getTime();
-      return lastUpdate && (now - lastUpdate < 3 * 60 * 1000);
-    });
-
-    const applying = liveWorkersInFlight > 0
-      ? Math.min(activeApplying.length > 0 ? activeApplying.length : liveWorkersInFlight, liveWorkersInFlight)
-      : 0;
+      return ['in_progress', 'started', 'applying', 'in_flight'].includes(st);
+    }).length;
 
     // 3. Failed: strictly status === 'failed' in job_distributions
     const failed = allApps.filter((a) => (a.status || '').toLowerCase() === 'failed').length;
