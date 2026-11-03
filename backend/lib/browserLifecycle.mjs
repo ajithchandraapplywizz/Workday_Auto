@@ -22,16 +22,22 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = MAX_CON
   if (isGlobalStopRequested()) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: global stop is active`);
   }
-  const effectiveMax = Math.max(1, Number(maxSlots) || 2);
+  const effectiveMax = Math.max(1, Number(process.env.MAX_ACTIVE_BROWSERS) || Number(maxSlots) || 4);
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
     return true;
   }
 
-  console.log(`⏳ [2-WORKER BATCH GUARD] ${workerId} waiting for active browser slot (${activeBrowsers.size}/${effectiveMax} active)...`);
-  await new Promise((resolve, reject) => {
-    waitingQueue.push({ workerId, resolve, reject });
-  });
+  console.log(`⏳ [SLOT GUARD] ${workerId} waiting for active browser slot (${activeBrowsers.size}/${effectiveMax} active)...`);
+  await Promise.race([
+    new Promise((resolve, reject) => {
+      waitingQueue.push({ workerId, resolve, reject });
+    }),
+    new Promise((resolve) => setTimeout(() => {
+      console.warn(`⚠️ [SLOT GUARD] Browser slot wait timed out for ${workerId} (45s). Self-healing slot to prevent lock.`);
+      resolve(true);
+    }, 45000))
+  ]);
   activeSlots.add(workerId);
   return true;
 }

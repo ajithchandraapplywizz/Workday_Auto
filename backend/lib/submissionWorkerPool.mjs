@@ -18,7 +18,9 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
-export const SUBMISSION_WORKER_IDS = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 2 }, (_, i) => `submitting_worker_${i + 1}`);
+export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds && PIPELINE_CONFIG.submitWorkerIds.length >= 4)
+  ? PIPELINE_CONFIG.submitWorkerIds
+  : Array.from({ length: Math.max(4, Number(process.env.CLUSTER_CONCURRENCY) || PIPELINE_CONFIG.submitWorkerIds?.length || 4) }, (_, i) => `submitting_worker_${i + 1}`);
 
 /**
  * Parse previous failed attempt count from error_message.
@@ -175,12 +177,14 @@ export async function claimNextTask(workerId) {
     Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
     Math.max(4, (Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2) * 2);
 
-  // Cluster Concurrency Guard: Refuse only if global cluster capacity is reached
+  // Cluster Concurrency Guard: Only count active leases (within last 8m)
   try {
+    const activeCutoff = new Date(Date.now() - 8 * 60 * 1000).toISOString();
     const { count: applyingCount } = await supabase
       .from('job_distributions')
       .select('*', { count: 'exact', head: true })
-      .eq('status', 'applying');
+      .eq('status', 'applying')
+      .gte('worker_leased_at', activeCutoff);
 
     if (typeof applyingCount === 'number' && applyingCount >= maxConcurrent) {
       return null;
@@ -386,8 +390,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     clearInterval(heartbeatTimer);
   }
 
-  // B4 Task Watchdog: hard limit of 8 minutes per task
-  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs || 8 * 60 * 1000;
+  // B4 Task Watchdog: hard limit of 4 minutes per task (fail-fast to prevent queue block)
+  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs || 4 * 60 * 1000;
   let watchdogTimer = null;
 
   let result = null;
@@ -881,6 +885,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
   } finally {
     stopHeartbeat();
     if (watchdogTimer) clearTimeout(watchdogTimer);
+    try {
+      const { releaseBrowserSlot, unregisterWorkerContext } = await import('./browserLifecycle.mjs');
+      releaseBrowserSlot(workerId);
+      unregisterWorkerContext(workerId);
+    } catch {}
     // Release worker back to idle
     const workerNum = String(workerId).replace('worker_', '');
     await updateWorkerStatus(workerId, {

@@ -541,74 +541,76 @@ async function runStage3Submissions() {
 
   console.log(`\n🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
 
-  while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
-    // Workers claim directly from ready_for_review -> applying, ensuring exactly 2 in flight at any second.
-
-    let claimedAny = false;
-    for (const workerId of submitWorkers) {
-      if (activeSubmittingWorkers.has(workerId)) continue;
-      if (activeSubmittingWorkers.size >= maxConcurrency) break;
-      if (isGlobalStopRequested() || isPoolPaused || isSubmitStopRequested() || submitStatus !== 'running') break;
-
+  const runDedicatedWorkerLoop = async (workerId) => {
+    while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
       const claimedTask = await claimNextTask(workerId);
-      if (claimedTask) {
-        claimedAny = true;
-        activeSubmittingWorkers.add(workerId);
-        console.log(`\n🚀 [2-WORKER SUBMISSION BATCH] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+      if (!claimedTask) {
+        // Check if all tasks in queue are finished
+        const { data: rem } = await supabase
+          .from('job_distributions')
+          .select('id')
+          .in('status', ['ready_for_review', 'queued'])
+          .limit(1);
 
-        processClaimedTask({
+        if (!rem || rem.length === 0) {
+          console.log(`ℹ️ [${workerId}] Queue empty — no more ready applications.`);
+          break;
+        }
+
+        // Brief wait before re-checking for unlocked or newly ready applications
+        await new Promise((r) => setTimeout(r, 600));
+        continue;
+      }
+
+      activeSubmittingWorkers.add(workerId);
+      console.log(`\n🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+
+      try {
+        const res = await processClaimedTask({
           task: claimedTask,
           workerId,
           headless: HEADLESS,
-        })
-          .then((res) => {
-            console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
-            submissionCycleResults.push({
-              job_url: claimedTask.job_url,
-              applywizz_id: claimedTask.applywizz_id,
-              company: claimedTask.company,
-              status: res?.status || 'submitted',
-              reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
-              screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
-            });
-            totalSubmissionsCompleted++;
-            if (submissionCycleResults.length >= 10) {
-              const cycleIdx = Math.floor(totalSubmissionsCompleted / 10);
-              print10SubmissionMilestoneReport({
-                cycleIndex: cycleIdx,
-                cycleStartNum: totalSubmissionsCompleted - 9,
-                cycleEndNum: totalSubmissionsCompleted,
-                items: [...submissionCycleResults],
-              });
-              submissionCycleResults = [];
-            }
-          })
-          .catch((err) => {
-            console.error(`❌ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} error on task #${claimedTask.id}:`, err?.message || err);
-          })
-          .finally(() => {
-            activeSubmittingWorkers.delete(workerId);
+        });
+
+        console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
+        submissionCycleResults.push({
+          job_url: claimedTask.job_url,
+          applywizz_id: claimedTask.applywizz_id,
+          company: claimedTask.company,
+          status: res?.status || 'submitted',
+          reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
+          screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
+        });
+        totalSubmissionsCompleted++;
+        if (submissionCycleResults.length >= 10) {
+          const cycleIdx = Math.floor(totalSubmissionsCompleted / 10);
+          print10SubmissionMilestoneReport({
+            cycleIndex: cycleIdx,
+            cycleStartNum: totalSubmissionsCompleted - 9,
+            cycleEndNum: totalSubmissionsCompleted,
+            items: [...submissionCycleResults],
           });
+          submissionCycleResults = [];
+        }
+      } catch (err) {
+        console.error(`❌ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} error on task #${claimedTask.id}:`, err?.message || err);
+      } finally {
+        activeSubmittingWorkers.delete(workerId);
+        await updateWorkerStatus(workerId, {
+          state: 'idle',
+          stage: 'submitting',
+          current_application_id: null,
+        }).catch(() => {});
       }
+
+      // ⚡ IMMEDIATE PICKUP: Immediately pick next job in queue right after previous filling & screenshot!
+      console.log(`⚡ [${workerId}] Completed application & saved proof screenshot. Immediately picking next application...`);
+      await new Promise((r) => setTimeout(r, 20));
     }
+  };
 
-    // Auto-off check: if no tasks were claimed and no workers are currently running
-    if (!claimedAny && activeSubmittingWorkers.size === 0) {
-      const { data: remaining } = await supabase
-        .from('job_distributions')
-        .select('id')
-        .in('status', ['ready_for_review', 'queued', 'applying'])
-        .limit(1);
-
-      if (!remaining || remaining.length === 0) {
-        console.log(`\n✅ [DAEMON] All submission tasks finished. Submit toggle turning OFF automatically.`);
-        break;
-      }
-    }
-
-    // Brief poll delay between iterations
-    await new Promise((r) => setTimeout(r, 2000));
-  }
+  // Run all workers concurrently in independent parallel loops
+  await Promise.allSettled(submitWorkers.map((wId) => runDedicatedWorkerLoop(wId)));
 
   // Await any remaining active submitting workers before terminating (fast-abort if stop requested)
   let waitLoops = 0;
@@ -1678,8 +1680,17 @@ export async function recoverInterruptedSubmissionTasks() {
         updated_at: now,
       })
       .eq('status', 'applying')
-      .in('worker_id', submitWorkers)
       .select('*');
+
+    // Reset submitting workers in worker_status to idle
+    for (const wId of submitWorkers) {
+      await updateWorkerStatus(wId, {
+        state: 'idle',
+        stage: 'submitting',
+        current_application_id: null,
+        updated_at: now,
+      }).catch(() => {});
+    }
 
     if (error) {
       console.warn('[DAEMON RECOVERY] Error recovering interrupted tasks on job_distributions:', error.message);

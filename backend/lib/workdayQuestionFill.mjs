@@ -494,11 +494,11 @@ export async function acknowledgeAllPageAgreements(page, profile, stepName = '')
         || /\*/.test(label)
         || Boolean(cb.closest('[data-automation-id*="formField"]')?.querySelector('[aria-required="true"], abbr[title*="required" i]'));
 
-      // Script-only: never click optional marketing / non-required checkboxes.
-      if (requiredOnly && !required) continue;
+      // If it's an agreement, consent, terms, statement, or required box — ALWAYS check it!
+      const agreement = isAgreement(label);
+      if (requiredOnly && !required && !agreement) continue;
 
-      if (!isAgreement(label) && !(inBottomHalf && required)) continue;
-      if (!isAgreement(label) && inBottomHalf && !/confirm|certify|acknowledge|consent|agree|privacy|terms|statement|accurate|understand/i.test(label)) {
+      if (!agreement && !required && !(inBottomHalf && /confirm|certify|acknowledge|consent|agree|privacy|terms|statement|accurate|understand/i.test(label))) {
         continue;
       }
 
@@ -518,6 +518,10 @@ export async function acknowledgeAllPageAgreements(page, profile, stepName = '')
       if (!cb.checked) {
         const wrap = cb.closest('label') || cb.parentElement;
         wrap?.click();
+      }
+      if (!cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
       }
       if (cb.checked) checkedLabels.push(label.slice(0, 120));
     }
@@ -1150,25 +1154,25 @@ export async function checkVoluntaryDisclosuresRequiredFields(page, profile = {}
       const labelText = norm(f.querySelector('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]')?.textContent || '');
       if (!labelText) continue;
 
+      const hasChecked = Boolean(f.querySelector('input[type="radio"]:checked, input[type="checkbox"]:checked'));
+      const valEl = f.querySelector('[data-automation-id*="select" i] button, button[aria-haspopup="listbox"], [role="combobox"], [data-automation-id="selectOne"] button, button');
+      const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
+      const isDropdownFilled = Boolean(v && !/^select(\s+one)?\.?$/i.test(v));
+
       if (/gender\b|^sex\b|please select your (gender|sex)/i.test(labelText)) {
         hasGender = true;
-        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
-        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
-        if (v && !/^select(\s+one)?\.?$/i.test(v)) genderFilled = true;
+        if (hasChecked || isDropdownFilled) genderFilled = true;
       }
 
-      if (/hispanic|latino/i.test(labelText) && !/terms|privacy|policy/i.test(labelText)) {
+      // Only match genuine Hispanic/Latino questions, not Race/Ethnicity questions mentioning "(not Hispanic or Latino)"
+      if ((/(are you|identify as|do you consider).*hispanic|latino/i.test(labelText) || (/hispanic|latino/i.test(labelText) && !/ethnicit|race|ancestry|which most accurate/i.test(labelText))) && !/terms|privacy|policy/i.test(labelText)) {
         hasHispanic = true;
-        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
-        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
-        if (v && !/^select(\s+one)?\.?$/i.test(v)) hispanicFilled = true;
+        if (hasChecked || isDropdownFilled) hispanicFilled = true;
       }
 
       if (/veteran\s*status|describe\s*your\s*veteran/i.test(labelText)) {
         hasVeteran = true;
-        const valEl = f.querySelector('[data-automation-id="selectWidget"] button, [role="combobox"], [data-automation-id="selectOne"] button');
-        const v = norm(valEl?.textContent || valEl?.getAttribute('aria-label') || '');
-        if (v && !/^select(\s+one)?\.?$/i.test(v)) veteranFilled = true;
+        if (hasChecked || isDropdownFilled) veteranFilled = true;
       }
     }
 
@@ -2216,7 +2220,10 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           ok = await cb.isChecked().catch(() => false);
         }
       } else {
-        const wantChecked = isCheckboxAckAnswer(answer) || isForegoingStatementCertifyLabel(label);
+        const isAgreementLabel = /agree|accept|certify|acknowledge|consent|terms|privacy|understand|confirm|statement|foregoing|declaration/i.test(label || questionLabel || '');
+        const isAffirmative = isCheckboxAckAnswer(answer) || /^yes|true|1$/i.test(String(answer || '').trim());
+        const isNegative = /^no|false|0$/i.test(String(answer || '').trim());
+        const wantChecked = (isAffirmative || isForegoingStatementCertifyLabel(label) || isAgreementLabel) && !isNegative;
         const cb = fieldBox.locator('input[type="checkbox"]').first();
         if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
           const isChecked = await cb.isChecked().catch(() => false);
@@ -2224,10 +2231,10 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           ok = wantChecked ? (await cb.isChecked().catch(() => false)) : true;
         }
         if (!ok && wantChecked) {
-          const certLabel = fieldBox.locator('label').filter({ hasText: /certify.*foregoing statement/i }).first();
+          const certLabel = fieldBox.locator('label').filter({ hasText: /certify|agree|accept|acknowledge|consent|terms|understand/i }).first();
           if (await certLabel.isVisible({ timeout: 800 }).catch(() => false)) {
             await certLabel.click({ force: true });
-        ok = true;
+            ok = true;
           }
         }
       }

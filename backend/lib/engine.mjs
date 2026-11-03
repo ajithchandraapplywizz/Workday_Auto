@@ -2009,6 +2009,29 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'skipped';
   }
 
+  // Final pass: ensure all agreements and terms on Review page are checked
+  await acknowledgeAllPageAgreements(page, profile, 'Review').catch(() => {});
+  await page.evaluate(() => {
+    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]:not(:checked):not(:disabled)'));
+    for (const cb of checkboxes) {
+      const parent = cb.closest('label, [data-automation-id*="formField"], div') || cb.parentElement;
+      const parentText = (parent?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
+      const isReq = cb.required || cb.getAttribute('aria-required') === 'true' || parentText.includes('*');
+      const isAgree = /agree|accept|terms|certify|acknowledge|consent|privacy|statement|understand|confirm|declaration/.test(parentText);
+      if (isAgree || isReq) {
+        cb.scrollIntoView({ block: 'center', behavior: 'instant' });
+        cb.click();
+        cb.dispatchEvent(new Event('input', { bubbles: true }));
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        if (!cb.checked) {
+          cb.checked = true;
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+      }
+    }
+  }).catch(() => {});
+  await page.waitForTimeout(500);
+
   console.log('🚀 Clicking final "Submit" button...');
   profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
   await clickSubmitButton(page, { allowSubmit: true });
@@ -2277,6 +2300,10 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
           await page.waitForTimeout(2000);
           await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {});
           await page.waitForTimeout(2000);
+          if (!await isWorkdayWizardVisible(page)) {
+            console.log('   🔄 Entering application wizard post home-page recovery...');
+            await ensureWorkdayApplicationWizard(page, { mode, profile });
+          }
         } else {
           const bodyLen = await page.evaluate(() => document.body?.innerText?.trim()?.length || 0).catch(() => 0);
           if (bodyLen < 150) {
@@ -2895,15 +2922,16 @@ async function clickSubmitButton(page, { allowSubmit = false } = {}) {
     return false;
   }
   const submitSelectors = [
+    'button[data-automation-id="pageFooterNextButton"]',
+    'button[data-automation-id="pageFooterSubmitButton"]',
+    'button[data-automation-id="submitButton"]',
+    'button[data-automation-id="submit-button"]',
+    'button[data-automation-id="bottom-navigation-next-button"]',
+    'button[data-automation-id="page-footer-next-button"]',
     'button:has-text("Submit application")',
     'button:has-text("Submit Application")',
     'button:has-text("Review and Submit")',
     'button:has-text("Review & Submit")',
-    'button:has-text("Save and Continue")',
-    'button:has-text("Save & Continue")',
-    'button[data-automation-id="bottom-navigation-next-button"]',
-    'button[data-automation-id="page-footer-next-button"]',
-    'button[data-automation-id="submit-button"]',
     'input[type="submit"]',
     'button[type="submit"]',
     'button:has-text("Submit")',
@@ -2921,6 +2949,8 @@ async function clickSubmitButton(page, { allowSubmit = false } = {}) {
         if (!visible) continue;
         const text = await btn.textContent().catch(() => '');
         console.log(`  🚀 Clicking Submit: "${text.trim()}"...`);
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await page.waitForTimeout(300);
         await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
         await page.waitForTimeout(3000);
         return true;

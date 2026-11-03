@@ -413,8 +413,8 @@ export async function executeWorkerTask({
     }
   }
 
-  // 5. Launch isolated Playwright browser context (strictly max 2 active browsers)
-  await acquireBrowserSlot(workerId, 2);
+  // 5. Launch isolated Playwright browser context (matching cluster concurrency)
+  await acquireBrowserSlot(workerId, Number(process.env.MAX_ACTIVE_BROWSERS) || 4);
   appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
   const browser = await chromium.launch({
     headless: Boolean(headless),
