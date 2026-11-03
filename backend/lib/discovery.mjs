@@ -255,52 +255,114 @@ export async function isWorkdayJobPageMissing(page) {
 /**
  * Workday "Already Applied" check — strictly verified via DOM.
  * Detects whether this candidate has previously applied to this job.
+ * CRITICAL RULE: If the page is currently on an active wizard form (e.g. Save and Continue,
+ * progress bar, form inputs, resume drop zone), it is IMPOSSIBLE to be "Already Applied".
  * @param {import('playwright').Page} page
  * @returns {Promise<boolean>}
  */
 export async function isWorkdayAlreadyApplied(page) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
   return await page.evaluate(() => {
-    // 1. Data-automation-id tags specifically signaling already applied
-    if (
-      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"], [data-automation-id*="viewMyApplications" i]')
-    ) {
-      return true;
-    }
-
-    // 2. Buttons, badges, or links where text is "Applied", "Already Applied", or "View My Applications"
-    const elements = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
-    const hasAppliedEl = elements.some(el => {
-      const txt = (el.textContent || '').trim();
-      return /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test(txt) ||
-             /^\s*view my applications\s*$/i.test(txt);
+    // 0. ABSOLUTE HARD GUARD: If on an active application wizard step, the candidate
+    // is actively applying! Workday NEVER renders the wizard form (Save and Continue,
+    // progress steps, form questions, resume uploaders) if already applied.
+    const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
+    const hasWizardNavBtn = allButtons.some(b => {
+      const txt = (b.textContent || '').trim().toLowerCase();
+      return (
+        txt === 'save and continue' ||
+        txt === 'save & continue' ||
+        txt === 'save and next' ||
+        txt === 'review and submit' ||
+        txt === 'back'
+      );
     });
-    if (hasAppliedEl) return true;
 
-    // 3. Document body or alert text indicating application already received / already applied
-    const text = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (!text) return false;
+    const hasWizardDomElement = Boolean(
+      document.querySelector(
+        'button[data-automation-id="bottom-navigation-next-button"], ' +
+        'button[data-automation-id="pageFooterNextButton"], ' +
+        'button[data-automation-id="saveAndContinue"], ' +
+        'button[data-automation-id="next-button"], ' +
+        'div[data-automation-id="file-upload-drop-zone"], ' +
+        '[data-automation-id="progressBar"], ' +
+        '[data-automation-id="progressBarActiveStep"], ' +
+        '[data-automation-id="myInformationPage"], ' +
+        '[data-automation-id="myExperiencePage"], ' +
+        '[data-automation-id="applicationQuestionsPage"], ' +
+        '[data-automation-id="voluntaryDisclosuresPage"], ' +
+        '[data-automation-id="reviewPage"]'
+      )
+    );
 
-    if (
-      /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(text) ||
-      /already applied (?:for|to) this (?:job|position)/i.test(text) ||
-      /already submitted (?:your|an) application/i.test(text) ||
-      /application (?:has already been|already) (?:submitted|received)/i.test(text) ||
-      /thank you.*already applied/i.test(text) ||
-      /duplicate application/i.test(text) ||
-      /we(?:'ve|\s*have)?\s*(?:already |previously )?received your application/i.test(text) ||
-      /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(text) ||
-      /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(text) ||
-      (/view my applications/i.test(text) && /applied/i.test(text))
-    ) {
+    // If an active wizard is present, candidate is NOT already applied
+    if (hasWizardNavBtn || hasWizardDomElement) {
+      return false;
+    }
+
+    const isVisible = (el) => {
+      if (!el) return false;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        } catch {}
+      }
+      return true;
+    };
+
+    // 1. Data-automation-id tags specifically signaling already applied
+    const appliedDataEl = document.querySelector(
+      '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
+    );
+    if (appliedDataEl && isVisible(appliedDataEl)) {
       return true;
     }
 
-    // 4. Heading or paragraph-level checks
-    const headings = Array.from(document.querySelectorAll('h1, h2, h3, h4, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"], p'));
-    for (const h of headings) {
-      const hText = (h.textContent || '').trim();
-      if (/already applied/i.test(hText) || /previously applied/i.test(hText) || /you've already applied/i.test(hText)) {
+    // 2. Buttons or badges where the text is explicitly "Applied", "Already Applied", or "Previously Applied"
+    // Must be a dedicated button/badge where the Apply button normally sits
+    const actionElements = Array.from(document.querySelectorAll('button, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
+    const hasAppliedAction = actionElements.some(el => {
+      if (!isVisible(el)) return false;
+      const txt = (el.textContent || '').trim();
+      return /^\s*(applied|already applied|previously applied)\s*$/i.test(txt);
+    });
+    if (hasAppliedAction) return true;
+
+    // 3. Document alert / banner / heading checks — strictly inspect alert or header containers
+    // NEVER match instructional/conditional warnings like:
+    // "Once your application has been submitted, you will not be able to update your resume..."
+    const alertContainers = Array.from(document.querySelectorAll(
+      '[role="alert"], [data-automation-id*="alert" i], [data-automation-id*="banner" i], [data-automation-id="errorMessage"], h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"]'
+    ));
+
+    for (const container of alertContainers) {
+      if (!isVisible(container)) continue;
+      const text = (container.textContent || '').replace(/\s+/g, ' ').trim();
+      if (!text) continue;
+
+      // Disregard any conditional/advisory text
+      if (
+        /once (?:your|the) application/i.test(text) ||
+        /after (?:your|the) application/i.test(text) ||
+        /when (?:your|the) application/i.test(text) ||
+        /before (?:submitting|your)/i.test(text) ||
+        /will not be able to update/i.test(text) ||
+        /ensure you have provided/i.test(text)
+      ) {
+        continue;
+      }
+
+      if (
+        /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(text) ||
+        /already\s+applied\s+(?:for|to)\s+this\s+(?:job|position)\b/i.test(text) ||
+        /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(text) ||
+        /application\s+has\s+already\s+been\s+submitted\b/i.test(text) ||
+        /we\s+have\s+already\s+received\s+your\s+application\b/i.test(text) ||
+        /duplicate\s+application\s+detected\b/i.test(text)
+      ) {
         return true;
       }
     }
@@ -931,16 +993,17 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
       );
       const hasWizard = Boolean(
-        document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"], [data-automation-id="progressBarActiveStep"]')
+        document.querySelector('button[data-automation-id="pageFooterNextButton"], button[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="saveAndContinue"], div[data-automation-id="file-upload-drop-zone"], input[data-automation-id="legalNameSection_firstName"], [data-automation-id="progressBarActiveStep"]') ||
+        Array.from(document.querySelectorAll('button')).some(b => /^\s*(save and continue|save & continue|save and next|review and submit)\s*$/i.test((b.textContent || '').trim()))
       );
       const hasJobContent = Boolean(
         (document.querySelector('[data-automation-id="jobPostingPage"], [data-automation-id="jobPostingHeader"], main, h1, h2') || text.length > 80) &&
         !/loading\.\.\./i.test(text)
       );
-      const isAlreadyApplied = Boolean(
-        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
-        Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim())) ||
-        /you('ve| have) already (applied|submitted)|already applied (?:for|to) this|already submitted (?:your|an) application|duplicate application|we('ve| have) (?:already |previously )?received your application/i.test(text)
+      const isAlreadyApplied = !hasWizard && Boolean(
+        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]') ||
+        Array.from(document.querySelectorAll('button, div[role="button"], [class*="badge" i]')).some(el => /^\s*(applied|already applied|previously applied)\s*$/i.test((el.textContent || '').trim())) ||
+        /you(?:'ve|\s+have)?\s+already\s+applied\b|already\s+applied\s+(?:for|to)\s+this|already\s+submitted\s+(?:your|an)\s+application|duplicate\s+application\s+detected/i.test(text)
       );
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|page not found|404\b/i.test(text);
 
@@ -959,22 +1022,50 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       );
       if (hasApply) return { expired: false, alreadyApplied: false };
 
-      // 2. If wizard is active, not expired
+      // 2. If wizard is active (Save and Continue, progress bar, form inputs), definitively NOT expired and NOT already applied
       const hasWizard = Boolean(
-        document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+        document.querySelector(
+          'button[data-automation-id="pageFooterNextButton"], ' +
+          'button[data-automation-id="bottom-navigation-next-button"], ' +
+          'button[data-automation-id="saveAndContinue"], ' +
+          'div[data-automation-id="file-upload-drop-zone"], ' +
+          'input[data-automation-id="legalNameSection_firstName"], ' +
+          '[data-automation-id="progressBar"], ' +
+          '[data-automation-id="progressBarActiveStep"]'
+        ) ||
+        Array.from(document.querySelectorAll('button')).some(b => /^\s*(save and continue|save & continue|save and next|review and submit)\s*$/i.test((b.textContent || '').trim()))
       );
       if (hasWizard) return { expired: false, alreadyApplied: false };
 
       const text = (document.body?.innerText || '').trim();
       const lower = text.toLowerCase();
 
-      // 3. Check for candidate "Already Applied" state
+      // 3. Check for candidate "Already Applied" state — strictly verify DOM elements (never advisory warnings)
       const isAlreadyApplied = Boolean(
-        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
-        Array.from(document.querySelectorAll('button, a, span, div[role="button"]')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim())) ||
-        /you('ve| have) already (applied|submitted)|already applied (?:for|to) this|already submitted (?:your|an) application|duplicate application|we('ve| have) (?:already |previously )?received your application|you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(lower)
+        document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"]') ||
+        Array.from(document.querySelectorAll('button, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]')).some(el => {
+          if (el.offsetParent === null) return false;
+          return /^\s*(applied|already applied|previously applied)\s*$/i.test((el.textContent || '').trim());
+        })
       );
       if (isAlreadyApplied) return { expired: false, alreadyApplied: true, reason: 'already_applied' };
+
+      // Explicit alert/header checks
+      const alertElements = Array.from(document.querySelectorAll('[role="alert"], [data-automation-id*="alert" i], [data-automation-id*="banner" i], h1, h2, h3'));
+      for (const el of alertElements) {
+        if (el.offsetParent === null) continue;
+        const alertTxt = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/once (?:your|the) application|will not be able to update/i.test(alertTxt)) continue;
+        if (
+          /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(alertTxt) ||
+          /already\s+applied\s+(?:for|to)\s+this\s+(?:job|position)\b/i.test(alertTxt) ||
+          /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(alertTxt) ||
+          /we\s+have\s+already\s+received\s+your\s+application\b/i.test(alertTxt) ||
+          /duplicate\s+application\s+detected\b/i.test(alertTxt)
+        ) {
+          return { expired: false, alreadyApplied: true, reason: 'already_applied' };
+        }
+      }
 
       // 4. Check for dead / expired link
       const isExpired = /this job is no longer available|this position has been filled|job posting has expired|job posting has been closed|the job you are looking for is no longer open|this job has expired|no longer accepting applications|job is inactive|the page you are looking (?:for )?(?:doesn'?t|does not) exist|page (?:you are looking (?:for )?)?(?:doesn'?t|does not) exist|(?:doesn'?t|does not) exist|page not found|\b(?:error\s*)?404\b/i.test(lower);

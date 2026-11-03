@@ -19,15 +19,76 @@ export const WORKDAY_STATES = {
  */
 export async function detectWorkdayStep(page) {
   return await page.evaluate(() => {
-    // 0. Detect "Already Applied" state immediately
-    const fullBody = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
-    if (
-      document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"], [data-automation-id*="viewMyApplications" i]') ||
-      /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(fullBody) ||
-      /already applied (?:for|to) this (?:job|position)/i.test(fullBody) ||
-      (/view my applications/i.test(fullBody) && /applied/i.test(fullBody))
-    ) {
-      return 'Already Applied';
+    // 0. Detect "Already Applied" state ONLY if NOT on an active application wizard step
+    const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
+    const hasWizardNavBtn = allButtons.some(b => {
+      const txt = (b.textContent || '').trim().toLowerCase();
+      return (
+        txt === 'save and continue' ||
+        txt === 'save & continue' ||
+        txt === 'save and next' ||
+        txt === 'review and submit' ||
+        txt === 'back'
+      );
+    });
+
+    const hasWizardDomElement = Boolean(
+      document.querySelector(
+        'button[data-automation-id="bottom-navigation-next-button"], ' +
+        'button[data-automation-id="pageFooterNextButton"], ' +
+        'button[data-automation-id="saveAndContinue"], ' +
+        'button[data-automation-id="next-button"], ' +
+        'div[data-automation-id="file-upload-drop-zone"], ' +
+        '[data-automation-id="progressBar"], ' +
+        '[data-automation-id="progressBarActiveStep"], ' +
+        '[data-automation-id="myInformationPage"], ' +
+        '[data-automation-id="myExperiencePage"], ' +
+        '[data-automation-id="applicationQuestionsPage"], ' +
+        '[data-automation-id="voluntaryDisclosuresPage"], ' +
+        '[data-automation-id="reviewPage"]'
+      )
+    );
+
+    const isVisible = (el) => {
+      if (!el) return false;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        } catch {}
+      }
+      return true;
+    };
+
+    if (!hasWizardNavBtn && !hasWizardDomElement) {
+      const appliedEl = document.querySelector(
+        '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
+      );
+      if (appliedEl && isVisible(appliedEl)) {
+        return 'Already Applied';
+      }
+
+      const alertContainers = Array.from(document.querySelectorAll(
+        '[role="alert"], [data-automation-id*="alert" i], [data-automation-id*="banner" i], [data-automation-id="errorMessage"], h1, h2, h3'
+      ));
+
+      for (const container of alertContainers) {
+        if (!isVisible(container)) continue;
+        const text = (container.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text || /once (?:your|the) application|will not be able to update/i.test(text)) continue;
+        if (
+          /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(text) ||
+          /already\s+applied\s+(?:for|to)\s+this\s+(?:job|position)\b/i.test(text) ||
+          /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(text) ||
+          /application\s+has\s+already\s+been\s+submitted\b/i.test(text) ||
+          /we\s+have\s+already\s+received\s+your\s+application\b/i.test(text) ||
+          /duplicate\s+application\s+detected\b/i.test(text)
+        ) {
+          return 'Already Applied';
+        }
+      }
     }
 
     // 1. If visible password/auth fields or Create Account/Sign In active step exist, it is NOT a wizard form step
@@ -147,53 +208,101 @@ export function normalizeWorkdayStepName(stepName, questionLabel = '') {
 export async function detectAlreadyApplied(page) {
   try {
     return await page.evaluate(() => {
-      const body = (document.body?.innerText || '').replace(/\s+/g, ' ').trim();
+      // 0. ABSOLUTE HARD GUARD: If on an active application wizard step, the candidate
+      // is actively applying! Workday NEVER renders the wizard form if already applied.
+      const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
+      const hasWizardNavBtn = allButtons.some(b => {
+        const txt = (b.textContent || '').trim().toLowerCase();
+        return (
+          txt === 'save and continue' ||
+          txt === 'save & continue' ||
+          txt === 'save and next' ||
+          txt === 'review and submit' ||
+          txt === 'back'
+        );
+      });
 
-      // ARIA / data-automation-id based detection for structured Workday tenants
-      if (
-        document.querySelector('[data-automation-id="appliedButton"]') ||
-        document.querySelector('[data-automation-id="alreadyApplied"]') ||
-        document.querySelector('[data-automation-id="previouslyApplied"]') ||
-        document.querySelector('[data-automation-id="applicationAlreadySubmitted"]') ||
-        document.querySelector('[data-automation-id="duplicateApplication"]') ||
-        document.querySelector('[data-automation-id*="viewMyApplications" i]')
-      ) {
-        return true;
-      }
-
-      // Button / badge elements explicitly saying "Applied" or "View My Applications"
-      const buttons = Array.from(document.querySelectorAll('button, a, span, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
-      if (buttons.some(b => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((b.textContent || '').trim()) || /^\s*view my applications\s*$/i.test((b.textContent || '').trim()))) {
-        return true;
-      }
-
-      // Text-based detection — covers all known Workday tenant phrasings
-      if (
-        /you(?:'ve|\s*have)?\s*already\s*(?:applied|submitted)/i.test(body) ||
-        /already applied (?:for|to) this (?:job|position)/i.test(body) ||
-        /already submitted (?:your|an) application/i.test(body) ||
-        /application (?:has already been|already) (?:submitted|received)/i.test(body) ||
-        /thank you.*already applied/i.test(body) ||
-        /duplicate application/i.test(body) ||
-        /we(?:'ve|\s*have)?\s*(?:already |previously )?received your application/i.test(body) ||
-        /you applied (?:on )?\w+\s+\d{1,2},?\s+\d{4}/i.test(body) ||
-        /(?:you|your) application (?:has been|was) (?:already )?(?:received|submitted)/i.test(body) ||
-        (/view my applications/i.test(body) && /applied/i.test(body))
-      ) {
-        return true;
-      }
-
-      // Page-level heading or paragraph detection
-      const headings = Array.from(
-        document.querySelectorAll('h1, h2, h3, h4, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"], p')
+      const hasWizardDomElement = Boolean(
+        document.querySelector(
+          'button[data-automation-id="bottom-navigation-next-button"], ' +
+          'button[data-automation-id="pageFooterNextButton"], ' +
+          'button[data-automation-id="saveAndContinue"], ' +
+          'button[data-automation-id="next-button"], ' +
+          'div[data-automation-id="file-upload-drop-zone"], ' +
+          '[data-automation-id="progressBar"], ' +
+          '[data-automation-id="progressBarActiveStep"], ' +
+          '[data-automation-id="myInformationPage"], ' +
+          '[data-automation-id="myExperiencePage"], ' +
+          '[data-automation-id="applicationQuestionsPage"], ' +
+          '[data-automation-id="voluntaryDisclosuresPage"], ' +
+          '[data-automation-id="reviewPage"]'
+        )
       );
-      for (const h of headings) {
-        const text = (h.textContent || '').trim();
+
+      if (hasWizardNavBtn || hasWizardDomElement) {
+        return false;
+      }
+
+      const isVisible = (el) => {
+        if (!el) return false;
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
+        if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+          try {
+            const style = window.getComputedStyle(el);
+            if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+          } catch {}
+        }
+        return true;
+      };
+
+      // 1. ARIA / data-automation-id based detection for structured Workday tenants
+      const appliedEl = document.querySelector(
+        '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
+      );
+      if (appliedEl && isVisible(appliedEl)) {
+        return true;
+      }
+
+      // 2. Button / badge elements explicitly saying "Applied" or "Already Applied"
+      const buttons = Array.from(document.querySelectorAll('button, div[role="button"], div[role="status"], [class*="badge" i], [class*="status" i]'));
+      if (buttons.some(b => {
+        if (!isVisible(b)) return false;
+        return /^\s*(applied|already applied|previously applied)\s*$/i.test((b.textContent || '').trim());
+      })) {
+        return true;
+      }
+
+      // 3. Document alert / banner / heading checks — strictly inspect alert or header containers
+      // NEVER match instructional/conditional warnings like:
+      // "Once your application has been submitted, you will not be able to update your resume..."
+      const alertContainers = Array.from(document.querySelectorAll(
+        '[role="alert"], [data-automation-id*="alert" i], [data-automation-id*="banner" i], [data-automation-id="errorMessage"], h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="compositeHeader"]'
+      ));
+
+      for (const container of alertContainers) {
+        if (!isVisible(container)) continue;
+        const text = (container.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+
         if (
-          /already applied/i.test(text) ||
-          /application submitted/i.test(text) ||
-          /previously applied/i.test(text) ||
-          /you've already applied/i.test(text)
+          /once (?:your|the) application/i.test(text) ||
+          /after (?:your|the) application/i.test(text) ||
+          /when (?:your|the) application/i.test(text) ||
+          /before (?:submitting|your)/i.test(text) ||
+          /will not be able to update/i.test(text) ||
+          /ensure you have provided/i.test(text)
+        ) {
+          continue;
+        }
+
+        if (
+          /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(text) ||
+          /already\s+applied\s+(?:for|to)\s+this\s+(?:job|position)\b/i.test(text) ||
+          /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(text) ||
+          /application\s+has\s+already\s+been\s+submitted\b/i.test(text) ||
+          /we\s+have\s+already\s+received\s+your\s+application\b/i.test(text) ||
+          /duplicate\s+application\s+detected\b/i.test(text)
         ) {
           return true;
         }
