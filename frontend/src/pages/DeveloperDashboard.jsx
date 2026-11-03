@@ -8,6 +8,8 @@ import {
   fetchBatchQueue,
   fetchAutomationTrace,
   fetchBatchWorkerLogs,
+  triggerUniversalPipeline,
+  stopUniversalPipeline,
   triggerAutonomousBot,
   stopAutonomousBot,
   triggerSubmissionStage,
@@ -100,6 +102,7 @@ export default function DeveloperDashboard() {
 
   const [isTriggering, setIsTriggering] = useState(false);
   const [isSubmitTriggering, setIsSubmitTriggering] = useState(false);
+  const [isUniversalTriggering, setIsUniversalTriggering] = useState(false);
   const [triggerToast, setTriggerToast] = useState(null);
 
   // Dedicated Backend Daemon URL & Connection Status
@@ -553,7 +556,64 @@ export default function DeveloperDashboard() {
     return healthResults.find((h) => h.id === id) || { ok: true, status: 'OK', time: 15, meta: 'Online' };
   };
 
-  // Handle triggering autonomous 3-worker pipeline (Scan & Resolve)
+  // Handle triggering the Universal Pipeline (Starts both Scanning and Submitting)
+  const handleTriggerUniversal = async () => {
+    setIsUniversalTriggering(true);
+    try {
+      setTriggerToast({ type: 'info', text: '⚡ Launching Universal Pipeline across all dynamic workers...' });
+      const res = await triggerUniversalPipeline();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '⚡ Universal Pipeline Triggered! Scanning and Submitting workers are armed and operating in parallel.',
+        });
+        setBotStatus((prev) => ({
+          ...prev,
+          isRunning: true,
+          isScanning: true,
+          isSubmitting: true,
+          stage: 'universal',
+          mode: 'parallel',
+        }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch signal') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Trigger error: ' + err.message });
+    } finally {
+      setIsUniversalTriggering(false);
+      setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
+  // Handle stopping the Universal Pipeline (Halts all running workers)
+  const handleStopUniversal = async () => {
+    setIsUniversalTriggering(true);
+    try {
+      setTriggerToast({ type: 'info', text: '🛑 Halting Universal Pipeline across all workers...' });
+      const res = await stopUniversalPipeline();
+      if (res.success) {
+        setTriggerToast({ type: 'success', text: 'All workers halted cleanly and set to idle.' });
+        setBotStatus((prev) => ({
+          ...prev,
+          isRunning: false,
+          isScanning: false,
+          isSubmitting: false,
+          stage: 'idle',
+          mode: 'idle',
+        }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
+    } finally {
+      setIsUniversalTriggering(false);
+      setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
+  // Handle triggering autonomous pipeline (Scan & Resolve)
   const handleTriggerBot = async () => {
     setIsTriggering(true);
     try {
@@ -769,7 +829,7 @@ export default function DeveloperDashboard() {
                 borderRadius: '6px',
                 border: '1px solid rgba(56, 189, 248, 0.3)'
               }}>
-                <strong style={{ color: '#38bdf8' }}>Pool 1 (Scan &amp; Resolve):</strong> 3 Dedicated Workers ({isScanActive ? 'Active' : 'Idle'})
+                <strong style={{ color: '#38bdf8' }}>Pool 1 (Scan &amp; Resolve):</strong> Dynamic Workers ({isScanActive ? 'Active' : 'Idle'})
               </div>
               <div style={{
                 fontSize: '0.78rem',
@@ -779,113 +839,164 @@ export default function DeveloperDashboard() {
                 borderRadius: '6px',
                 border: '1px solid rgba(129, 140, 248, 0.3)'
               }}>
-                <strong style={{ color: '#818cf8' }}>Pool 2 (Submissions):</strong> 3 Dedicated Workers ({isSubmitActive ? 'Active' : 'Idle'})
+                <strong style={{ color: '#818cf8' }}>Pool 2 (Submissions):</strong> Dynamic Workers ({isSubmitActive ? 'Active' : 'Idle'})
               </div>
               <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                • Triggers automatically when tasks are uploaded into batch queue
+                • Universal Pipeline connects scanning and submissions in parallel
               </span>
             </div>
           </div>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
-          {/* Stage 1: Trigger / Stop Scanning & Resolving (3 Workers) */}
-          {isScanActive ? (
+          {/* Universal Pipeline Trigger: Solo Start / Stop */}
+          {isAnyPipelineActive ? (
             <button
               type="button"
-              onClick={handleStopBot}
-              disabled={isTriggering}
+              onClick={handleStopUniversal}
+              disabled={isUniversalTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '8px',
-                padding: '0.65rem 1.25rem',
+                padding: '0.7rem 1.4rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
+                color: '#ffffff',
+                fontSize: '0.92rem',
+                fontWeight: 800,
+                cursor: 'pointer',
+                boxShadow: '0 4px 14px rgba(239, 68, 68, 0.4)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Stop entire Universal Pipeline across all scanning and submitting workers"
+            >
+              <span>🛑 Stop Universal Pipeline</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerUniversal}
+              disabled={isUniversalTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.7rem 1.4rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #6366f1 0%, #4338ca 100%)',
+                color: '#ffffff',
+                fontSize: '0.92rem',
+                fontWeight: 800,
+                cursor: isUniversalTriggering ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 14px rgba(99, 102, 241, 0.4)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Universal Trigger: Starts both Scanning and Submitting. Workers process jobs as they arrive."
+            >
+              <span>⚡ Universal Pipeline Trigger (All Workers)</span>
+            </button>
+          )}
+
+          {/* Granular Stage 1: Trigger / Stop Scanning & Resolving */}
+          {isScanActive ? (
+            <button
+              type="button"
+              onClick={handleStopBot}
+              disabled={isTriggering || isUniversalTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.15rem',
                 borderRadius: '6px',
                 border: '1px solid rgba(239, 68, 68, 0.4)',
                 background: 'rgba(239, 68, 68, 0.15)',
                 color: '#f87171',
-                fontSize: '0.88rem',
+                fontSize: '0.84rem',
                 fontWeight: 700,
                 cursor: 'pointer',
                 transition: 'all 0.15s ease',
               }}
               title="Stop scanning workers immediately"
             >
-              <span>🛑 Stop Scanning (3 Workers)</span>
+              <span>🛑 Stop Scanning</span>
             </button>
           ) : (
             <button
               type="button"
               onClick={handleTriggerBot}
-              disabled={isTriggering}
+              disabled={isTriggering || isUniversalTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '8px',
-                padding: '0.65rem 1.25rem',
+                padding: '0.65rem 1.15rem',
                 borderRadius: '6px',
                 border: 'none',
                 background: 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
                 color: '#ffffff',
-                fontSize: '0.88rem',
+                fontSize: '0.84rem',
                 fontWeight: 700,
-                cursor: isTriggering ? 'not-allowed' : 'pointer',
+                cursor: (isTriggering || isUniversalTriggering) ? 'not-allowed' : 'pointer',
                 boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
                 transition: 'all 0.15s ease',
               }}
-              title="Trigger 3 parallel workers to scan links and pre-resolve candidate answers into job_distributions"
+              title="Trigger parallel workers to scan links and pre-resolve candidate answers into job_distributions"
             >
-              <span>⚡ Trigger Scanning & Resolving (3 Workers)</span>
+              <span>⚡ Trigger Scanning</span>
             </button>
           )}
 
-          {/* Stage 2: Trigger / Stop Submissions (3 Workers) */}
+          {/* Granular Stage 2: Trigger / Stop Submissions */}
           {isSubmitActive ? (
             <button
               type="button"
               onClick={handleStopSubmissions}
-              disabled={isSubmitTriggering}
+              disabled={isSubmitTriggering || isUniversalTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '8px',
-                padding: '0.65rem 1.25rem',
+                padding: '0.65rem 1.15rem',
                 borderRadius: '6px',
                 border: '1px solid rgba(239, 68, 68, 0.4)',
                 background: 'rgba(239, 68, 68, 0.15)',
                 color: '#f87171',
-                fontSize: '0.88rem',
+                fontSize: '0.84rem',
                 fontWeight: 700,
                 cursor: 'pointer',
                 transition: 'all 0.15s ease',
               }}
               title="Stop submission workers immediately"
             >
-              <span>🛑 Stop Submissions (3 Workers)</span>
+              <span>🛑 Stop Submissions</span>
             </button>
           ) : (
             <button
               type="button"
               onClick={handleTriggerSubmissions}
-              disabled={isSubmitTriggering}
+              disabled={isSubmitTriggering || isUniversalTriggering}
               style={{
                 display: 'inline-flex',
                 alignItems: 'center',
                 gap: '8px',
-                padding: '0.65rem 1.25rem',
+                padding: '0.65rem 1.15rem',
                 borderRadius: '6px',
                 border: 'none',
                 background: 'linear-gradient(135deg, #10b981 0%, #047857 100%)',
                 color: '#ffffff',
-                fontSize: '0.88rem',
+                fontSize: '0.84rem',
                 fontWeight: 700,
-                cursor: isSubmitTriggering ? 'not-allowed' : 'pointer',
+                cursor: (isSubmitTriggering || isUniversalTriggering) ? 'not-allowed' : 'pointer',
                 boxShadow: '0 4px 12px rgba(16, 185, 129, 0.35)',
                 transition: 'all 0.15s ease',
               }}
-              title="Trigger 3 dedicated workers to submit applications in ready_for_review"
+              title="Trigger dedicated workers to submit applications in ready_for_review"
             >
-              <span>🚀 Trigger Submissions (3 Workers)</span>
+              <span>🚀 Trigger Submissions</span>
             </button>
           )}
 

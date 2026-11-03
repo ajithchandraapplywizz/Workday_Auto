@@ -508,22 +508,26 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         }
 
         const cleanAwlId = String(task.applywizz_id || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
-        const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
-        const dbClient = await getClientRecordByAwlId(cleanAwlId);
+        const { resolveCandidateCompanyEmail } = await import('./supabaseClient.mjs');
+        const emailResolution = await resolveCandidateCompanyEmail(cleanAwlId, task.dbClient);
 
-        if (!dbClient || !dbClient.company_email || !String(dbClient.company_email).trim()) {
-          const errMsg = `[STRICT AUTH GUARD] No valid company_email found in clients table for client "${task.applywizz_id}" (${cleanAwlId}). Refusing to authenticate with unverified/mock credentials.`;
+        if (!emailResolution.valid) {
+          const errMsg = emailResolution.reason === 'Zoho Mail was not connected'
+            ? 'Zoho Mail was not connected'
+            : `[STRICT AUTH GUARD] No valid company_email found in clients table or CRM for client "${task.applywizz_id}" (${cleanAwlId}).`;
           console.error(`❌ [${workerId}] ${errMsg}`);
           return {
             status: 'failed',
             error: errMsg,
             reason: errMsg,
+            failureReason: errMsg,
             stoppedAtStep: 'Strict Auth Guard',
           };
         }
 
-        const candidateCompanyEmail = String(dbClient.company_email).trim().toLowerCase();
-        console.log(`🔒 [STRICT AUTH GUARD] [${workerId}] Verified candidate company_email from clients table: ${candidateCompanyEmail} for ${cleanAwlId} (${dbClient.client_name || ''})`);
+        const candidateCompanyEmail = emailResolution.email;
+        const dbClient = emailResolution.client || {};
+        console.log(`🔒 [STRICT AUTH GUARD] [${workerId}] Verified candidate company_email: ${candidateCompanyEmail} for ${cleanAwlId} (${dbClient.client_name || ''})`);
 
         task.candidateEmail = candidateCompanyEmail;
         task.dbClient = dbClient;
@@ -683,14 +687,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     }
 
     if (isSuccess) {
-      console.log(`\n${'═'.repeat(90)}`);
-      console.log(`✅ [STAGE 3: SUBMITTER] [${workerId}] APPLICATION SUBMITTED SUCCESSFULLY!`);
-      console.log(`✅ [STAGE 3: SUBMITTER] [${workerId}] This application was submitted with screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-      console.log(`   • Status: SUBMITTED`);
-      console.log(`   • Proof Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'submitted'`);
-      console.log(`${'═'.repeat(90)}\n`);
+      console.log(`[SUBMITTER ${workerId}] AWL_ID: ${task.applywizz_id} | Job: ${task.job_url} | Submitted: YES | Screenshot: ${finalShotUrl || 'Uploaded to Supabase'}`);
 
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,
@@ -705,14 +702,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         },
       });
     } else if (isAlreadyApplied) {
-      console.log(`\n${'═'.repeat(90)}`);
-      console.log(`ℹ️ [STAGE 3: SUBMITTER] [${workerId}] APPLICATION ALREADY APPLIED ON WORKDAY`);
-      console.log(`ℹ️ [STAGE 3: SUBMITTER] [${workerId}] This application was ALREADY APPLIED with screenshot: ${finalShotUrl || 'None'}`);
-      console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-      console.log(`   • Status: ALREADY_APPLIED`);
-      console.log(`   • Proof Screenshot: ${finalShotUrl || 'None'}`);
-      console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'already_applied'`);
-      console.log(`${'═'.repeat(90)}\n`);
+      console.log(`[SUBMITTER ${workerId}] AWL_ID: ${task.applywizz_id} | Job: ${task.job_url} | Submitted: ALREADY_APPLIED | Screenshot: ${finalShotUrl || 'None'}`);
 
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,
@@ -731,7 +721,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
 
       const isFatalNonRetryable = (
-        /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(rawErrMsg) ||
+        /zoho mail was not connected|mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(rawErrMsg) ||
         /strict auth guard/i.test(failedStep) ||
         result?.status === 'job_expired' ||
         result?.status === 'invalid_url'
@@ -740,15 +730,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       if (currentAttempt < 3 && !isFatalNonRetryable) {
         // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
         const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
-        console.log(`\n${'═'.repeat(90)}`);
-        console.log(`🔄 [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION ATTEMPT ${currentAttempt}/3 FAILED — REVERTING TO READY_FOR_REVIEW`);
-        console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-        console.log(`   • Attempt: ${currentAttempt} of 3 (Will retry up to 3 attempts before marking failed)`);
-        console.log(`   • Status: Reverting strictly to ready_for_review (DO NOT MARK FAILED)`);
-        console.log(`   • Halted At Step: ${failedStep}`);
-        console.log(`   • Reason: ${rawErrMsg}`);
-        console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'ready_for_review'`);
-        console.log(`${'═'.repeat(90)}\n`);
+        console.log(`[SUBMITTER ${workerId}] AWL_ID: ${task.applywizz_id} | Job: ${task.job_url} | Retry: Attempt ${currentAttempt}/3 | Reason: ${rawErrMsg}`);
 
         await updateJobDistributionWithCheck({
           distributionId: task.distribution_id || task.id,
@@ -803,16 +785,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         }
 
         const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
-        console.log(`\n${'═'.repeat(90)}`);
-        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION PERMANENTLY FAILED (MAX 3 ATTEMPTS EXHAUSTED)`);
-        console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-        console.log(`   • Attempt: 3 of 3 (Max attempts reached)`);
-        console.log(`   • Status: FAILED`);
-        console.log(`   • Failed At Step: ${failedStep}`);
-        console.log(`   • Failure Reason: ${rawErrMsg}`);
-        console.log(`   • Failure Diagnostic Screenshot: ${finalShotUrl || 'None'}`);
-        console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'failed'`);
-        console.log(`${'═'.repeat(90)}\n`);
+        console.log(`[SUBMITTER ${workerId}] AWL_ID: ${task.applywizz_id} | Job: ${task.job_url} | Submitted: NO (Attempt 3/3) | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}`);
 
         const failPatch = {
           status: 'failed',
@@ -900,7 +873,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const failedStep = 'Execution Exception';
 
     const isFatalNonRetryable = (
-      /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
+      /zoho mail was not connected|mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
       /strict auth guard/i.test(errMsg)
     );
 

@@ -1,37 +1,77 @@
 /**
- * pipelineConfig.mjs — 2-Worker Per Service Canonical Pipeline Configuration
+ * pipelineConfig.mjs — Dynamic Worker Configuration Engine
+ * =========================================================
+ * Dynamically resolves active worker counts and IDs strictly from environment variables:
+ *   - SERVICE_ROLE ('scanner', 'submitter', 'main', 'all')
+ *   - WORKER_COUNT (dynamic count per container, default 2)
+ *   - WORKER_OFFSET (offset for worker indexing, default 0)
+ *   - SCANNER_WORKERS / SCAN_WORKERS
+ *   - SUBMISSION_WORKERS / SUBMIT_WORKERS
+ *   - RESOLVE_WORKERS / RESOLVING_WORKERS
  *
- * Configures strictly 2 dedicated workers per service:
- * - Scanning/Resolving: scanning_worker_1, scanning_worker_2
- * - Resolving: resolving_worker_1, resolving_worker_2
- * - Submitting: submitting_worker_1, submitting_worker_2
+ * Never hardcodes static worker counts, artificial limits, or fixed log text.
  */
+
+export function getActiveWorkerCount(roleType = '') {
+  const baseCount = Number(process.env.WORKER_COUNT) || 2;
+  const role = (roleType || process.env.SERVICE_ROLE || process.env.ROLE || '').toLowerCase();
+
+  if (role.includes('scan')) {
+    return Number(process.env.SCANNER_WORKERS) || Number(process.env.SCAN_WORKERS) || baseCount;
+  }
+  if (role.includes('submit')) {
+    return Number(process.env.SUBMISSION_WORKERS) || Number(process.env.SUBMIT_WORKERS) || baseCount;
+  }
+  if (role.includes('resolve')) {
+    return Number(process.env.RESOLVE_WORKERS) || Number(process.env.RESOLVING_WORKERS) || baseCount;
+  }
+  return baseCount;
+}
+
+export function getWorkerOffset() {
+  return Number(process.env.WORKER_OFFSET) || 0;
+}
+
+export function getScanWorkerIds() {
+  if (process.env.SCAN_WORKER_IDS) {
+    return process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const count = getActiveWorkerCount('scanner');
+  const offset = getWorkerOffset();
+  return Array.from({ length: count }, (_, i) => `scanning_worker_${i + 1 + offset}`);
+}
+
+export function getResolveWorkerIds() {
+  if (process.env.RESOLVE_WORKER_IDS) {
+    return process.env.RESOLVE_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const count = getActiveWorkerCount('resolver');
+  const offset = getWorkerOffset();
+  return Array.from({ length: count }, (_, i) => `resolving_worker_${i + 1 + offset}`);
+}
+
+export function getSubmitWorkerIds() {
+  if (process.env.SUBMISSION_WORKER_IDS || process.env.SUBMIT_WORKER_IDS) {
+    const raw = process.env.SUBMISSION_WORKER_IDS || process.env.SUBMIT_WORKER_IDS;
+    return raw.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const count = getActiveWorkerCount('submitter');
+  const offset = getWorkerOffset();
+  return Array.from({ length: count }, (_, i) => `submitting_worker_${i + 1 + offset}`);
+}
 
 export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 2;
 export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
 
-export const SCAN_WORKER_IDS = process.env.SCAN_WORKER_IDS
-  ? process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
-  : Array.from({ length: WORKER_COUNT }, (_, i) => `scanning_worker_${i + 1 + WORKER_OFFSET}`);
+export const SCANNER_WORKER_COUNT = Number(process.env.SCANNER_WORKERS) || Number(process.env.SCAN_WORKERS) || WORKER_COUNT;
+export const SUBMISSION_WORKER_COUNT = Number(process.env.SUBMISSION_WORKERS) || Number(process.env.SUBMIT_WORKERS) || WORKER_COUNT;
+export const RESOLVE_WORKER_COUNT = Number(process.env.RESOLVE_WORKERS) || Number(process.env.RESOLVING_WORKERS) || WORKER_COUNT;
 
-export const RESOLVE_WORKER_IDS = process.env.RESOLVE_WORKER_IDS
-  ? process.env.RESOLVE_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
-  : Array.from({ length: WORKER_COUNT }, (_, i) => `resolving_worker_${i + 1 + WORKER_OFFSET}`);
+export const SCAN_WORKER_IDS = getScanWorkerIds();
+export const RESOLVE_WORKER_IDS = getResolveWorkerIds();
+export const SUBMIT_WORKER_IDS = getSubmitWorkerIds();
 
-export const SUBMIT_WORKER_IDS = process.env.SUBMISSION_WORKER_IDS
-  ? process.env.SUBMISSION_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
-  : (process.env.SUBMIT_WORKER_IDS
-      ? process.env.SUBMIT_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
-      : Array.from({ length: WORKER_COUNT }, (_, i) => `submitting_worker_${i + 1 + WORKER_OFFSET}`));
-
-const DEFAULT_ALL_WORKERS = [
-  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
-  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
-  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
-  'submitting_worker_5', 'submitting_worker_6', 'submitting_worker_7', 'submitting_worker_8',
-];
-
-const ALL_CANONICAL_WORKERS = [...new Set([...DEFAULT_ALL_WORKERS, ...SCAN_WORKER_IDS, ...RESOLVE_WORKER_IDS, ...SUBMIT_WORKER_IDS])];
+const ALL_CANONICAL_WORKERS = [...new Set([...SCAN_WORKER_IDS, ...RESOLVE_WORKER_IDS, ...SUBMIT_WORKER_IDS])];
 
 const WORKER_NAMES = {};
 SCAN_WORKER_IDS.forEach((id) => { const n = (id.match(/\d+/) || [1])[0]; WORKER_NAMES[id] = `Scanning Worker ${n}`; });
@@ -47,11 +87,28 @@ export const PIPELINE_CONFIG = {
     IDLE: 'idle',
   },
 
-  workersCount: WORKER_COUNT,
+  get workersCount() {
+    return getActiveWorkerCount();
+  },
+  get scannerWorkersCount() {
+    return getActiveWorkerCount('scanner');
+  },
+  get submissionWorkersCount() {
+    return getActiveWorkerCount('submitter');
+  },
+  get resolveWorkersCount() {
+    return getActiveWorkerCount('resolver');
+  },
 
-  scanWorkerIds: SCAN_WORKER_IDS,
-  resolveWorkerIds: RESOLVE_WORKER_IDS,
-  submitWorkerIds: SUBMIT_WORKER_IDS,
+  get scanWorkerIds() {
+    return getScanWorkerIds();
+  },
+  get resolveWorkerIds() {
+    return getResolveWorkerIds();
+  },
+  get submitWorkerIds() {
+    return getSubmitWorkerIds();
+  },
 
   workerNames: WORKER_NAMES,
   allWorkerIds: ALL_CANONICAL_WORKERS,

@@ -2477,6 +2477,153 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 }
 
 /**
+ * Trigger the Universal Pipeline (Starts both Scanning and Submitting).
+ * Arms both pools dynamically from environment.
+ * Workers process jobs as they arrive.
+ */
+export async function triggerUniversalPipeline() {
+  try {
+    const now = new Date().toISOString();
+    const actionNonce = Date.now().toString();
+
+    // 1. Authoritative Supabase signal for Universal Pipeline
+    try {
+      await supabase
+        .from('bot_control')
+        .update({
+          stage: 'universal',
+          mode: 'parallel',
+          is_running: true,
+          is_paused: false,
+          stop_requested: false,
+          scan_status: 'running',
+          scan_enabled: true,
+          scan_stop_requested: false,
+          submit_status: 'running',
+          submit_enabled: true,
+          submit_stop_requested: false,
+          trigger_requested: true,
+          last_action_requested: 'start_universal',
+          current_action: 'Universal Pipeline Active: Scanning & Submissions armed across all dynamic workers',
+          updated_at: now,
+        })
+        .eq('id', 'primary');
+    } catch (bcErr) {
+      console.warn('Note on updating bot_control for universal trigger:', bcErr?.message);
+    }
+
+    // 2. Webhook call to daemon endpoints
+    const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
+    const endpoints = [
+      ...(backendBase ? [
+        `${backendBase}/api/bot/universal/start`,
+        `${backendBase}/api/bot/start`,
+        `${backendBase}/api/bot/webhook`,
+      ] : []),
+      ...(isLocal ? [
+        'http://localhost:3001/api/bot/universal/start',
+        'http://localhost:3001/api/bot/start',
+        'http://localhost:3001/api/bot/webhook',
+        'http://localhost:3002/api/bot/universal/start',
+        'http://localhost:3002/api/bot/submit/start',
+      ] : []),
+    ];
+
+    for (const ep of endpoints) {
+      try {
+        const resp = await fetch(ep, {
+          method: 'POST',
+          headers: getStaffAuthHeaders(),
+          body: JSON.stringify({ action: 'start_universal', trigger: true, nonce: actionNonce, timestamp: now }),
+          signal: AbortSignal.timeout(2000),
+        });
+        if (resp.ok) break;
+      } catch {}
+    }
+
+    return {
+      success: true,
+      message: '⚡ Universal Pipeline Triggered! Scanning and Submitting workers are armed and operating in parallel.',
+    };
+  } catch (err) {
+    console.error('Failed to trigger universal pipeline:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Stop the Universal Pipeline immediately (Halts both Scanning and Submitting).
+ */
+export async function stopUniversalPipeline() {
+  try {
+    const now = new Date().toISOString();
+    const actionNonce = Date.now().toString();
+
+    const backendBase = getBackendBaseUrl();
+    const isLocal = isLocalEnvironment();
+    const stopEndpoints = [
+      ...(backendBase ? [
+        `${backendBase}/api/bot/universal/stop`,
+        `${backendBase}/api/bot/stop`,
+        `${backendBase}/api/bot/webhook`,
+      ] : []),
+      ...(isLocal ? [
+        'http://localhost:3001/api/bot/universal/stop',
+        'http://localhost:3001/api/bot/stop',
+        'http://localhost:3001/api/bot/webhook',
+        'http://localhost:3002/api/bot/universal/stop',
+        'http://localhost:3002/api/bot/submit/stop',
+      ] : []),
+    ];
+
+    await Promise.any(
+      stopEndpoints.map((u) =>
+        fetch(u, {
+          method: 'POST',
+          headers: getStaffAuthHeaders(),
+          body: JSON.stringify({ action: 'stop_universal', stop_requested: true, stop: true, nonce: actionNonce, timestamp: now }),
+          signal: AbortSignal.timeout(1500),
+        })
+      )
+    ).catch(() => {});
+
+    try {
+      await supabase
+        .from('bot_control')
+        .update({
+          stage: 'idle',
+          mode: 'idle',
+          is_running: false,
+          is_paused: false,
+          stop_requested: true,
+          scan_status: 'off',
+          scan_enabled: false,
+          scan_stop_requested: true,
+          submit_status: 'off',
+          submit_enabled: false,
+          submit_stop_requested: true,
+          trigger_requested: false,
+          last_action_requested: 'stop_universal',
+          current_action: 'Universal Pipeline stopped by user. All workers idle.',
+          updated_at: now,
+        })
+        .eq('id', 'primary');
+    } catch (bcErr) {
+      console.warn('Note on updating bot_control universal stop state:', bcErr?.message);
+    }
+
+    return {
+      success: true,
+      message: 'Universal Pipeline stopped. All workers reset to idle.',
+    };
+  } catch (err) {
+    console.error('Failed to stop universal pipeline:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
  * Trigger the autonomous 9-worker pipeline across Scanning, Resolving, and Submitting.
  * Resumes paused queue tasks and sets active in_flight signal.
  */

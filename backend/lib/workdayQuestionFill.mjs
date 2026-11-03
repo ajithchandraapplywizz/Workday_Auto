@@ -1,5 +1,5 @@
 /**
- * workdayQuestionFill.mjs — Fill Workday dropdown/combobox questions by label
+ted * workdayQuestionFill.mjs — Fill Workday dropdown/combobox questions by label
  */
 
 import { writeFile } from 'fs/promises';
@@ -82,7 +82,7 @@ async function selectCurrentDateFromCalendar(page, fieldBox, dateInput, timeZone
   if (await pickerButton.isVisible({ timeout: 500 }).catch(() => false)) {
     await pickerButton.click({ force: true });
   } else {
-    await dateInput.click({ force: true }).catch(() => {});
+    await dateInput.click({ force: true }).catch(() => { });
   }
 
   const exactDateButton = page.locator(
@@ -362,7 +362,7 @@ export async function acknowledgeTermsAndConditionsOnce(page, profile) {
       console.log('    ☑️  Terms and Conditions consent checked via locator');
       return true;
     }
-    await fallback.click({ force: true }).catch(() => {});
+    await fallback.click({ force: true }).catch(() => { });
     if (profile) recordField(profile, TERMS_CONSENT_KEY, 'Yes');
     console.log('    ☑️  Terms and Conditions consent checked via label click');
     return true;
@@ -446,7 +446,7 @@ export async function acknowledgeAllPageAgreements(page, profile, stepName = '')
       '[data-automation-id="footerContainer"], [data-automation-id="bottom-navigation"], footer'
     );
     footer?.scrollIntoView({ block: 'end', behavior: 'instant' });
-  }).catch(() => {});
+  }).catch(() => { });
   await waitForDomSettled(page);
   await page.waitForTimeout(350);
 
@@ -858,7 +858,7 @@ async function pickWorkdayPromptOption(page, answer, labelText = '') {
   await page.waitForSelector(
     '[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]',
     { timeout: 2500 }
-  ).catch(() => {});
+  ).catch(() => { });
 
   const OPTION_SELECTOR = '[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]';
   const escapeRe = (text) => String(text).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -868,7 +868,7 @@ async function pickWorkdayPromptOption(page, answer, labelText = '') {
     for (let i = 0; i < count; i++) {
       const el = locator.nth(i);
       if (!(await el.isVisible({ timeout: 400 }).catch(() => false))) continue;
-      await el.scrollIntoViewIfNeeded().catch(() => {});
+      await el.scrollIntoViewIfNeeded().catch(() => { });
       await el.click({ force: true });
       return true;
     }
@@ -966,8 +966,8 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
     return false;
   }
 
-  await page.keyboard.press('Escape').catch(() => {});
-  await trigger.scrollIntoViewIfNeeded().catch(() => {});
+  await page.keyboard.press('Escape').catch(() => { });
+  await trigger.scrollIntoViewIfNeeded().catch(() => { });
   await trigger.click({ force: true });
   await page.waitForTimeout(500);
 
@@ -988,7 +988,7 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
     console.log(`    ⚠️  No prompt option matched for: "${labelText.slice(0, 45)}..." → "${String(answer).slice(0, 40)}"`);
   }
 
-  await page.keyboard.press('Escape').catch(() => {});
+  await page.keyboard.press('Escape').catch(() => { });
   await page.waitForTimeout(300);
   await waitForDomSettled(page);
 
@@ -1229,7 +1229,9 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
       if (expCheck?.unfilledCount > 0) {
         unfilled += expCheck.unfilledCount;
       }
-    } catch (_) {}
+    } catch (err) {
+      trace?.({ stage: 'experience_field_check_note', message: err?.message });
+    }
   }
 
   // Guard for Voluntary Disclosures / Self Identify step: verify EEO & CC-305 required fields
@@ -1239,7 +1241,9 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
       if (discCheck?.unfilledCount > 0) {
         unfilled += discCheck.unfilledCount;
       }
-    } catch (_) {}
+    } catch (err) {
+      trace?.({ stage: 'voluntary_disclosures_field_check_note', message: err?.message });
+    }
   }
 
   return unfilled;
@@ -1396,7 +1400,7 @@ export async function advanceApplicationQuestionsPage(page) {
     );
     footer?.scrollIntoView({ block: 'end', behavior: 'instant' });
     window.scrollTo(0, document.body.scrollHeight);
-  }).catch(() => {});
+  }).catch(() => { });
   await page.waitForTimeout(500);
 
   const clicked = await page.evaluate(() => {
@@ -1442,7 +1446,7 @@ export async function advanceApplicationQuestionsPage(page) {
   for (const loc of locators) {
     if (!(await loc.isVisible({ timeout: 800 }).catch(() => false))) continue;
     if (!(await loc.isEnabled().catch(() => true))) continue;
-    await loc.scrollIntoViewIfNeeded().catch(() => {});
+    await loc.scrollIntoViewIfNeeded().catch(() => { });
     await loc.click({ force: true });
     await waitForDomSettled(page);
     await page.waitForTimeout(1200);
@@ -1840,7 +1844,7 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
     return typedOnly.ok;
   }
 
-  await combo.scrollIntoViewIfNeeded().catch(() => {});
+  await combo.scrollIntoViewIfNeeded().catch(() => { });
 
   const directAgreementSelected = await selectExactAgreementOption(page, label, answer);
   if (directAgreementSelected) return true;
@@ -2055,23 +2059,23 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         const mm = String(Number(month));
         const dd = String(Number(day));
         const yyyy = String(year);
-        await spinButtons.nth(0).click().catch(() => {});
-        await spinButtons.nth(0).fill(mm).catch(() => {});
-        await spinButtons.nth(0).dispatchEvent('change').catch(() => {});
-        await spinButtons.nth(1).click().catch(() => {});
-        await spinButtons.nth(1).fill(dd).catch(() => {});
-        await spinButtons.nth(1).dispatchEvent('change').catch(() => {});
-        await spinButtons.nth(2).click().catch(() => {});
-        await spinButtons.nth(2).fill(yyyy).catch(() => {});
-        await spinButtons.nth(2).dispatchEvent('change').catch(() => {});
-        await spinButtons.nth(2).press('Tab').catch(() => {});
-        await spinButtons.nth(2).dispatchEvent('blur').catch(() => {});
+        await spinButtons.nth(0).click().catch(() => { });
+        await spinButtons.nth(0).fill(mm).catch(() => { });
+        await spinButtons.nth(0).dispatchEvent('change').catch(() => { });
+        await spinButtons.nth(1).click().catch(() => { });
+        await spinButtons.nth(1).fill(dd).catch(() => { });
+        await spinButtons.nth(1).dispatchEvent('change').catch(() => { });
+        await spinButtons.nth(2).click().catch(() => { });
+        await spinButtons.nth(2).fill(yyyy).catch(() => { });
+        await spinButtons.nth(2).dispatchEvent('change').catch(() => { });
+        await spinButtons.nth(2).press('Tab').catch(() => { });
+        await spinButtons.nth(2).dispatchEvent('blur').catch(() => { });
       } else if (fillValue === 'date') {
         await dateInput.fill(targetValue);
         await dateInput.press('Tab');
       } else {
-        await dateInput.click({ force: true }).catch(() => {});
-        await dateInput.fill(targetValue).catch(() => {});
+        await dateInput.click({ force: true }).catch(() => { });
+        await dateInput.fill(targetValue).catch(() => { });
         await dateInput.press('Tab');
       }
       const expectedPattern = fillValue === 'date' ? /^\d{4}-\d{2}-\d{2}$/ : /^\d{2}\/\d{2}\/\d{4}$/;
@@ -2086,13 +2090,13 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         if (spinButtonCount >= 3) {
           const [, month, day, year] = valueToFill.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
           await spinButtons.nth(0).fill(String(Number(month)));
-          await spinButtons.nth(0).dispatchEvent('change').catch(() => {});
+          await spinButtons.nth(0).dispatchEvent('change').catch(() => { });
           await spinButtons.nth(1).fill(String(Number(day)));
-          await spinButtons.nth(1).dispatchEvent('change').catch(() => {});
+          await spinButtons.nth(1).dispatchEvent('change').catch(() => { });
           await spinButtons.nth(2).fill(year);
-          await spinButtons.nth(2).dispatchEvent('change').catch(() => {});
-          await spinButtons.nth(2).press('Tab').catch(() => {});
-          await spinButtons.nth(2).dispatchEvent('blur').catch(() => {});
+          await spinButtons.nth(2).dispatchEvent('change').catch(() => { });
+          await spinButtons.nth(2).press('Tab').catch(() => { });
+          await spinButtons.nth(2).dispatchEvent('blur').catch(() => { });
           const values = await spinButtons.evaluateAll((elements) => elements.map((element) => element.getAttribute('aria-valuenow') || element.value || (element.textContent || '').trim()));
           actual = `${String(values[0] || '').padStart(2, '0')}/${String(values[1] || '').padStart(2, '0')}/${values[2] || ''}`;
         } else {
@@ -2145,13 +2149,13 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
             (await sp.getAttribute('placeholder') || '')
           ).toLowerCase();
           if (/month|\bmm\b|datesectionmonth/i.test(hint)) {
-            await sp.fill(String(Number(month))).catch(() => {});
+            await sp.fill(String(Number(month))).catch(() => { });
             spinsFilled++;
           } else if (/day|\bdd\b|datesectionday/i.test(hint)) {
-            await sp.fill(String(Number(day))).catch(() => {});
+            await sp.fill(String(Number(day))).catch(() => { });
             spinsFilled++;
           } else if (/year|yyyy|datesectionyear/i.test(hint)) {
-            await sp.fill(year).catch(() => {});
+            await sp.fill(year).catch(() => { });
             spinsFilled++;
           }
         }
@@ -2162,11 +2166,11 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (!ok) {
         const input = fieldBox.locator('input[type="date"], input[type="text"], input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])').first();
         if (await input.isVisible({ timeout: 600 }).catch(() => false)) {
-          await input.scrollIntoViewIfNeeded().catch(() => {});
-          await input.click({ force: true }).catch(() => {});
+          await input.scrollIntoViewIfNeeded().catch(() => { });
+          await input.click({ force: true }).catch(() => { });
           await input.fill(formattedDate || String(answer));
-          await input.press('Enter').catch(() => {});
-          await input.press('Tab').catch(() => {});
+          await input.press('Enter').catch(() => { });
+          await input.press('Tab').catch(() => { });
           ok = true;
         }
       }
@@ -2183,11 +2187,11 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       for (const loc of candidates) {
         const input = loc.first();
         if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
-          await input.scrollIntoViewIfNeeded().catch(() => {});
-          await input.click({ force: true }).catch(() => {});
+          await input.scrollIntoViewIfNeeded().catch(() => { });
+          await input.click({ force: true }).catch(() => { });
           await input.fill(String(fillValue));
-          await input.press('Enter').catch(() => {});
-          await input.press('Tab').catch(() => {});
+          await input.press('Enter').catch(() => { });
+          await input.press('Tab').catch(() => { });
           const actual = (await input.inputValue().catch(() => '') || '').trim();
           if (actual || String(fillValue).length > 0) {
             ok = true;
@@ -2213,9 +2217,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (isPartTimeWorkTypeLabel(questionLabel)) {
         ok = true;
       } else if (isFullTimeWorkTypeLabel(questionLabel) || isWorkTypeCheckboxLabel(questionLabel)) {
-      const cb = fieldBox.locator('input[type="checkbox"]').first();
-      if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
-        const isChecked = await cb.isChecked().catch(() => false);
+        const cb = fieldBox.locator('input[type="checkbox"]').first();
+        if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
+          const isChecked = await cb.isChecked().catch(() => false);
           if (!isChecked) await cb.click({ force: true });
           ok = await cb.isChecked().catch(() => false);
         }
@@ -2243,7 +2247,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (!ok) {
         const area = fieldBox.locator('textarea, input[type="text"]').first();
         if (await area.isVisible({ timeout: 600 }).catch(() => false)) {
-          await area.scrollIntoViewIfNeeded().catch(() => {});
+          await area.scrollIntoViewIfNeeded().catch(() => { });
           await area.fill(String(answer));
           ok = Boolean((await area.inputValue().catch(() => '') || '').trim());
         }
@@ -2272,14 +2276,14 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       if (await radio.isVisible({ timeout: 800 }).catch(() => false)) {
         await radio.click({ force: true });
         await page.waitForTimeout(150);
-        await page.keyboard.press('Enter').catch(() => {});
+        await page.keyboard.press('Enter').catch(() => { });
         ok = true;
       } else {
         const opt = fieldBox.locator('label').filter({ hasText: answerRe }).first();
         if (await opt.isVisible().catch(() => false)) {
           await opt.click({ force: true });
           await page.waitForTimeout(150);
-          await page.keyboard.press('Enter').catch(() => {});
+          await page.keyboard.press('Enter').catch(() => { });
           ok = true;
         }
       }
@@ -2289,9 +2293,9 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         for (const r of allRadios) {
           const txt = (await r.textContent().catch(() => '') || '').trim();
           if (txt && fuzzyScore(aStr, txt) >= 0.8) {
-            await r.click({ force: true }).catch(() => {});
+            await r.click({ force: true }).catch(() => { });
             await page.waitForTimeout(150);
-            await page.keyboard.press('Enter').catch(() => {});
+            await page.keyboard.press('Enter').catch(() => { });
             ok = true;
             break;
           }
@@ -2302,40 +2306,40 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         if (await pageRadio.isVisible({ timeout: 1000 }).catch(() => false)) {
           await pageRadio.click({ force: true });
           await page.waitForTimeout(150);
-          await page.keyboard.press('Enter').catch(() => {});
+          await page.keyboard.press('Enter').catch(() => { });
           ok = true;
         } else {
           const pageLabel = page.locator('label').filter({ hasText: answerRe }).first();
           if (await pageLabel.isVisible({ timeout: 1000 }).catch(() => false)) {
             await pageLabel.click({ force: true });
             await page.waitForTimeout(150);
-            await page.keyboard.press('Enter').catch(() => {});
+            await page.keyboard.press('Enter').catch(() => { });
             ok = true;
           }
         }
       }
     } else {
       ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
-          if (ok && /mutual\s+arbitration\s+agreement/i.test(label)) {
+      if (ok && /mutual\s+arbitration\s+agreement/i.test(label)) {
         const combo = fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first();
-            const selectedText = await combo.evaluate((element) => {
-              if (element.tagName.toLowerCase() === 'select') {
-                return element.selectedOptions?.[0]?.textContent || '';
-              }
-              return element.textContent || element.getAttribute('aria-label') || '';
-            }).catch(() => '');
-            if (!/I have read and agree to the Mutual Arbitration Agreement/i.test(selectedText)) {
-              await combo.click({ force: true });
-              ok = Boolean(await clickVisiblePromptOption(page, [
-                'I have read and agree to the Mutual Arbitration Agreement',
-              ]));
+        const selectedText = await combo.evaluate((element) => {
+          if (element.tagName.toLowerCase() === 'select') {
+            return element.selectedOptions?.[0]?.textContent || '';
+          }
+          return element.textContent || element.getAttribute('aria-label') || '';
+        }).catch(() => '');
+        if (!/I have read and agree to the Mutual Arbitration Agreement/i.test(selectedText)) {
+          await combo.click({ force: true });
+          ok = Boolean(await clickVisiblePromptOption(page, [
+            'I have read and agree to the Mutual Arbitration Agreement',
+          ]));
         }
       }
     }
   } finally {
     await page.evaluate(() => {
       document.querySelectorAll('[data-auto-fill-target]').forEach((el) => el.removeAttribute('data-auto-fill-target'));
-    }).catch(() => {});
+    }).catch(() => { });
   }
 
   return ok;
@@ -2354,25 +2358,27 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
 
   // At most 3 sub-page advances — stop as soon as current page has nothing left to fill
   for (let pagePass = 0; pagePass < 3; pagePass++) {
-  await waitForDomSettled(page, { timeout: 1000 });
-  const qaStore = createQAStore();
-  let questions = await discoverFormFieldQuestions(page);
+    await waitForDomSettled(page, { timeout: 1000 });
+    const qaStore = createQAStore();
+    let questions = await discoverFormFieldQuestions(page);
 
     const pageInfo = await getApplicationQuestionsPageInfo(page);
     const pageHint = pageInfo ? `page ${pageInfo.current} of ${pageInfo.total}` : (stepName || 'form fields');
 
-  console.log(`  📋 DOM [${pageHint}]: ${questions.length} formField question(s) detected`);
+    console.log(`  📋 DOM [${pageHint}]: ${questions.length} formField question(s) detected`);
 
-  if (questions.length === 0) {
-    await page.waitForTimeout(400);
-    questions = await discoverFormFieldQuestions(page);
-    if (questions.length > 0) {
-      console.log(`    ↳ After wait: ${questions.length} formField question(s)`);
+    if (questions.length === 0) {
+      await page.waitForTimeout(400);
+      questions = await discoverFormFieldQuestions(page);
+      if (questions.length > 0) {
+        console.log(`    ↳ After wait: ${questions.length} formField question(s)`);
+      }
     }
-  }
 
-  let filled = 0;
-  let skipped = 0;
+    let filled = 0;
+    let skipped = 0;
+
+    const seenFieldKeys = new Set(questions.map((q) => q.automationId ? `aid:${q.automationId}` : `label:${q.normalizedLabel || normalizeLabel(q.label)}`));
 
     if (/application questions|voluntary disclosures/i.test(stepName)) {
       const batchFilled = await fillAllWorkdaySelectOneDropdowns(page, profile, stepName);
@@ -2383,46 +2389,46 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       }
     }
 
-  for (const q of questions) {
-    if (isCheckboxOnlyLabel(q.label)) continue;
-    if (/employee\s*id.*if applicable/i.test(q.label)) continue;
+    for (const q of questions) {
+      if (isCheckboxOnlyLabel(q.label)) continue;
+      if (/employee\s*id.*if applicable/i.test(q.label)) continue;
 
-    const questionLabel = extractQuestionLabel(q.label);
+      const questionLabel = extractQuestionLabel(q.label);
       if (shouldSkipOptionalFill(questionLabel, q, profile, stepName)) {
         skipped++;
         continue;
       }
-    const norm = normalizeLabel(questionLabel);
+      const norm = normalizeLabel(questionLabel);
       const tenantForPeek = profile?._tenant || getWorkdayTenant(page.url());
       const expectedPeek = peekExpectedAnswer(questionLabel, profile, tenantForPeek);
       const domFilled = isQuestionDomFilled(q, questionLabel, expectedPeek, profile);
       const isDropdown = q.fieldType === 'dropdown' || q.fieldType === 'select';
-    const dynamicDateAction = buildCurrentDateAction(questionLabel, {
-      label: questionLabel,
-      placeholder: q.placeholder,
-      name: q.name,
-      automationId: q.automationId,
-      question: `${questionLabel} ${q.containerText || ''}`,
-      containerText: q.containerText,
-      timeZone: 'America/New_York',
-    });
-    const currentDateValue = q.fieldType === 'date'
-      ? getTodayISODate(dynamicDateAction?.timeZone || 'America/New_York')
-      : dynamicDateAction?.value;
-    const isCurrentDateAlreadyCorrect = dynamicDateAction
-      && (
-        q.fieldType === 'date'
-          ? String(q.currentValue || '').trim() === currentDateValue
-          : isSameCurrentDateValue(q.currentValue, currentDateValue)
-      );
+      const dynamicDateAction = buildCurrentDateAction(questionLabel, {
+        label: questionLabel,
+        placeholder: q.placeholder,
+        name: q.name,
+        automationId: q.automationId,
+        question: `${questionLabel} ${q.containerText || ''}`,
+        containerText: q.containerText,
+        timeZone: 'America/New_York',
+      });
+      const currentDateValue = q.fieldType === 'date'
+        ? getTodayISODate(dynamicDateAction?.timeZone || 'America/New_York')
+        : dynamicDateAction?.value;
+      const isCurrentDateAlreadyCorrect = dynamicDateAction
+        && (
+          q.fieldType === 'date'
+            ? String(q.currentValue || '').trim() === currentDateValue
+            : isSameCurrentDateValue(q.currentValue, currentDateValue)
+        );
 
       const sessionRecorded = profile?._filledValues
         && Object.keys(profile._filledValues).some((k) => normalizeLabel(k) === norm);
 
       if (!dynamicDateAction && sessionRecorded && domFilled && !isDropdown) {
-      skipped++;
-      continue;
-    }
+        skipped++;
+        continue;
+      }
       if (sessionRecorded && !domFilled && profile?._filledValues) {
         for (const key of Object.keys(profile._filledValues)) {
           if (normalizeLabel(key) === norm) delete profile._filledValues[key];
@@ -2433,13 +2439,13 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         skipped++;
         continue;
       } else if (domFilled && (!dynamicDateAction || isCurrentDateAlreadyCorrect)) {
-      if (dynamicDateAction && isCurrentDateAlreadyCorrect) {
-        console.log(`[date] Current-date field already verified: ${currentDateValue}`);
-      }
+        if (dynamicDateAction && isCurrentDateAlreadyCorrect) {
+          console.log(`[date] Current-date field already verified: ${currentDateValue}`);
+        }
         recordField(profile, questionLabel, expectedPeek || q.currentValue);
-      skipped++;
-      continue;
-    }
+        skipped++;
+        continue;
+      }
 
       if (shouldSkipOptionalFill(questionLabel, q, profile, stepName)) {
         skipped++;
@@ -2492,16 +2498,16 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
       if (!answer) {
         answer = await matchQuestionToAnswer(questionLabel, profile, qaStore);
       }
-    if (!answer) {
-      console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
-      continue;
-    }
+      if (!answer) {
+        console.log(`    ⚠️  No answer supplied for: "${q.label.slice(0, 70)}..."`);
+        continue;
+      }
 
-    answer = adjustAnswerForFieldType(questionLabel, answer, q, profile) || answer;
-    if (!answer) {
-      skipped++;
-      continue;
-    }
+      answer = adjustAnswerForFieldType(questionLabel, answer, q, profile) || answer;
+      if (!answer) {
+        skipped++;
+        continue;
+      }
 
       let ok = false;
       if (isDropdown || isYesNoDropdownQuestion(questionLabel)) {
@@ -2528,44 +2534,68 @@ export async function handleWorkdayFormFieldQuestions(page, profile, stepName = 
         });
         ok = verifyMark?.found && (valuesFuzzyMatch(verifyMark.current, answer) || isDropdownAnsweredInDom(verifyMark.current));
       }
-    if (ok) {
-      recordField(profile, questionLabel, answer);
+      if (ok) {
+        recordField(profile, questionLabel, answer);
         if (!profile.qa_answers) profile.qa_answers = {};
         profile.qa_answers[normalizeLabel(questionLabel)] = answer;
         if (!isDropdown) {
           console.log(`    ✅ [${q.fieldType}] "${q.label.slice(0, 55)}..." ← "${String(answer).length > 40 ? String(answer).slice(0, 40) + '...' : answer}"`);
         }
-      filled++;
-      await waitForDomSettled(page);
-    } else {
-      const live = (q.options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean);
-      const options = live.length ? live : await collectLiveFieldOptions(page, questionLabel, q.fieldType).catch(() => []);
-      const nearest = options.length
-        ? await pickNearestSelectOption({
-          question: questionLabel,
-          options,
-          preferred: answer,
-          profile,
-          company: profile?._company,
-        })
-        : await resolveUnknownWithLlm(questionLabel, q, { page, profile, preferred: answer });
-      if (nearest && nearest !== answer) {
-        ok = await fillApplicationQuestionField(page, questionLabel, q.fieldType, nearest, profile, q);
-        if (!ok) ok = Boolean(await typeAndClickOption(page, page.locator('[data-auto-fill-target="1"]').first(), nearest).then((r) => r.ok).catch(() => false));
-        if (ok) {
-          answer = nearest;
-          recordField(profile, questionLabel, nearest);
-          console.log(`    ✅ [nearest] "${questionLabel.slice(0, 55)}..." ← "${String(nearest).slice(0, 40)}"`);
-          filled++;
-          await waitForDomSettled(page);
-          continue;
-        }
-      }
-      console.log(`    ⚠️  Could not fill: "${q.label.slice(0, 55)}..."`);
-    }
-  }
+        filled++;
+        await waitForDomSettled(page, { timeout: 800 });
 
-  if (skipped > 0 && filled === 0) {
+        // Stage 3: Immediate dynamic DOM re-scan for newly revealed dependent fields
+        try {
+          const { scanPageForNewFields } = await import('./workdayDom.mjs');
+          const newDependentFields = await scanPageForNewFields(page, seenFieldKeys);
+          for (const df of newDependentFields) {
+            const dfKey = df.automationId ? `aid:${df.automationId}` : `label:${df.normalizedLabel || normalizeLabel(df.label)}`;
+            seenFieldKeys.add(dfKey);
+            questions.push(df);
+            console.log(`    ↳ 🌟 [Dynamic Dependent Field Revealed] "${df.label}" (${df.fieldType})`);
+          }
+        } catch { /* non-fatal */ }
+      } else {
+        const live = (q.options || []).map((o) => (typeof o === 'string' ? o : o?.text)).filter(Boolean);
+        const options = live.length ? live : await collectLiveFieldOptions(page, questionLabel, q.fieldType).catch(() => []);
+        const nearest = options.length
+          ? await pickNearestSelectOption({
+            question: questionLabel,
+            options,
+            preferred: answer,
+            profile,
+            company: profile?._company,
+          })
+          : await resolveUnknownWithLlm(questionLabel, q, { page, profile, preferred: answer });
+        if (nearest && nearest !== answer) {
+          ok = await fillApplicationQuestionField(page, questionLabel, q.fieldType, nearest, profile, q);
+          if (!ok) ok = Boolean(await typeAndClickOption(page, page.locator('[data-auto-fill-target="1"]').first(), nearest).then((r) => r.ok).catch(() => false));
+          if (ok) {
+            answer = nearest;
+            recordField(profile, questionLabel, nearest);
+            console.log(`    ✅ [nearest] "${questionLabel.slice(0, 55)}..." ← "${String(nearest).slice(0, 40)}"`);
+            filled++;
+            await waitForDomSettled(page, { timeout: 800 });
+
+            // Stage 3: Immediate dynamic DOM re-scan for newly revealed dependent fields
+            try {
+              const { scanPageForNewFields } = await import('./workdayDom.mjs');
+              const newDependentFields = await scanPageForNewFields(page, seenFieldKeys);
+              for (const df of newDependentFields) {
+                const dfKey = df.automationId ? `aid:${df.automationId}` : `label:${df.normalizedLabel || normalizeLabel(df.label)}`;
+                seenFieldKeys.add(dfKey);
+                questions.push(df);
+                console.log(`    ↳ 🌟 [Dynamic Dependent Field Revealed] "${df.label}" (${df.fieldType})`);
+              }
+            } catch { /* non-fatal */ }
+            continue;
+          }
+        }
+        console.log(`    ⚠️  Could not fill: "${q.label.slice(0, 55)}..."`);
+      }
+    }
+
+    if (skipped > 0 && filled === 0) {
       console.log(`    ℹ️  ${skipped} field(s) skipped (verified filled in live DOM)`);
     }
 
@@ -2733,11 +2763,11 @@ async function fillSelfIdentifyLanguage(page, profile) {
     const langField = page.locator('[data-automation-id*="formField"]').filter({ hasText: /^Language\b/i }).first();
     const trigger = langField.locator(DROPDOWN_TRIGGER_IN_FIELD).first();
     if (await trigger.isVisible({ timeout: 1500 }).catch(() => false)) {
-      await trigger.scrollIntoViewIfNeeded().catch(() => {});
+      await trigger.scrollIntoViewIfNeeded().catch(() => { });
       await trigger.click({ force: true });
       await page.waitForTimeout(450);
       ok = Boolean(await clickVisiblePromptOption(page, [language, 'English', 'english', 'English (US)', 'English (United States)']));
-      await page.keyboard.press('Escape').catch(() => {});
+      await page.keyboard.press('Escape').catch(() => { });
     }
   }
 
@@ -2909,8 +2939,8 @@ export async function handleSelfIdentifyStep(page, profile) {
       const byLabel = page.getByLabel(/^Name\b/i).first();
       if (await byLabel.isVisible({ timeout: 1500 }).catch(() => false)) {
         await byLabel.fill(fullName);
-        await byLabel.press('Enter').catch(() => {});
-        await byLabel.press('Tab').catch(() => {});
+        await byLabel.press('Enter').catch(() => { });
+        await byLabel.press('Tab').catch(() => { });
         nameOk = true;
         console.log(`    ✅ [text] Name ← "${fullName}" (getByLabel)`);
       }
@@ -2977,7 +3007,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
     const custom = await fillWorkdayCustomDropdown(page, { label, fieldType: 'dropdown' }, wanted);
     if (custom.success) {
       recordField(profile, 'Gender', custom.verifiedValue);
-    return true;
+      return true;
     }
   }
 
@@ -2998,7 +3028,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
   const combo = genderField.locator('[role="combobox"], button[aria-haspopup="listbox"], [data-automation-id="selectWidget"] button').first();
 
   if (await combo.isVisible({ timeout: 1500 }).catch(() => false)) {
-    await combo.scrollIntoViewIfNeeded().catch(() => {});
+    await combo.scrollIntoViewIfNeeded().catch(() => { });
     const result = await handleDropdown(page, combo, gender, 'Gender');
     if (result.success) {
       recordField(profile, 'Gender', gender);
@@ -3043,7 +3073,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
   if (marked) {
     const fallbackCombo = page.locator('[data-auto-gender-target="true"]').first();
     try {
-      await fallbackCombo.scrollIntoViewIfNeeded().catch(() => {});
+      await fallbackCombo.scrollIntoViewIfNeeded().catch(() => { });
       await fallbackCombo.click({ force: true }).catch(() => fallbackCombo.evaluate((el) => el.click()));
       await page.waitForTimeout(300);
       const picked = await clickVisiblePromptOption(page, [gender, 'Male']);
@@ -3057,7 +3087,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
       await page.evaluate(() => {
         document.querySelectorAll('[data-auto-gender-target="true"]')
           .forEach((el) => el.removeAttribute('data-auto-gender-target'));
-      }).catch(() => {});
+      }).catch(() => { });
     }
   }
 
@@ -3162,9 +3192,9 @@ export async function fillVeteranStatusDropdown(page, veteran = '', profile = nu
   }
 
   const widget = page.locator('[data-wd-eeo-target="1"]').first();
-  await widget.scrollIntoViewIfNeeded().catch(() => {});
+  await widget.scrollIntoViewIfNeeded().catch(() => { });
   const typed = await typeAndClickOption(page, widget, clickText);
-  await waitForDomSettled(page, { timeout: 800 }).catch(() => {});
+  await waitForDomSettled(page, { timeout: 800 }).catch(() => { });
   const after = await page.evaluate(() => {
     const widget = document.querySelector('[data-wd-eeo-target="1"]');
     const selected = widget?.querySelector('[data-automation-id="selectedItem"], [data-automation-id="promptSelectedItem"]');
@@ -3275,7 +3305,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
     const custom = await fillWorkdayCustomDropdown(page, { label, fieldType: 'dropdown' }, wanted);
     if (custom.success) {
       recordField(profile, label, custom.verifiedValue);
-      await saveAnswerToYaml(label, custom.verifiedValue).catch(() => {});
+      await saveAnswerToYaml(label, custom.verifiedValue).catch(() => { });
       return true;
     }
   }
@@ -3311,7 +3341,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
   const byLabel = await fillWorkdaySelectOneDropdown(page, 'Race', wanted);
   if (byLabel) {
     recordField(profile, 'Race', wanted);
-    await saveAnswerToYaml('Race', wanted).catch(() => {});
+    await saveAnswerToYaml('Race', wanted).catch(() => { });
     return true;
   }
 
@@ -3323,20 +3353,20 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
   ).first();
 
   if (await combo.isVisible({ timeout: 1500 }).catch(() => false)) {
-    await combo.scrollIntoViewIfNeeded().catch(() => {});
+    await combo.scrollIntoViewIfNeeded().catch(() => { });
     const result = await handleDropdown(page, combo, wanted, 'Race');
     if (result.success) {
       recordField(profile, 'Race', wanted);
       console.log(`    ✅ Race dropdown ← "${wanted}"`);
       return true;
     }
-    await combo.click({ force: true }).catch(() => {});
+    await combo.click({ force: true }).catch(() => { });
     await page.waitForTimeout(400);
     const picked = await clickVisiblePromptOption(page, candidates);
     if (picked) {
       recordField(profile, 'Race', picked);
       console.log(`    ✅ Race dropdown ← "${picked}"`);
-      await page.keyboard.press('Escape').catch(() => {});
+      await page.keyboard.press('Escape').catch(() => { });
       return true;
     }
     // Type "Asian" into searchable list then click matching option
@@ -3367,7 +3397,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
   if (marked) {
     const fallbackCombo = page.locator('[data-auto-race-target="true"]').first();
     try {
-      await fallbackCombo.scrollIntoViewIfNeeded().catch(() => {});
+      await fallbackCombo.scrollIntoViewIfNeeded().catch(() => { });
       await fallbackCombo.click({ force: true }).catch(() => fallbackCombo.evaluate((el) => el.click()));
       await page.waitForTimeout(400);
       let picked = await clickVisiblePromptOption(page, candidates);
@@ -3375,7 +3405,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
         const typed = await typeAndClickOption(page, page.locator('body'), 'Asian');
         picked = typed.ok ? (typed.matched || 'Asian') : null;
       }
-      await page.keyboard.press('Escape').catch(() => {});
+      await page.keyboard.press('Escape').catch(() => { });
       const after = await page.evaluate(() => {
         const normalize = (text) => (text || '').replace(/\s+/g, ' ').replace(/\*+$/, '').trim();
         const label = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"]'))
@@ -3389,14 +3419,14 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
         const value = after && !/^select/i.test(after) ? after : (picked || wanted);
         recordField(profile, 'Race', value);
         console.log(`    ✅ Race dropdown ← "${value}"`);
-        await saveAnswerToYaml('Race', value).catch(() => {});
+        await saveAnswerToYaml('Race', value).catch(() => { });
         return true;
       }
     } finally {
       await page.evaluate(() => {
         document.querySelectorAll('[data-auto-race-target="true"]')
           .forEach((el) => el.removeAttribute('data-auto-race-target'));
-      }).catch(() => {});
+      }).catch(() => { });
     }
   }
 
@@ -3601,7 +3631,7 @@ export async function fillEmptyRequiredWithNearestLlm(page, profile, stepName = 
 
     filled++;
     recordField(profile, questionLabel, answer);
-    await saveAnswerToYaml(questionLabel, answer).catch(() => {});
+    await saveAnswerToYaml(questionLabel, answer).catch(() => { });
     if (tenant) {
       await saveAnswerToTenantYaml(tenant, {
         label: questionLabel,
@@ -3609,7 +3639,7 @@ export async function fillEmptyRequiredWithNearestLlm(page, profile, stepName = 
         fieldType: q.fieldType || 'dropdown',
         options,
         step: stepName,
-      }).catch(() => {});
+      }).catch(() => { });
     }
     console.log(`    🤖 Unstick nearest: "${questionLabel.slice(0, 50)}" ← "${String(answer).slice(0, 40)}"`);
   }

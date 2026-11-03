@@ -24,7 +24,7 @@ if (!isSupabaseConfigured()) {
 
 const csvPath = process.argv[2]
   ? resolve(process.argv[2])
-  : resolve(process.cwd(), 'Data', 'wd_jobs_202610301744.csv');
+  : resolve(process.cwd(), 'Data', 'wd_jobs_202611031652.csv');
 
 if (!existsSync(csvPath)) {
   console.error(`❌ CSV not found at: ${csvPath}`);
@@ -99,10 +99,22 @@ async function main() {
 
     const awlMatches = [...rawAwl.matchAll(/AWL[-_]?\d+/gi)].map((m) => m[0].toUpperCase());
 
+    const cleanCompany = company
+      .replace(/â€“/g, ' - ')
+      .replace(/[â€œâ€\?]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
+    const cleanRole = roleTitle
+      .replace(/â€“/g, ' - ')
+      .replace(/[â€œâ€\?]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+
     if (!linkMap.has(jobUrl)) {
       linkMap.set(jobUrl, {
-        company: company.replace(/[â€œâ€\?]/g, '').trim(),
-        role_title: parseRole(jobUrl, roleTitle.replace(/[â€œâ€\?]/g, '').trim()),
+        company: cleanCompany,
+        role_title: parseRole(jobUrl, cleanRole),
         job_url: jobUrl.trim(),
         awlSet: new Set(),
       });

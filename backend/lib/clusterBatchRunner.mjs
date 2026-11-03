@@ -779,7 +779,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       if (currentAttempts < 2) {
         const nextAttempt = currentAttempts + 1;
         // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
-        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
+        console.log(`[SCANNER ${workerId}] AWL_ID: ${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID} | Job: ${jobUrl} | Retry: Attempt ${nextAttempt}/${MAX_ATTEMPTS} | Reason: ${leadFailReason}`);
         try {
           const urlsToRetry = Array.from(new Set([
             ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
@@ -819,7 +819,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         };
       } else {
         // Attempt 3 failed -> Upsert into failed_jobs
-        console.log(`❌ [scan] ${company} | ${jobUrl} — attempt ${MAX_ATTEMPTS}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. Max 3 attempts reached.`);
+        console.log(`[SCANNER ${workerId}] AWL_ID: ${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID} | Job: ${jobUrl} | Scanned: FAILED | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
         const { recordFailedJob } = await import('./supabaseClient.mjs');
         await recordFailedJob({
           applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
@@ -861,13 +861,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const reviewShotUrl = (rawReviewShot && !rawReviewShot.includes('fail') && !rawReviewShot.includes('application-failures') && !rawReviewShot.includes('failed-applications')) ? rawReviewShot : null;
   const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
 
-  console.log(`\n${'═'.repeat(72)}`);
-  console.log(`🎉 [${workerId}] PHASE 1: SCANNING IS DONE!`);
-  console.log(`   Status: REACHED REVIEW & SUBMIT`);
-  console.log(`   Blueprint Lead Candidate: ${blueprintTask.applywizz_id}`);
-  console.log(`   Job Posting: ${company} — ${role}`);
-  console.log(`   📸 Blueprint Review Screenshot: ${reviewShotUrl || 'Uploaded to Supabase'}`);
-  console.log(`   📋 Harvested Questions Count: ${harvestedQuestions.length} fields`);
+  console.log(`[SCANNER ${workerId}] AWL_ID: ${blueprintTask.applywizz_id} | Job: ${jobUrl} | Scanned: SUCCESS | Review Screenshot: ${reviewShotUrl || 'None'}`);
   try {
     const { saveMasterYamlTemplate } = await import('./masterYamlManager.mjs');
     await saveMasterYamlTemplate(harvestedQuestions, {

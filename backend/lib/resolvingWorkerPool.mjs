@@ -411,25 +411,35 @@ export async function runResolvingWorkerPool(options = {}) {
             }
 // [SILENCED]             console.log(`${'─'.repeat(64)}`);
 
-            // Recalculate unanswered questions strictly after 5-tier resolution
-            const unanswered = structuredAnswers
-              .filter(q => (!q.answer || !q.is_answered) && q.is_required)
+            // Recalculate unanswered questions strictly after 6-tier resolution with answer_is_question_true flags
+            const formattedForDistribution = structuredAnswers.map((sa, idx) => {
+              const qText = String(sa.question || sa.label || '').trim();
+              const ansVal = sa.answer !== undefined && sa.answer !== null ? String(sa.answer).trim() : '';
+              const isAnswerTrue = ansVal !== '' && ansVal !== 'MISSING' && ansVal !== 'unresolved';
+              return {
+                question: qText,
+                answer: ansVal,
+                source_type: sa.source || (sa.tier ? `tier_${sa.tier}` : 'tier_1'),
+                field_type: sa.field_type || 'text',
+                count_number: idx + 1,
+                answer_is_question_true: isAnswerTrue,
+              };
+            });
+
+            const unresolved = formattedForDistribution
+              .filter(q => !q.answer_is_question_true)
               .map(q => ({
                 question: q.question,
                 field_type: q.field_type || 'text',
-                step: q.step || 'Application Questions',
-                options: q.options || [],
-                is_required: true,
                 reason: 'missing_required_answer',
               }));
 
-            const unansweredCount = unanswered.length;
-            // STRICT INSTRUCTION: Every application is resolved across 5 tiers with client details and mandatorily marked as ready_for_review
-            const isFully = true;
-            const clientStatus = 'ready_for_review';
-            const answeredTotal = structuredAnswers.filter(q => q.is_answered).length;
+            const unansweredCount = unresolved.length;
+            const isFully = unansweredCount === 0;
+            const clientStatus = isFully ? 'ready_for_review' : 'needs_answers';
+            const answeredTotal = formattedForDistribution.filter(q => q.answer_is_question_true).length;
 
-            console.log(`✅ [STAGE 2: RESOLVER] [${workerId}] ${awlId} 100% resolved across 5 tiers (${answeredTotal}/${totalQCount}) → MANDATORILY marked as "ready_for_review"`);
+            console.log(`✅ [STAGE 2: RESOLVER] [${workerId}] ${awlId} resolved across tiers (${answeredTotal}/${totalQCount}) → status: "${clientStatus}"`);
             if (job.screenshot_path) {
               console.log(`   📸 Review Screenshot: ${job.screenshot_path}`);
             }
@@ -441,18 +451,18 @@ export async function runResolvingWorkerPool(options = {}) {
               company,
               roleTitle,
               scrapedQuestions: questions,
-              resolvedAnswers: structuredAnswers,
-              unansweredQuestions: [],
-              unansweredCount: 0,
+              resolvedAnswers: formattedForDistribution,
+              unansweredQuestions: unresolved,
+              unansweredCount: unansweredCount,
               screenshotUrl: null, // STRICT POLICY: Scanned review screenshot belongs in scanned_jobs only; job_distributions screenshot is authentic post-submission proof only
               status: clientStatus,
               clients: [{
                 applywizzId: awlId,
                 jobId: job.id,
                 jobUrl: job.job_url,
-                resolvedAnswers: structuredAnswers,
-                unansweredQuestions: [],
-                unansweredCount: 0,
+                resolvedAnswers: formattedForDistribution,
+                unansweredQuestions: unresolved,
+                unansweredCount: unansweredCount,
                 isFullyAnswered: isFully,
                 screenshotUrl: null,
                 status: clientStatus,
@@ -473,29 +483,6 @@ export async function runResolvingWorkerPool(options = {}) {
               status: clientStatus,
               tierSummary: `T1:${t1Count} T2:${t2Count} T3:${t3Count} T4:${t4Count} T5:${t5Count}`,
             });
-
-            if (false && resolvedMilestoneRecords.length > 0 && resolvedMilestoneRecords.length % 10 === 0) {
-              const batchNum = Math.floor(resolvedMilestoneRecords.length / 10);
-              const batchSlice = resolvedMilestoneRecords.slice(-10);
-              const readyCount = batchSlice.filter(r => r.status === 'ready_for_review').length;
-              const needsCount = batchSlice.length - readyCount;
-// [SILENCED]               console.log(`\n${'═'.repeat(74)}`);
-// [SILENCED]               console.log(`📊 10-RESOLUTION MILESTONE REPORT — Batch #${batchNum} (AWLs #${resolvedMilestoneRecords.length - 9}–#${resolvedMilestoneRecords.length})`);
-// [SILENCED]               console.log(`   Job: ${company} — ${roleTitle}`);
-// [SILENCED]               console.log(`   ✅ Resolved: ${readyCount}/10 | ❌ needs_answers: ${needsCount}/10 | Success Rate: ${readyCount * 10}%`);
-// [SILENCED]               console.log(`${'─'.repeat(74)}`);
-// [SILENCED]               console.log(` # | AWL-ID    | Answered | Missing | Tier Summary               | Status`);
-// [SILENCED]               console.log(`${'─'.repeat(74)}`);
-              batchSlice.forEach((r, idx) => {
-                const num = String(idx + 1).padStart(2, ' ');
-                const id = String(r.awlId).padEnd(9, ' ');
-                const ans = `${r.answered}/${r.total}`.padEnd(8, ' ');
-                const mis = String(r.missing).padEnd(7, ' ');
-                const tiers = r.tierSummary.padEnd(26, ' ');
-// [SILENCED]                 console.log(` ${num} | ${id} | ${ans} | ${mis} | ${tiers} | ${r.status}`);
-              });
-// [SILENCED]               console.log(`${'═'.repeat(74)}\n`);
-            }
           }
         } catch (err) {
           console.warn(`   ⚠️ [${workerId}] Resolution note for ${awlId}: ${err.message}`);

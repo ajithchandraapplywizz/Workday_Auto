@@ -1,5 +1,5 @@
 /**
- * zohoMailClient.mjs — Integration with Zoho Mail Reader on Render
+ * zohoMailClient.mjs â€” Integration with Zoho Mail Reader on Render
  *
  * Provides real-time polling of client mailboxes for Workday confirmation links,
  * account activation URLs, password reset links, and 6-digit OTP codes.
@@ -32,7 +32,7 @@ export async function listZohoUsers({ forceRefresh = false } = {}) {
     usersCacheTime = now;
     return usersCache;
   } catch (err) {
-    console.warn(`  ⚠️ [ZohoMail] Failed to list users: ${err.message}`);
+    console.warn(`  âš ï¸ [ZohoMail] Failed to list users: ${err.message}`);
     return null;
   }
 }
@@ -52,8 +52,12 @@ export async function getZohoUser(email) {
  * Ensure admin login on Zoho Mail Reader so all mailboxes can be accessed.
  */
 export async function ensureZohoAdminLogin() {
-  const username = process.env.ZOHO_ADMIN_USERNAME || 'Created@123';
-  const password = process.env.ZOHO_ADMIN_PASSWORD || 'Applywizz@2026';
+  const username = process.env.ZOHO_ADMIN_USERNAME;
+  const password = process.env.ZOHO_ADMIN_PASSWORD;
+  if (!username || !password) {
+    console.warn('  ⚠️ [ZohoMail] ZOHO_ADMIN_USERNAME or ZOHO_ADMIN_PASSWORD env vars not set — skipping admin login.');
+    return false;
+  }
   try {
     const res = await fetch(`${ZOHO_BASE_URL}/api/zoho/ui/login`, {
       method: 'POST',
@@ -62,11 +66,11 @@ export async function ensureZohoAdminLogin() {
       signal: AbortSignal.timeout(20000),
     });
     if (res.ok) {
-      console.log(`   ✓ [ZohoMail] Logged into Zoho Mail Reader as admin (${username})`);
+      console.log(`   âœ“ [ZohoMail] Logged into Zoho Mail Reader as admin (${username})`);
       return true;
     }
   } catch (err) {
-    console.warn(`  ⚠️ [ZohoMail] Admin login notice: ${err.message}`);
+    console.warn(`  âš ï¸ [ZohoMail] Admin login notice: ${err.message}`);
   }
   return false;
 }
@@ -88,7 +92,7 @@ export async function getZohoInbox(email, { limit = 5, start = 1 } = {}) {
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
-    console.warn(`  ⚠️ [ZohoMail] Failed to get inbox for ${clean}: ${err.message}`);
+    console.warn(`  âš ï¸ [ZohoMail] Failed to get inbox for ${clean}: ${err.message}`);
     return null;
   }
 }
@@ -116,7 +120,7 @@ export async function getZohoMessage(email, { accountId, folderId, messageId }) 
     if (!res.ok) return null;
     return await res.json();
   } catch (err) {
-    console.warn(`  ⚠️ [ZohoMail] Failed to fetch message ${messageId}: ${err.message}`);
+    console.warn(`  âš ï¸ [ZohoMail] Failed to fetch message ${messageId}: ${err.message}`);
     return null;
   }
 }
@@ -170,7 +174,7 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '') {
         uLower.includes('token=') ||
         uLower.includes('code=')
       ) {
-        console.log(`   🎉 [ZohoMail] Found Workday password reset link: ${cleanUrl}`);
+        console.log(`   ðŸŽ‰ [ZohoMail] Found Workday password reset link: ${cleanUrl}`);
         return {
           found: true,
           type: 'reset',
@@ -188,7 +192,7 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '') {
       uLower.includes('token=') ||
       uLower.includes('code=')
     ) {
-      console.log(`   🎉 [ZohoMail] Found Workday verification link: ${cleanUrl}`);
+      console.log(`   ðŸŽ‰ [ZohoMail] Found Workday verification link: ${cleanUrl}`);
       return {
         found: true,
         type: 'link',
@@ -201,7 +205,7 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '') {
   const codeMatch = combined.match(/\b([0-9]{6})\b/);
   if (codeMatch) {
     const code = codeMatch[1];
-    console.log(`   🎉 [ZohoMail] Found 6-digit Workday verification code: ${code}`);
+    console.log(`   ðŸŽ‰ [ZohoMail] Found 6-digit Workday verification code: ${code}`);
     return {
       found: true,
       type: 'code',
@@ -236,16 +240,16 @@ export async function pollZohoWorkdayAuth({
   const deadline = Date.now() + timeoutMs;
   const cutoff = cutoffTime || (Date.now() - 5 * 60 * 1000); // default last 5 minutes
 
-  console.log(`   📧 [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail} every 1s (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
+  console.log(`   ðŸ“§ [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail} every 1s (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
 
   // 1. Verify user connection in Zoho
   let userAccountId = null;
   const user = await getZohoUser(cleanEmail);
   if (user) {
     userAccountId = user.accountId;
-    console.log(`   ✓ [ZohoMail] Candidate account verified in Zoho: ${cleanEmail} (Connected: ${user.connected})`);
+    console.log(`   âœ“ [ZohoMail] Candidate account verified in Zoho: ${cleanEmail} (Connected: ${user.connected})`);
     if (user.connected === false) {
-      console.log(`   ❌ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
+      console.log(`   âŒ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
       return { found: false, reason: 'mailbox_not_connected' };
     }
   } else {
@@ -253,9 +257,9 @@ export async function pollZohoWorkdayAuth({
     const probeInbox = await getZohoInbox(cleanEmail, { limit: 1, start: 1 });
     if (probeInbox && probeInbox.accountId) {
       userAccountId = probeInbox.accountId;
-      console.log(`   ✓ [ZohoMail] Candidate inbox probe confirmed active: ${cleanEmail} (AccountId: ${userAccountId})`);
+      console.log(`   âœ“ [ZohoMail] Candidate inbox probe confirmed active: ${cleanEmail} (AccountId: ${userAccountId})`);
     } else {
-      console.log(`   ❌ [ZohoMail] Candidate ${cleanEmail} is not connected in Zoho Mail Reader!`);
+      console.log(`   âŒ [ZohoMail] Candidate ${cleanEmail} is not connected in Zoho Mail Reader!`);
       return { found: false, reason: 'mailbox_not_connected' };
     }
   }
@@ -327,6 +331,74 @@ export async function pollZohoWorkdayAuth({
     await new Promise((r) => setTimeout(r, pollIntervalMs));
   }
 
-  console.log(`   ⏳ [ZohoMail] No matching verification email received for ${cleanEmail} within timeout.`);
+  console.log(`   â³ [ZohoMail] No matching verification email received for ${cleanEmail} within timeout.`);
   return { found: false, reason: 'timeout' };
+}
+
+/**
+ * Check if a candidate email domain is Zoho-connected (not @gmail.com or @outlook.com etc.)
+ * Returns 'zoho_connected' | 'not_connected' | 'gmail' | 'outlook' | 'unknown'
+ */
+export function checkEmailDomainEligibility(email) {
+  if (!email || typeof email !== 'string') return 'unknown';
+  const lower = email.trim().toLowerCase();
+  const domain = lower.split('@')[1] || '';
+  if (!domain) return 'unknown';
+
+  // Gmail.com explicitly detected
+  if (domain === 'gmail.com' || domain.endsWith('.gmail.com')) {
+    return 'gmail';
+  }
+
+  // Authoritative Zoho-connected company suffixes
+  const ALLOWED_ZOHO_SUFFIXES = [
+    'applywizz.ai',
+    'applywizzard.ai',
+    'applyres.ai',
+    'applyresort.ai',
+  ];
+
+  if (ALLOWED_ZOHO_SUFFIXES.some(s => domain === s || domain.endsWith('.' + s))) {
+    return 'zoho_connected';
+  }
+
+  return 'not_connected';
+}
+
+/**
+ * Full auth recovery flow — poll Zoho Mail for verification or reset link from a specific company.
+ * @param {object} opts
+ * @param {string} opts.email - candidate email
+ * @param {string} opts.company - hiring company name for subject matching
+ * @param {string} opts.type - 'verification' | 'reset'
+ * @param {number} [opts.timeoutMs=90000]
+ * @returns {Promise<{found: boolean, link?: string, reason?: string}>}
+ */
+export async function fetchWorkdayMailLink({ email, company, type = 'verification', timeoutMs = 90000 }) {
+  const eligibility = checkEmailDomainEligibility(email);
+  if (eligibility !== 'zoho_connected') {
+    return { found: false, reason: `email_domain_not_zoho_connected:${eligibility}` };
+  }
+
+  const result = await pollZohoWorkdayAuth({
+    email,
+    company,
+    timeoutMs,
+    pollIntervalMs: 2000,
+    cutoffTime: Date.now() - 5 * 60 * 1000,
+  });
+
+  if (!result.found) return { found: false, reason: result.reason || 'no_mail_found' };
+
+  if (type === 'reset' && result.type === 'reset') {
+    return { found: true, link: result.verificationLink };
+  }
+  if (type === 'verification' && result.type === 'link') {
+    return { found: true, link: result.verificationLink };
+  }
+  // If code-based verification
+  if (result.type === 'code') {
+    return { found: true, code: result.verificationCode };
+  }
+  return { found: false, reason: 'link_type_mismatch' };
 }

@@ -1,10 +1,10 @@
 /**
- * queue_daemon.mjs — 9-Worker Pipeline Autonomous Webhook Engine & Controller
+ * queue_daemon.mjs — Dynamic-Worker Autonomous Webhook Engine & Controller
  * ===========================================================================
  * Event-driven webhook controller with instant (<500ms) browser abortion.
  *
  * Pipeline Architecture:
- *   - Strictly 9 Canonical Workers in worker_status:
+ *   - Dynamic Canonical Workers in worker_status (configured via ENV):
  *       • Scanning (3): scanning_worker_1, scanning_worker_2, scanning_worker_3
  *       • Resolving (3): resolving_worker_1, resolving_worker_2, resolving_worker_3
  *       • Submitting (3): submitting_worker_1, submitting_worker_2, submitting_worker_3
@@ -134,7 +134,7 @@ function routeLogEntry(level, args) {
   try {
     const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
     const isSubmitService = SERVICE_ROLE === 'submitter' || currentMode === 'submitting' || currentStage === 'submitting';
-    const cluster = (isSubmitService || text.includes('[SUBMIT') || text.includes('submitting') || text.includes('Submissions') || text.includes('[2-WORKER SUBMISSION') || text.includes('DISPATCHER]'))
+    const cluster = (isSubmitService || text.includes('[SUBMIT') || text.includes('submitting') || text.includes('Submissions') || text.includes('SUBMISSION') || text.includes('DISPATCHER]'))
       ? 'Submit'
       : (currentStage === 'resolving' ? 'Resolve' : 'Scan');
 
@@ -421,14 +421,17 @@ async function runStage1Scanning() {
     console.log(`ℹ️ [DAEMON] bot_control has no scan_run_id — auto-generated fallback: ${scanRunId}`);
   }
 
+  const scanWorkerCount = PIPELINE_CONFIG.scannerWorkersCount;
+  const scanWorkerIds = PIPELINE_CONFIG.scanWorkerIds;
+
   await syncBotControlState({
     stage: 'scanning',
     is_running: true,
     current_action: `Scanning unique Workday links (Run: ${scanRunId})`,
-    active_worker_count: TEST_MODE ? 1 : Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
+    active_worker_count: TEST_MODE ? 1 : scanWorkerCount,
   });
 
-  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with 2 scanning workers (${PIPELINE_CONFIG.scanWorkerIds.slice(0, 2).join(', ')}) under run ${scanRunId}...`);
+  console.log(`\n🚀 [DAEMON] Starting Stage 1: Scanning unique job links with ${scanWorkerCount} scanning worker(s) (${scanWorkerIds.join(', ')}) under run ${scanRunId}...`);
 
   const { syncQueueWithScannedAndFailedJobs } = await import('../lib/supabaseClient.mjs');
   await syncQueueWithScannedAndFailedJobs().catch(() => { });
@@ -437,7 +440,7 @@ async function runStage1Scanning() {
   await runClusterBatchRunner({
     scanRunId,
     topLinks: TEST_MODE ? 1 : 100, // Harvest 50+ unique Workday job links
-    workers: TEST_MODE ? 1 : Math.min(PIPELINE_CONFIG.workersCount || 2, 2),
+    workers: TEST_MODE ? 1 : scanWorkerCount,
     headless: HEADLESS,
     confirmSubmit: false,
     limitPerLink: TEST_MODE ? 1 : null,
@@ -516,20 +519,28 @@ async function runStage3Submissions() {
 
   const tasksCount = initialCount || 0;
   if (tasksCount === 0) {
-    console.log(`ℹ️ [DAEMON] 0 applications ready for submission.`);
-    submitStatus = 'off';
-    currentMode = 'idle';
-    currentStage = 'idle';
-    isPoolRunning = false;
-    await syncBotControlState({
-      mode: 'idle',
-      stage: 'idle',
-      submit_enabled: false,
-      submit_status: 'off',
-      is_running: false,
-      current_action: '0 applications ready for submission. Idle.',
-    });
-    return;
+    const { count: pendingScans } = await supabase
+      .from('batch_job_queue')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['pending', 'processing']);
+
+    if ((pendingScans || 0) === 0 && scanStatus !== 'running') {
+      console.log(`ℹ️ [DAEMON] 0 applications ready for submission and no active scans.`);
+      submitStatus = 'off';
+      currentMode = 'idle';
+      currentStage = 'idle';
+      isPoolRunning = false;
+      await syncBotControlState({
+        mode: 'idle',
+        stage: 'idle',
+        submit_enabled: false,
+        submit_status: 'off',
+        is_running: false,
+        current_action: '0 applications ready for submission. Idle.',
+      });
+      return;
+    }
+    console.log(`⏳ [DAEMON] Submissions armed: waiting in parallel for scanning to produce ready applications (${pendingScans || 0} batches queued)...`);
   }
 
   await syncBotControlState({
@@ -539,17 +550,17 @@ async function runStage3Submissions() {
     submit_status: 'running',
     submit_stop_requested: false,
     is_running: true,
-    current_action: `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway`,
+    current_action: `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers`,
     active_worker_count: maxConcurrency,
   });
 
-  console.log(`\n🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
+  console.log(`\n🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} dynamic workers (${submitWorkers.join(', ')})...`);
 
   const runDedicatedWorkerLoop = async (workerId) => {
     while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
       const claimedTask = await claimNextTask(workerId);
       if (!claimedTask) {
-        // Check if all tasks in queue are finished
+        // Check if any tasks remain in ready_for_review or queued
         const { data: rem } = await supabase
           .from('job_distributions')
           .select('id')
@@ -557,7 +568,18 @@ async function runStage3Submissions() {
           .limit(1);
 
         if (!rem || rem.length === 0) {
-          console.log(`ℹ️ [${workerId}] Queue empty — no more ready applications.`);
+          const { count: pendingScans } = await supabase
+            .from('batch_job_queue')
+            .select('*', { count: 'exact', head: true })
+            .in('status', ['pending', 'processing']);
+
+          if ((pendingScans || 0) > 0 || scanStatus === 'running') {
+            // Scanning is actively generating new distributions — wait in standby
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
+          }
+
+          console.log(`ℹ️ [${workerId}] Queue empty & scanning complete — worker entering standby idle.`);
           break;
         }
 
@@ -897,6 +919,69 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  // 2a-2. Universal Pipeline Start & Stop Endpoints
+  if ((pathname === '/api/bot/universal/start' || (pathname === '/api/bot/webhook' && (body.action === 'start_universal' || body.action === 'universal_start'))) && req.method === 'POST') {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
+
+    console.log(`\n⚡ [DAEMON WEBHOOK] Universal Pipeline Start triggered across dynamic workers!`);
+    setGlobalStop(false);
+    setScanStop(false);
+    setSubmitStop(false);
+    isPoolRunning = true;
+    scanStopRequested = false;
+    submitStopRequested = false;
+
+    await syncBotControlState({
+      mode: 'parallel',
+      stage: 'universal',
+      scan_status: 'running',
+      scan_enabled: true,
+      scan_stop_requested: false,
+      submit_status: 'running',
+      submit_enabled: true,
+      submit_stop_requested: false,
+      is_running: true,
+      stop_requested: false,
+      trigger_requested: false,
+      last_action_requested: null,
+      current_action: `Universal Pipeline Active: Scanning & Submissions armed across dynamic workers`,
+    }).catch(() => { });
+
+    if (SERVICE_ROLE !== 'submitter') {
+      scanStatus = 'running';
+      runScanAndResolveParallel({ force: true }).catch(console.error);
+    }
+    if (SERVICE_ROLE !== 'scanner') {
+      submitStatus = 'running';
+      runStage3Submissions().catch(console.error);
+    }
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'Universal Pipeline triggered across all dynamic scanning and submitting workers!',
+      isRunning: true,
+      stage: 'universal',
+      mode: 'parallel',
+    }));
+    return;
+  }
+
+  if ((pathname === '/api/bot/universal/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop_universal' || body.action === 'universal_stop'))) && req.method === 'POST') {
+    console.log(`\n🛑 [DAEMON WEBHOOK] Universal Pipeline Stop requested! Halting all scanning and submitting workers...`);
+    await stopAutonomousPool();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      success: true,
+      message: 'Universal Pipeline stopped cleanly. All workers idle.',
+      isRunning: false,
+      stage: 'idle',
+      mode: 'idle',
+    }));
+    return;
+  }
+
   // 2b. Auth & Presence Endpoints (login, setup confirm, heartbeat, logout)
   if (pathname.startsWith('/api/auth/')) {
     return handleAuthRequest(req, res, pathname, body);
@@ -1197,7 +1282,7 @@ const server = http.createServer(async (req, res) => {
           submit_stop_requested: false,
           is_running: true,
           refusal_reason: null,
-          current_action: 'Submitting approved applications across 2 workers in parallel',
+          current_action: `Submitting approved applications across ${PIPELINE_CONFIG.submissionWorkersCount} workers in parallel`,
         });
 
         runStage3Submissions().catch(console.error);
@@ -1208,7 +1293,7 @@ const server = http.createServer(async (req, res) => {
           mode: 'submitting',
           submitStatus: 'running',
           submit_status: 'running',
-          message: 'Submit pipeline started across 2 workers in parallel.',
+          message: `Submit pipeline started across ${PIPELINE_CONFIG.submissionWorkersCount} workers in parallel.`,
         }));
         return;
       }
@@ -1593,7 +1678,7 @@ export async function dispatchQueuedSubmissions() {
       if (claimedTask) {
         claimedAny = true;
         activeSubmittingWorkers.add(workerId);
-        console.log(`\n🚀 [2-WORKER SUBMISSION BATCH] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+        console.log(`\n🚀 [DYNAMIC SUBMISSION BATCH] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
 
         // Process asynchronously so workers run in parallel!
         processClaimedTask({
@@ -1780,7 +1865,7 @@ export async function initOnStartup() {
 
     // Only trigger immediate submissions on startup if explicitly requested via flag
     if ((args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
-      console.log(`[DAEMON] Startup trigger detected: initiating Stage 3 Submissions across 2 workers...`);
+      console.log(`[DAEMON] Startup trigger detected: initiating Stage 3 Submissions across ${PIPELINE_CONFIG.submissionWorkersCount} workers...`);
       runStage3Submissions().catch(console.error);
     }
   } catch (err) {
@@ -1845,6 +1930,7 @@ export async function initOnStartup() {
         bc?.stop_requested ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_pipeline' ||
+        bc?.last_action_requested === 'stop_universal' ||
         (bc?.is_running === false && (isScanActive || isSubmitActive))
       );
 
@@ -1876,7 +1962,13 @@ export async function initOnStartup() {
       const isSubmitRunning = submitStatus === 'running';
 
       const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
-        (bc && bc.is_running !== false && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.trigger_requested && (bc.stage === 'scanning' || bc.scan_status === 'running')))) ||
+        (bc && bc.is_running !== false && (
+          bc.last_action_requested === 'start' ||
+          bc.last_action_requested === 'start_scan' ||
+          bc.last_action_requested === 'start_pipeline' ||
+          bc.last_action_requested === 'start_universal' ||
+          (bc.trigger_requested && (bc.stage === 'scanning' || bc.stage === 'universal' || bc.scan_status === 'running'))
+        )) ||
         (scanCtrl && scanCtrl.enabled === true && !scanCtrl.stop_requested) ||
         (bc?.scan_status === 'running' && bc?.is_running !== false)
       );
@@ -1909,7 +2001,9 @@ export async function initOnStartup() {
         (bc && bc.is_running !== false && (
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
-          (bc.trigger_requested && (bc.stage === 'submitting' || bc.submit_status === 'running')) ||
+          bc.last_action_requested === 'start_universal' ||
+          bc.last_action_requested === 'start_pipeline' ||
+          (bc.trigger_requested && (bc.stage === 'submitting' || bc.stage === 'universal' || bc.submit_status === 'running')) ||
           (bc.submit_status === 'running')
         )) ||
         (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested) ||
@@ -1943,7 +2037,7 @@ export async function initOnStartup() {
             submit_status: 'running',
             submit_enabled: true,
             stop_requested: false,
-            current_action: 'Submitting approved applications across 2 workers in parallel on Submitter Service',
+            current_action: `Submitting approved applications across ${PIPELINE_CONFIG.submissionWorkersCount} workers in parallel on Submitter Service`,
           });
           if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: true, status: 'running' }).catch(() => { });
           return;

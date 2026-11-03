@@ -209,6 +209,71 @@ export async function getClientRecordByAwlId(rawAwlId) {
   return null;
 }
 
+/**
+ * Resolves candidate company email dynamically.
+ * 1. Checks clients table for company_email.
+ * 2. If empty, falls back to external CRM API:
+ *    https://www.apply-wizz.me/api/get-client-details?applywizz_id=AWL-XXXX
+ * 3. Enforces domain check:
+ *    - If @gmail.com or non-Zoho: returns { valid: false, reason: 'Zoho Mail was not connected' }
+ *    - If @applywizz.ai / @applywizzard.ai: returns { valid: true, email }
+ */
+export async function resolveCandidateCompanyEmail(rawAwlId, existingClient = null) {
+  const cleanId = String(rawAwlId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  if (!cleanId) {
+    return { valid: false, email: null, reason: 'invalid_awl_id' };
+  }
+
+  let client = existingClient || (await getClientRecordByAwlId(cleanId));
+  let email = String(client?.company_email || client?.companyEmail || '').trim().toLowerCase();
+
+  // Fallback to Apply-Wizz CRM API if company_email is empty
+  if (!email) {
+    try {
+      const apiUrl = `https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(cleanId)}`;
+      const res = await fetch(apiUrl, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const apiEmail = String(data?.company_email || data?.companyEmail || data?.data?.company_email || data?.email || '').trim().toLowerCase();
+        if (apiEmail) {
+          email = apiEmail;
+          // Asynchronously update clients table with resolved company_email
+          request('clients', {
+            method: 'PATCH',
+            query: `?applywizz_id=eq.${encode(cleanId)}`,
+            body: { company_email: email },
+          }).catch(() => {});
+        }
+      }
+    } catch (err) {
+      console.warn(`[resolveCandidateCompanyEmail] API fallback error for ${cleanId}:`, err.message);
+    }
+  }
+
+  if (!email) {
+    return { valid: false, email: null, client, reason: 'No company email found in database or CRM' };
+  }
+
+  // Check domain eligibility
+  const domain = email.split('@')[1] || '';
+  if (domain === 'gmail.com' || domain.endsWith('.gmail.com')) {
+    return { valid: false, email, client, reason: 'Zoho Mail was not connected' };
+  }
+
+  const isZohoConnected = [
+    'applywizz.ai',
+    'applywizzard.ai',
+    'applyres.ai',
+    'applyresort.ai',
+  ].some((s) => domain === s || domain.endsWith('.' + s));
+
+  if (!isZohoConnected) {
+    return { valid: false, email, client, reason: 'Zoho Mail was not connected' };
+  }
+
+  return { valid: true, email, client, reason: null };
+}
+
 export async function loadSupabaseClientSnapshot(applywizzId) {
   if (!isSupabaseConfigured() || !applywizzId) return null;
   const cleanId = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
@@ -2853,16 +2918,41 @@ export async function recordJobDistributions({
         };
       }).filter((u) => u.question);
 
-      const clientCountUnanswered = (typeof c === 'object' && c.unansweredCount !== null && c.unansweredCount !== undefined)
-        ? Number(c.unansweredCount)
-        : clientUnanswered.length;
-      const clientIsFully = (clientCountUnanswered === 0);
-      let clientStatus = (typeof c === 'object' && c.status)
-        ? c.status
-        : (clientIsFully ? 'ready_for_review' : 'needs_answers');
-      if (!clientIsFully && clientStatus === 'ready_for_review') {
-        clientStatus = 'needs_answers';
-      }
+      // Format every resolved answer strictly according to Phase 2 JSON requirements
+      let qIndex = 0;
+      const structuredClientResolved = clientResolved.map((ans) => {
+        qIndex++;
+        const qText = String(ans.question || ans.label || '').trim();
+        const ansVal = ans.answer !== undefined && ans.answer !== null ? String(ans.answer).trim() : '';
+        const isAnswerTrue = ansVal !== '' && ansVal !== 'MISSING' && ansVal !== 'unresolved' && ans.answer_is_question_true !== false;
+        return {
+          question: qText,
+          answer: ansVal,
+          source_type: ans.source_type || ans.source || (ans.tier ? `tier_${ans.tier}` : 'tier_1'),
+          field_type: ans.field_type || ans.type || 'text',
+          count_number: ans.count_number || ans.sequence || qIndex,
+          answer_is_question_true: isAnswerTrue,
+        };
+      });
+
+      // Collect any unresolved questions with their exact scraped Workday field_type
+      const unresolvedFromAnswers = structuredClientResolved
+        .filter((a) => !a.answer_is_question_true)
+        .map((a) => ({
+          question: a.question,
+          field_type: a.field_type || 'text',
+          reason: 'unresolved_answer',
+        }));
+
+      const allUnresolvedFields = [...unresolvedFromAnswers, ...clientUnanswered.map(u => ({
+        question: u.question,
+        field_type: u.field_type || 'text',
+        reason: u.reason || 'missing_required_answer',
+      }))];
+
+      const clientCountUnanswered = allUnresolvedFields.length;
+      const clientIsFully = clientCountUnanswered === 0 && structuredClientResolved.length > 0;
+      const clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
       const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : (screenshotUrl || null);
 
       return {
@@ -2875,9 +2965,11 @@ export async function recordJobDistributions({
         lead_applywizz_id: cleanLead || null,
         scraped_questions: questions,
         question_count: questionCount,
-        resolved_answers: clientResolved,
-        unanswered_questions: clientCountUnanswered === 0 ? [] : clientUnanswered,
+        resolved_answers: structuredClientResolved,
+        unanswered_questions: allUnresolvedFields,
         unanswered_count: clientCountUnanswered,
+        unresolved_fields: allUnresolvedFields,
+        ready_for_review: clientIsFully,
         is_fully_answered: clientIsFully,
         application_submitted_screenshot_url: clientStatus === 'submitted' ? clientShot : null,
         status: clientStatus,

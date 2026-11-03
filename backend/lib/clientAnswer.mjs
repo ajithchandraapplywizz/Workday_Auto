@@ -1,26 +1,34 @@
 /**
  * clientAnswer.mjs — Single answer path for every Workday question.
  *
- *   0. 16+/18+ working-age questions → Yes (DOB years if present; jobs are 18+)
- *   1. Apply Wizz client API (hydrated profile + Q&A index)
- *   2. Facts on that API profile (identity, work auth, EEO, dates, salary)
- *   3. Resume-backed experience answers
- *   4. LLM + live Playwright options
+ * Fast-path (synchronous):
+ *   peekClientAnswer(label, profile, opts) — identity/name/email/phone from profile
  *
- * Default: API-only mode — no profile.yml qa_answers or local qa-store (USE_LOCAL_PROFILE_QA=1 to restore).
+ * Full waterfall (async):
+ *   resolveClientAnswer(field, profile, opts) — invokes the 6-tier tierResolver
+ *
+ * Tier 0 (pre-resolution):
+ *   lookupResolvedAnswerFromProfile — JSON pre-resolved answers from job_distributions
+ *
+ * Tiers 1-6 delegated to: ./tierResolver.mjs
+ *   Tier 1: Supabase client_questions + clients table
+ *   Tier 2: Resume parsing facts
+ *   Tier 3: Apply Wizz CRM Profile API
+ *   Tier 4: Universal Q&A Bank (qa_store)
+ *   Tier 5: Semantic + fuzzy composite context match
+ *   Tier 6: LLM (Claude) with bound context + auto Q&A bank cache
  */
 
 import {
   hydrateProfileFromApplyWizz,
   resolveDomQuestionFromApplyWizz,
   isApplyWizzConfigured,
-  saveApplyWizzClientAnswer,
   alignAnswerToWorkdayOptions,
   stripWorkdayQuestionLabel,
 } from './applyWizzClient.mjs';
 import { tokenSetRatio, fuzzyScore } from './fields.mjs';
 import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
-import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './claudeLlm.mjs';
+import { isPersonalIdentityQuestion } from './claudeLlm.mjs';
 import {
   resolveExperienceQuestionAnswer,
   sanitizeExperienceAnswer,
@@ -51,28 +59,30 @@ import {
 import { toTitleCase } from './personName.mjs';
 import { formatToMMDDYYYY } from './fillHandlers.mjs';
 import { extractDobFromResumeText } from './resumeParser.mjs';
+import { resolveAnswer } from './tierResolver.mjs';
 
-function fieldOptions(field = {}) {
+// ─── Field helpers ────────────────────────────────────────────────────────────
+
+export function fieldOptions(field = {}) {
   return (field.options || [])
     .map((o) => (typeof o === 'string' ? o : o?.text))
     .map((o) => String(o || '').replace(/\s+/g, ' ').trim())
     .filter(Boolean);
 }
 
-function fieldLabel(field = {}, fallback = '') {
+export function fieldLabel(field = {}, fallback = '') {
   return String(field.questionLabel || field.label || field.id || field.name || fallback || '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function isAvailabilityTimingQuestion(label = '') {
-  return /available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(label);
-}
+// ─── Profile fact mapping ──────────────────────────────────────────────────────
 
 /**
  * Facts that already live on the hydrated client profile — never a hardcoded Yes/No.
+ * Returns the value for a label if it can be answered directly from the profile object.
  */
-function profileFactForLabel(label, profile = {}) {
+export function profileFactForLabel(label, profile = {}) {
   const n = normalizeLabel(label);
   const p = profile.personal || {};
   const e = profile.education || {};
@@ -195,6 +205,8 @@ function profileFactForLabel(label, profile = {}) {
   return null;
 }
 
+// ─── Prior employer answer ────────────────────────────────────────────────────
+
 /** Resolve named prior-employer questions from the complete hydrated profile. */
 export function priorEmployerAnswer(label, profile = {}) {
   const text = String(label || '').replace(/\s+/g, ' ').trim();
@@ -214,17 +226,21 @@ export function priorEmployerAnswer(label, profile = {}) {
     .map((token) => token.replace(/[^a-z0-9]/g, ''))
     .filter((token) => token.length >= 3 && !/^(ever|been|employed|working|worked|family|group|team)$/.test(token));
   if (!targetTokens.length) return null;
+
   const evidence = [
     profile.experience?.current_company,
     profile.experience?.previous_company,
     profile._resumeText,
     JSON.stringify(profile._applyWizzClientContext || {}),
   ].filter(Boolean).join(' ').toLowerCase();
+
   return targetTokens.some((token) => evidence.includes(token)) ? 'Yes' : 'No';
 }
 
+// ─── Answer validation / sanitization ────────────────────────────────────────
+
 /**
- * Reject a candidate that cannot be the answer for this question shape.
+ * Reject a candidate answer that cannot be the answer for this question shape.
  * @returns {string|null}
  */
 export function acceptClientValue(label, value, { options = [], fieldType = '', profile = null } = {}) {
@@ -256,9 +272,11 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
   return sanitizeExperienceAnswer(label, text, profile, { options, fieldType }) || text;
 }
 
+// ─── Tier 0: Pre-Resolved JSON lookup ────────────────────────────────────────
+
 /**
- * Tier 0: Direct JSON Lookup for Pre-Resolved Answers from job_distributions.
- * During scanning, all questions were answered and stored in job_distributions.resolved_answers.
+ * Tier 0: Direct JSON lookup for pre-resolved answers from job_distributions.
+ * During scanning all questions were answered and stored in job_distributions.resolved_answers.
  * Applications in ready_for_review have 100% complete answers in this JSON.
  */
 export function lookupResolvedAnswerFromProfile(rawLabel, profile = {}, opts = {}) {
@@ -351,63 +369,16 @@ export function lookupResolvedAnswerFromProfile(rawLabel, profile = {}, opts = {
   return null;
 }
 
-/**
- * Tier 4: Fuzzy Match combining candidate's Resume parsing & Supabase QA data.
- * Checks candidate's verified Supabase QA answers and resume experience tokens.
- */
-export function lookupCombinedFuzzyAnswer(rawLabel, profile = {}, { options = [], fieldType = '' } = {}) {
-  if (!rawLabel || !profile) return null;
-  const stripped = stripWorkdayQuestionLabel(rawLabel);
-  const norm = normalizeLabel(stripped || rawLabel);
-  if (!norm) return null;
-
-  // 1. Fuzzy match across indexed Supabase QA memory
-  const qaMap = profile._supabaseQa || {};
-  let bestScore = 0;
-  let bestAnswer = null;
-  let bestSource = null;
-
-  for (const [k, ans] of Object.entries(qaMap)) {
-    if (!ans) continue;
-    const kNorm = normalizeLabel(k);
-    const score = Math.max(tokenSetRatio(norm, kNorm), fuzzyScore(norm, kNorm));
-    if (score > bestScore && score >= 0.80) {
-      bestScore = score;
-      bestAnswer = ans;
-      bestSource = 'fuzzy_supabase_qa';
-    }
-  }
-
-  // 2. Fuzzy match across candidate resume keywords
-  if (!bestAnswer && profile._resumeText) {
-    const lowerResume = String(profile._resumeText).toLowerCase();
-    const tokens = norm.split(/\s+/).filter((t) => t.length >= 3 && !/^(have|with|your|this|that|what|when|where|which|years|experience|candidate)\b/i.test(t));
-    const matchCount = tokens.filter((t) => lowerResume.includes(t)).length;
-    if (tokens.length > 0 && matchCount / tokens.length >= 0.75) {
-      if (options.length > 0) {
-        const yesOpt = options.find((o) => /^yes\b/i.test(o));
-        if (yesOpt) {
-          bestAnswer = yesOpt;
-          bestSource = 'fuzzy_resume_match';
-        }
-      }
-    }
-  }
-
-  if (bestAnswer) {
-    let aligned = bestAnswer;
-    if (options.length > 0 && /dropdown|select|combobox|radio/i.test(fieldType)) {
-      aligned = alignAnswerToWorkdayOptions(bestAnswer, options, fieldType) || bestAnswer;
-    }
-    return { answer: aligned, source: bestSource, score: bestScore };
-  }
-
-  return null;
-}
+// ─── Fast-path (synchronous) peek ─────────────────────────────────────────────
 
 /**
- * Sync peek: age/safety first, then Tier 1 (Supabase clients table -> client_questions table) -> Tier 2 (Resume parsing).
- * Never calls the LLM.
+ * Synchronous fast-path check for obvious answers (name, email, phone from profile)
+ * without hitting any async tiers. Safe to call in synchronous contexts.
+ *
+ * @param {string} label       - question label
+ * @param {object} profile     - hydrated client profile
+ * @param {object} [opts]      - { options, fieldType }
+ * @returns {string|null}
  */
 export function peekClientAnswer(label, profile = {}, opts = {}) {
   const question = String(label || '').replace(/\s+/g, ' ').trim();
@@ -415,7 +386,7 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const options = opts.options || [];
   const fieldType = opts.fieldType || '';
 
-  // ─── TIER 0: Pre-Resolved JSON Lookup (PRIMARY) ───
+  // ─── Tier 0: Pre-Resolved JSON Lookup (PRIMARY) ───
   const fromResolvedJson = lookupResolvedAnswerFromProfile(question, profile, { options, fieldType });
   if (fromResolvedJson?.answer) {
     const jsonOk = acceptClientValue(question, fromResolvedJson.answer, { options, fieldType, profile });
@@ -431,43 +402,70 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const sensitive = lookupSensitiveSafeAnswer(question);
   if (sensitive) return acceptClientValue(question, sensitive, { options, fieldType, profile }) || sensitive;
 
+  // Identity fast-path (name, email, phone) — synchronous only
   const fromProfileIdentity = isPersonalIdentityQuestion(question) ? profileFactForLabel(question, profile) : null;
   if (fromProfileIdentity) return acceptClientValue(question, fromProfileIdentity, { options, fieldType, profile }) || fromProfileIdentity;
 
-  const currentStep = profile?._currentStepIndex || 2;
-
-  // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
-  // 1a. Check Supabase client_questions table with respective AWL ID
+  // ─── Supabase in-memory sync lookup ───
   const fromSupabase = lookupSupabaseAnswerSync(question, profile, { options, fieldType });
   const supabaseOk = acceptClientValue(question, fromSupabase?.answer, { options, fieldType, profile });
   if (supabaseOk) return supabaseOk;
 
-  // 1b. Check Supabase clients table facts
+  // ─── Direct profile facts ───
   const fromProfile = profileFactForLabel(question, profile);
   const profileOk = acceptClientValue(question, fromProfile, { options, fieldType, profile });
   if (profileOk) return profileOk;
 
-  // ─── TIER 2: Resume Parsing (Primary Source of Truth for Experience & Skills) ───
-  const fromExperience = resolveExperienceQuestionAnswer(question, profile, { options, fieldType });
-  const expOk = acceptClientValue(question, fromExperience?.answer, { options, fieldType, profile });
-  if (expOk) return expOk;
-
-  // ─── TIER 3: CRM API (Apply Wizz Fallback) ──────────────────────────────────
-  const fromApi = resolveDomQuestionFromApplyWizz(question, profile, {
-    options,
-    fieldType,
-    threshold: 0.48,
-  });
-  return acceptClientValue(question, fromApi?.answer, { options, fieldType, profile });
+  return null;
 }
 
+// ─── Adult DOB derivation ──────────────────────────────────────────────────────
+
 /**
- * Resolve one question across the strict 3-tier hierarchy:
- *   Tier 1: Supabase direct answer (clients table facts -> client_questions table)
- *   Tier 2: Resume parsing (experience facts and resume text)
- *   Tier 3: LLM human-like analysis using live Playwright DOM options
- *           (persisted directly to Supabase client_questions table with AWL ID)
- * @returns {Promise<{ answer: string, source: string, field_type_code?: number }|null>}
+ * Derives a valid adult Date of Birth (MM/DD/YYYY) when the field is strictly REQUIRED
+ * and missing from Supabase, CRM, and Resume.
+ * Uses candidate's graduation year (grad_year - 22) or experience milestones.
+ */
+export function deriveAdultDobFromProfile(profile = {}) {
+  const gradYear = profile.education?.graduation_year
+    || profile.education?.to_year
+    || profile.education?.from_year
+    || '';
+  const gradNum = parseInt(String(gradYear).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
+  if (gradNum && gradNum >= 1970 && gradNum <= 2030) {
+    const birthYear = gradNum - 22;
+    return `06/15/${birthYear}`;
+  }
+
+  const fromDate = profile.experience?.from_date || profile.experience?.start_date || '';
+  const workStartNum = parseInt(String(fromDate).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
+  if (workStartNum && workStartNum >= 1970 && workStartNum <= 2030) {
+    const birthYear = workStartNum - 22;
+    return `06/15/${birthYear}`;
+  }
+
+  const currentYear = new Date().getFullYear();
+  return `06/15/${currentYear - 25}`;
+}
+
+// ─── Main async resolver ──────────────────────────────────────────────────────
+
+/**
+ * Resolve one question using the full 6-tier hierarchy via tierResolver.mjs.
+ *
+ * Resolution order:
+ *   Tier 0: Pre-resolved JSON from job_distributions (fast skip)
+ *   Tier 1: Supabase client_questions + clients table  (via tierResolver)
+ *   Tier 2: Resume parsing facts                       (via tierResolver)
+ *   Tier 3: Apply Wizz CRM Profile API                 (via tierResolver)
+ *   Tier 4: Universal Q&A Bank                         (via tierResolver)
+ *   Tier 5: Semantic + fuzzy composite match           (via tierResolver)
+ *   Tier 6: LLM with bound context + auto-cache        (via tierResolver)
+ *
+ * @param {object|string} field   - Workday field descriptor or bare label string
+ * @param {object} profile        - hydrated client profile
+ * @param {object} [opts]         - { page, tenant, company, required, dryRun, jobUrl, isScanOnly, forceLlm, ... }
+ * @returns {Promise<{ answer: string, source: string, field_type_code?: number, field_type?: string }|null>}
  */
 export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   const enriched = enrichFieldWithTypeCode(typeof field === 'object' ? field : { label: field });
@@ -486,9 +484,12 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       options = await collectLiveFieldOptions(opts.page, label, fieldType) || [];
     } catch { /* live option discovery is optional */ }
   }
+
   const code = enriched.field_type_code || fieldTypeToCode(fieldType);
   const required = enriched.required === true || opts.required === true || /\*/.test(label) || enriched.hasRequiredMarker === true;
-  const availabilityTiming = isAvailabilityTimingQuestion(label);
+  const currentStep = profile?._currentStepIndex || 2;
+  const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '';
+  const tenant = opts.tenant || profile?._tenant || '';
 
   const finish = (answer, source) => {
     const value = acceptClientValue(label, answer, { options, fieldType, profile });
@@ -496,16 +497,14 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     return { answer: value, source, field_type_code: code, field_type: fieldType };
   };
 
-  // 0. Legal & safety guards
+  // ─── Special: Password ───────────────────────────────────────────────────
   if (/password/i.test(label) || fieldType === 'password') {
     const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
     console.log(`    🔑 [Password] "${label.slice(0, 55)}" ← (auto-filled workday password)`);
     return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType };
   }
 
-  const currentStep = profile?._currentStepIndex || 2;
-
-  // ─── TIER 0: Pre-Resolved Answers JSON from job_distributions (PRIMARY FIRST CHOICE) ───
+  // ─── Tier 0: Pre-Resolved JSON from job_distributions ───────────────────
   const preResolvedHit = lookupResolvedAnswerFromProfile(label, profile, { options, fieldType });
   if (preResolvedHit?.answer) {
     const validated = finish(preResolvedHit.answer, preResolvedHit.source);
@@ -516,328 +515,82 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
+  // ─── Age / Safety guards ─────────────────────────────────────────────────
   const ageYes = resolveMinimumAgeAnswer(label, profile);
   if (ageYes) {
-    const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
     console.log(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
-    return hit;
+    return { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
   }
 
-
-  // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
-  // 1a. Core Identity from Supabase clients table (name, phone, email, address)
+  // ─── Fast-path: profile identity facts (name, email, phone) ──────────────
   const fromProfileIdentity = isPersonalIdentityQuestion(label) ? profileFactForLabel(label, profile) : null;
   if (fromProfileIdentity) {
     const hit = finish(fromProfileIdentity, 'supabase_client_fact');
     if (hit) {
       console.log(`    👤 [Identity] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      profile?._onLog?.(currentStep, `[Tier 1 Identity Match] "${label.slice(0, 50)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Tier 1 Identity] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
 
-  // 1b. Exact question-and-answer from Supabase client_questions table for this client (AWL ID)
-  const fromSupabase = await lookupSupabaseAnswer(label, profile, { options, fieldType });
-  if (fromSupabase?.answer) {
-    const supabaseHit = finish(fromSupabase.answer, fromSupabase.source || 'supabase_client_questions');
-    if (supabaseHit) {
-      console.log(`    🗄️  [Supabase Tier 1 client_questions] "${label.slice(0, 55)}" ← "${supabaseHit.answer.slice(0, 40)}" (${fromSupabase.source})`);
-      profile?._onLog?.(currentStep, `[Tier 1 Supabase Match] "${label.slice(0, 50)}" ← "${supabaseHit.answer.slice(0, 45)}"`);
-      return supabaseHit;
-    }
-  }
-
-  // 1c. Other attributes from Supabase clients table (education, degree, skills, dates)
-  const fromProfile = profileFactForLabel(label, profile);
+  // ─── Profile facts (Tier 1 fast-path before async waterfall) ─────────────
   const domainQuestion = isYearsQuantityQuestion(label)
     || isDescribeExperienceQuestion(label)
     || isProceedQuestion(label);
+  const fromProfile = profileFactForLabel(label, profile);
   if (fromProfile && !domainQuestion) {
     const hit = finish(fromProfile, 'supabase_clients_table');
     if (hit) {
-      console.log(`    🗄️  [Supabase Tier 1 clients table] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 1 Profile Match] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
+      console.log(`    🗄️  [Profile Fact] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Profile Fact] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
       return hit;
     }
   }
 
-  const priorEmployer = priorEmployerAnswer(label, profile);
-  if (priorEmployer) {
-    const hit = finish(priorEmployer, 'supabase_clients_table');
-    if (hit) {
-      console.log(`    🧾 [Supabase Tier 1 Prior Employer] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      profile?._onLog?.(currentStep, `[Tier 1 Prior Employer] "${label.slice(0, 50)}" ← "${hit.answer}"`);
-      return hit;
-    }
-  }
-
-  const clientId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || process.env.APPLYWIZZ_ID || '';
-  const tenant = opts.tenant || profile?._tenant || '';
-
-  // ─── TIER 2: Resume Parsing (Primary Source of Truth for Experience & Skills) ───
-  const fromExperience = resolveExperienceQuestionAnswer(label, profile, { options, fieldType });
-  let expHit = finish(fromExperience?.answer, `experience/${fromExperience?.source || 'resume'}`);
-  
-  if (!expHit && profile._resumeText) {
-    // Check if question asks about specific skill / experience in resume
-    const { inferAnswerFromResume } = await import('./resumeParser.mjs');
-    const directInfer = inferAnswerFromResume(label, profile._resumeText, { options, fieldType });
-    if (directInfer) {
-      expHit = finish(directInfer, 'resume_direct_infer');
-    } else if (isYesNoQuestionLabel(label) && options.length) {
-      // If asking "Do you have at least X years experience in <tech>", check if tech is in resume
-      const lowerResume = (profile._resumeText || '').toLowerCase();
-      const topicTokens = (label.toLowerCase().match(/[a-z0-9+#.]{3,}/g) || [])
-        .filter(t => !/^(have|least|years|experience|with|systems|distributed|the|for|you|and|are)\b/i.test(t));
-      const hasTopic = topicTokens.length > 0 && topicTokens.some(t => lowerResume.includes(t));
-      if (hasTopic) {
-        const yesOpt = options.find(o => /^yes\b/i.test(o)) || 'Yes';
-        expHit = finish(yesOpt, 'resume_keyword_match');
-      }
-    }
-  }
-
-  // DOB resolution in Tier 2: Resume text extraction -> Required adult derivation
-  if (!expHit && /date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i.test(label)) {
-    if (profile._resumeText) {
-      const fromResume = extractDobFromResumeText(profile._resumeText);
-      if (fromResume) {
-        expHit = finish(fromResume, 'resume_extracted_dob');
-        if (expHit && profile._applyWizzId) {
-          recordSupabaseAnswerInMemory(profile, 'date of birth', fromResume);
-          upsertSupabaseAnswer({
-            applywizzId: profile._applyWizzId,
-            question: label,
-            questionNormalized: 'date of birth',
-            answer: fromResume,
-            fieldType: 'date',
-            source: 'resume',
-          }).catch(() => {});
-        }
-      }
-    }
-
-    if (!expHit && (required || opts.forceLlm === true)) {
-      const derivedDob = deriveAdultDobFromProfile(profile);
-      if (derivedDob) {
-        expHit = finish(derivedDob, 'derived_adult_dob');
-        if (expHit && profile._applyWizzId) {
-          recordSupabaseAnswerInMemory(profile, 'date of birth', derivedDob);
-          upsertSupabaseAnswer({
-            applywizzId: profile._applyWizzId,
-            question: label,
-            questionNormalized: 'date of birth',
-            answer: derivedDob,
-            fieldType: 'date',
-            source: 'ai',
-          }).catch(() => {});
-        }
-      }
-    }
-
-    // If NOT required and not found in Supabase or Resume, do NOT fill optional DOB
-    if (!required && opts.forceLlm !== true && !expHit) {
-      return null;
-    }
-  }
-
-  if (expHit) {
-    trace({
-      stage: 'tier2',
-      clientId,
-      tenant,
-      query: normalizeLabel(label),
-      hit: true,
-      source: expHit.source || fromExperience?.source || 'resume',
-      answer: expHit.answer,
-    });
-    console.log(`    📄 [Tier 2 Resume Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
-    profile?._onLog?.(currentStep, `[Tier 2 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
-    return expHit;
-  }
-  trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
-
-  // ─── TIER 3: CRM API (Apply Wizz Profile Facts) ──────────────────────────────
-  const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
-    options,
-    fieldType,
-    threshold: 0.48,
-  });
-  const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
-  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
-    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_crm');
-    if (apiHit) {
-      trace({
-        stage: 'tier3',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: true,
-        source: fromApi.source,
-        answer: apiHit.answer,
-      });
-      console.log(`    🗄️  [Tier 3 CRM API Match] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
-      return apiHit;
-    }
-  }
-  trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
-
-  // ─── TIER 4: Fuzzy Match (Resume Parsing + Supabase Data Combined) ───────────
-  const combinedMemoryHit = lookupCombinedFuzzyAnswer(label, profile, { options, fieldType });
-  if (combinedMemoryHit?.answer) {
-    const fHit = finish(combinedMemoryHit.answer, combinedMemoryHit.source || 'fuzzy_resume_supabase');
-    if (fHit) {
-      console.log(`    🔍 [Tier 4 Fuzzy Combined Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 4 Fuzzy Combined Match] "${label.slice(0, 50)}" ← "${fHit.answer.slice(0, 45)}"`);
-      return fHit;
-    }
-  }
-
-  // ─── TIER 5: QA Bank Reference Bank (Persistent Table) ──────────────────────
-  try {
-    const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
-    const qaBankAnswer = await findAnswerFromQaBank({
-      questionLabel: label,
-      options,
-      tenant,
-      isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
-      isScanOnly: Boolean(opts.isScanOnly || opts.isClusterBlueprint),
-      blockUniversalYaml: Boolean(opts.blockUniversalYaml),
-    });
-    if (qaBankAnswer) {
-      const qaHit = finish(qaBankAnswer, 'qa_bank');
-      if (qaHit) {
-        trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
-        console.log(`    🏦 [Tier 5 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
-        profile?._onLog?.(currentStep, `[Universal QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
-        return qaHit;
-      }
-    }
-  } catch {}
-
-  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 0-5) ─────────
+  // ─── Sensitive safe fallback (before full waterfall) ──────────────────────
   const sensitive = lookupSensitiveSafeAnswer(label);
   if (sensitive) {
     const hit = finish(sensitive, 'sensitive_safe');
     if (hit) {
-      trace({
-        stage: 'sensitive_safe',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: true,
-        answer: hit.answer,
-      });
-      console.log(`    🛡️  [Sensitive Safe Compliance] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
 
-  // Only mandatory/required questions proceed to LLM unless forceLlm is set
+  // ─── Tiers 1-6: Full waterfall via tierResolver.mjs ──────────────────────
+  // Only required questions, domain questions, and forceLlm=true proceed to the waterfall.
+  // Optional non-domain questions return null early unless explicitly requested.
+  const availabilityTiming = /available\s*to\s*start|when\s*(are|can)\s*you\s*start|how\s*soon\s*can\s*you\s*start|desired\s*start|earliest\s*start/i.test(label);
   if (!required && opts.forceLlm !== true && !domainQuestion && !availabilityTiming) {
     return null;
   }
 
-  // ─── TIER 6: LLM Analysis with Live Playwright DOM Context ───────────────────
-  // Tier 6 LLM must never answer work-auth, sponsorship, or EEO questions.
-  const isProtectedCompliance = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo/i.test(label);
-  if (isProtectedCompliance) {
-    trace({
-      stage: 'tier6',
-      clientId,
-      tenant,
-      query: normalizeLabel(label),
-      hit: false,
-      rejectionReason: 'llm_blocked_for_compliance',
-    });
-    console.log(`    🛑 [Tier 6 LLM blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
-    profile?._onLog?.(currentStep, `[Compliance Blocked] "${label.slice(0, 50)}" — protected question, manual answer needed`);
-    return null;
-  }
+  const qaBank = profile._qaBank || profile._supabaseQa || {};
 
-  console.log(`    🤖 [Tier 6 LLM] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
-  const llmAnswer = await resolveUnknownWithLlm(label, {
-    ...enriched,
+  const tierResult = await resolveAnswer({
+    question: label,
     fieldType,
-    type: fieldType,
-    field_type_code: code,
-    required,
     options,
-  }, {
-    page: opts.page || null,
-    profile,
-    tenant: opts.tenant || profile._tenant || '',
-    company: opts.company || profile._company || '',
-    step: opts.step || '',
-    resumePath: opts.resumePath || profile._resumePath,
-    fieldTypeCode: code,
-    preferred: isProceedQuestion(label) ? 'Yes' : '',
+    clientProfile: profile,
+    clientId,
+    qaBank,
+    opts: {
+      ...opts,
+      required,
+      tenant,
+    },
   });
 
-  // Check if LLM answer contradicts a stored profile fact (for free-text inputs)
-  if (llmAnswer) {
-    const pFact = profileFactForLabel(label, profile);
-    if (pFact && options.length === 0 && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
-      trace({
-        stage: 'tier6',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: false,
-        rejectionReason: 'llm_contradicts_profile_fact',
-        llmAnswer,
-        profileFact: pFact,
-      });
-      console.log(`    🛑 [Tier 6 LLM rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
-      return null;
+  if (tierResult?.answer) {
+    const hit = finish(tierResult.answer, tierResult.sourceType);
+    if (hit) {
+      profile?._onLog?.(currentStep, `[Tier ${tierResult.tier} ${tierResult.sourceType}] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
+      return hit;
     }
   }
 
-  const llmHit = finish(llmAnswer, 'llm_profile');
-
-  if (llmHit) {
-    trace({
-      stage: 'tier6',
-      clientId,
-      tenant,
-      query: normalizeLabel(label),
-      hit: true,
-      llmChoice: llmHit.answer,
-      allowedOptions: options,
-      dryRun: opts.dryRun === true,
-    });
-    profile?._onLog?.(currentStep, `[Tier 6 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
-
-    const awlId = profile._applyWizzId || profile.applywizz_id || profile.client_id || process.env.APPLYWIZZ_ID || '';
-    if (awlId && isSupabaseConfigured() && opts.dryRun !== true) {
-      try {
-        const { persistNewResolvedAnswer } = await import('./supabaseClient.mjs');
-        await persistNewResolvedAnswer({
-          applywizzId: awlId,
-          distributionId: profile._distributionId || profile.distribution_id || null,
-          jobUrl: opts.jobUrl || profile._jobUrl || profile._canonicalJobUrl || '',
-          question: label,
-          answer: llmHit.answer,
-          fieldType,
-          options,
-          source: 'llm',
-        });
-      } catch (e) {
-        console.log(`    ⚠️  Persist Q&A error: ${e.message?.slice(0, 80)}`);
-      }
-      recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
-      if (profile._resolvedAnswersMap instanceof Map) {
-        profile._resolvedAnswersMap.set(label, { answer: llmHit.answer, rawQ: label });
-        profile._resolvedAnswersMap.set(normalizeLabel(label), { answer: llmHit.answer, rawQ: label });
-      }
-    }
-    console.log(`    🤖 [Tier 6 LLM → Saved to QA Bank & job_distributions] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
-    return llmHit;
-  }
-  trace({ stage: 'tier6', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
-
+  // ─── Proceed questions always get Yes ────────────────────────────────────
   if (isProceedQuestion(label)) {
     const yes = options.find((opt) => /^yes\b/i.test(opt)) || 'Yes';
     const proceed = finish(yes, 'proceed_continue');
@@ -847,7 +600,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  // Rule A (Scanning fills anything and records everything):
+  // ─── Scan-mode placeholder ────────────────────────────────────────────────
   if (opts.isScanOnly || profile?._isScanOnly || opts.dryRun) {
     let placeholder = 'N/A';
     if (/number|numeric|spin/i.test(fieldType)) {
@@ -865,7 +618,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
     const placeholderHit = finish(placeholder, 'scan_placeholder');
     if (placeholderHit) {
-      console.log(`    🛠️  [Scan Placeholder Rule A] "${label.slice(0, 55)}" ← "${placeholderHit.answer}"`);
+      console.log(`    🛠️  [Scan Placeholder] "${label.slice(0, 55)}" ← "${placeholderHit.answer}"`);
       import('./masterYamlManager.mjs').then(({ saveMasterYamlTemplate }) => {
         saveMasterYamlTemplate([{
           question: label,
@@ -880,14 +633,14 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
-  // ─── TIER 5: Safe Required Default Fallback (Every field answered for submission) ─
+  // ─── Submission-mode safe required fallback ───────────────────────────────
   const isSubmissionMode = Boolean(
-    required ||
-    opts.isSubmission ||
-    opts.confirmSubmit ||
-    profile?._isSubmission ||
-    opts.forceLlm ||
-    !opts.isScanOnly
+    required
+    || opts.isSubmission
+    || opts.confirmSubmit
+    || profile?._isSubmission
+    || opts.forceLlm
+    || !opts.isScanOnly,
   );
 
   if (isSubmissionMode) {
@@ -906,23 +659,22 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
     // 2. Radio or Dropdown options
     else if (options.length > 0) {
-      // Sensitive negative questions (e.g. criminal history, conviction, discharged) -> No
+      // Sensitive negative questions (criminal history, conviction, etc.) → No
       if (/convict|crime|felon|misdemeanor|discharge|fired|terminate|suspend|violation|bankrupt/i.test(lower)) {
         fallback = options.find((o) => /^no\b/i.test(o)) || options[0];
       }
-      // General affirmative questions (e.g. authorized, eligible, shift, willing) -> Yes
+      // General affirmative questions → Yes
       else if (/authoriz|eligib|permit|availab|relocat|travel|overtime|shift|willing|able|legally/i.test(lower)) {
         fallback = options.find((o) => /^yes\b/i.test(o)) || options[0];
       }
-      // EEO / voluntary disclosures -> Prefer not to say / Decline / None
+      // EEO / voluntary disclosures → Prefer not to say / Decline
       else if (/gender|race|ethnic|veteran|disability|sexual/i.test(lower)) {
         fallback = options.find((o) => /prefer\s*not|decline|do\s*not\s*wish|choose\s*not/i.test(o)) || options[0];
       }
-      // Fallback to "No" for prior employment at this company
+      // Prior employment → No
       else if (/previously\s*employed|worked\s*for|former\s*employee/i.test(lower)) {
         fallback = options.find((o) => /^no\b/i.test(o)) || options[0];
-      }
-      else {
+      } else {
         // Safe default: Yes if available, else first option
         fallback = options.find((o) => /^yes\b/i.test(o)) || options[0];
       }
@@ -956,43 +708,16 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       }
     }
 
-    const t5Hit = finish(fallback, 'tier5_safe_fallback');
-    if (t5Hit) {
-      console.log(`    🛡️  [Tier 5 Safe Required Fallback] "${label.slice(0, 55)}" ← "${t5Hit.answer}"`);
-      return t5Hit;
+    const safeFallbackHit = finish(fallback, 'safe_required_fallback');
+    if (safeFallbackHit) {
+      console.log(`    🛡️  [Safe Required Fallback] "${label.slice(0, 55)}" ← "${safeFallbackHit.answer}"`);
+      return safeFallbackHit;
     }
   }
 
-  // At submission, an unanswerable non-scan field returns { answer: null, requiresReview: true }
-  console.log(`    ⚠️  No answer found across Tier 0 (JSON), Tier 1 (Supabase), Tier 2 (CRM), Tier 3 (Resume), Tier 4 (Claude), Tier 5 (Fallback) for "${label.slice(0, 55)}"`);
+  // All tiers exhausted — unanswerable field
+  console.log(`    ⚠️  No answer found (Tiers 0-6 exhausted) for "${label.slice(0, 55)}"`);
   return { answer: null, requiresReview: true, status: 'needs_answers' };
-}
-
-/**
- * Derives a valid adult Date of Birth (MM/DD/YYYY) when the field is strictly REQUIRED
- * and missing from Supabase, CRM, and Resume.
- * Uses candidate's graduation year (grad_year - 22) or experience milestones.
- */
-export function deriveAdultDobFromProfile(profile = {}) {
-  const gradYear = profile.education?.graduation_year
-    || profile.education?.to_year
-    || profile.education?.from_year
-    || '';
-  const gradNum = parseInt(String(gradYear).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
-  if (gradNum && gradNum >= 1970 && gradNum <= 2030) {
-    const birthYear = gradNum - 22;
-    return `06/15/${birthYear}`;
-  }
-
-  const fromDate = profile.experience?.from_date || profile.experience?.start_date || '';
-  const workStartNum = parseInt(String(fromDate).match(/\b(19\d{2}|20\d{2})\b/)?.[1] || '', 10);
-  if (workStartNum && workStartNum >= 1970 && workStartNum <= 2030) {
-    const birthYear = workStartNum - 22;
-    return `06/15/${birthYear}`;
-  }
-
-  const currentYear = new Date().getFullYear();
-  return `06/15/${currentYear - 25}`;
 }
 
 export { normalizeLabel };

@@ -318,18 +318,21 @@ export async function executeWorkerTask({
     return { status: 'profile_load_failed', error: err.message };
   }
 
-  // 3. Resolve Workday credentials STRICTLY from clients table for this candidate's AWL ID
+  // 3. Resolve Workday credentials STRICTLY from clients table (with CRM API fallback)
   const cleanCandidateAwlId = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
-  const { getClientRecordByAwlId, loadSupabaseClientSnapshot } = await import('./supabaseClient.mjs');
-  let candidateDbClient = task?.dbClient || (await getClientRecordByAwlId(cleanCandidateAwlId));
+  const { resolveCandidateCompanyEmail } = await import('./supabaseClient.mjs');
+  const emailRes = await resolveCandidateCompanyEmail(cleanCandidateAwlId, task?.dbClient);
 
-  if (!candidateDbClient?.company_email || !String(candidateDbClient.company_email).trim()) {
-    const strictAuthErr = `[STRICT AUTH GUARD] Failed submission: No company_email found in clients table for candidate "${applywizzId}" (${cleanCandidateAwlId}). Refusing to authenticate with unverified/mock credentials.`;
+  if (!emailRes.valid) {
+    const strictAuthErr = emailRes.reason === 'Zoho Mail was not connected'
+      ? 'Zoho Mail was not connected'
+      : `[STRICT AUTH GUARD] Failed submission: No company_email found in clients table or CRM for candidate "${applywizzId}" (${cleanCandidateAwlId}). Refusing to authenticate with unverified/mock credentials.`;
     console.error(`   ❌ [${workerId}] ${strictAuthErr}`);
     throw new Error(strictAuthErr);
   }
 
-  const workdayEmail = String(candidateDbClient.company_email).trim().toLowerCase();
+  const candidateDbClient = emailRes.client || {};
+  const workdayEmail = emailRes.email;
 
   // Enforce candidate's company_email on all profile contact fields
   profile.personal = profile.personal || {};
@@ -764,43 +767,33 @@ export async function executeWorkerTask({
     if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
       let wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
 
-      // Check if the page is still displaying an Apply button before jumping to auth failed!
+      // Check if the page needs Workday Authentication or No-Auth Bypass
       if (!wizardNow) {
-        const stillHasApply = await page.$([
-          'a[data-automation-id="adventureButton"]:visible',
-          'button[data-automation-id="adventureButton"]:visible',
-          'a[data-automation-id="applyButton"]:visible',
-          'button[data-automation-id="applyButton"]:visible',
-          '[data-automation-id="jobPostingApplyButton"]:visible',
-          'button:has-text("Apply"):visible',
-          'a:has-text("Apply"):visible',
-        ].join(', ')).catch(() => null);
+        console.log(`   🔐 [${workerId}] Executing Workday Auth State Machine for ${workdayEmail}...`);
+        const { executeWorkdayAuth } = await import('./workdayAuth.mjs');
+        const authResult = await executeWorkdayAuth(page, {
+          email: workdayEmail,
+          company: company || '',
+          password: workdayPassword,
+        });
 
-        if (stillHasApply) {
-          console.log(`   🔎 [${workerId}] Page still displays Apply button — clicking Apply to enter application wizard...`);
-          const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
-          await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
-          await page.waitForTimeout(1500);
+        if (authResult.reason === 'Zoho Mail was not connected') {
+          console.log(`   ❌ [${workerId}] Authentication halted: Zoho Mail was not connected for ${workdayEmail}`);
+          scan.authFailed = true;
+          scan.reason = 'Zoho Mail was not connected';
+          scan.failureReason = 'Zoho Mail was not connected';
+        } else if (authResult.success) {
           wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
-        }
-      }
-
-      // Check if on login form or modal
-      if (!wizardNow) {
-        const isAuthScreen = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
-        if (isAuthScreen) {
-          console.log(`   🔑 [${workerId}] Login screen detected — submitting credentials for ${workdayEmail}...`);
-          const { handleWorkday } = await import('./workday.mjs');
-          const authRes = await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
-          await page.waitForTimeout(1500);
-          if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
+          if (await isWorkdayAlreadyApplied(page)) {
             console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
             scan.alreadyApplied = true;
             scan.reason = 'already_applied';
             wizardNow = false;
-          } else {
-            wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
           }
+        } else {
+          scan.authFailed = true;
+          scan.reason = authResult.reason || 'Auth failed across all paths';
+          scan.failureReason = authResult.reason || 'Auth failed across all paths';
         }
       }
 
