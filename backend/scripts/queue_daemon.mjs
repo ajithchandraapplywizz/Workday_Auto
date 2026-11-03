@@ -489,6 +489,7 @@ async function runStage3Submissions() {
 
   const {
     SUBMISSION_WORKER_IDS,
+    resolveInstanceSubmissionWorkerIds,
     claimNextTask,
     processClaimedTask,
     moveReadyTasksToQueued,
@@ -496,7 +497,10 @@ async function runStage3Submissions() {
     print10SubmissionMilestoneReport,
   } = await import('../lib/submissionWorkerPool.mjs');
 
-  const submitWorkers = (SUBMISSION_WORKER_IDS || []);
+  const resolvedIds = typeof resolveInstanceSubmissionWorkerIds === 'function'
+    ? await resolveInstanceSubmissionWorkerIds().catch(() => SUBMISSION_WORKER_IDS)
+    : SUBMISSION_WORKER_IDS;
+  const submitWorkers = (resolvedIds && resolvedIds.length > 0) ? resolvedIds : (SUBMISSION_WORKER_IDS || []);
   const maxConcurrency = submitWorkers.length;
 
   console.log(`\n🚀 [DAEMON] Checking for ready applications to submit across ${maxConcurrency} parallel workers (${submitWorkers.join(', ')})...`);
@@ -1569,10 +1573,13 @@ export async function dispatchQueuedSubmissions() {
   if (submitStatus !== 'running') return;
 
   try {
-    const { SUBMISSION_WORKER_IDS, claimNextTask, processClaimedTask, moveReadyTasksToQueued, print10SubmissionMilestoneReport } = await import('../lib/submissionWorkerPool.mjs');
+    const { SUBMISSION_WORKER_IDS, resolveInstanceSubmissionWorkerIds, claimNextTask, processClaimedTask, moveReadyTasksToQueued, print10SubmissionMilestoneReport } = await import('../lib/submissionWorkerPool.mjs');
 
     // Submitting workers assigned to this service
-    const submitWorkers = (SUBMISSION_WORKER_IDS || []);
+    const resolvedIds = typeof resolveInstanceSubmissionWorkerIds === 'function'
+      ? await resolveInstanceSubmissionWorkerIds().catch(() => SUBMISSION_WORKER_IDS)
+      : SUBMISSION_WORKER_IDS;
+    const submitWorkers = (resolvedIds && resolvedIds.length > 0) ? resolvedIds : (SUBMISSION_WORKER_IDS || []);
     const maxConcurrency = submitWorkers.length;
     // Workers claim directly from ready_for_review -> applying without bulk queueing.
 
@@ -1666,7 +1673,7 @@ export async function dispatchQueuedSubmissions() {
  * this daemon's submitting workers to 'failed' with 'Interrupted: daemon restarted'.
  */
 export async function recoverInterruptedSubmissionTasks() {
-  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: 4 }, (_, i) => `submitting_worker_${i + 1}`);
+  const submitWorkers = PIPELINE_CONFIG.submitWorkerIds || Array.from({ length: PIPELINE_CONFIG.workersCount || 2 }, (_, i) => `submitting_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
   const now = new Date().toISOString();
 
   try {

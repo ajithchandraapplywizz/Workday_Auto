@@ -28,6 +28,7 @@ const DEFAULT_ALL_WORKERS = [
   'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
   'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
   'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
+  'submitting_worker_5', 'submitting_worker_6', 'submitting_worker_7', 'submitting_worker_8',
 ];
 
 const ALL_CANONICAL_WORKERS = [...new Set([...DEFAULT_ALL_WORKERS, ...SCAN_WORKER_IDS, ...RESOLVE_WORKER_IDS, ...SUBMIT_WORKER_IDS])];

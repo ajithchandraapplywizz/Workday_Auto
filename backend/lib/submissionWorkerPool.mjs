@@ -18,9 +18,65 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
   ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY)
   : null;
 
-export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds && PIPELINE_CONFIG.submitWorkerIds.length >= 4)
+export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds && PIPELINE_CONFIG.submitWorkerIds.length > 0)
   ? PIPELINE_CONFIG.submitWorkerIds
-  : Array.from({ length: Math.max(4, Number(process.env.CLUSTER_CONCURRENCY) || PIPELINE_CONFIG.submitWorkerIds?.length || 4) }, (_, i) => `submitting_worker_${i + 1}`);
+  : Array.from({ length: PIPELINE_CONFIG.workersCount || 2 }, (_, i) => `submitting_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
+
+/**
+ * Dynamically resolves the active 2-worker slot pair for this container instance.
+ * - If SUBMISSION_WORKER_IDS or SUBMIT_WORKER_IDS is set, uses it directly.
+ * - If WORKER_OFFSET is set, uses it directly.
+ * - In multi-replica Railway deployments where replicas share identical env vars,
+ *   pairs of workers ([1,2], [3,4], [5,6], [7,8]) are automatically assigned without collision.
+ */
+export async function resolveInstanceSubmissionWorkerIds() {
+  if (process.env.SUBMISSION_WORKER_IDS) {
+    return process.env.SUBMISSION_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  if (process.env.SUBMIT_WORKER_IDS) {
+    return process.env.SUBMIT_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+
+  const baseOffset = Number(process.env.WORKER_OFFSET);
+  if (!Number.isNaN(baseOffset) && process.env.WORKER_OFFSET !== undefined) {
+    return Array.from({ length: PIPELINE_CONFIG.workersCount || 2 }, (_, i) => `submitting_worker_${i + 1 + baseOffset}`);
+  }
+
+  // Multi-replica Railway automatic pair allocation across strictly 8 max cluster workers:
+  const candidatePairs = [
+    ['submitting_worker_1', 'submitting_worker_2'],
+    ['submitting_worker_3', 'submitting_worker_4'],
+    ['submitting_worker_5', 'submitting_worker_6'],
+    ['submitting_worker_7', 'submitting_worker_8'],
+  ];
+
+  if (!supabase) {
+    return SUBMISSION_WORKER_IDS;
+  }
+
+  try {
+    const activeCutoff = new Date(Date.now() - 60 * 1000).toISOString();
+    const { data: activeWorkers } = await supabase
+      .from('worker_status')
+      .select('worker_id, state, updated_at')
+      .in('worker_id', candidatePairs.flat())
+      .gt('updated_at', activeCutoff);
+
+    const activeSet = new Set(
+      (activeWorkers || [])
+        .filter((w) => w.state === 'in_flight' || w.state === 'busy')
+        .map((w) => w.worker_id)
+    );
+
+    for (const pair of candidatePairs) {
+      if (!pair.some((id) => activeSet.has(id))) {
+        return pair;
+      }
+    }
+  } catch {}
+
+  return SUBMISSION_WORKER_IDS;
+}
 
 /**
  * Parse previous failed attempt count from error_message.
@@ -172,12 +228,16 @@ export async function claimNextTask(workerId) {
   const controls = await getWorkerControls().catch(() => null);
   if (controls?.submit?.stop_requested) return null;
   const now = new Date().toISOString();
-  const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
+  const MAX_CLUSTER_CONCURRENCY = 8;
+  const maxConcurrent = Math.min(
+    MAX_CLUSTER_CONCURRENCY,
+    Number(process.env.CLUSTER_CONCURRENCY) ||
     Number(process.env.GLOBAL_WORKER_COUNT) ||
     Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
-    Math.max(4, (Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2) * 2);
+    MAX_CLUSTER_CONCURRENCY
+  );
 
-  // Cluster Concurrency Guard: Only count active leases (within last 8m)
+  // Cluster Concurrency Guard: Strictly at most 8 rows can be 'applying' across all services and replicas
   try {
     const activeCutoff = new Date(Date.now() - 8 * 60 * 1000).toISOString();
     const { count: applyingCount } = await supabase
@@ -655,25 +715,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
 
-      // Immediate fail if Zoho mailbox is not connected
-      if (String(rawErrMsg || '').includes('zoho mail not connected')) {
-        console.log(`\n❌ [STAGE 3: SUBMITTER] [${workerId}] Candidate mailbox is disconnected in Zoho Mail Reader. Marking permanently failed immediately.`);
-        const failPatch = {
-          status: 'failed',
-          error_message: rawErrMsg,
-          completed_at: now,
-          updated_at: now,
-        };
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id || task.id,
-          applywizzId: task.applywizz_id,
-          jobUrl: task.job_url,
-          workerId,
-          patch: failPatch,
-        });
-        return { success: false, status: 'failed', reason: rawErrMsg };
-      }
-
       if (currentAttempt < 3) {
         // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
         const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
@@ -701,6 +742,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             updated_at: now,
           },
         });
+
+        // Ensure NO premature row in failed_jobs on attempt 1 or 2
+        try {
+          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          const cleanUrl = String(task.job_url).trim().replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '');
+          await supabase.from('failed_jobs').delete().eq('applywizz_id', cleanId).eq('job_url', cleanUrl);
+        } catch {}
       } else {
         // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
         let finalShotUrl = result?.screenshotUrl || null;
@@ -834,21 +882,28 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${errMsg}`;
       console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt ${currentAttempt}/3. Re-queueing job_distributions #${task.distribution_id || task.id} to ready_for_review for retry.`);
 
-      await updateJobDistributionWithCheck({
-        distributionId: task.distribution_id || task.id,
-        applywizzId: task.applywizz_id,
-        jobUrl: task.job_url,
-        workerId,
-        patch: {
-          status: 'ready_for_review',
-          worker_id: null,
-          worker_leased_at: null,
-          error_message: retryMsg,
-          application_submitted_screenshot_url: null,
-          updated_at: now,
-        },
-      });
-    } else {
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            worker_leased_at: null,
+            error_message: retryMsg,
+            application_submitted_screenshot_url: null,
+            updated_at: now,
+          },
+        });
+
+        // Ensure NO premature row in failed_jobs on attempt 1 or 2
+        try {
+          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          const cleanUrl = String(task.job_url).trim().replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '');
+          await supabase.from('failed_jobs').delete().eq('applywizz_id', cleanId).eq('job_url', cleanUrl);
+        } catch {}
+      } else {
       const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${errMsg}`;
       const failPatch = {
         status: 'failed',

@@ -129,6 +129,8 @@ export async function recordClientApplication(profile = {}, meta = {}) {
   await saveHistory(doc);
   if (isSupabaseConfigured() && applywizzId && url) {
     const status = normalizeApplicationStatus(meta.status, meta);
+    const isDirect = Boolean(profile._isDirectSubmission || profile.isDirectSubmission || meta.isDirectSubmission);
+    const isFinal = Boolean(meta.isFinalAttempt);
     await upsertSupabaseApplication({
       applywizzId,
       jobUrl: url,
@@ -136,6 +138,8 @@ export async function recordClientApplication(profile = {}, meta = {}) {
       roleTitle,
       status,
       failureReason: meta.failureReason || '',
+      isDirectSubmission: isDirect,
+      isFinalAttempt: isFinal,
     }).then(() => console.log(`  ✓ Supabase application recorded: ${status} ← ${url} [Company: ${company || 'N/A'}, Role: ${roleTitle || 'N/A'}]`))
       .catch((err) => console.log(`  ⚠️  Supabase application save skipped: ${err.message?.slice(0, 120) || err}`));
   }

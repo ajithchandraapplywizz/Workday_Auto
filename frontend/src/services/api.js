@@ -709,8 +709,8 @@ export function getEnvWorkerCounts() {
   }
   const scanCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SCAN_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SCAN_WORKER_COUNT, 10) : count;
   const resolveCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RESOLVE_WORKER_COUNT) ? parseInt(import.meta.env.VITE_RESOLVE_WORKER_COUNT, 10) : count;
-  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : (count < 4 ? 4 : count);
-  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || 4 };
+  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : 8;
+  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || 8 };
 }
 
 export function getDynamicWorkerIds() {

@@ -7,10 +7,10 @@ const key = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
 async function check() {
   const res = await httpsJsonWithRetry({
-    url: `${url}/rest/v1/failed_jobs?failure_reason=ilike.*human-required*&limit=2`,
+    url: `${url}/rest/v1/failed_jobs?order=created_at.desc&limit=5`,
     headers: { apikey: key, Authorization: `Bearer ${key}` }
   });
-  console.log('human-required row:', JSON.stringify(res.json(), null, 2));
+  console.log('recent failed_jobs:', JSON.stringify(res.json(), null, 2));
 }
 
 check();

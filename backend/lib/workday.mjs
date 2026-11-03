@@ -408,17 +408,17 @@ export async function isWorkdayLogin(page) {
 
   const scan = await prescanGatewayElements(page);
   if (scan.hasWizardFields) return false;
-  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword && !scan.hasEmailInput) return false;
+  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword) return false;
 
+  // A page is ONLY a login / auth gateway if genuine authentication controls exist:
   return !!(
-    scan.hasEmailInput ||
     scan.hasPasswordInput ||
     scan.hasVerifyPassword ||
     scan.hasSignInWithEmailBtn ||
     scan.hasCreateAccountBtn ||
     scan.hasSignInUnderCreateAccount ||
-    scan.hasForgotPasswordBtn ||
-    scan.hasResetPasswordBtn
+    scan.hasSocialSSO ||
+    (scan.hasEmailInput && (scan.hasForgotPasswordBtn || scan.hasResetPasswordBtn))
   );
 }
 

@@ -312,12 +312,30 @@ export async function isWorkdayAlreadyApplied(page) {
 const WORKDAY_WIZARD_SELECTORS = [
   'button[data-automation-id="pageFooterNextButton"]',
   'button[data-automation-id="bottom-navigation-next-button"]',
+  'button[data-automation-id="next-button"]',
+  'button[data-automation-id="saveAndContinue"]',
   'button:has-text("Save and Continue")',
   'button:has-text("Save & Continue")',
+  'button:has-text("Save and Next")',
+  'button:has-text("Next")',
   'input[data-automation-id="legalNameSection_firstName"]',
+  'input[data-automation-id*="firstName" i]',
   'input[id*="legalName--firstName"]',
   'input[name*="legalName--firstName"]',
+  'input[data-automation-id*="lastName" i]',
+  'input[id*="legalName--lastName"]',
+  'input[name*="legalName--lastName"]',
   'input[data-automation-id="phone-number"]',
+  'input[data-automation-id*="phone" i]',
+  'input[data-automation-id*="address" i]',
+  'div[data-automation-id="file-upload-drop-zone"]',
+  'div[data-automation-id*="resume" i]',
+  '[data-automation-id="contactInformationSection"]',
+  '[data-automation-id="myInformationPage"]',
+  '[data-automation-id="myExperiencePage"]',
+  '[data-automation-id="applicationQuestionsPage"]',
+  '[data-automation-id="voluntaryDisclosuresPage"]',
+  '[data-automation-id="reviewPage"]',
 ].join(', ');
 
 const CONTINUE_APPLICATION_SELECTORS = [
@@ -385,7 +403,18 @@ export async function isWorkdayWizardVisible(page) {
     return /^(my\s*information|my\s*experience|application\s*questions|voluntary\s*disclosures|self\s*identify|review)$/i.test(t);
   }).catch(() => false);
 
-  return Boolean(hasAuthenticatedActiveStep);
+  if (Boolean(hasAuthenticatedActiveStep)) return true;
+
+  // 5. Direct Apply / No-Auth detection (e.g., Bob's Discount Furniture):
+  // If on an apply path (e.g. /apply, /applyManually, /job-apply) with NO auth inputs,
+  // check if visible form inputs or next/continue buttons are present.
+  const isApplyPath = /\/apply|\/job-apply|\/application/i.test(url);
+  if (isApplyPath && !isAuth) {
+    const hasFormInputs = await page.$('input:not([type="hidden"]), select, textarea, div[data-automation-id="file-upload-drop-zone"]').catch(() => null);
+    if (hasFormInputs && await hasFormInputs.isVisible().catch(() => false)) return true;
+  }
+
+  return false;
 }
 
 /**

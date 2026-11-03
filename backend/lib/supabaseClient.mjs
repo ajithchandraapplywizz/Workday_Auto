@@ -531,6 +531,8 @@ export async function upsertSupabaseApplication({
   failureReason = '',
   failureScreenshotUrl = '',
   stoppedAtStep = '',
+  isFinalAttempt = false,
+  isDirectSubmission = false,
 } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !jobUrl) return false;
   const cleanUrl = String(jobUrl).trim()
@@ -567,35 +569,67 @@ export async function upsertSupabaseApplication({
 
   let liveAppId = null;
 
-  // 1. Always sync status to the active consolidated table job_distributions
+  // 1. Sync status to job_distributions according to strict attempt policy
   try {
-    const distStatus = normalizedStatus === 'in_progress' || normalizedStatus === 'started'
-      ? 'applying'
-      : (normalizedStatus === 'skipped' ? 'failed' : normalizedStatus);
-    const distPatch = {
-      status: distStatus,
-      updated_at: new Date().toISOString(),
-    };
-    if (company) distPatch.company = company;
-    if (roleTitle) distPatch.role_title = roleTitle;
-    if (normalizedStatus === 'submitted' && failureScreenshotUrl) {
-      distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
-    }
-    const distRes = await request('job_distributions', {
-      method: 'PATCH',
-      query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
-      prefer: 'return=representation',
-      body: distPatch,
-    });
-    if (Array.isArray(distRes) && distRes[0]?.id) {
-      liveAppId = distRes[0].id;
+    // In direct submission mode, submissionWorkerPool owns the 3-attempt state machine.
+    // Intermediate errors must NEVER overwrite job_distributions with 'failed'.
+    if (!isDirectSubmission) {
+      let distStatus;
+      if (normalizedStatus === 'submitted') {
+        distStatus = 'submitted';
+      } else if (normalizedStatus === 'in_progress' || normalizedStatus === 'started') {
+        distStatus = 'applying';
+      } else if (normalizedStatus === 'ready_for_review' || normalizedStatus === 'reached_review') {
+        distStatus = 'ready_for_review';
+      } else if (normalizedStatus === 'failed') {
+        // STRICT 3-ATTEMPT POLICY: Never mark failed until attempt 3 is reached
+        distStatus = isFinalAttempt ? 'failed' : 'ready_for_review';
+      } else if (normalizedStatus === 'skipped') {
+        distStatus = 'skipped';
+      } else {
+        distStatus = 'ready_for_review';
+      }
+
+      const distPatch = {
+        status: distStatus,
+        updated_at: new Date().toISOString(),
+      };
+      if (company) distPatch.company = company;
+      if (roleTitle) distPatch.role_title = roleTitle;
+      if (normalizedStatus === 'submitted' && failureScreenshotUrl) {
+        distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
+      }
+      const distRes = await request('job_distributions', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
+        prefer: 'return=representation',
+        body: distPatch,
+      });
+      if (Array.isArray(distRes) && distRes[0]?.id) {
+        liveAppId = distRes[0].id;
+      }
+    } else if (normalizedStatus === 'submitted') {
+      // In direct submission mode, only sync success
+      const distPatch = {
+        status: 'submitted',
+        updated_at: new Date().toISOString(),
+      };
+      if (failureScreenshotUrl) {
+        distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
+      }
+      await request('job_distributions', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
+        prefer: 'return=minimal',
+        body: distPatch,
+      }).catch(() => {});
     }
   } catch (distErr) {
     // Non-fatal if candidate row was not pre-created in job_distributions
   }
 
-  // 2. If application failed, track in failed_jobs for audit and dashboard visibility
-  if (normalizedStatus === 'failed') {
+  // 2. STRICT 3-ATTEMPT POLICY: Only track in failed_jobs strictly on final attempt (Attempt 3)
+  if (normalizedStatus === 'failed' && isFinalAttempt && !isDirectSubmission) {
     try {
       await recordFailedJob({
         applywizzId,
@@ -1465,6 +1499,7 @@ const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || [
   'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
   'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
   'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
+  'submitting_worker_5', 'submitting_worker_6', 'submitting_worker_7', 'submitting_worker_8',
 ];
 
 export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
@@ -3183,5 +3218,108 @@ export async function syncQueueWithScannedAndFailedJobs() {
   }
 }
 
+/**
+ * Persists a newly resolved question/answer into BOTH qa_bank (strictly for candidate AWL ID)
+ * and job_distributions.resolved_answers.
+ */
+export async function persistNewResolvedAnswer({
+  applywizzId,
+  distributionId = null,
+  jobUrl = '',
+  question,
+  answer,
+  fieldType = 'text',
+  source = 'llm',
+  options = [],
+} = {}) {
+  if (!isSupabaseConfigured() || !applywizzId || !question || answer === undefined || answer === null) return;
+  const cleanId = String(applywizzId).trim().toUpperCase();
+  const qStr = String(question).trim();
+  const ansStr = String(answer).trim();
+  const norm = normalizeLabel(qStr);
 
+  // 1. Upsert into qa_bank strictly for this candidate
+  try {
+    await request('qa_bank', {
+      method: 'POST',
+      query: '?on_conflict=applywizz_id,question_normalized',
+      prefer: 'resolution=merge-duplicates,return=minimal',
+      body: {
+        applywizz_id: cleanId,
+        question: qStr,
+        question_normalized: norm,
+        answer: ansStr,
+        field_type: fieldType,
+        source: ['supabase', 'api', 'resume', 'llm', 'manual'].includes(source) ? source : 'llm',
+        updated_at: new Date().toISOString(),
+      },
+    });
+    console.log(`    🏦 [qa_bank] Persisted Q&A for ${cleanId}: "${qStr.slice(0, 45)}" ← "${ansStr.slice(0, 30)}"`);
+  } catch (qaErr) {
+    console.warn(`    ⚠️ [qa_bank] Note: ${qaErr?.message?.slice(0, 100)}`);
+  }
 
+  // 2. Also upsert into client_questions
+  try {
+    await upsertSupabaseAnswer({
+      applywizzId: cleanId,
+      question: qStr,
+      questionNormalized: norm,
+      answer: ansStr,
+      fieldType,
+      options,
+      source,
+      unknownQuestion: true,
+      jobUrl: jobUrl || '',
+    });
+  } catch {}
+
+  // 3. Upsert into job_distributions.resolved_answers
+  try {
+    let targetDistId = distributionId;
+    if (!targetDistId && jobUrl) {
+      const distRow = await request('job_distributions', {
+        query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(jobUrl)}&select=id,resolved_answers&limit=1`,
+      }).catch(() => null);
+      if (Array.isArray(distRow) && distRow[0]) {
+        targetDistId = distRow[0].id;
+      }
+    }
+
+    if (targetDistId) {
+      const existingDist = await request('job_distributions', {
+        query: `?id=eq.${targetDistId}&select=id,resolved_answers&limit=1`,
+      }).catch(() => null);
+
+      if (Array.isArray(existingDist) && existingDist[0]) {
+        let currentList = Array.isArray(existingDist[0].resolved_answers) ? existingDist[0].resolved_answers : [];
+        const existingIdx = currentList.findIndex((item) => (item.question_normalized || normalizeLabel(item.question || '')) === norm);
+        const newItem = {
+          question: qStr,
+          question_normalized: norm,
+          answer: ansStr,
+          field_type: fieldType,
+          source,
+          updated_at: new Date().toISOString(),
+        };
+        if (existingIdx >= 0) {
+          currentList[existingIdx] = { ...currentList[existingIdx], ...newItem };
+        } else {
+          currentList.push(newItem);
+        }
+        await request('job_distributions', {
+          method: 'PATCH',
+          query: `?id=eq.${targetDistId}`,
+          prefer: 'return=minimal',
+          body: {
+            resolved_answers: currentList,
+            updated_at: new Date().toISOString(),
+          },
+        });
+        console.log(`    ⚡ [job_distributions] Updated resolved_answers for dist #${targetDistId}`);
+      }
+    }
+  } catch (distErr) {
+    console.warn(`    ⚠️ [job_distributions] Note updating resolved_answers: ${distErr?.message?.slice(0, 100)}`);
+  }
+}

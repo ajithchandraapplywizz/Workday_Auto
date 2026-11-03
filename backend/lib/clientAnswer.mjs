@@ -352,6 +352,60 @@ export function lookupResolvedAnswerFromProfile(rawLabel, profile = {}, opts = {
 }
 
 /**
+ * Tier 4: Fuzzy Match combining candidate's Resume parsing & Supabase QA data.
+ * Checks candidate's verified Supabase QA answers and resume experience tokens.
+ */
+export function lookupCombinedFuzzyAnswer(rawLabel, profile = {}, { options = [], fieldType = '' } = {}) {
+  if (!rawLabel || !profile) return null;
+  const stripped = stripWorkdayQuestionLabel(rawLabel);
+  const norm = normalizeLabel(stripped || rawLabel);
+  if (!norm) return null;
+
+  // 1. Fuzzy match across indexed Supabase QA memory
+  const qaMap = profile._supabaseQa || {};
+  let bestScore = 0;
+  let bestAnswer = null;
+  let bestSource = null;
+
+  for (const [k, ans] of Object.entries(qaMap)) {
+    if (!ans) continue;
+    const kNorm = normalizeLabel(k);
+    const score = Math.max(tokenSetRatio(norm, kNorm), fuzzyScore(norm, kNorm));
+    if (score > bestScore && score >= 0.80) {
+      bestScore = score;
+      bestAnswer = ans;
+      bestSource = 'fuzzy_supabase_qa';
+    }
+  }
+
+  // 2. Fuzzy match across candidate resume keywords
+  if (!bestAnswer && profile._resumeText) {
+    const lowerResume = String(profile._resumeText).toLowerCase();
+    const tokens = norm.split(/\s+/).filter((t) => t.length >= 3 && !/^(have|with|your|this|that|what|when|where|which|years|experience|candidate)\b/i.test(t));
+    const matchCount = tokens.filter((t) => lowerResume.includes(t)).length;
+    if (tokens.length > 0 && matchCount / tokens.length >= 0.75) {
+      if (options.length > 0) {
+        const yesOpt = options.find((o) => /^yes\b/i.test(o));
+        if (yesOpt) {
+          bestAnswer = yesOpt;
+          bestSource = 'fuzzy_resume_match';
+        }
+      }
+    }
+  }
+
+  if (bestAnswer) {
+    let aligned = bestAnswer;
+    if (options.length > 0 && /dropdown|select|combobox|radio/i.test(fieldType)) {
+      aligned = alignAnswerToWorkdayOptions(bestAnswer, options, fieldType) || bestAnswer;
+    }
+    return { answer: aligned, source: bestSource, score: bestScore };
+  }
+
+  return null;
+}
+
+/**
  * Sync peek: age/safety first, then Tier 1 (Supabase clients table -> client_questions table) -> Tier 2 (Resume parsing).
  * Never calls the LLM.
  */
@@ -597,13 +651,50 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       source: expHit.source || fromExperience?.source || 'resume',
       answer: expHit.answer,
     });
-    console.log(`    📄 [Resume Tier 2 Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
+    console.log(`    📄 [Tier 2 Resume Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
     profile?._onLog?.(currentStep, `[Tier 2 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
     return expHit;
   }
   trace({ stage: 'tier2', clientId, tenant, query: normalizeLabel(label), hit: false });
 
-  // ─── TIER 2.5: QA Bank Reference Bank (Table) ──────────────────────────────
+  // ─── TIER 3: CRM API (Apply Wizz Profile Facts) ──────────────────────────────
+  const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
+    options,
+    fieldType,
+    threshold: 0.48,
+  });
+  const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
+  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
+    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_crm');
+    if (apiHit) {
+      trace({
+        stage: 'tier3',
+        clientId,
+        tenant,
+        query: normalizeLabel(label),
+        hit: true,
+        source: fromApi.source,
+        answer: apiHit.answer,
+      });
+      console.log(`    🗄️  [Tier 3 CRM API Match] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
+      return apiHit;
+    }
+  }
+  trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
+
+  // ─── TIER 4: Fuzzy Match (Resume Parsing + Supabase Data Combined) ───────────
+  const combinedMemoryHit = lookupCombinedFuzzyAnswer(label, profile, { options, fieldType });
+  if (combinedMemoryHit?.answer) {
+    const fHit = finish(combinedMemoryHit.answer, combinedMemoryHit.source || 'fuzzy_resume_supabase');
+    if (fHit) {
+      console.log(`    🔍 [Tier 4 Fuzzy Combined Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 4 Fuzzy Combined Match] "${label.slice(0, 50)}" ← "${fHit.answer.slice(0, 45)}"`);
+      return fHit;
+    }
+  }
+
+  // ─── TIER 5: QA Bank Reference Bank (Persistent Table) ──────────────────────
   try {
     const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
     const qaBankAnswer = await findAnswerFromQaBank({
@@ -618,40 +709,14 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       const qaHit = finish(qaBankAnswer, 'qa_bank');
       if (qaHit) {
         trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
-        console.log(`    🏦 [qa_bank Reference Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
+        console.log(`    🏦 [Tier 5 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
         profile?._onLog?.(currentStep, `[Universal QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
         return qaHit;
       }
     }
   } catch {}
 
-  // ─── TIER 3: CRM API (Apply Wizz Fallback) ────────────────────────────────────
-  const fromApi = resolveDomQuestionFromApplyWizz(label, profile, {
-    options,
-    fieldType,
-    threshold: 0.48,
-  });
-  const apiIsFuzzy = /fuzzy|substring/.test(String(fromApi?.source || ''));
-  if (fromApi?.answer && !(apiIsFuzzy && domainQuestion)) {
-    const apiHit = finish(fromApi.answer, fromApi.source || 'applywizz_api');
-    if (apiHit) {
-      trace({
-        stage: 'tier3',
-        clientId,
-        tenant,
-        query: normalizeLabel(label),
-        hit: true,
-        source: fromApi.source,
-        answer: apiHit.answer,
-      });
-      console.log(`    🗄️  [CRM API Tier 3 Fallback] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
-      return apiHit;
-    }
-  }
-  trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
-
-  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 1, 2, or 3) ───
+  // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 0-5) ─────────
   const sensitive = lookupSensitiveSafeAnswer(label);
   if (sensitive) {
     const hit = finish(sensitive, 'sensitive_safe');
@@ -664,36 +729,35 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         hit: true,
         answer: hit.answer,
       });
-      console.log(`    🛡️  [Sensitive Safe] "${label.slice(0, 55)}" ← "${hit.answer}"`);
-      profile?._onLog?.(currentStep, `[Tier 1 Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
+      console.log(`    🛡️  [Sensitive Safe Compliance] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      profile?._onLog?.(currentStep, `[Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
   }
-
 
   // Only mandatory/required questions proceed to LLM unless forceLlm is set
   if (!required && opts.forceLlm !== true && !domainQuestion && !availabilityTiming) {
     return null;
   }
 
-  // ─── TIER 4: LLM Analysis with Live Playwright DOM Context ───────────────────
-  // (4) Tier 4 LLM must never answer work-auth, sponsorship, or EEO questions.
+  // ─── TIER 6: LLM Analysis with Live Playwright DOM Context ───────────────────
+  // Tier 6 LLM must never answer work-auth, sponsorship, or EEO questions.
   const isProtectedCompliance = /authorized to work|authori[sz]ed|work auth|visa|sponsor|veteran|disability|gender|sex|race|ethnicity|hispanic|latino|eeo/i.test(label);
   if (isProtectedCompliance) {
     trace({
-      stage: 'tier4',
+      stage: 'tier6',
       clientId,
       tenant,
       query: normalizeLabel(label),
       hit: false,
       rejectionReason: 'llm_blocked_for_compliance',
     });
-    console.log(`    🛑 [LLM Tier 4 blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
+    console.log(`    🛑 [Tier 6 LLM blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
     profile?._onLog?.(currentStep, `[Compliance Blocked] "${label.slice(0, 50)}" — protected question, manual answer needed`);
     return null;
   }
 
-  console.log(`    🤖 [LLM Tier 4] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
+  console.log(`    🤖 [Tier 6 LLM] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
   const llmAnswer = await resolveUnknownWithLlm(label, {
     ...enriched,
     fieldType,
@@ -717,7 +781,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const pFact = profileFactForLabel(label, profile);
     if (pFact && options.length === 0 && String(pFact).toLowerCase() !== String(llmAnswer).toLowerCase()) {
       trace({
-        stage: 'tier4',
+        stage: 'tier6',
         clientId,
         tenant,
         query: normalizeLabel(label),
@@ -726,7 +790,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         llmAnswer,
         profileFact: pFact,
       });
-      console.log(`    🛑 [LLM Tier 4 rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
+      console.log(`    🛑 [Tier 6 LLM rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
       return null;
     }
   }
@@ -735,7 +799,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   if (llmHit) {
     trace({
-      stage: 'tier4',
+      stage: 'tier6',
       clientId,
       tenant,
       query: normalizeLabel(label),
@@ -744,38 +808,35 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       allowedOptions: options,
       dryRun: opts.dryRun === true,
     });
-    profile?._onLog?.(currentStep, `[Tier 4 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
+    profile?._onLog?.(currentStep, `[Tier 6 AI LLM Prediction] "${label.slice(0, 50)}" ← "${llmHit.answer.slice(0, 45)}"`);
 
     const awlId = profile._applyWizzId || profile.applywizz_id || profile.client_id || process.env.APPLYWIZZ_ID || '';
     if (awlId && isSupabaseConfigured() && opts.dryRun !== true) {
-      upsertSupabaseAnswer({
-        applywizzId: awlId,
-        question: label,
-        questionNormalized: normalizeLabel(label),
-        answer: llmHit.answer,
-        fieldType,
-        options,
-        source: 'llm',
-        unknownQuestion: true,
-        jobUrl: opts.jobUrl || profile._jobUrl || '',
-        company: opts.company || profile._company || '',
-      }).catch((e) => console.log(`    ⚠️  Supabase write error: ${e.message?.slice(0, 80)}`));
-      recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
-      import('./masterYamlManager.mjs').then(({ saveMasterYamlTemplate }) => {
-        saveMasterYamlTemplate([{
+      try {
+        const { persistNewResolvedAnswer } = await import('./supabaseClient.mjs');
+        await persistNewResolvedAnswer({
+          applywizzId: awlId,
+          distributionId: profile._distributionId || profile.distribution_id || null,
+          jobUrl: opts.jobUrl || profile._jobUrl || profile._canonicalJobUrl || '',
           question: label,
-          field_type: fieldType,
-          step: currentStep,
+          answer: llmHit.answer,
+          fieldType,
           options,
-          value: llmHit.answer,
           source: 'llm',
-        }], { tenant, company: opts.company, mockAwlId: awlId || 'AWL-1568' }).catch(() => {});
-      }).catch(() => {});
+        });
+      } catch (e) {
+        console.log(`    ⚠️  Persist Q&A error: ${e.message?.slice(0, 80)}`);
+      }
+      recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
+      if (profile._resolvedAnswersMap instanceof Map) {
+        profile._resolvedAnswersMap.set(label, { answer: llmHit.answer, rawQ: label });
+        profile._resolvedAnswersMap.set(normalizeLabel(label), { answer: llmHit.answer, rawQ: label });
+      }
     }
-    console.log(`    🤖 [LLM Tier 4${opts.dryRun ? ' (dry-run)' : ' → Supabase saved'}] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
+    console.log(`    🤖 [Tier 6 LLM → Saved to QA Bank & job_distributions] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
     return llmHit;
   }
-  trace({ stage: 'tier4', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
+  trace({ stage: 'tier6', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
 
   if (isProceedQuestion(label)) {
     const yes = options.find((opt) => /^yes\b/i.test(opt)) || 'Yes';
@@ -819,8 +880,91 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     }
   }
 
+  // ─── TIER 5: Safe Required Default Fallback (Every field answered for submission) ─
+  const isSubmissionMode = Boolean(
+    required ||
+    opts.isSubmission ||
+    opts.confirmSubmit ||
+    profile?._isSubmission ||
+    opts.forceLlm ||
+    !opts.isScanOnly
+  );
+
+  if (isSubmissionMode) {
+    let fallback = null;
+    const lower = label.toLowerCase();
+
+    // 1. Consent / Agreement / Certification / Acknowledgments
+    if (/agree|accept|certify|acknowledge|consent|terms|statement|declaration|confirm|policy|understand|permission/i.test(lower)) {
+      if (/check/i.test(fieldType)) {
+        fallback = 'true';
+      } else if (options.length > 0) {
+        fallback = options.find((o) => /^yes|agree|accept|acknowledge/i.test(o)) || options[0];
+      } else {
+        fallback = 'Yes';
+      }
+    }
+    // 2. Radio or Dropdown options
+    else if (options.length > 0) {
+      // Sensitive negative questions (e.g. criminal history, conviction, discharged) -> No
+      if (/convict|crime|felon|misdemeanor|discharge|fired|terminate|suspend|violation|bankrupt/i.test(lower)) {
+        fallback = options.find((o) => /^no\b/i.test(o)) || options[0];
+      }
+      // General affirmative questions (e.g. authorized, eligible, shift, willing) -> Yes
+      else if (/authoriz|eligib|permit|availab|relocat|travel|overtime|shift|willing|able|legally/i.test(lower)) {
+        fallback = options.find((o) => /^yes\b/i.test(o)) || options[0];
+      }
+      // EEO / voluntary disclosures -> Prefer not to say / Decline / None
+      else if (/gender|race|ethnic|veteran|disability|sexual/i.test(lower)) {
+        fallback = options.find((o) => /prefer\s*not|decline|do\s*not\s*wish|choose\s*not/i.test(o)) || options[0];
+      }
+      // Fallback to "No" for prior employment at this company
+      else if (/previously\s*employed|worked\s*for|former\s*employee/i.test(lower)) {
+        fallback = options.find((o) => /^no\b/i.test(o)) || options[0];
+      }
+      else {
+        // Safe default: Yes if available, else first option
+        fallback = options.find((o) => /^yes\b/i.test(o)) || options[0];
+      }
+    }
+    // 3. Numbers / Years
+    else if (/number|numeric|spin|year|month/i.test(fieldType) || /how\s*many|years\s*of/i.test(lower)) {
+      fallback = '1';
+    }
+    // 4. Date
+    else if (/date/i.test(fieldType) || /date/i.test(lower)) {
+      if (/birth|dob/i.test(lower)) {
+        fallback = deriveAdultDobFromProfile(profile);
+      } else {
+        const d = new Date();
+        const mm = String(d.getMonth() + 1).padStart(2, '0');
+        const dd = String(d.getDate()).padStart(2, '0');
+        const yyyy = d.getFullYear();
+        fallback = `${mm}/${dd}/${yyyy}`;
+      }
+    }
+    // 5. Checkbox
+    else if (/check/i.test(fieldType)) {
+      fallback = 'true';
+    }
+    // 6. Text / Signature
+    else {
+      if (isSignatureOrFullNameQuestion(label)) {
+        fallback = toTitleCase(profile?.personal?.full_name || [profile?.personal?.first_name, profile?.personal?.last_name].filter(Boolean).join(' ') || profile?.name || 'Applicant');
+      } else {
+        fallback = 'Yes';
+      }
+    }
+
+    const t5Hit = finish(fallback, 'tier5_safe_fallback');
+    if (t5Hit) {
+      console.log(`    🛡️  [Tier 5 Safe Required Fallback] "${label.slice(0, 55)}" ← "${t5Hit.answer}"`);
+      return t5Hit;
+    }
+  }
+
   // At submission, an unanswerable non-scan field returns { answer: null, requiresReview: true }
-  console.log(`    ⚠️  No answer found across Tier 1 (Supabase), Tier 2 (Resume), qa_bank, Tier 3 (CRM), Tier 4 (Claude) for "${label.slice(0, 55)}"`);
+  console.log(`    ⚠️  No answer found across Tier 0 (JSON), Tier 1 (Supabase), Tier 2 (CRM), Tier 3 (Resume), Tier 4 (Claude), Tier 5 (Fallback) for "${label.slice(0, 55)}"`);
   return { answer: null, requiresReview: true, status: 'needs_answers' };
 }
 

@@ -303,6 +303,7 @@ export async function executeWorkerTask({
     profile._applyWizzId = applywizzId;
     profile._canonicalJobUrl = jobUrl;
     profile._jobUrl = jobUrl;
+    profile._isDirectSubmission = Boolean(task?.isDirectSubmission || options?.isDirectSubmission);
     profile._applicationId = liveApplicationId;
     profile._onLog = (stepIndex, msg) => appLog(stepIndex, msg);
     if (company) profile._company = company;
@@ -1337,17 +1338,6 @@ export async function executeWorkerTask({
           ? 'ready_for_review'
           : status;
 
-    await upsertSupabaseApplication({
-      applywizzId,
-      jobUrl,
-      company,
-      roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
-      status: appStatus,
-      failureReason: fullFailureReason,
-      failureScreenshotUrl: completionShotUrl,
-      stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
-    }).catch(() => {});
-
     const taskKey = `${applywizzId}:${jobUrl}`;
     const isExpired = (
       status === 'job_not_found' ||
@@ -1364,6 +1354,21 @@ export async function executeWorkerTask({
 
     const isMiddleStepFailure = !isSuccessStatus && !isExpired;
     const shouldRetryMiddleStep = isMiddleStepFailure && currentAttempt < 3;
+
+    if (!isDirectSubmission) {
+      await upsertSupabaseApplication({
+        applywizzId,
+        jobUrl,
+        company,
+        roleTitle: roleTitle || profile._roleTitle || 'Workday Application',
+        status: shouldRetryMiddleStep ? 'ready_for_review' : appStatus,
+        failureReason: fullFailureReason,
+        failureScreenshotUrl: completionShotUrl,
+        stoppedAtStep: isSuccessStatus ? 'Step 5: Review & Submit' : stoppedBlock,
+        isFinalAttempt: !shouldRetryMiddleStep,
+        isDirectSubmission: false,
+      }).catch(() => {});
+    }
 
     if (queueTaskId) {
       const finalStatus = (status === 'submitted')
