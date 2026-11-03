@@ -9,7 +9,7 @@
  *   Path C1: Create Account -> redirected to Login -> login -> redirects to form
  *   Path C2: Email Verification Required:
  *            - If @gmail.com: immediately flag "Zoho Mail was not connected" & halt
- *            - If custom domain (@applyres.ai): fetch verification link via Zoho API,
+ *            - If custom domain (@applywizard.ai / @applywizz.ai): fetch verification link via Zoho API,
  *              navigate/paste in active browser, refresh, and login
  *   Path D:  Worst-Case: Forgot Password -> submit email -> fetch reset link via Zoho API ->
  *            set new password from .env -> submit -> login -> redirects to form

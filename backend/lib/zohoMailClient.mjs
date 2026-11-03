@@ -352,10 +352,9 @@ export function checkEmailDomainEligibility(email) {
 
   // Authoritative Zoho-connected company suffixes
   const ALLOWED_ZOHO_SUFFIXES = [
-    'applywizz.ai',
+    'applywizard.ai',
     'applywizzard.ai',
-    'applyres.ai',
-    'applyresort.ai',
+    'applywizz.ai',
   ];
 
   if (ALLOWED_ZOHO_SUFFIXES.some(s => domain === s || domain.endsWith('.' + s))) {

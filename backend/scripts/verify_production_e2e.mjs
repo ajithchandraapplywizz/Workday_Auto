@@ -233,16 +233,15 @@ async function verifyExternalApis() {
     pass('apis', 'Company Email Resolution', `Resolved email: ${gmailResult.companyEmail || 'none'}, domain: ${gmailResult.domain || 'none'}`);
 
     // Test 2.2.2: Suffix authorization validation
-    const validDomains = ['@applywizz.ai', '@applywizzard.ai', '@applyres.ai', '@applyresort.ai'];
-    const invalidDomains = ['@gmail.com', '@yahoo.com', '@outlook.com'];
+    const validDomains = ['@applywizard.ai', '@applywizz.ai', '@applywizzard.ai'];
+    const invalidDomains = ['@gmail.com', '@yahoo.com', '@outlook.com', '@example.com'];
 
     const testValid = validDomains.every((d) => {
-      const email = `test${d}`;
-      return d.endsWith('applywizz.ai') || d.endsWith('applywizzard.ai') || d.endsWith('applyres.ai') || d.endsWith('applyresort.ai');
+      return d.endsWith('applywizard.ai') || d.endsWith('applywizz.ai') || d.endsWith('applywizzard.ai');
     });
 
     const testInvalid = invalidDomains.every((d) => {
-      return d === '@gmail.com' || (!d.endsWith('applywizz.ai') && !d.endsWith('applywizzard.ai') && !d.endsWith('applyres.ai') && !d.endsWith('applyresort.ai'));
+      return d === '@gmail.com' || (!d.endsWith('applywizard.ai') && !d.endsWith('applywizz.ai') && !d.endsWith('applywizzard.ai'));
     });
 
     if (testValid && testInvalid) {

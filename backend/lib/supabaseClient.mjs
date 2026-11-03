@@ -261,10 +261,9 @@ export async function resolveCandidateCompanyEmail(rawAwlId, existingClient = nu
   }
 
   const isZohoConnected = [
-    'applywizz.ai',
+    'applywizard.ai',
     'applywizzard.ai',
-    'applyres.ai',
-    'applyresort.ai',
+    'applywizz.ai',
   ].some((s) => domain === s || domain.endsWith('.' + s));
 
   if (!isZohoConnected) {
