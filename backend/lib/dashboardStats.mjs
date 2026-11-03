@@ -138,7 +138,7 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
   ] = await Promise.all([
     supabase
       .from('job_distributions')
-      .select('id, applywizz_id, status, error_message, updated_at, created_at, completed_at, worker_id, worker_leased_at, resolved_answers'),
+      .select('id, applywizz_id, status, error_message, updated_at, created_at, worker_id, worker_leased_at, resolved_answers'),
     supabase
       .from('batch_job_queue')
       .select('id, applywizz_id, status, created_at')

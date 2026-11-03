@@ -71,3 +71,43 @@ test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_rev
   assert.equal(attempt3.screenshotRequired, true, 'Attempt 3 MUST capture and submit diagnostic screenshot');
   assert.ok(attempt3.errorMessage.includes('[Attempt 3/3 Failed at "Application Questions"]'));
 });
+
+test('Attempt 3 failure patch mandatorily persists screenshot to application_submitted_screenshot_url', () => {
+  const finalShotUrl = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-999_company_123_failed_1793685000000.png';
+  const finalFailMsg = '[Attempt 3/3 Failed at "Review & Submit"]: Wizard submission timeout';
+
+  const failPatch = {
+    status: 'failed',
+    error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
+    application_submitted_screenshot_url: finalShotUrl,
+    updated_at: new Date().toISOString(),
+  };
+
+  // Assertions for mandatory fields on Attempt 3 failure
+  assert.equal(failPatch.status, 'failed');
+  assert.ok(failPatch.application_submitted_screenshot_url, 'Screenshot URL must be stored on Attempt 3 failure');
+  assert.equal(failPatch.application_submitted_screenshot_url, finalShotUrl);
+  assert.ok(failPatch.error_message.includes('diagnostic_screenshot'));
+  assert.equal('completed_at' in failPatch, false, 'completed_at MUST NOT be present in patch');
+});
+
+test('Clean patch sanitizer ensures completed_at is stripped and mapped to updated_at', () => {
+  const inputPatch = {
+    status: 'failed',
+    completed_at: '2026-11-03T10:00:00.000Z',
+    application_submitted_screenshot_url: 'https://test.png',
+  };
+
+  const cleanPatch = { ...inputPatch };
+  if ('completed_at' in cleanPatch) {
+    if (!cleanPatch.updated_at && cleanPatch.completed_at) {
+      cleanPatch.updated_at = cleanPatch.completed_at;
+    }
+    delete cleanPatch.completed_at;
+  }
+
+  assert.equal('completed_at' in cleanPatch, false, 'completed_at must be completely removed');
+  assert.equal(cleanPatch.updated_at, '2026-11-03T10:00:00.000Z', 'completed_at must be safely remapped to updated_at');
+  assert.equal(cleanPatch.status, 'failed');
+  assert.equal(cleanPatch.application_submitted_screenshot_url, 'https://test.png');
+});

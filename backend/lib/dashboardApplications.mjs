@@ -62,7 +62,7 @@ export async function getApplicationsList({
   // 1. Fetch job_distributions
   const { data: jobDists, error: jdErr } = await supabase
     .from('job_distributions')
-    .select('id, applywizz_id, job_url, company, role_title, status, error_message, updated_at, created_at, completed_at, application_submitted_screenshot_url');
+    .select('id, applywizz_id, job_url, company, role_title, status, error_message, updated_at, created_at, application_submitted_screenshot_url');
 
   if (jdErr) throw jdErr;
 

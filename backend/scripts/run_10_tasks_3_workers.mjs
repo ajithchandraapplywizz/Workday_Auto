@@ -205,7 +205,6 @@ async function main() {
               error_message: finalError,
               screenshot_path: proofUrl,
               application_submitted_screenshot_url: proofUrl,
-              completed_at: completedAt,
               updated_at: completedAt,
             })
             .eq('id', task.distributionId);

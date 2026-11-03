@@ -73,7 +73,7 @@ export async function resolveInstanceSubmissionWorkerIds() {
         return pair;
       }
     }
-  } catch {}
+  } catch { }
 
   return SUBMISSION_WORKER_IDS;
 }
@@ -146,6 +146,13 @@ export async function updateJobDistributionWithCheck({
       cleanPatch.application_submitted_screenshot_url = cleanPatch.screenshot_path;
     }
     delete cleanPatch.screenshot_path;
+  }
+  // job_distributions has no completed_at column in schema; updated_at stores the completion timestamp
+  if ('completed_at' in cleanPatch) {
+    if (!cleanPatch.updated_at && cleanPatch.completed_at) {
+      cleanPatch.updated_at = cleanPatch.completed_at;
+    }
+    delete cleanPatch.completed_at;
   }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
@@ -239,17 +246,21 @@ export async function claimNextTask(workerId) {
 
   // Cluster Concurrency Guard: Strictly at most 8 rows can be 'applying' across all services and replicas
   try {
-    const activeCutoff = new Date(Date.now() - 8 * 60 * 1000).toISOString();
-    const { count: applyingCount } = await supabase
+    // Check raw total count of rows currently in 'applying' state across the entire database
+    const { count: rawApplyingCount } = await supabase
       .from('job_distributions')
       .select('*', { count: 'exact', head: true })
-      .eq('status', 'applying')
-      .gte('worker_leased_at', activeCutoff);
+      .eq('status', 'applying');
 
-    if (typeof applyingCount === 'number' && applyingCount >= maxConcurrent) {
-      return null;
+    if (typeof rawApplyingCount === 'number' && rawApplyingCount >= maxConcurrent) {
+      // Proactively reap any stale / expired leases right now
+      const reaped = await reapExpiredLeases(6).catch(() => []);
+      const remainingApplying = rawApplyingCount - (reaped?.length || 0);
+      if (remainingApplying >= maxConcurrent) {
+        return null;
+      }
     }
-  } catch {}
+  } catch { }
 
   // 1. Direct atomic CAS on job_distributions (Candidate picking strictly from job_distributions without pre-sync)
   try {
@@ -263,6 +274,10 @@ export async function claimNextTask(workerId) {
       .order('created_at', { ascending: true })
       .limit(10);
 
+    // Cool-down for retries: Don't immediately re-claim a task that just failed seconds ago.
+    // Give other tasks priority and provide a 60-second backoff before retrying.
+    const retryCooldownCutoff = new Date(Date.now() - 60 * 1000).toISOString();
+
     // 2. Only after all 0th attempt applications have finished processing, claim deferred Attempt 1 retries
     if (!candidates || candidates.length === 0) {
       const { data: retryCandidates } = await supabase
@@ -270,7 +285,8 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
-        .order('created_at', { ascending: true })
+        .lte('updated_at', retryCooldownCutoff)
+        .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates || [];
     }
@@ -282,7 +298,8 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'queued'])
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
-        .order('created_at', { ascending: true })
+        .lte('updated_at', retryCooldownCutoff)
+        .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates2 || [];
     }
@@ -358,7 +375,7 @@ export async function sendTaskHeartbeat(taskId, workerId) {
  * Reaper: Reverts tasks with expired lease (> timeoutMinutes) back to 'ready_for_review'
  * on job_distributions directly. NEVER sets 'failed'.
  */
-export async function reapExpiredLeases(timeoutMinutes = 10) {
+export async function reapExpiredLeases(timeoutMinutes = 6) {
   if (!supabase) return [];
   try {
     const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
@@ -368,7 +385,7 @@ export async function reapExpiredLeases(timeoutMinutes = 10) {
       .from('job_distributions')
       .select('id, worker_id, applywizz_id')
       .eq('status', 'applying')
-      .lt('worker_leased_at', cutoff);
+      .or(`worker_leased_at.lt.${cutoff},worker_leased_at.is.null`);
 
     if (selErr || !expired || expired.length === 0) return [];
 
@@ -582,7 +599,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             }
           }
           if (ctx?.browser) {
-            await ctx.browser.close().catch(() => {});
+            await ctx.browser.close().catch(() => { });
           }
         } catch (wShotErr) {
           console.warn(`[${workerId}] Watchdog screenshot error:`, wShotErr.message);
@@ -641,16 +658,16 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             }
           }
         }
-      } catch {}
+      } catch { }
     }
 
     if (isAlreadyApplied) {
       try {
         const ctx = getWorkerContext(workerId);
         if (ctx?.browser) {
-          await ctx.browser.close().catch(() => {});
+          await ctx.browser.close().catch(() => { });
         }
-      } catch {}
+      } catch { }
     }
 
     if (!finalStoragePath && finalShotUrl) {
@@ -684,7 +701,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'submitted',
           error_message: null,
           application_submitted_screenshot_url: finalShotUrl,
-          completed_at: now,
           updated_at: now,
         },
       });
@@ -707,7 +723,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'already_applied',
           error_message: 'Application already submitted on Workday',
           application_submitted_screenshot_url: finalShotUrl,
-          completed_at: now,
           updated_at: now,
         },
       });
@@ -715,7 +730,14 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
 
-      if (currentAttempt < 3) {
+      const isFatalNonRetryable = (
+        /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(rawErrMsg) ||
+        /strict auth guard/i.test(failedStep) ||
+        result?.status === 'job_expired' ||
+        result?.status === 'invalid_url'
+      );
+
+      if (currentAttempt < 3 && !isFatalNonRetryable) {
         // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
         const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
         console.log(`\n${'═'.repeat(90)}`);
@@ -748,10 +770,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
           const cleanUrl = String(task.job_url).trim().replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '');
           await supabase.from('failed_jobs').delete().eq('applywizz_id', cleanId).eq('job_url', cleanUrl);
-        } catch {}
+        } catch { }
       } else {
         // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
-        let finalShotUrl = result?.screenshotUrl || null;
+        let finalShotUrl = result?.screenshotUrl || result?.failureScreenshotUrl || result?.reviewScreenshotUrl || null;
         if (!finalShotUrl) {
           try {
             const ctx = getWorkerContext(workerId);
@@ -796,7 +818,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'failed',
           error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
           application_submitted_screenshot_url: finalShotUrl,
-          completed_at: now,
           updated_at: now,
         };
 
@@ -878,38 +899,42 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const errMsg = err?.message || 'Execution error';
     const failedStep = 'Execution Exception';
 
-    if (currentAttempt < 3) {
+    const isFatalNonRetryable = (
+      /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
+      /strict auth guard/i.test(errMsg)
+    );
+
+    if (currentAttempt < 3 && !isFatalNonRetryable) {
       const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${errMsg}`;
       console.log(`\n🔄 [STAGE 3: SUBMITTER] [${workerId}] Exception on attempt ${currentAttempt}/3. Re-queueing job_distributions #${task.distribution_id || task.id} to ready_for_review for retry.`);
 
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id || task.id,
-          applywizzId: task.applywizz_id,
-          jobUrl: task.job_url,
-          workerId,
-          patch: {
-            status: 'ready_for_review',
-            worker_id: null,
-            worker_leased_at: null,
-            error_message: retryMsg,
-            application_submitted_screenshot_url: null,
-            updated_at: now,
-          },
-        });
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id || task.id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
+        workerId,
+        patch: {
+          status: 'ready_for_review',
+          worker_id: null,
+          worker_leased_at: null,
+          error_message: retryMsg,
+          application_submitted_screenshot_url: null,
+          updated_at: now,
+        },
+      });
 
-        // Ensure NO premature row in failed_jobs on attempt 1 or 2
-        try {
-          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-          const cleanUrl = String(task.job_url).trim().replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '');
-          await supabase.from('failed_jobs').delete().eq('applywizz_id', cleanId).eq('job_url', cleanUrl);
-        } catch {}
-      } else {
+      // Ensure NO premature row in failed_jobs on attempt 1 or 2
+      try {
+        const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+        const cleanUrl = String(task.job_url).trim().replace(/\/(apply(\/.*)?|applicationSubmitted(\/.*)?|jobTasks(\/.*)?)$/i, '');
+        await supabase.from('failed_jobs').delete().eq('applywizz_id', cleanId).eq('job_url', cleanUrl);
+      } catch { }
+    } else {
       const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${errMsg}`;
       const failPatch = {
         status: 'failed',
         error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
         application_submitted_screenshot_url: errShotUrl,
-        completed_at: now,
         updated_at: now,
       };
 
@@ -944,7 +969,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const { releaseBrowserSlot, unregisterWorkerContext } = await import('./browserLifecycle.mjs');
       releaseBrowserSlot(workerId);
       unregisterWorkerContext(workerId);
-    } catch {}
+    } catch { }
     // Release worker back to idle
     const workerNum = String(workerId).replace('worker_', '');
     await updateWorkerStatus(workerId, {

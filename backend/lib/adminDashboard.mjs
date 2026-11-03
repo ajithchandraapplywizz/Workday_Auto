@@ -319,7 +319,7 @@ export async function getAdminDashboardData(opts = 'all', optFrom = null, optTo 
   // Date filter applies to job_distributions.updated_at
   let distQuery = supabase
     .from('job_distributions')
-    .select('id, status, error_message, updated_at, created_at, completed_at');
+    .select('id, status, error_message, updated_at, created_at');
 
   if (boundsStartIso) {
     distQuery = distQuery.gte('updated_at', boundsStartIso);

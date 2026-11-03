@@ -231,10 +231,10 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
     supabase.from('job_distributions').select('*', { count: 'exact', head: true }).eq('status', 'queued'),
     supabase.from('job_distributions').select('*', { count: 'exact', head: true }).eq('status', 'ready_for_review'),
     supabase.from('job_distributions')
-      .select('id, status, completed_at, resolved_answers')
+      .select('id, status, updated_at, resolved_answers')
       .in('status', ['submitted', 'failed', 'already_applied'])
-      .gte('completed_at', window.startIso)
-      .lte('completed_at', window.endIso),
+      .gte('updated_at', window.startIso)
+      .lte('updated_at', window.endIso),
   ]);
 
   const running = liveRunningRes.count ?? 0;

@@ -92,7 +92,6 @@ export async function recordTaskSubmissionProof({
       const patch = {
         status: 'submitted',
         application_submitted_screenshot_url: publicUrl,
-        completed_at: now,
         updated_at: now,
       };
       const { data: rows, error: updateErr } = await supabase

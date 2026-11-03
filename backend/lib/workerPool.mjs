@@ -224,6 +224,10 @@ export async function executeWorkerTask({
 
   const isApprovedForSubmission = task.status === 'approved_for_submission' || task.status === 'approved_by_ca' || task.status === 'queued_for_submission';
   const effectiveConfirmSubmit = isApprovedForSubmission ? true : confirmSubmit;
+  const isDirectSubmission = Boolean(task.isDirectSubmission || options.isDirectSubmission);
+  const currentAttempt = Number(task.currentAttempt || options.currentAttempt || 1);
+  const maxAttempts = Number(task.maxAttempts || options.maxAttempts || 3);
+  const isFinalAttempt = Boolean(task.isFinalAttempt ?? options.isFinalAttempt ?? (currentAttempt >= maxAttempts));
 
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
   const rawJobUrl = task.jobUrl || task.job_url || task.url || '';
@@ -1268,7 +1272,7 @@ export async function executeWorkerTask({
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
             // STRICT RULE: If isDirectSubmission is true, only upload on final attempt (Attempt 3):
-            const isSubmissionRetry = Boolean(isDirectSubmission && options.isFinalAttempt === false);
+            const isSubmissionRetry = Boolean(isDirectSubmission && !isFinalAttempt);
             if (!isSubmissionRetry) {
               bucket = 'failed-applications';
               const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
@@ -1278,13 +1282,15 @@ export async function executeWorkerTask({
           }
 
           if (bucket && filename && buf) {
-            completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf);
+            completionShotUrl = await uploadStorageScreenshot(bucket, filename, buf, bucket === 'failed-applications' ? 'image/png' : 'image/jpeg');
             if (completionShotUrl) {
               console.log(`[${workerId}] screenshot uploaded to ${bucket}: ${filename}`);
             }
           }
         }
-      } catch {}
+      } catch (shotErr) {
+        console.warn(`[${workerId}] Screenshot upload error in Step F:`, shotErr.message);
+      }
 
     if (status === 'submitted') {
       console.log(`\n${'═'.repeat(90)}`);
@@ -1805,19 +1811,24 @@ export async function executeWorkerTask({
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         const liveStep = await detectWorkdayStep(page).catch(() => null);
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
-        const buf = await page.screenshot({ type: 'png' }).catch(() => null);
-        if (buf) {
-          const timestamp = Date.now();
-          const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
-          const cleanTaskId = String(taskId || task.id || timestamp).replace(/["'\\]/g, '').trim();
-          const failStoragePath = `${cleanAwl}_${cleanTaskId}_failed_${timestamp}.png`;
-          errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf);
-          if (errShotUrl) {
-            console.log(`[${workerId}] screenshot uploaded: ${failStoragePath}`);
+        const isSubmissionRetry = Boolean(isDirectSubmission && !isFinalAttempt);
+        if (!isSubmissionRetry) {
+          const buf = await page.screenshot({ type: 'png' }).catch(() => null);
+          if (buf) {
+            const timestamp = Date.now();
+            const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
+            const cleanTaskId = String(taskId || task.id || timestamp).replace(/["'\\]/g, '').trim();
+            const failStoragePath = `${cleanAwl}_${cleanTaskId}_failed_${timestamp}.png`;
+            errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf, 'image/png');
+            if (errShotUrl) {
+              console.log(`[${workerId}] 3rd attempt failure screenshot uploaded: ${failStoragePath}`);
+            }
           }
         }
       }
-    } catch {}
+    } catch (shotErr) {
+      console.warn(`[${workerId}] Screenshot error in catch block:`, shotErr.message);
+    }
 
     let fullErrReason = `${err.message} (stopped at ${errStep}) [step: ${errStep}]`;
     if (errShotUrl) fullErrReason += ` [screenshot: ${errShotUrl}]`;
@@ -1864,29 +1875,31 @@ export async function executeWorkerTask({
       }
     }
 
-    try {
-      const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
-      await recordFailedJob({
-        applywizzId,
-        jobId: task.job_id || task.jobId || null,
-        jobUrl,
-        company,
-        roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
-        failureReason: fullErrReason,
-        failedAtStep: errStep,
-        screenshotPath: errShotUrl,
-        resolvedAnswers: answeredSoFar,
-      });
-      await recordApplicationFailure({
-        applywizzId,
-        jobId: task.job_id || task.jobId || null,
-        jobUrl,
-        company,
-        roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
-        failureReason: fullErrReason,
-        screenshotPath: errShotUrl,
-      });
-    } catch {}
+    if (!isDirectSubmission || isFinalAttempt) {
+      try {
+        const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
+        await recordFailedJob({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
+          failureReason: fullErrReason,
+          failedAtStep: errStep,
+          screenshotPath: errShotUrl,
+          resolvedAnswers: answeredSoFar,
+        });
+        await recordApplicationFailure({
+          applywizzId,
+          jobId: task.job_id || task.jobId || null,
+          jobUrl,
+          company,
+          roleTitle: roleTitle || profile?._roleTitle || 'Workday Application',
+          failureReason: fullErrReason,
+          screenshotPath: errShotUrl,
+        });
+      } catch {}
+    }
 
     return { status: 'error', error: err.message, cacheHit, screenshotUrl: errShotUrl, stoppedAtStep: errStep };
   } finally {
