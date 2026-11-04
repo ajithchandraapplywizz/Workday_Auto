@@ -61,8 +61,9 @@ export function AuthProvider({ children }) {
       .then(() => {})
       .catch(() => {});
 
-    // 2. Periodic heartbeat every 20s
+    // 2. Periodic heartbeat every 60s (visibility-aware to conserve API requests)
     const heartbeatTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       const pingIso = new Date().toISOString();
       supabase
         .from('operators')
@@ -76,7 +77,7 @@ export function AuthProvider({ children }) {
         .ilike('email', em)
         .then(() => {})
         .catch(() => {});
-    }, 20000);
+    }, 60000);
 
     // 3. Browser disconnect on tab/window close
     const handleBeforeUnload = () => {

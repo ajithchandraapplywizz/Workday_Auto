@@ -84,7 +84,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 // Configuration
 const args = process.argv.slice(2);
-const HEADLESS = process.env.HEADLESS !== 'false' && !args.includes('--headful') && !args.includes('--headed');
+const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
+// In production (Railway), HEADLESS is strictly enforced.
+// On local machines, HEADLESS is true by default unless --headed is explicitly passed.
+const HEADLESS = isProduction ? true : (process.env.HEADLESS !== 'false' && !args.includes('--headful') && !args.includes('--headed'));
 const TEST_MODE = args.includes('--test');
 
 let envRole = (process.env.SERVICE_ROLE || '').toLowerCase();
@@ -566,7 +569,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
         }
 
         // Brief wait before re-checking for unlocked or newly ready applications
-        await new Promise((r) => setTimeout(r, 600));
+        await new Promise((r) => setTimeout(r, 2500));
         continue;
       }
 
@@ -729,12 +732,11 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     });
 
     // Run Scanning (Stage 1) and Resolving (Stage 2) in PARALLEL
-    console.log(`\n⚡ [DAEMON] Universal Pipeline: Launching Stage 1 Scanning, Stage 2 Resolving, and Stage 3 Submissions in PARALLEL STREAMING mode...`);
-    submitStatus = 'running';
-    submitStopRequested = false;
-    const submissionPromise = runStage3Submissions({ isStreaming: true }).catch((err) => {
-      console.error(`❌ [DAEMON] Stage 3 Submissions streaming error:`, err?.message || err);
-    });
+    // Note: Scanning workers strictly halt at "Review & Submit" page, capture screenshot, extract schema,
+    // and resolve candidate answers into job_distributions (status: 'ready_for_review').
+    // Stage 3 Submissions is handled strictly by dedicated Submitter Services.
+    console.log(`\n⚡ [DAEMON] Pipeline: Launching Stage 1 Scanning & Stage 2 Resolving in PARALLEL across ${PIPELINE_CONFIG.scanWorkerIds.length} scanner(s) and ${PIPELINE_CONFIG.resolveWorkerIds.length} resolver(s)...`);
+
     await Promise.all([
       runStage1Scanning().catch((err) => {
         console.error(`❌ [DAEMON] Stage 1 Scanning error:`, err?.message || err);
@@ -745,55 +747,34 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     ]);
 
     scanStatus = 'completed';
-    console.log(`\n✅ [DAEMON] Stage 1 & 2 complete. Awaiting any remaining in-flight submissions...`);
-    await submissionPromise;
+    currentStage = 'idle';
+    currentMode = 'idle';
+    isPoolRunning = false;
 
     if (isGlobalStopRequested() || isScanStopRequested() || isPoolPaused) {
       console.log(`🛑 [DAEMON] Pipeline stopped.`);
       scanCompleteMessage = 'Scan & Resolve stopped by user request.';
     } else {
-      scanCompleteMessage = `Scan & Resolve complete: Unique links scanned and candidate answers resolved to ready_for_review.`;
+      scanCompleteMessage = `Scan & Resolve complete: Unique links scanned (halted at Review & Submit) and candidate answers resolved to ready_for_review.`;
       console.log(`\n✅ [DAEMON] ${scanCompleteMessage}`);
 
-      // Check if candidate applications are ready in job_distributions
+      // Count ready applications in job_distributions
       const { count: readyCount } = await supabase
         .from('job_distributions')
         .select('*', { count: 'exact', head: true })
         .eq('status', 'ready_for_review');
 
-      if (readyCount && readyCount > 0) {
-        console.log(`\n🚀 [PIPELINE AUTO-TRANSITION] ${readyCount} applications ready in job_distributions! Transitioning immediately to Stage 3 Submissions...`);
-        scanStatus = 'completed';
-        currentStage = 'submitting';
-        currentMode = 'submitting';
-        submitStatus = 'running';
-        isPoolRunning = true;
+      console.log(`ℹ️ [DAEMON] ${readyCount || 0} applications in job_distributions with status 'ready_for_review'. Ready for dedicated Submitter Service.`);
 
-        await syncBotControlState({
-          mode: 'submitting',
-          stage: 'submitting',
-          scan_status: 'completed',
-          scan_enabled: false,
-          submit_status: 'running',
-          submit_enabled: true,
-          last_action_requested: 'start_submit',
-          trigger_requested: true,
-          is_running: true,
-          stop_requested: false,
-          current_action: `Stage 1 & 2 complete. Auto-launching submissions for ${readyCount} applications across dedicated submitting workers.`,
-        });
-
-        if (SERVICE_ROLE === 'scanner') {
-          console.log(`\n⚡ [SCANNER SERVICE] Signal written to Supabase! Submitter Service will pick up Stage 3 immediately.`);
-          return;
-        }
-
-        // Launch Stage 3 Submissions immediately
-        runStage3Submissions().catch(console.error);
-        return;
-      } else {
-        console.log(`ℹ️ [DAEMON] 0 ready applications in job_distributions. Idling until new tasks arrive.`);
-      }
+      await syncBotControlState({
+        mode: 'idle',
+        stage: 'ready_for_review',
+        scan_status: 'completed',
+        scan_enabled: false,
+        is_running: false,
+        active_worker_count: 0,
+        current_action: `Stage 1 & 2 complete. ${readyCount || 0} applications ready for review & submission.`,
+      });
     }
   } catch (err) {
     console.error(`❌ [DAEMON] Pipeline error:`, err?.message || err);
@@ -1837,6 +1818,11 @@ export async function initOnStartup() {
   let warnedMissingBotControl = false;
   setInterval(async () => {
     try {
+      // Guard: If running on a local machine and not in production, do not process cloud jobs unless explicitly enabled.
+      // This prevents a local process from competing with or duplicating jobs being run on Railway production.
+      if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-workers') && !args.includes('--local')) {
+        return;
+      }
       const [bc, wc] = await Promise.all([
         getBotControl().catch(() => null),
         getWorkerControls().catch(() => null),
@@ -2043,7 +2029,7 @@ export async function initOnStartup() {
     } catch {
       // Continue polling silently
     }
-  }, 2000);
+  }, 5000);
 
   // ── Phase 3: 6-Minute Lease Reaper Background Interval (runs every 30s) ──
   setInterval(async () => {

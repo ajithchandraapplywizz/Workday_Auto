@@ -267,14 +267,14 @@ export async function isWorkdayAlreadyApplied(page) {
     // is actively applying! Workday NEVER renders the wizard form (Save and Continue,
     // progress steps, form questions, resume uploaders) if already applied.
     const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
+    // Note: Do NOT match generic 'back' button as wizard navigation! Only forward wizard steps:
     const hasWizardNavBtn = allButtons.some(b => {
       const txt = (b.textContent || '').trim().toLowerCase();
       return (
         txt === 'save and continue' ||
         txt === 'save & continue' ||
         txt === 'save and next' ||
-        txt === 'review and submit' ||
-        txt === 'back'
+        txt === 'review and submit'
       );
     });
 
@@ -285,7 +285,6 @@ export async function isWorkdayAlreadyApplied(page) {
         'button[data-automation-id="saveAndContinue"], ' +
         'button[data-automation-id="next-button"], ' +
         'div[data-automation-id="file-upload-drop-zone"], ' +
-        '[data-automation-id="progressBar"], ' +
         '[data-automation-id="progressBarActiveStep"], ' +
         '[data-automation-id="myInformationPage"], ' +
         '[data-automation-id="myExperiencePage"], ' +
@@ -295,7 +294,24 @@ export async function isWorkdayAlreadyApplied(page) {
       )
     );
 
-    // If an active wizard is present, candidate is NOT already applied
+    // 0a. Check for explicit "Already Applied" text across the entire page body FIRST
+    const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ');
+    const hasExplicitAlreadyAppliedText = (
+      /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(bodyText) ||
+      /already\s+applied\s+(?:for|to|on)\s+this\s+(?:job|position|role)\b/i.test(bodyText) ||
+      /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(bodyText) ||
+      /application\s+(?:has\s+already\s+been|is\s+already)\s+submitted\b/i.test(bodyText) ||
+      /we\s+have\s+already\s+received\s+your\s+application\b/i.test(bodyText) ||
+      /duplicate\s+application\s+detected\b/i.test(bodyText) ||
+      /already\s+submitted\s+an\s+application\b/i.test(bodyText)
+    );
+
+    // If explicit already-applied text is present, return true regardless of background elements
+    if (hasExplicitAlreadyAppliedText) {
+      return true;
+    }
+
+    // If an active wizard is present without any already applied message, candidate is NOT already applied
     if (hasWizardNavBtn || hasWizardDomElement) {
       return false;
     }

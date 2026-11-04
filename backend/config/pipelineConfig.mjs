@@ -10,6 +10,12 @@
 export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 2;
 export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
 
+// Dynamic worker counts per stage across all services (default: 2 services * WORKER_COUNT)
+export const TOTAL_SERVICES = Number(process.env.TOTAL_SERVICES) || 2;
+export const TOTAL_SCAN_WORKERS = Number(process.env.TOTAL_SCAN_WORKERS) || (WORKER_COUNT * TOTAL_SERVICES);
+export const TOTAL_RESOLVE_WORKERS = Number(process.env.TOTAL_RESOLVE_WORKERS) || (WORKER_COUNT * TOTAL_SERVICES);
+export const TOTAL_SUBMIT_WORKERS = Number(process.env.TOTAL_SUBMIT_WORKERS) || (WORKER_COUNT * TOTAL_SERVICES);
+
 export const SCAN_WORKER_IDS = process.env.SCAN_WORKER_IDS
   ? process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
   : Array.from({ length: WORKER_COUNT }, (_, i) => `scanning_worker_${i + 1 + WORKER_OFFSET}`);
@@ -24,14 +30,18 @@ export const SUBMIT_WORKER_IDS = process.env.SUBMISSION_WORKER_IDS
       ? process.env.SUBMIT_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
       : Array.from({ length: WORKER_COUNT }, (_, i) => `submitting_worker_${i + 1 + WORKER_OFFSET}`));
 
-const DEFAULT_ALL_WORKERS = [
-  'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
-  'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
-  'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
-  'submitting_worker_5', 'submitting_worker_6', 'submitting_worker_7', 'submitting_worker_8',
-];
+export const ALL_CANONICAL_SCAN_IDS = Array.from({ length: TOTAL_SCAN_WORKERS }, (_, i) => `scanning_worker_${i + 1}`);
+export const ALL_CANONICAL_RESOLVE_IDS = Array.from({ length: TOTAL_RESOLVE_WORKERS }, (_, i) => `resolving_worker_${i + 1}`);
+export const ALL_CANONICAL_SUBMIT_IDS = Array.from({ length: TOTAL_SUBMIT_WORKERS }, (_, i) => `submitting_worker_${i + 1}`);
 
-const ALL_CANONICAL_WORKERS = [...new Set([...DEFAULT_ALL_WORKERS, ...SCAN_WORKER_IDS, ...RESOLVE_WORKER_IDS, ...SUBMIT_WORKER_IDS])];
+const ALL_CANONICAL_WORKERS = [...new Set([
+  ...ALL_CANONICAL_SCAN_IDS,
+  ...ALL_CANONICAL_RESOLVE_IDS,
+  ...ALL_CANONICAL_SUBMIT_IDS,
+  ...SCAN_WORKER_IDS,
+  ...RESOLVE_WORKER_IDS,
+  ...SUBMIT_WORKER_IDS,
+])];
 
 const WORKER_NAMES = {};
 SCAN_WORKER_IDS.forEach((id) => { const n = (id.match(/\d+/) || [1])[0]; WORKER_NAMES[id] = `Scanning Worker ${n}`; });

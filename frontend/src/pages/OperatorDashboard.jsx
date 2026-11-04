@@ -251,7 +251,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
       }
     };
 
-    const intervalId = setInterval(refreshActiveCandidateApps, 2000);
+    const intervalId = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      refreshActiveCandidateApps();
+    }, 10000);
     return () => {
       isMounted = false;
       clearInterval(intervalId);
@@ -282,7 +285,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     }
 
     loadStats();
-    const intervalId = setInterval(loadStats, 5000);
+    const intervalId = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      loadStats();
+    }, 15000);
     return () => {
       isMounted = false;
       clearInterval(intervalId);

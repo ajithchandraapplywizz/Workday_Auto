@@ -600,7 +600,7 @@ export async function fetchFreshTasksByIds(taskIds = []) {
  */
 export async function runClusterWorker(workerId, cluster, options = {}) {
   const {
-    headless = false, // HEADED by default!
+    headless = process.env.HEADLESS !== 'false',
     confirmSubmit = false,
     limitPerLink = null,
     defaultPassword = process.env.WORKDAY_PASSWORD || 'Applywizz@2026',

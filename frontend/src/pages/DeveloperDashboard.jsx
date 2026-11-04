@@ -176,74 +176,39 @@ export default function DeveloperDashboard() {
     // Immediate initial fetch on mount and tab switch
     pollBatchLogs();
 
-    // Poll faster (2.5s) on Worker Logs tab, or periodically (5s) while pipeline is active
-    const pollIntervalMs = activeTab === 'Worker Logs' ? 2500 : (isAnyPipelineActive ? 5000 : null);
+    // Visibility-aware poll: 5s on Worker Logs tab, 15s when pipeline is active in background
+    const pollIntervalMs = activeTab === 'Worker Logs' ? 5000 : (isAnyPipelineActive ? 15000 : null);
     if (!pollIntervalMs) return;
 
-    const interval = setInterval(pollBatchLogs, pollIntervalMs);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      pollBatchLogs();
+    }, pollIntervalMs);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
   }, [activeTab, isAnyPipelineActive]);
 
-  // Load all dynamic data with real-time polling and Supabase Realtime channel
+  // 1. Load static reference data (managers, clients, client_assignment_log, operators) once per mount/date
   useEffect(() => {
     let isMounted = true;
-    async function loadData(silent = false) {
-      if (!silent) setLoading(true);
+    async function loadStaticReferenceData() {
       try {
-        const [kpiRes, workerRes, healthRes, appsRes, queueRes, opsRes, mgrsRes, logsRes, clientsRes, daemonRes] = await Promise.all([
-          fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
-          fetchWorkerStatuses(),
-          checkAllApiHealth(),
-          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 300 }),
-          fetchBatchQueue(),
-          fetchAllOperators(),
+        const [mgrsRes, logsRes, clientsRes, opsRes] = await Promise.all([
           supabase.from('managers').select('*'),
           supabase.from('client_assignment_log').select('applywizz_id, ca_email, ca_id').order('assignment_date', { ascending: false }).limit(1000),
           supabase.from('clients').select('applywizz_id, client_name, ca_email, current_ca_email'),
-          fetchBotDaemonStatus(),
+          fetchAllOperators().catch(() => ({ success: false, operators: [] })),
         ]);
-
-        if (daemonRes?.success) {
-          setBotStatus(daemonRes);
-        }
 
         if (!isMounted) return;
 
-        const activeWorkersCount = workerRes?.success ? (workerRes.inFlight || 0) : 0;
-        if (workerRes?.success) {
-          setWorkerPool(workerRes);
-        }
-
-        if (kpiRes.success) {
-          // Direct DB sync: strictly use actual applying count from job_distributions
-          setKpis({
-            submitted: kpiRes.submitted,
-            applying: kpiRes.applying,
-            failed: kpiRes.failed,
-            queued: kpiRes.queued,
-            total: kpiRes.total,
-          });
-        }
-
-        setHealthResults(healthRes);
-
-        if (appsRes.success) {
-          setApplications(appsRes.applications || []);
-        }
-
-        if (queueRes.success) {
-          setQueueItems(queueRes.queue || []);
-        }
-
-        if (opsRes.success) {
-          setOperators(opsRes.operators || []);
-        }
-
-        if (mgrsRes.data) {
+        if (mgrsRes?.data) {
           setManagers(mgrsRes.data || []);
+        }
+        if (opsRes?.success) {
+          setOperators(opsRes.operators || []);
         }
 
         const cMap = new Map();
@@ -272,13 +237,89 @@ export default function DeveloperDashboard() {
         }
         setClientToCaMap(cMap);
       } catch (err) {
-        console.error('Error loading developer dashboard data:', err);
+        console.warn('Error loading static developer reference data:', err);
+      }
+    }
+    loadStaticReferenceData();
+    return () => { isMounted = false; };
+  }, [date]);
+
+  // 2. Health check runs on mount and every 60 seconds (or when tab becomes visible)
+  useEffect(() => {
+    let isMounted = true;
+    async function runHealthCheck() {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      try {
+        const healthRes = await checkAllApiHealth();
+        if (isMounted) setHealthResults(healthRes);
+      } catch { }
+    }
+    runHealthCheck();
+    const healthInterval = setInterval(runHealthCheck, 60000);
+    return () => { isMounted = false; clearInterval(healthInterval); };
+  }, []);
+
+  // 3. Load dynamic real-time data with visibility awareness & intelligent rate throttling
+  useEffect(() => {
+    let isMounted = true;
+    async function loadDynamicData(silent = false) {
+      // Guard: never poll if user is on another browser tab or window is minimized
+      if (silent && typeof document !== 'undefined' && document.hidden) return;
+      if (!silent) setLoading(true);
+      try {
+        const [kpiRes, workerRes, appsRes, queueRes, daemonRes] = await Promise.all([
+          fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
+          fetchWorkerStatuses(),
+          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 300 }),
+          fetchBatchQueue(),
+          fetchBotDaemonStatus(),
+        ]);
+
+        if (!isMounted) return;
+
+        if (daemonRes?.success) {
+          setBotStatus(daemonRes);
+        }
+
+        if (workerRes?.success) {
+          setWorkerPool(workerRes);
+        }
+
+        if (kpiRes.success) {
+          setKpis({
+            submitted: kpiRes.submitted,
+            applying: kpiRes.applying,
+            failed: kpiRes.failed,
+            queued: kpiRes.queued,
+            total: kpiRes.total,
+          });
+        }
+
+        if (appsRes.success) {
+          setApplications(appsRes.applications || []);
+        }
+
+        if (queueRes.success) {
+          setQueueItems(queueRes.queue || []);
+        }
+      } catch (err) {
+        console.error('Error loading developer dynamic data:', err);
       } finally {
         if (isMounted && !silent) setLoading(false);
       }
     }
 
-    loadData(false);
+    loadDynamicData(false);
+
+    // Refresh immediately when returning to tab from background
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && !document.hidden && isMounted) {
+        loadDynamicData(true);
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange);
+    }
 
     // Realtime channel for instant sub-second DB synchronization on job_distributions
     const realtimeChannel = supabase
@@ -287,19 +328,24 @@ export default function DeveloperDashboard() {
         'postgres_changes',
         { event: '*', schema: 'public', table: 'job_distributions' },
         () => {
-          loadData(true);
+          if (typeof document !== 'undefined' && document.hidden) return;
+          loadDynamicData(true);
         }
       )
       ?.subscribe();
 
-    // Direct dynamic polling every 1s for immediate real-time synchronization with DB
+    // Intelligent polling rate: 8s during active pipeline execution, 25s when idle (saving 95%+ API requests)
+    const intervalMs = isAnyPipelineActive ? 8000 : 25000;
     const pollInterval = setInterval(() => {
-      loadData(true);
-    }, 1000);
+      loadDynamicData(true);
+    }, intervalMs);
 
     return () => {
       isMounted = false;
       if (pollInterval) clearInterval(pollInterval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibilityChange);
+      }
       if (realtimeChannel && supabase?.removeChannel) {
         supabase.removeChannel(realtimeChannel);
       }
@@ -1370,7 +1416,7 @@ export default function DeveloperDashboard() {
                   color: (workerPool.scanningActive || 0) > 0 ? '#38bdf8' : '#94a3b8',
                   border: (workerPool.scanningActive || 0) > 0 ? '1px solid rgba(56, 189, 248, 0.4)' : '1px solid rgba(148, 163, 184, 0.25)',
                 }}>
-                  {(workerPool.scanningActive || 0)} / 3 ACTIVE
+                  {(workerPool.scanningActive || 0)} / {workerPool.scanWorkers?.length || 4} ACTIVE
                 </span>
               </div>
 
@@ -1483,7 +1529,7 @@ export default function DeveloperDashboard() {
                   color: (workerPool.submittingActive || 0) > 0 ? '#34d399' : '#94a3b8',
                   border: (workerPool.submittingActive || 0) > 0 ? '1px solid rgba(16, 185, 129, 0.4)' : '1px solid rgba(148, 163, 184, 0.25)',
                 }}>
-                  {(workerPool.submittingActive || 0)} / {workerPool.submitWorkers?.length || 8} ACTIVE
+                  {(workerPool.submittingActive || 0)} / {workerPool.submitWorkers?.length || 4} ACTIVE
                 </span>
               </div>
 

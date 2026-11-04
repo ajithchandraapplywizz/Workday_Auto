@@ -150,6 +150,7 @@ export default function ApplicationSlideDrawer({
 
     let isMounted = true;
     const interval = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         let updated = null;
         if (distributionId) {
@@ -205,7 +206,7 @@ export default function ApplicationSlideDrawer({
       } catch (e) {
         // silent polling catch
       }
-    }, 1500);
+    }, 6000);
 
     return () => {
       isMounted = false;

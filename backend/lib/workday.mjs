@@ -836,6 +836,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         return finishSuccessfulLogin(page, mode, profile);
       }
 
+      if (await isWorkdayAlreadyApplied(page)) {
+        console.log('   ℹ️ Candidate has ALREADY APPLIED to this job post-login attempt.');
+        return 'already_applied';
+      }
+
       const company = extractWorkdayCompanyName(page.url());
 
       // Case 1: Workday reports email verification needed
@@ -1039,6 +1044,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
 
         if (await isWorkdayWizardVisible(page)) {
           return true;
+        }
+
+        if (await isWorkdayAlreadyApplied(page)) {
+          console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+          return 'already_applied';
         }
 
         console.log('   ❌ Unable to enter application form after account creation.');

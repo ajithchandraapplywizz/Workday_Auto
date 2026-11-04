@@ -115,7 +115,10 @@ export default function CADashboard() {
       } catch {}
     }
     checkWorkerStatus();
-    const interval = setInterval(checkWorkerStatus, 3000);
+    const interval = setInterval(() => {
+      if (typeof document !== 'undefined' && document.hidden) return;
+      checkWorkerStatus();
+    }, 12000);
     return () => { isMounted = false; clearInterval(interval); };
   }, []);
 
@@ -421,6 +424,7 @@ export default function CADashboard() {
     let isMounted = true;
 
     const intervalId = setInterval(async () => {
+      if (typeof document !== 'undefined' && document.hidden) return;
       try {
         const [distRes, queueRes] = await Promise.all([
           supabase
@@ -490,7 +494,7 @@ export default function CADashboard() {
       } catch (err) {
         // silent polling catch
       }
-    }, 2500);
+    }, 10000);
 
     return () => {
       isMounted = false;

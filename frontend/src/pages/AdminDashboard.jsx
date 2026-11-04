@@ -55,44 +55,71 @@ export default function AdminDashboard() {
   // Tabs as specified in Master Prompt section 5
   const tabs = ['Overview', 'Managers', 'Operators', 'Guide'];
 
-  // Load all dynamic data with real-time updates
-  const loadData = React.useCallback(async (silent = false) => {
-    if (!silent) setLoading(true);
+  // 1. Static reference data (reconciliation, managers, operators) loaded on mount or date changes
+  const loadStaticData = React.useCallback(async () => {
     try {
-      const [reconRes, mgrsRes, opsRes, kpiRes, appsRes] = await Promise.all([
+      const [reconRes, mgrsRes, opsRes] = await Promise.all([
         reconcileOperatorsWithAPI(),
         fetchManagers(),
         fetchAllOperators(),
-        fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
-        fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
       ]);
-
       if (reconRes.success) setReconciliation(reconRes);
       if (mgrsRes.success) setManagers(mgrsRes.managers);
       if (opsRes.success) setOperators(opsRes.operators);
+    } catch (err) {
+      console.warn('Error loading admin reference data:', err);
+    }
+  }, []);
+
+  // 2. Dynamic KPI & Applications data with visibility awareness
+  const loadDynamicData = React.useCallback(async (silent = false) => {
+    if (silent && typeof document !== 'undefined' && document.hidden) return;
+    if (!silent) setLoading(true);
+    try {
+      const [kpiRes, appsRes] = await Promise.all([
+        fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
+        fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 200 }),
+      ]);
       if (kpiRes.success) setKpis(kpiRes);
       if (appsRes.success) setApplications(appsRes.applications);
     } catch (err) {
-      console.error('Error loading Admin dashboard data:', err);
+      console.error('Error loading Admin dynamic data:', err);
     } finally {
       if (!silent) setLoading(false);
     }
   }, [date, timeframe]);
 
+  const loadData = React.useCallback(async (silent = false) => {
+    await Promise.all([loadStaticData(), loadDynamicData(silent)]);
+  }, [loadStaticData, loadDynamicData]);
+
   useEffect(() => {
     let isMounted = true;
     loadData(false);
 
-    // Dynamic 1s interval for real-time live updates
+    // Visibility change listener: fetch immediately when tab is brought to foreground
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && !document.hidden && isMounted) {
+        loadDynamicData(true);
+      }
+    };
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibility);
+    }
+
+    // Rate-limited polling: 20 seconds instead of 1 second (saving 95% API calls)
     const pollInterval = setInterval(() => {
-      loadData(true);
-    }, 1000);
+      loadDynamicData(true);
+    }, 20000);
 
     return () => {
       isMounted = false;
       clearInterval(pollInterval);
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleVisibility);
+      }
     };
-  }, [loadData]);
+  }, [loadData, loadDynamicData]);
 
   // Global Sync for all CAs across Balaji & Ramakrishna
   const handleGlobalSync = async () => {

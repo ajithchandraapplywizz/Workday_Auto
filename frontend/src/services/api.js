@@ -707,10 +707,11 @@ export function getEnvWorkerCounts() {
       count = parseInt(envVal, 10);
     }
   }
-  const scanCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SCAN_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SCAN_WORKER_COUNT, 10) : count;
-  const resolveCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RESOLVE_WORKER_COUNT) ? parseInt(import.meta.env.VITE_RESOLVE_WORKER_COUNT, 10) : count;
-  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : 8;
-  return { global: count, scan: scanCount || count, resolve: resolveCount || count, submit: submitCount || 8 };
+  const totalServices = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_TOTAL_SERVICES) ? parseInt(import.meta.env.VITE_TOTAL_SERVICES, 10) : 2;
+  const scanCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SCAN_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SCAN_WORKER_COUNT, 10) : (count * totalServices);
+  const resolveCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_RESOLVE_WORKER_COUNT) ? parseInt(import.meta.env.VITE_RESOLVE_WORKER_COUNT, 10) : (count * totalServices);
+  const submitCount = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUBMIT_WORKER_COUNT) ? parseInt(import.meta.env.VITE_SUBMIT_WORKER_COUNT, 10) : (count * totalServices);
+  return { global: count, scan: scanCount, resolve: resolveCount, submit: submitCount };
 }
 
 export function getDynamicWorkerIds() {
@@ -2555,7 +2556,7 @@ export async function triggerAutonomousBot() {
     const isLocal = isLocalEnvironment();
     const endpoints = [
       ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
-      ...(isLocal ? [
+      ...(!backendBase && isLocal ? [
         'http://localhost:3001/api/bot/start',
         'http://localhost:3001/api/bot/trigger',
         'http://localhost:3001/api/bot/webhook',
@@ -2602,7 +2603,7 @@ export async function stopAutonomousBot() {
         `${backendBase}/api/bot/webhook`,
         `${backendBase}/api/bot/controls`,
       ] : []),
-      ...(isLocal ? [
+      ...(!backendBase && isLocal ? [
         'http://localhost:3001/api/bot/scan/stop',
         'http://localhost:3001/api/bot/stop',
         'http://localhost:3001/api/bot/controls',
@@ -2766,7 +2767,7 @@ export async function triggerSubmissionStage() {
 
   const endpoints = [
     ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
-    ...(isLocal ? [
+    ...(!backendBase && isLocal ? [
       'http://localhost:3002/api/bot/submit/start',
       'http://localhost:3002/api/bot/submit',
       'http://localhost:3001/api/bot/submit/start',
@@ -2878,7 +2879,7 @@ export async function stopSubmissionStage() {
       `${backendBase}/api/bot/webhook`,
       `${backendBase}/api/bot/controls`,
     ] : []),
-    ...(isLocal ? [
+    ...(!backendBase && isLocal ? [
       'http://localhost:3002/api/bot/submit/stop',
       'http://localhost:3002/api/bot/stop',
       'http://localhost:3002/api/bot/controls',
@@ -2982,7 +2983,7 @@ export async function triggerAllParallelStage() {
       `${backendBase}/api/bot/submit/start`,
       `${backendBase}/api/bot/webhook`,
     ] : []),
-    ...(isLocal ? [
+    ...(!backendBase && isLocal ? [
       'http://localhost:3001/api/bot/start',
       'http://localhost:3002/api/bot/submit/start',
       'http://localhost:3001/api/bot/webhook',
@@ -3082,7 +3083,7 @@ export async function stopAllParallelStage() {
       `${backendBase}/api/bot/controls`,
       `${backendBase}/api/bot/webhook`,
     ] : []),
-    ...(isLocal ? [
+    ...(!backendBase && isLocal ? [
       'http://localhost:3001/api/bot/stop',
       'http://localhost:3001/api/bot/scan/stop',
       'http://localhost:3002/api/bot/stop',
