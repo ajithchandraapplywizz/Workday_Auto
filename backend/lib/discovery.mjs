@@ -227,7 +227,7 @@ export async function isWorkdayJobPageMissing(page) {
 
     // 3. If multi-step wizard is active, not missing
     const hasWizard = Boolean(
-      document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+      document.querySelector('button[data-automation-id="pageFooterNextButton"], input[data-automation-id="legalNameSection_firstName"]') || Array.from(document.querySelectorAll('button')).some(b => /save\s*(?:and|&)\s*continue/i.test(b.textContent || ''))
     );
     if (hasWizard) return false;
 
@@ -601,6 +601,9 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
 export async function isInNavOrHeader(el) {
   if (!el || typeof el.evaluate !== 'function') return false;
   return await el.evaluate(node => {
+    const selfAutoId = (node.getAttribute?.('data-automation-id') || '').toLowerCase();
+    const selfText = (node.textContent || '').trim().toLowerCase();
+    if (selfAutoId.includes('apply') || selfAutoId.includes('adventure') || /^apply(\\s+now)?$/i.test(selfText)) return false;
     let cur = node;
     while (cur && cur !== document.body) {
       const tag = cur.tagName?.toLowerCase();
@@ -1155,7 +1158,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
 
       for (const sel of workdayApplySelectors) {
         try {
-          const btns = await page.$(sel);
+          const btns = await page.$$(sel);
           for (const btn of btns) {
             if (await btn.isVisible().catch(() => false)) {
               if (await isInNavOrHeader(btn)) continue;

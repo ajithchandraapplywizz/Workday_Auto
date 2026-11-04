@@ -6,7 +6,7 @@
  */
 
 import { fillApplicationQuestionField } from './workdayQuestionFill.mjs';
-import { handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, typeAndClickOption } from './fields.mjs';
+import { handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, typeAndClickOption } from './fields.mjs';
 import { resolveField, mapLabelToProfileValue, getNestedValue } from './planner.mjs';
 import { createQAStore, saveAnswerToYaml } from './qaStore.mjs';
 import { lookupDefaultAnswer, leadingYesNo, selectionMatchesAnswer } from './workdayDefaults.mjs';
@@ -1331,6 +1331,48 @@ async function fillSingleFieldOfStudy(page, field, unique, leaf, force) {
       return true;
     }
   }
+  // ── USER RULE: If options do not match typed words in Stage 1 or Stage 3,
+  // type ONE letter and pick / click the FIRST dropdown option that appears ──
+  console.log('    ↻ Field of Study words did not match — executing 1-letter typing + first dropdown option fallback...');
+  const firstChar = String(leaf || '').trim()[0] || 'c';
+  const candidateLetters = [...new Set([firstChar.toLowerCase(), 'c', 'a', 'e', 's'])].filter((c) => /^[a-z]$/i.test(c));
+
+  for (const letter of candidateLetters) {
+    await combo.click({ force: true, timeout: 2000 }).catch(async () => {
+      await field.click({ force: true, timeout: 2000 }).catch(() => {});
+    });
+    await page.waitForTimeout(200);
+
+    const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
+    if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
+      await search.fill('').catch(() => {});
+      await page.waitForTimeout(100);
+      await search.pressSequentially(letter, { delay: 45 });
+    } else {
+      await page.waitForTimeout(100);
+      await page.keyboard.type(letter, { delay: 45 });
+    }
+
+    await page.waitForTimeout(500);
+
+    // Click FIRST visible prompt option
+    const pickedFirst = await clickFirstVisiblePromptOption(page);
+    if (!pickedFirst) {
+      await page.keyboard.press('ArrowDown').catch(() => {});
+      await page.waitForTimeout(100);
+      await page.keyboard.press('Enter').catch(() => {});
+    }
+    await page.waitForTimeout(250);
+    await page.keyboard.press('Escape').catch(() => {});
+    await page.waitForTimeout(200);
+
+    const afterFallback = await readFieldValue(field).catch(() => '');
+    if (pickedFirst || isFieldOfStudyFilled(afterFallback, letter)) {
+      console.log(`    ✅ Field of Study (1-letter fallback "${letter}") ← "${afterFallback || pickedFirst}"`);
+      return true;
+    }
+  }
+
   console.log('    ✗ Field of Study still empty after type+option');
   return false;
 }
@@ -1397,7 +1439,38 @@ async function fillFieldOfStudy(page, fieldLoc, answer) {
     if (appOk) return { ok: true, selected: leaf, attempts };
   }
 
-  const after = await readFieldValue(fieldLoc);
+  let after = await readFieldValue(fieldLoc);
+  if (!isFieldOfStudyFilled(after, leaf)) {
+    console.log('    ↻ Field of Study still empty on field locator — running 1-letter first dropdown fallback...');
+    const trigger = fieldLoc.locator(
+      '[data-automation-id="selectWidget"] button, button[aria-haspopup="listbox"], [role="combobox"], input[role="combobox"]'
+    ).first();
+    if (await trigger.isVisible({ timeout: 800 }).catch(() => false)) {
+      await trigger.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(200);
+      const letter = (String(leaf || '').trim()[0] || 'c').toLowerCase();
+      const searchBox = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[role="combobox"]:visible').last();
+      if (await searchBox.isVisible({ timeout: 600 }).catch(() => false)) {
+        await searchBox.fill('').catch(() => {});
+        await searchBox.pressSequentially(letter, { delay: 45 });
+      } else {
+        await page.keyboard.type(letter, { delay: 45 });
+      }
+      await page.waitForTimeout(500);
+      const picked = await clickFirstVisiblePromptOption(page);
+      if (!picked) {
+        await page.keyboard.press('ArrowDown').catch(() => {});
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+      await page.waitForTimeout(200);
+      await page.keyboard.press('Escape').catch(() => {});
+      after = await readFieldValue(fieldLoc);
+      if (picked || isFieldOfStudyFilled(after, letter)) {
+        attempts.push(`1-letter fallback "${letter}" clicked "${picked || after}" ✓`);
+        return { ok: true, selected: picked || after, attempts };
+      }
+    }
+  }
   return { ok: isFieldOfStudyFilled(after, leaf), selected: after || leaf, attempts };
 }
 

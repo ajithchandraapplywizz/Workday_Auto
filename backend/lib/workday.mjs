@@ -70,6 +70,9 @@ async function detectLoginFailureReason(page) {
       (text.includes('verification email') && text.includes('sent')) ||
       text.includes('check your spam folder') ||
       text.includes('check your email') ||
+      text.includes('account may need verification') ||
+      text.includes('resend account verification') ||
+      text.includes("still can't sign in") ||
       text.includes('we sent a verification link') ||
       text.includes('we sent a verification code') ||
       text.includes('we have sent you a verification') ||
@@ -186,9 +189,13 @@ async function finishSuccessfulLogin(page, mode, profile = null) {
     return true;
   }
 
-  // 2. Final recovery attempt: reload if still not confirmed (e.g. stalled hydration)
+  // 2. Final recovery attempt: reload only if genuine transient error or blank page (never destroy active login modal)
   bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-  if (/something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText) || !await isWorkdayWizardVisible(page)) {
+  const isOnAuth = await isWorkdayLogin(page);
+  const hasModal = await page.$('[role="dialog"], .modal, [data-automation-id*="modal" i]').catch(() => null);
+  const isTransientError = /something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText);
+
+  if (isTransientError || (!await isWorkdayWizardVisible(page) && !isOnAuth && !hasModal)) {
     console.log('   🔄 Wizard not confirmed post-login — refreshing page once to trigger hydration...');
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(4000);
@@ -256,7 +263,7 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       timeoutMs: 55000,
     });
 
-    if (forgotResult?.reason === 'mailbox_not_connected') {
+    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected') {
       return 'mailbox_not_connected';
     }
 
@@ -283,7 +290,7 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       timeoutMs: 50000,
     }).catch(() => null);
 
-    if (verified?.reason === 'mailbox_not_connected') {
+    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected') {
       return 'mailbox_not_connected';
     }
 
@@ -308,7 +315,7 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       timeoutMs: 55000,
     }).catch(() => null);
 
-    if (forgotResult?.reason === 'mailbox_not_connected') {
+    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected') {
       return 'mailbox_not_connected';
     }
 
@@ -342,6 +349,10 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       startTime: Date.now() - 60000,
       timeoutMs: 50000,
     }).catch(() => null);
+
+    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected') {
+      return 'mailbox_not_connected';
+    }
 
     if (verified?.onWizard || await isWorkdayWizardVisible(page)) {
       return finishSuccessfulLogin(page, mode, profile);
@@ -845,7 +856,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           return null;
         });
 
-        if (verified?.reason === 'mailbox_not_connected') {
+        if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected') {
           return 'mailbox_not_connected';
         }
 
@@ -872,7 +883,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           timeoutMs: 55000,
         });
 
-        if (forgotResult?.reason === 'mailbox_not_connected') {
+        if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected') {
           return 'mailbox_not_connected';
         }
 

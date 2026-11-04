@@ -683,18 +683,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
   trace({ stage: 'tier3', clientId, tenant, query: normalizeLabel(label), hit: false });
 
-  // ─── TIER 4: Fuzzy Match (Resume Parsing + Supabase Data Combined) ───────────
-  const combinedMemoryHit = lookupCombinedFuzzyAnswer(label, profile, { options, fieldType });
-  if (combinedMemoryHit?.answer) {
-    const fHit = finish(combinedMemoryHit.answer, combinedMemoryHit.source || 'fuzzy_resume_supabase');
-    if (fHit) {
-      console.log(`    🔍 [Tier 4 Fuzzy Combined Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
-      profile?._onLog?.(currentStep, `[Tier 4 Fuzzy Combined Match] "${label.slice(0, 50)}" ← "${fHit.answer.slice(0, 45)}"`);
-      return fHit;
-    }
-  }
-
-  // ─── TIER 5: QA Bank Reference Bank (Persistent Table) ──────────────────────
+  // ─── TIER 4: QA Bank & Universal Reference Bank (Persistent Table & Templates) ───
   try {
     const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
     const qaBankAnswer = await findAnswerFromQaBank({
@@ -709,12 +698,23 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       const qaHit = finish(qaBankAnswer, 'qa_bank');
       if (qaHit) {
         trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
-        console.log(`    🏦 [Tier 5 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
-        profile?._onLog?.(currentStep, `[Universal QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
+        console.log(`    🏦 [Tier 4 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
+        profile?._onLog?.(currentStep, `[Tier 4 QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
         return qaHit;
       }
     }
   } catch {}
+
+  // ─── TIER 5: Semantic & Fuzzy Match (Resume Parsing + Supabase Data + CRM API) ─────
+  const combinedMemoryHit = lookupCombinedFuzzyAnswer(label, profile, { options, fieldType });
+  if (combinedMemoryHit?.answer) {
+    const fHit = finish(combinedMemoryHit.answer, combinedMemoryHit.source || 'fuzzy_resume_supabase');
+    if (fHit) {
+      console.log(`    🔍 [Tier 5 Semantic/Fuzzy Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
+      profile?._onLog?.(currentStep, `[Tier 5 Semantic/Fuzzy Match] "${label.slice(0, 50)}" ← "${fHit.answer.slice(0, 45)}"`);
+      return fHit;
+    }
+  }
 
   // ─── Safe Legal & Compliance Fallbacks (when not answered in Tier 0-5) ─────────
   const sensitive = lookupSensitiveSafeAnswer(label);

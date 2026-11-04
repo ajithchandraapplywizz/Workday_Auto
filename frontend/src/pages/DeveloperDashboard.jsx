@@ -11,7 +11,9 @@ import {
   triggerAutonomousBot,
   stopAutonomousBot,
   triggerSubmissionStage,
+  triggerAllParallelStage,
   stopSubmissionStage,
+  stopAllParallelStage,
   fetchBotDaemonStatus,
   fetchAllOperators,
   resolveSupabaseStorageUrl,
@@ -23,7 +25,18 @@ import {
 export default function DeveloperDashboard() {
   const { date, timeframe } = useAuth();
 
-  const [activeTab, setActiveTab] = useState('System');
+  const [activeTab, setActiveTab] = useState(() => {
+    try {
+      return sessionStorage.getItem('workday_dev_active_tab') || 'System';
+    } catch {}
+    return 'System';
+  });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('workday_dev_active_tab', activeTab);
+    } catch {}
+  }, [activeTab]);
   const [statusFilter, setStatusFilter] = useState('All');
   const [stoppedBlockFilter, setStoppedBlockFilter] = useState('All');
   const [errorSearchQuery, setErrorSearchQuery] = useState('');
@@ -33,12 +46,20 @@ export default function DeveloperDashboard() {
   const [selectedDebugApp, setSelectedDebugApp] = useState(null);
   const [debugTrace, setDebugTrace] = useState([]);
 
-  // Batch-wise 9-worker logs states
-  const [batchLogs, setBatchLogs] = useState({
-    scanning: [],
-    resolving: [],
-    submitting: [],
+  // Batch-wise 9-worker logs states (persisted across reloads)
+  const [batchLogs, setBatchLogs] = useState(() => {
+    try {
+      const cached = sessionStorage.getItem('workday_batch_logs');
+      if (cached) return JSON.parse(cached);
+    } catch {}
+    return { scanning: [], resolving: [], submitting: [] };
   });
+
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('workday_batch_logs', JSON.stringify(batchLogs));
+    } catch {}
+  }, [batchLogs]);
   const [activeBatchView, setActiveBatchView] = useState('all'); // 'all' | 'scanning' | 'resolving' | 'submitting'
   const [scanWorkerFilter, setScanWorkerFilter] = useState('all');
   const [resolveWorkerFilter, setResolveWorkerFilter] = useState('all');
@@ -142,27 +163,29 @@ export default function DeveloperDashboard() {
     };
   }, [backendUrl, isAnyPipelineActive]);
 
-  // Live polling for Batch Worker Logs whenever Worker Logs tab is active
+  // Live polling for Batch Worker Logs (continuous on Worker Logs tab or whenever any pipeline is running)
   useEffect(() => {
-    if (activeTab !== 'Worker Logs') return;
     let isMounted = true;
     async function pollBatchLogs() {
-      const res = await fetchBatchWorkerLogs({ limit: 120 });
+      const res = await fetchBatchWorkerLogs({ limit: 150 });
       if (!isMounted) return;
       if (res.success && res.batches) {
         setBatchLogs(res.batches);
       }
     }
-    // Immediate initial fetch
+    // Immediate initial fetch on mount and tab switch
     pollBatchLogs();
 
-    // Continuous live polling every 2.5s while user is viewing Worker Logs tab
-    const interval = setInterval(pollBatchLogs, 2500);
+    // Poll faster (2.5s) on Worker Logs tab, or periodically (5s) while pipeline is active
+    const pollIntervalMs = activeTab === 'Worker Logs' ? 2500 : (isAnyPipelineActive ? 5000 : null);
+    if (!pollIntervalMs) return;
+
+    const interval = setInterval(pollBatchLogs, pollIntervalMs);
     return () => {
       isMounted = false;
       clearInterval(interval);
     };
-  }, [activeTab]);
+  }, [activeTab, isAnyPipelineActive]);
 
   // Load all dynamic data with real-time polling and Supabase Realtime channel
   useEffect(() => {
@@ -633,6 +656,38 @@ export default function DeveloperDashboard() {
     }
   };
 
+  // Handle triggering both scanning & submission stages in parallel
+  const handleTriggerAllParallel = async () => {
+    setIsTriggering(true);
+    setIsSubmitTriggering(true);
+    try {
+      setTriggerToast({ type: 'info', text: '⚡ Launching Universal Parallel Pipeline (Scanning & Submitting)...' });
+      const res = await triggerAllParallelStage();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ Universal Parallel Pipeline Triggered! Both Scanning and Submitting workers are running concurrently.',
+        });
+        setBotStatus((prev) => ({
+          ...prev,
+          isRunning: true,
+          isScanning: true,
+          isSubmitting: true,
+          state: 'parallel_pipeline',
+          stage: 'parallel_pipeline',
+        }));
+      } else {
+        setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch parallel trigger') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Trigger error: ' + err.message });
+    } finally {
+      setIsTriggering(false);
+      setIsSubmitTriggering(false);
+      setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
   // Handle triggering submission pipeline for all approved applications
   const handleTriggerSubmissions = async () => {
     setIsSubmitTriggering(true);
@@ -660,6 +715,62 @@ export default function DeveloperDashboard() {
     } finally {
       setIsSubmitTriggering(false);
       setTimeout(() => setTriggerToast(null), 10000);
+    }
+  };
+
+  // Handle hard stopping ALL workers (both Scanning & Submissions) immediately
+  const handleStopAllParallel = async () => {
+    setIsTriggering(true);
+    setIsSubmitTriggering(true);
+    setTriggerToast({ type: 'info', text: '🛑 Halting ALL background workers immediately across both pipelines...' });
+
+    // Immediately reflect stopped state in UI
+    setBotStatus((prev) => ({
+      ...prev,
+      isRunning: false,
+      isScanning: false,
+      isSubmitting: false,
+      state: 'stopped',
+      stage: 'idle',
+    }));
+    setWorkerPool((prev) => ({
+      ...prev,
+      inFlight: 0,
+      scanningActive: 0,
+      resolvingActive: 0,
+      submittingActive: 0,
+    }));
+
+    const stopEntry = {
+      id: 'stop-all-' + Date.now(),
+      ts: new Date().toISOString(),
+      step_index: 0,
+      message: '🛑 [STOPPED] All background workers TERMINATED immediately by user. Active browser contexts aborted and workers set to idle in database.',
+      level: 'warn',
+    };
+    setBatchLogs((prev) => ({
+      ...prev,
+      scanning: [stopEntry, ...(prev.scanning || [])],
+      resolving: [stopEntry, ...(prev.resolving || [])],
+      submitting: [stopEntry, ...(prev.submitting || [])],
+    }));
+
+    try {
+      const res = await stopAllParallelStage();
+      if (res.success) {
+        setTriggerToast({
+          type: 'success',
+          text: '✓ All workers STOPPED immediately. All browser contexts closed and database status reset to idle.',
+        });
+      } else {
+        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop all workers') });
+      }
+    } catch (err) {
+      setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
+    } finally {
+      setIsTriggering(false);
+      setIsSubmitTriggering(false);
+      setTimeout(() => setTriggerToast(null), 8000);
     }
   };
 
@@ -789,6 +900,31 @@ export default function DeveloperDashboard() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
+          {/* Universal Parallel Pipeline Trigger */}
+          <button
+            type="button"
+            onClick={handleTriggerAllParallel}
+            disabled={isTriggering || isSubmitTriggering}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '0.65rem 1.25rem',
+              borderRadius: '6px',
+              border: 'none',
+              background: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)',
+              color: '#ffffff',
+              fontSize: '0.88rem',
+              fontWeight: 700,
+              cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+              boxShadow: '0 4px 12px rgba(139, 92, 246, 0.35)',
+              transition: 'all 0.15s ease',
+            }}
+            title="Run scanning/resolving and submission pipelines simultaneously across all active workers"
+          >
+            <span>⚡ Trigger All (Parallel Pipeline)</span>
+          </button>
+
           {/* Stage 1: Trigger / Stop Scanning & Resolving (3 Workers) */}
           {isScanActive ? (
             <button
@@ -892,10 +1028,7 @@ export default function DeveloperDashboard() {
           {(isScanActive || isSubmitActive) && (
             <button
               type="button"
-              onClick={() => {
-                if (isScanActive) handleStopBot();
-                if (isSubmitActive) handleStopSubmissions();
-              }}
+              onClick={handleStopAllParallel}
               disabled={isTriggering || isSubmitTriggering}
               style={{
                 display: 'inline-flex',

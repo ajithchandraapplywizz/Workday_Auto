@@ -58,7 +58,7 @@ export function slugify(url) {
 export function discoverFieldsInDOM(container = document) {
   const root = container || document;
   const nodes = root.querySelectorAll(
-    'input, select, textarea, [role="combobox"], [role="radiogroup"], [role="radio"], [role="checkbox"], [contenteditable="true"], [data-automation-id="select-widget"]'
+    'input, select, textarea, [role="combobox"], [role="radiogroup"], [role="radio"], [role="checkbox"], [contenteditable="true"], [data-automation-id="select-widget"], [data-automation-id="selectWidget"], [data-automation-id="selectOne"], [data-automation-id*="select" i], button[aria-haspopup="listbox"], button[aria-haspopup="true"]'
   );
 
   function isVisible(el) {
@@ -273,7 +273,9 @@ export function discoverFieldsInDOM(container = document) {
     if (role === 'combobox') return 'select';
     if (role === 'checkbox') return 'checkbox';
     if (role === 'radiogroup' || role === 'radio') return 'radio';
-    if (el.getAttribute('data-automation-id') === 'select-widget') return 'select';
+    const autoId = (el.getAttribute('data-automation-id') || '').toLowerCase();
+    if (autoId === 'select-widget' || autoId === 'selectwidget' || autoId === 'selectone' || autoId === 'select-one') return 'select';
+    if (el.getAttribute('aria-haspopup') === 'listbox' || el.getAttribute('aria-haspopup') === 'true') return 'select';
     if (el.tagName.toLowerCase() === 'select') return 'select';
     if (el.tagName.toLowerCase() === 'textarea') return 'textarea';
     if (el.type) return el.type === 'select-one' ? 'select' : el.type;
@@ -285,7 +287,8 @@ export function discoverFieldsInDOM(container = document) {
   for (const el of nodes) {
     if (el.getAttribute('data-automation-id') === 'beecatcher' || el.name === 'website') continue;
     const type = classifyFieldType(el);
-    if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type) && el.getAttribute('data-automation-id') !== 'select-widget') continue;
+    const isCustomSelect = /select-?widget|select-?one/i.test(automationId) || el.getAttribute('aria-haspopup') === 'listbox';
+    if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type) && !isCustomSelect) continue;
     if (!isVisible(el)) continue;
 
     const automationId = el.getAttribute('data-automation-id')
@@ -436,7 +439,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           Array.from(document.querySelectorAll('a, button')).some(el => /^\s*(apply|apply now|apply for this job|continue application)\s*$/i.test((el.textContent || '').trim()))
         );
         const hasWizard = Boolean(
-          document.querySelector('button[data-automation-id="pageFooterNextButton"], button:has-text("Save and Continue"), input[data-automation-id="legalNameSection_firstName"]')
+          document.querySelector('button[data-automation-id="pageFooterNextButton"], input[data-automation-id="legalNameSection_firstName"]') || Array.from(document.querySelectorAll('button')).some(b => /save\s*(?:and|&)\s*continue/i.test(b.textContent || ''))
         );
         const hasExpired = /(?:doesn'?t|does not) exist|expired|not found|\b(?:error\s*)?404\b|closed|filled|no longer available/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;

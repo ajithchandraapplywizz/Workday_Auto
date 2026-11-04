@@ -2,8 +2,8 @@ title: Workday Auto Master Question & Answer Reference Bank
 description: Consolidated, deduplicated form questions, types, and sample
   answers captured by Blueprint Workers
 version: 1.0.0
-last_updated: 2026-11-01T13:43:14.862Z
-total_unique_questions: 63
+last_updated: 2026-11-04T09:39:18.063Z
+total_unique_questions: 117
 questions:
   are you legally authorized to work in the united states:
     question: Are you legally authorized to work in the United States?
@@ -111,7 +111,8 @@ questions:
     question: Country*
     field_type: dropdown
     step: My Information
-    options: []
+    options:
+      - United States of America
     sample_answer: United States of America (+1)
     source: scan_placeholder
     tenant: global
@@ -172,43 +173,67 @@ questions:
     field_type: dropdown
     step: My Information
     options:
-      - India (+91)
-      - Andaman and Nicobar Islands
-      - Andhra Pradesh
-      - Arunāchal Pradesh
-      - Assam
-      - Bihār
-      - Chandīgarh
-      - Chhattīsgarh
-      - Dādra and Nagar Haveli and Damān and Diu
-      - Delhi
-      - Goa
-      - Gujarāt
-      - Haryāna
-      - Himāchal Pradesh
-      - Jammu and Kashmīr
-      - Jhārkhand
-      - Karnātaka
-      - Kerala
-      - Ladākh
-      - Lakshadweep
-      - Madhya Pradesh
-      - Mahārāshtra
-      - Manipur
-      - Meghālaya
-      - Mizoram
-      - Nāgāland
-      - Odisha
-      - Puducherry (Pondicherry)
-      - Punjab
-      - Rājasthān
-      - Sikkim
-      - Tamil Nādu
-      - Telangāna
-      - Tripura
-      - Uttarākhand
-      - Uttar Pradesh
-      - West Bengal
+      - United States of America (+1)
+      - Alabama
+      - Alaska
+      - American Samoa
+      - Arizona
+      - Arkansas
+      - Armed Forces Americas
+      - Armed Forces Europe
+      - Armed Forces Pacific
+      - California
+      - Colorado
+      - Connecticut
+      - Delaware
+      - District of Columbia
+      - Florida
+      - Georgia
+      - Guam
+      - Hawaii
+      - Idaho
+      - Illinois
+      - Indiana
+      - Iowa
+      - Kansas
+      - Kentucky
+      - Louisiana
+      - Maine
+      - Maryland
+      - Massachusetts
+      - Michigan
+      - Minnesota
+      - Mississippi
+      - Missouri
+      - Montana
+      - Nebraska
+      - Nevada
+      - New Hampshire
+      - New Jersey
+      - New Mexico
+      - New York
+      - North Carolina
+      - North Dakota
+      - Northern Mariana Islands
+      - Ohio
+      - Oklahoma
+      - Oregon
+      - Pennsylvania
+      - Puerto Rico
+      - Rhode Island
+      - South Carolina
+      - South Dakota
+      - Tennessee
+      - Texas
+      - United States Minor Outlying Islands
+      - Utah
+      - Vermont
+      - Virginia
+      - Virgin Islands, U.S.
+      - Washington
+      - West Virginia
+      - Wisconsin
+      - Wyoming
     sample_answer: Florida
     source: scan_placeholder
     tenant: global
@@ -411,6 +436,8 @@ questions:
     step: Review
     options:
       - Male
+      - Female
+      - Decline to self-identify
     sample_answer: Male
     source: scan_placeholder
     tenant: global
@@ -476,7 +503,7 @@ questions:
     field_type: text
     step: My Information
     options: []
-    sample_answer: null
+    sample_answer: Sai Sunai Madhamshetty
     source: scan_placeholder
     tenant: global
     first_seen_company: Zoom
@@ -572,6 +599,7 @@ questions:
     options:
       - Yes
       - No
+      - Decline to self-identify
     sample_answer: No
     source: scan_placeholder
     tenant: global
@@ -899,3 +927,795 @@ questions:
     first_seen_role: Application
     mock_client_id: AWL-1568
     created_at: 2026-11-01T13:43:14.862Z
+  if you are currently in a period of optional practical training opt are you eligible for a 24-month opt extension based upon a degree from a qualifying united states institution in science technology engineering or mathematics stem:
+    question: If you are currently in a period of Optional Practical Training (OPT),
+      are you eligible for a 24-month OPT extension based upon a degree from a
+      qualifying United States institution in Science, Technology, Engineering
+      or Mathematics (STEM)?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options: []
+    sample_answer: No
+    source: llm_scan_learned
+    tenant: philips
+    first_seen_company: Philips
+    first_seen_role: Careers
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:29:36.179Z
+  are you in a family or romantic relationship with anyone at the company:
+    question: Are you in a family or romantic relationship with anyone at the Company? **
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: llm_scan_learned
+    tenant: revantage
+    first_seen_company: Revantage
+    first_seen_role: Sr Associate Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:30:18.934Z
+  are you currently or have you previously worked for philips including as a contingent worker/external:
+    question: Are you currently or have you previously worked for Philips, including
+      as a contingent worker/external?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  country / territory:
+    question: Country / Territory*
+    field_type: dropdown
+    step: My Information
+    options: []
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  email:
+    question: Email*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: sai.madhamshetty@applywizard.ai
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  are you currently legally authorized to work in the united states:
+    question: Are you currently legally authorized to work in the United States?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  will you now or in the future require sponsorship from philips for an employment-authorized visa status ie h-1b l-1 tn etc to work in the united states:
+    question: Will you now, or in the future, require sponsorship from Philips for
+      an employment-authorized visa status (i.e., H-1B, L-1, TN, etc.) to work
+      in the United States?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  do you have temporary authorization eg opt cpt or similar temporary work authorization to currently work in the united states:
+    question: Do you have temporary authorization (e.g., OPT, CPT, or similar
+      temporary work authorization) to currently work in the United States?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  ? a conflict of interest exists when personal interests or activities are not in line with philips’ interests and influence or appear to influence our ability to perform our work objectively and in the best interests of the company examples of possible conflicts of interest- you award a contract to a third party in which you or a family member or friend have a financial interest- next to your job at philips you also work part-time for another company- you decide to hire or manage a close family member or friend- you have a romantic or family relationship with someone in your management chain direct or indirect report customer or competitor- you have a material financial interest in a customer or supplier of philips- you provide or receive financial support such as a personal loan to or from someone you also have a working relationship with for example someone working at a distributor or customer of philips- in your own time you offer services to a customer which are similar to those offered by philipsdo you have any conflict of interest related to the examples mentioned above
+  : question: A conflict of interest exists when personal interests or activities
+      are not in line with Philips’ interests and influence, or appear to
+      influence, our ability to perform our work objectively and in the best
+      interests of the company. Examples of possible Conflicts of Interest:- You
+      award a contract to a third party in which you or a family member or
+      friend have a financial interest.- Next to your job at Philips, you also
+      work part-time for another company.- You decide to hire or manage a close
+      family member or friend.- You have a romantic or family relationship with
+      someone in your management chain, direct or indirect report, customer or
+      competitor.- You have a (material) financial interest in a customer or
+      supplier of Philips.- You provide or receive financial support, such as a
+      personal loan, to or from someone you also have a working relationship
+      with, for example someone working at a distributor or customer of
+      Philips.- In your own time, you offer services to a customer which are
+      similar to those offered by Philips.Do you have any conflict of interest
+      related to the examples mentioned above?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  your sex male:
+    question: your sex. Male
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: Male
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  the ethnicity or race which most accurately describes how you identify yourself:
+    question: the ethnicity or race which most accurately describes how you identify
+      yourself.
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - American Indian or Alaska Native (Not Hispanic or Latino) (United States
+        of America)
+      - Asian (Not Hispanic or Latino) (United States of America)
+      - Black or African American (Not Hispanic or Latino) (United States of
+        America)
+      - Hispanic or Latino (United States of America)
+      - I choose not to self-identify (United States of America)
+      - Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)
+        (United States of America)
+      - Two or More Races (Not Hispanic or Latino) (United States of America)
+      - White (Not Hispanic or Latino) (United States of America)
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  your veteran status:
+    question: your Veteran status.
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I am a Protected Veteran (as defined above)
+      - I am a veteran but do not fall under the protected classifications
+        listed above
+      - I have no military experience
+      - I do not wish to disclose my status
+    sample_answer: I am a Protected Veteran (as defined above)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Philips
+    first_seen_role: Sr. Software Development Engineer (Orlando, FL)
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:32:45.087Z
+  have you previously been employed by any revantage entity across any location including as an intern current employees please apply via our internal workday career site instead:
+    question: "Have you previously been employed by any Revantage entity across any
+      location, including as an intern? CURRENT EMPLOYEES: Please apply via our
+      internal Workday career site instead.*"
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  are you legally eligible to work in the united states:
+    question: Are you legally eligible to work in the United States? **
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  will you now or will you at any point in the future require sponsorship to work in the united states:
+    question: Will you now, or will you at any point in the future, require
+      sponsorship to work in the United States? **
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  are you over the age of 18:
+    question: Are you over the age of 18? **
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  by selecting below you consent to the terms:
+    question: By selecting below you consent to the terms.*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - By selecting below you consent to the terms.*
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  language:
+    question: Language*
+    field_type: dropdown
+    step: Self Identify
+    options: []
+    sample_answer: English
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  name:
+    question: Name*
+    field_type: text
+    step: Self Identify
+    options: []
+    sample_answer: Sai Sunai
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  date:
+    question: Date*
+    field_type: date
+    step: Self Identify
+    options: []
+    sample_answer: 11/04/2026
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  current value is 11/4/2026:
+    question: current value is 11/4/2026
+    field_type: date
+    step: Self Identify
+    options: []
+    sample_answer: 11/04/2026
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  please check one of the boxes below:
+    question: Please check one of the boxes below:*
+    field_type: checkbox-group
+    step: Self Identify
+    options:
+      - Yes, I have a disability, or have had one in the past
+      - No, I do not have a disability and have not had one in the past
+      - I do not want to answer
+    sample_answer: No, I do not have a disability
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Revantage
+    first_seen_role: Sr. Associate, Data Scientist
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:35:00.189Z
+  will you require relocation assistance for this role or do you live local to the position location:
+    question: Will you require relocation assistance for this role, or do you live
+      local to the position location?*
+    field_type: textarea
+    step: Application Questions
+    options: []
+    sample_answer: N/A
+    source: scan_mandatory_fallback
+    tenant: wattswater
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:37:39.351Z
+  do you possess the minimum number years of experience as listed in the job description:
+    question: Do you possess the minimum number years of experience as listed in the
+      job description?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: "5"
+    source: scan_mandatory_fallback
+    tenant: wattswater
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:37:40.076Z
+  are you willing to meet the travel requirements for this role:
+    question: Are you willing to meet the travel requirements for this role?*
+    field_type: dropdown
+    step: 3
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: wattswater
+    first_seen_company: Workday Partner
+    first_seen_role: Application
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:38:45.050Z
+  do you possess the required degrees and/or professional certifications as listed in the job description:
+    question: Do you possess the required degrees and/or professional certifications
+      as listed in the job description?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: llm_scan_learned
+    tenant: wattswater
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:38:46.449Z
+  are you a former watts water technology employee if you select yes please answer one or more of the questions below:
+    question: Are you a former Watts Water Technology employee? If you select yes,
+      please answer one or more of the questions below.*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  are you legally eligible to work in the country to which you are applying:
+    question: Are you legally eligible to work in the country to which you are applying?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  will you now or in the future require visa sponsorship to work in the country or location to which you are applying:
+    question: Will you now or in the future require visa sponsorship to work in the
+      country or location to which you are applying?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  our positions require a pre-employment drug screen and background check are you willing to participate in these standard pre-employment screens:
+    question: Our positions require a pre-employment drug screen and background
+      check. Are you willing to participate in these standard pre-employment
+      screens?*
+    field_type: dropdown
+    step: Application Questions
+    options: []
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  have you ever been employed by watts water technologies or any of its subsidiaries:
+    question: Have you ever been employed by Watts Water Technologies or any of its
+      subsidiaries?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  do you have relatives employed by watts water technologies or any of its subsidiaries:
+    question: Do you have relatives employed by Watts Water Technologies or any of
+      its subsidiaries?*
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  what are your desired annual salary expectations for the position you are applying to please express in your local currency:
+    question: What are your desired annual salary expectations for the position you
+      are applying to? (please express in your local currency)*
+    field_type: textarea
+    step: Application Questions
+    options: []
+    sample_answer: 100000 USD
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  how many years have you directly managed a team:
+    question: How many years have you directly managed a team?*
+    field_type: textarea
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: "0"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  ethnicity asian not hispanic or latino united states of america:
+    question: "Ethnicity: Asian (Not Hispanic or Latino) (United States of America)"
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+      - Decline to self-identify
+    sample_answer: Asian (Not Hispanic or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  veteran status:
+    question: Veteran Status:*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
+    sample_answer: I am not a veteran
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  hispanic or latino:
+    question: Hispanic or Latino?
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Watts Water Technologies
+    first_seen_role: Supply Chain Business Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T08:43:20.808Z
+  have you previously been employed by chg healthcare:
+    question: Have you previously been employed by CHG Healthcare?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  regionsubdivision1:
+    question: regionSubdivision1
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: Georgia
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  county:
+    question: County*
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: Georgia
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  do you currently require immigration sponsorship for work authorization eg h-1b if hired verification will be required consistent with federal law:
+    question: Do you currently require immigration sponsorship for work
+      authorization (e.g., H-1B)? (if hired, verification will be required
+      consistent with federal law)*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  will you require future immigration sponsorship for work authorization:
+    question: Will you require future immigration sponsorship for work authorization?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  have you ever worked for a staffing company in any capacity within the last 5 years:
+    question: Have you ever worked for a staffing company (in any capacity) within
+      the last 5 years?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: marietta
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  race or ethnicity select all that apply:
+    question: Race or Ethnicity? (Select all that apply).*
+    field_type: checkbox-group
+    step: Voluntary Disclosures
+    options:
+      - American Indian or Alaska Native (Not Hispanic or Latino) (United States
+        of America)
+      - Asian (Not Hispanic or Latino) (United States of America)
+      - Black or African American (Not Hispanic or Latino) (United States of
+        America)
+      - Hispanic or Latino (United States of America)
+      - I do not wish to answer. (United States of America)
+      - Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)
+        (United States of America)
+      - Two or More Races (Not Hispanic or Latino) (United States of America)
+      - White (Not Hispanic or Latino) (United States of America)
+    sample_answer: marietta
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  i have read and confirm to the terms of service for chg careers:
+    question: I have read and confirm to the terms of service for CHG Careers.*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - I have read and confirm to the terms of service for CHG Careers.*
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  white not hispanic or latino united states of america:
+    question: White (Not Hispanic or Latino) (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  two or more races not hispanic or latino united states of america:
+    question: Two or More Races (Not Hispanic or Latino) (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  native hawaiian or other pacific islander not hispanic or latino united states of america:
+    question: Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)
+      (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  i do not wish to answer united states of america:
+    question: I do not wish to answer. (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  hispanic or latino united states of america:
+    question: Hispanic or Latino (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  black or african american not hispanic or latino united states of america:
+    question: Black or African American (Not Hispanic or Latino) (United States of
+      America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  asian not hispanic or latino united states of america:
+    question: Asian (Not Hispanic or Latino) (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  american indian or alaska native not hispanic or latino united states of america:
+    question: American Indian or Alaska Native (Not Hispanic or Latino) (United
+      States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: CHG Healthcare
+    first_seen_role: Sr. Software Engineer
+    mock_client_id: AWL-26230
+    created_at: 2026-11-04T08:56:59.784Z
+  i agree that visa may reach out to me via sms regarding my application and candidate experience message and data rates may apply i can opt-out at any time:
+    question: I agree that Visa may reach out to me via SMS regarding my application
+      and candidate experience. Message and data rates may apply. I can opt-out
+      at any time.*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Opt-In
+      - Opt-Out
+    sample_answer: Opt-In
+    source: scan_mandatory_fallback
+    tenant: visa
+    first_seen_company: Visa
+    first_seen_role: Staff Software Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-04T09:39:18.063Z

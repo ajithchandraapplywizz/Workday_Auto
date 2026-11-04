@@ -51,6 +51,10 @@ export async function isWorkdayVerificationPage(page) {
         'input[data-automation-id*="code" i]:visible',
         'input[data-automation-id*="verification" i]:visible',
         'button[data-automation-id*="resend" i]:visible',
+        'button:has-text("Resend Account Verification"):visible',
+        'a:has-text("Resend Account Verification"):visible',
+        'button:has-text("Resend verification"):visible',
+        'a:has-text("Resend verification"):visible',
         'button:has-text("Resend email"):visible',
         'button:has-text("Resend code"):visible',
       ].join(', ')).catch(() => null);
@@ -67,6 +71,8 @@ export async function isWorkdayVerificationPage(page) {
         bodyText.includes('verification email') ||
         bodyText.includes('verification code') ||
         bodyText.includes('account may need verification') ||
+        bodyText.includes('resend account verification') ||
+        bodyText.includes("still can't sign in") ||
         bodyText.includes('need to be verified') ||
         bodyText.includes('need to be activated') ||
         bodyText.includes('activate your account') ||
@@ -514,7 +520,28 @@ export async function resolveWorkdayVerification(page, { email, password, compan
     return { success: true, type: 'direct_wizard', onWizard: true };
   }
 
-  const cutoff = startTime ? (startTime - 60000) : (Date.now() - 5 * 60 * 1000);
+  // Active Trigger: If Workday displays "Resend Account Verification", click it to dispatch a fresh verification email!
+  if (page && typeof page.locator === 'function') {
+    const resendBtn = page.locator([
+      'button:has-text("Resend Account Verification")',
+      'a:has-text("Resend Account Verification")',
+      'button:has-text("Resend verification")',
+      'a:has-text("Resend verification")',
+      'button:has-text("Resend email")',
+      'a:has-text("Resend email")',
+      'button:has-text("Resend code")',
+      'a:has-text("Resend code")',
+      '[data-automation-id*="resend" i]',
+    ].join(', ')).first();
+    if (await resendBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
+      console.log('   📩 [WorkdayBot] "Resend Account Verification" detected — clicking to dispatch fresh verification email...');
+      await resendBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(2500);
+      startTime = Date.now();
+    }
+  }
+
+  const cutoff = startTime ? (startTime - 60000) : (Date.now() - 10 * 60 * 1000);
   const effectiveCompany = company || (page && typeof page.url === 'function' ? extractWorkdayCompanyName(page.url()) : '');
 
   console.log(`   📧 [WorkdayBot] Polling Zoho Mail Reader for candidate ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
@@ -535,24 +562,32 @@ export async function resolveWorkdayVerification(page, { email, password, compan
         return { success: false, reason: 'invalid_link' };
       }
 
-      console.log(`   🔗 [WorkdayBot] Captured link: ${cleanLink}`);
+      console.log(`   🔗 [WorkdayBot] Captured authentic verification link: ${cleanLink}`);
       console.log('   🌐 [WorkdayBot] Navigating directly in active browser session...');
-      await page.goto(cleanLink, { waitUntil: 'domcontentloaded' });
+      try {
+        await page.goto(cleanLink, { waitUntil: 'domcontentloaded', timeout: 45000 });
+      } catch (navErr) {
+        console.warn(`   ⚠️ [WorkdayBot] First goto attempt hit ${navErr?.message}, retrying...`);
+        await page.goto(cleanLink, { waitUntil: 'load', timeout: 45000 }).catch(() => {});
+      }
       await page.waitForTimeout(3000);
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
       // Complete password setup form if present
       const resetCompleted = await completeWorkdayPasswordResetForm(page, email, password);
 
-      // Check for post-action buttons
+      // Check for post-action buttons (Sign In / Continue)
       if (typeof page.locator === 'function') {
         const actionBtn = page.locator([
+          'button:has-text("Sign In")',
+          'a:has-text("Sign In")',
+          'button:has-text("Log In")',
+          'a:has-text("Log In")',
           'button:has-text("Continue")',
           'a:has-text("Continue")',
           'button[data-automation-id*="continue" i]',
           'a[data-automation-id*="continue" i]',
-          'button:has-text("Sign In")',
-          'a:has-text("Sign In")',
+          'button[data-automation-id="signInSubmitButton"]',
           'button[data-automation-id="adventureButton"]',
           'a[data-automation-id="adventureButton"]',
           'button[data-automation-id="jobPostingApplyButton"]',
@@ -562,9 +597,25 @@ export async function resolveWorkdayVerification(page, { email, password, compan
         if (await actionBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
           console.log('   🔗 [WorkdayBot] Clicking post-activation action button...');
           await actionBtn.click({ force: true }).catch(() => {});
-          await page.waitForTimeout(2000);
+          await page.waitForTimeout(2500);
           try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
         }
+      }
+
+      // If landed on Sign In form post-activation, log in directly:
+      let hasPwd = await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible').catch(() => null);
+      if (!hasPwd) {
+        try {
+          await page.waitForSelector('input[data-automation-id="password"]:visible, input[type="password"]:visible', { timeout: 4000 });
+          hasPwd = true;
+        } catch {}
+      }
+      if (hasPwd && email && password) {
+        console.log('   🔑 [WorkdayBot] Sign In form active post-verification link — submitting credentials...');
+        const { workdayLogin } = await import('./workday.mjs');
+        await workdayLogin(page, email, password);
+        await page.waitForTimeout(2500);
+        try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
       }
 
       const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
@@ -611,9 +662,9 @@ export async function resolveWorkdayVerification(page, { email, password, compan
     }
   }
 
-  if (pollRes?.reason === 'mailbox_not_connected') {
+  if (pollRes?.reason === 'mailbox_not_connected' || pollRes?.reason === 'zoho mail not connected') {
     console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is not connected in Zoho Mail Reader.`);
-    return { success: false, reason: 'zoho mail not connected' };
+    return { success: false, reason: 'mailbox_not_connected' };
   }
 
   console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout (${pollRes?.reason || 'timeout'}).`);

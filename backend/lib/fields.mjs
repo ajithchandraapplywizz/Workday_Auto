@@ -457,6 +457,52 @@ export async function clickVisiblePromptOption(page, needles = []) {
   return chosen;
 }
 
+/**
+ * Click the FIRST valid visible prompt option in an open Workday listbox/popup.
+ * Used as fallback when typed search terms don't match Workday's prompt taxonomy (e.g. Field of Study).
+ * @param {import('playwright').Page} page
+ * @returns {Promise<string|null>}
+ */
+export async function clickFirstVisiblePromptOption(page) {
+  const evaluatedText = await page.evaluate(() => {
+    const normalize = (s) => (s || '').replace(/\s+/g, ' ').trim();
+    const riskyRe = /^(add|\+|add\s+another|create|delete|remove|clear|cancel|close)$/i;
+    const nodes = Array.from(document.querySelectorAll(
+      '[role="option"], [data-automation-id="promptOption"], [role="treeitem"], [data-automation-id="menuItem"], [role="listbox"] [role="checkbox"], [data-automation-id="promptOption"] [role="checkbox"]'
+    )).filter(el => {
+      const style = window.getComputedStyle(el);
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      if (!(el.offsetWidth > 0 || el.getClientRects().length > 0)) return false;
+      const text = normalize(el.textContent);
+      if (!text || riskyRe.test(text)) return false;
+      if (el.tagName === 'BUTTON' && /^add\b/i.test(text)) return false;
+      if (/^select(\s+one)?$/i.test(text)) return false;
+      return true;
+    });
+
+    if (nodes.length === 0) return null;
+    const target = nodes[0];
+    const text = normalize(target.textContent);
+    target.click();
+    return text;
+  }).catch(() => null);
+
+  if (evaluatedText) return evaluatedText;
+
+  try {
+    const loc = page.locator('[role="option"]:visible, [data-automation-id="promptOption"]:visible, [role="treeitem"]:visible').first();
+    if (await loc.isVisible({ timeout: 800 }).catch(() => false)) {
+      const txt = (await loc.innerText().catch(() => '')).replace(/\s+/g, ' ').trim();
+      if (txt && !/^(add|\+|delete|remove|cancel|close)$/i.test(txt)) {
+        await loc.click({ force: true }).catch(() => loc.evaluate((el) => el.click()));
+        return txt;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
 // ─── Searchable dropdown handler (Country Phone Code etc.) ──────────────────
 export async function handleSearchableDropdown(page, trigger, searchTerm, optionText, options = {}) {
   const timeout = options.timeout || 8000;

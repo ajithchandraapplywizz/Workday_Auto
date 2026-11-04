@@ -650,55 +650,68 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     allTasks.flatMap((t) => String(t.applywizz_id || '').split(',').map((s) => s.replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean))
   ));
 
-  const candidateTask = {
-    ...leadTask,
-    queueTaskId: leadTask.id,
-    applywizz_id: MOCK_SCAN_CLIENT_ID,
-    applywizzId: MOCK_SCAN_CLIENT_ID,
-    jobUrl: leadTask.job_url || jobUrl,
-  };
+  // Sibling AWL-ID cascade: If a candidate requires Zoho verification but their mailbox is not connected,
+  // do NOT fail the job link. Reject only that candidate and immediately try the next candidate AWL-ID in the list!
+  const candidatePool = Array.from(new Set([
+    ...(MOCK_SCAN_CLIENT_ID ? [MOCK_SCAN_CLIENT_ID] : []),
+    ...allSiblingAwlIds,
+  ].filter(Boolean)));
 
-  console.log(`\n${'═'.repeat(64)}`);
-  console.log(`📥 [STAGE 1] Picked from batch_job_queue:`);
-  console.log(`   Canonical URL: ${jobUrl}`);
-  console.log(`   Cluster AWL-IDs: ${allSiblingAwlIds.slice(0, 8).join(', ')}${allSiblingAwlIds.length > 8 ? ` (+${allSiblingAwlIds.length - 8} more)` : ''} (${allSiblingAwlIds.length} candidates)`);
-  console.log(`   Attempt: ${currentAttempts + 1}/2 | Mock Scanner: ${MOCK_SCAN_CLIENT_ID}`);
-  console.log(`   Company: ${company} | Role: ${role}`);
-  console.log(`   Browser Mode:  ${headless ? 'Headless' : 'HEADED (Visible Browser Window)'}`);
-  console.log(`${'═'.repeat(64)}\n`);
+  let deadJob = false;
 
-  const result = await executeWorkerTask({
-    task: candidateTask,
-    workerId,
-    taskIndex: 1,
-    totalTasks: 1,
-    options: {
-      headless: Boolean(headless),
-      dryRun: true,
-      confirmSubmit: false,
-      defaultPassword,
-      isClusterBlueprint: true,
-      isScanOnly: true,
-    },
-  });
+  for (let cIdx = 0; cIdx < candidatePool.length; cIdx++) {
+    const candidateAwlId = candidatePool[cIdx];
+    const candidateTask = {
+      ...leadTask,
+      queueTaskId: leadTask.id,
+      applywizz_id: candidateAwlId,
+      applywizzId: candidateAwlId,
+      jobUrl: leadTask.job_url || jobUrl,
+    };
 
-  const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
-  const success = result && (
-    result.status === 'submitted' ||
-    result.status === 'reached-review' ||
-    result.status === 'reached_review' ||
-    result.status === 'ready_for_review' ||
-    (result.status === 'human-required' && reachedReviewStep) ||
-    reachedReviewStep
-  );
+    console.log(`\n${'═'.repeat(64)}`);
+    console.log(`📥 [STAGE 1] Cluster Blueprint Candidate [${cIdx + 1}/${candidatePool.length}]:`);
+    console.log(`   Canonical URL: ${jobUrl}`);
+    console.log(`   Testing AWL-ID: ${candidateAwlId}`);
+    console.log(`   Cluster Sibling AWL-IDs: ${allSiblingAwlIds.slice(0, 8).join(', ')}${allSiblingAwlIds.length > 8 ? ` (+${allSiblingAwlIds.length - 8} more)` : ''} (${allSiblingAwlIds.length} candidates)`);
+    console.log(`   Attempt: ${currentAttempts + 1}/2`);
+    console.log(`   Company: ${company} | Role: ${role}`);
+    console.log(`   Browser Mode:  ${headless ? 'Headless' : 'HEADED (Visible Browser Window)'}`);
+    console.log(`${'═'.repeat(64)}\n`);
 
-  if (success) {
-    blueprintTask = candidateTask;
-    blueprintResult = result;
-    bpSuccess = true;
-  } else {
-    // Check if the job itself is genuinely expired / closed / 404
-    const deadJob = result?.status === 'job_expired' ||
+    const result = await executeWorkerTask({
+      task: candidateTask,
+      workerId,
+      taskIndex: cIdx + 1,
+      totalTasks: candidatePool.length,
+      options: {
+        headless: Boolean(headless),
+        dryRun: true,
+        confirmSubmit: false,
+        defaultPassword,
+        isClusterBlueprint: true,
+        isScanOnly: true,
+      },
+    });
+
+    const reachedReviewStep = String(result?.stoppedAtStep || '').toLowerCase().includes('review');
+    const success = result && (
+      result.status === 'submitted' ||
+      result.status === 'reached-review' ||
+      result.status === 'reached_review' ||
+      result.status === 'ready_for_review' ||
+      (result.status === 'human-required' && reachedReviewStep) ||
+      reachedReviewStep
+    );
+
+    if (success) {
+      blueprintTask = candidateTask;
+      blueprintResult = result;
+      bpSuccess = true;
+      break;
+    }
+
+    deadJob = result?.status === 'job_expired' ||
       String(result?.reason || '').includes('expired') ||
       String(result?.reason || '').includes('apply_not_found') ||
       String(result?.reason || '').includes('empty_page') ||
@@ -709,6 +722,11 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     leadProofShot = result?.screenshotUrl || null;
     leadFailReason = result?.failureReason || result?.error || result?.reason || result?.status || 'Scan stopped before review';
     leadFailStep = result?.stoppedAtStep || 'Form Wizard';
+
+    if (deadJob) {
+      console.log(`❌ [${workerId}] Genuine job expiration confirmed on Workday — skipping remaining sibling candidates.`);
+      break;
+    }
 
     const isUserHalted = (await isClusterStopRequested()) ||
       String(leadFailReason).toLowerCase().includes('halt') ||
@@ -736,6 +754,30 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       };
     }
 
+    // Check if failure was due to Zoho mail verification / not connected:
+    const isZohoAuthIssue =
+      result?.status === 'auth-failed' ||
+      result?.status === 'zoho_not_connected' ||
+      result?.reason === 'mailbox_not_connected' ||
+      result?.reason === 'zoho mail not connected' ||
+      result?.isZohoNotConnected ||
+      String(leadFailReason).toLowerCase().includes('zoho') ||
+      String(leadFailReason).toLowerCase().includes('verification') ||
+      String(leadFailReason).toLowerCase().includes('auth');
+
+    if (isZohoAuthIssue && cIdx < candidatePool.length - 1) {
+      console.log(`\n⚠️ [${workerId}] Candidate ${candidateAwlId} requires Zoho email verification but was not connected in Zoho Mail Reader.`);
+      console.log(`   ❌ Rejecting candidate ${candidateAwlId} ONLY — keeping job link ALIVE.`);
+      console.log(`   ➡️  Retrying cluster with next candidate in batch queue list: ${candidatePool[cIdx + 1]}...\n`);
+      continue;
+    }
+
+    break;
+  }
+
+  if (bpSuccess) {
+    // Candidate reached review step / completed scan successfully
+  } else {
     if (deadJob) {
       // RULE C: Expired link -> no retry, direct single-row upsert into failed_jobs
       console.log(`\n❌ [${workerId}] Genuine job expiration confirmed for "${company}" (${jobUrl}). Upserting single row to failed_jobs...`);

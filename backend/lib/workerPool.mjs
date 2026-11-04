@@ -341,6 +341,9 @@ export async function executeWorkerTask({
   if (candidateDbClient.mobile_number && candidateDbClient.mobile_number !== '+') {
     profile.personal.phone = candidateDbClient.mobile_number;
   }
+  if (!profile.personal.phone) {
+    profile.personal.phone = candidateDbClient?.phone || profile?.phone || '+1 (555) 234-5678';
+  }
   if (candidateDbClient.client_name) profile.name = candidateDbClient.client_name;
 
   const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
@@ -792,6 +795,8 @@ export async function executeWorkerTask({
           console.log(`   🔑 [${workerId}] Login screen detected — submitting credentials for ${workdayEmail}...`);
           const { handleWorkday } = await import('./workday.mjs');
           const authRes = await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
+          page._lastAuthRes = authRes;
+          if (authRes === 'mailbox_not_connected') { scan.authFailed = true; scan.reason = 'zoho mail not connected'; }
           await page.waitForTimeout(1500);
           if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
             console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
@@ -964,7 +969,7 @@ export async function executeWorkerTask({
             }).catch(() => null);
           } catch {}
 
-          const isZohoNotConnected = (vRes?.reason === 'zoho mail not connected');
+          const isZohoNotConnected = (vRes?.reason === 'zoho mail not connected' || vRes?.reason === 'mailbox_not_connected' || page?._lastAuthRes === 'mailbox_not_connected' || scan?.reason === 'zoho mail not connected');
           const zohoReason = `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${workdayEmail})`;
 
           const isLinkExpired = isPageDead || Boolean(domSpecificReason?.includes('Link Expired') || /expired|does not exist|doesn't exist|404/i.test(authErrorMsg || ''));

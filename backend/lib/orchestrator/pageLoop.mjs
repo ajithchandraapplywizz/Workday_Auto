@@ -327,6 +327,33 @@ export async function runPageOrchestrator({
       } catch {}
     }
 
+    const isScanBypassMode = Boolean(profile?._isScanOnly || profile?._isClusterBlueprint);
+    if ((!decision?.answer || decision?.requiresReview) && isScanBypassMode) {
+      const scanAnswer = synthesizeScanMandatoryAnswer(field, profile);
+      console.log(`  🛠️ [Scan Bypass Fallback] "${field.label.slice(0, 50)}" ← "${scanAnswer}"`);
+      saveMasterYamlTemplate([{
+        question: field.label,
+        field_type: field.elementType || field.fieldType || 'text',
+        step: step,
+        options: field.options || [],
+        value: scanAnswer,
+        source: 'scan_mandatory_fallback',
+      }], {
+        tenant: profile?._tenant || 'global',
+        company: profile?._company || '',
+        roleTitle: profile?._roleTitle || '',
+      }).catch(() => {});
+
+      decision = {
+        questionId: field.questionId,
+        intent: classifyQuestionIntent(field.label, field),
+        answer: scanAnswer,
+        confidence: 0.85,
+        requiresReview: false,
+        source: 'scan_mandatory_fallback',
+      };
+    }
+
     const isAgreementCheckbox = (field.elementType === 'checkbox' || field.fieldType === 'checkbox' || field.type === 'checkbox') &&
       (/terms|read and understood|consent|agreement|statement and certify|acknowledge|state that i have read/i.test(field.label || '') ||
        /terms|agree|consent|ack/i.test(field.automationId || ''));
@@ -868,6 +895,38 @@ export async function runPageOrchestrator({
     if (field._raw) field._raw.currentValue = gate.answer;
     fillsThisCycle += 1;
     cyclesWithoutFill = 0;
+
+    // === ATOMIC DYNAMIC RE-SCAN ARCHITECTURE ===
+    // Every answer fill can dynamically reveal or affect other fields (child questions, conditional radios, address cascades).
+    // Settle DOM and immediately re-scan all visible fields on the page.
+    try {
+      await adapter.waitStable(page);
+      const postScan = await adapter.scan(page, { pageNumber, stepName: step });
+      let freshFields = dedupeFields(postScan.fields || []);
+      if (profile?._fillOptionalFields !== true && adapter.name === 'workday') {
+        freshFields = freshFields.filter((f) => f.required === true || isMandatoryField(f.label, f, step));
+      }
+      const knownKeys = new Set(fields.map(fieldDedupeKey));
+      const newlyRevealed = freshFields.filter(f => !knownKeys.has(fieldDedupeKey(f)));
+      if (newlyRevealed.length > 0) {
+        console.log(`  ✨ [Dynamic Re-Scan] Detected ${newlyRevealed.length} newly revealed field(s) on "${step}" after answering "${field.label.slice(0, 40)}":`);
+        for (const rf of newlyRevealed) {
+          console.log(`     ↳ [${rf.elementType || rf.fieldType || 'field'}] ${rf.label}${rf.required ? ' *' : ''}`);
+        }
+        const newPack = await answerFn(newlyRevealed, profile, {
+          page,
+          pageNumber,
+          stepName: step,
+          resumePath: plan?.resume || profile._resumePath,
+        });
+        if (newPack?.decisions) {
+          pack.decisions = { ...(pack.decisions || {}), ...newPack.decisions };
+        }
+      }
+      fields = freshFields;
+    } catch (reErr) {
+      console.warn(`  ⚠️  [Dynamic Re-Scan] Post-fill re-scan notice: ${reErr.message}`);
+    }
     } // end multi-fill per cycle
 
     if (filled === filledBeforeCycle) {

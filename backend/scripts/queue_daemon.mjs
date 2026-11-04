@@ -476,7 +476,7 @@ async function runStage2Resolving() {
 /**
  * Execute Stage 3: Submissions across parallel workers
  */
-async function runStage3Submissions() {
+export async function runStage3Submissions({ isStreaming = false } = {}) {
   currentMode = 'submitting';
   currentStage = 'submitting';
   submitStatus = 'running';
@@ -515,7 +515,7 @@ async function runStage3Submissions() {
     .in('status', ['ready_for_review', 'queued', 'applying']);
 
   const tasksCount = initialCount || 0;
-  if (tasksCount === 0) {
+  if (tasksCount === 0 && !isStreaming) {
     console.log(`ℹ️ [DAEMON] 0 applications ready for submission.`);
     submitStatus = 'off';
     currentMode = 'idle';
@@ -557,6 +557,10 @@ async function runStage3Submissions() {
           .limit(1);
 
         if (!rem || rem.length === 0) {
+          if (scanStatus === 'running' || isStreaming) {
+            await new Promise((r) => setTimeout(r, 2500));
+            continue;
+          }
           console.log(`ℹ️ [${workerId}] Queue empty — no more ready applications.`);
           break;
         }
@@ -644,23 +648,23 @@ async function runStage3Submissions() {
   }
 
   submitStatus = 'off';
-  if (currentMode === 'submitting') {
-    currentMode = 'idle';
-    currentStage = 'idle';
-    isPoolRunning = false;
-  }
-  await updateWorkerControl('submit', { enabled: false, stop_requested: false, updated_by: 'system_auto_off' }).catch(() => { });
+  const isScanningStillActive = scanStatus === 'running';
+  currentMode = isScanningStillActive ? 'scanning' : 'idle';
+  currentStage = isScanningStillActive ? 'scanning' : 'idle';
+  isPoolRunning = isScanningStillActive;
+  await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false, updated_by: 'system_auto_off' }).catch(() => { });
   for (const workerId of submitWorkers) {
     await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => { });
   }
   await syncBotControlState({
-    mode: 'idle',
-    stage: 'idle',
+    mode: currentMode,
+    stage: currentStage,
     submit_enabled: false,
     submit_status: 'off',
-    is_running: false,
-    current_action: 'Submissions complete. Idle.',
-    active_worker_count: 0,
+    submit_stop_requested: false,
+    is_running: isPoolRunning,
+    current_action: isScanningStillActive ? 'Submissions complete. Scanning continuing...' : 'Submissions complete. Idle.',
+    active_worker_count: isScanningStillActive ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0,
   });
 }
 
@@ -725,7 +729,12 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     });
 
     // Run Scanning (Stage 1) and Resolving (Stage 2) in PARALLEL
-    console.log(`\n⚡ [DAEMON] Launching Stage 1 Scanning & Stage 2 Resolving in PARALLEL...`);
+    console.log(`\n⚡ [DAEMON] Universal Pipeline: Launching Stage 1 Scanning, Stage 2 Resolving, and Stage 3 Submissions in PARALLEL STREAMING mode...`);
+    submitStatus = 'running';
+    submitStopRequested = false;
+    const submissionPromise = runStage3Submissions({ isStreaming: true }).catch((err) => {
+      console.error(`❌ [DAEMON] Stage 3 Submissions streaming error:`, err?.message || err);
+    });
     await Promise.all([
       runStage1Scanning().catch((err) => {
         console.error(`❌ [DAEMON] Stage 1 Scanning error:`, err?.message || err);
@@ -734,6 +743,10 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
         console.error(`❌ [DAEMON] Stage 2 Resolving error:`, err?.message || err);
       }),
     ]);
+
+    scanStatus = 'completed';
+    console.log(`\n✅ [DAEMON] Stage 1 & 2 complete. Awaiting any remaining in-flight submissions...`);
+    await submissionPromise;
 
     if (isGlobalStopRequested() || isScanStopRequested() || isPoolPaused) {
       console.log(`🛑 [DAEMON] Pipeline stopped.`);
@@ -787,13 +800,20 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     scanCompleteMessage = `Pipeline error: ${err?.message || err}`;
   } finally {
     scanStatus = 'off';
-    if (currentMode === 'scanning') currentMode = 'idle';
-    currentStage = 'idle';
-    isPoolRunning = submitStatus === 'running';
-    await resetAllWorkersIdle().catch(() => { });
+    const isSubmittingStillActive = submitStatus === 'running';
+    currentMode = isSubmittingStillActive ? 'submitting' : 'idle';
+    currentStage = isSubmittingStillActive ? 'submitting' : 'idle';
+    isPoolRunning = isSubmittingStillActive;
+    const scanAndResolveWorkerIds = [
+      ...(PIPELINE_CONFIG.scanWorkerIds || []),
+      ...(PIPELINE_CONFIG.resolveWorkerIds || []),
+    ];
+    for (const workerId of scanAndResolveWorkerIds) {
+      await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => { });
+    }
     await syncBotControlState({
       mode: currentMode,
-      stage: 'idle',
+      stage: currentStage,
       scan_enabled: false,
       scan_status: 'off',
       scan_stop_requested: false,
@@ -801,7 +821,7 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
       last_action_requested: null,
       trigger_requested: false,
       is_running: isPoolRunning,
-      current_action: scanCompleteMessage || 'Scan & Resolve complete. Ready for Submissions trigger.',
+      current_action: scanCompleteMessage || (isSubmittingStillActive ? 'Scan & Resolve complete. Submissions continuing...' : 'Scan & Resolve complete. Ready for Submissions trigger.'),
       active_worker_count: isPoolRunning ? activeSubmittingWorkers.size : 0,
     });
   }
@@ -1876,7 +1896,13 @@ export async function initOnStartup() {
       const isSubmitRunning = submitStatus === 'running';
 
       const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
-        (bc && bc.is_running !== false && (bc.last_action_requested === 'start' || bc.last_action_requested === 'start_scan' || bc.last_action_requested === 'start_pipeline' || (bc.trigger_requested && (bc.stage === 'scanning' || bc.scan_status === 'running')))) ||
+        (bc && bc.is_running !== false && (
+          bc.last_action_requested === 'start' ||
+          bc.last_action_requested === 'start_scan' ||
+          bc.last_action_requested === 'start_pipeline' ||
+          bc.last_action_requested === 'start_universal' ||
+          (bc.trigger_requested && (bc.stage === 'scanning' || bc.stage === 'parallel' || bc.stage === 'universal_parallel' || bc.scan_status === 'running'))
+        )) ||
         (scanCtrl && scanCtrl.enabled === true && !scanCtrl.stop_requested) ||
         (bc?.scan_status === 'running' && bc?.is_running !== false)
       );
@@ -1888,7 +1914,18 @@ export async function initOnStartup() {
         }
         if (SERVICE_ROLE === 'main') {
           console.log(`\n⚡ [MAIN APP] Start scan signal detected. Forwarding to dedicated Scanner Service via Supabase (0 workers spawned in main app).`);
-          await syncBotControlState({ last_action_requested: null, trigger_requested: false, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
+          const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
+          await syncBotControlState({
+            last_action_requested: bc?.last_action_requested === 'start_universal' ? 'start_universal' : null,
+            trigger_requested: false,
+            is_running: true,
+            stage: targetStage,
+            mode: targetStage,
+            scan_status: 'running',
+            scan_enabled: true,
+            stop_requested: false,
+            scan_stop_requested: false
+          });
           if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
           return;
         }
@@ -1897,7 +1934,18 @@ export async function initOnStartup() {
           return;
         }
         console.log(`\n⚡ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker scanning cluster...`);
-        await syncBotControlState({ last_action_requested: null, trigger_requested: false, is_running: true, stage: 'scanning', scan_status: 'running', scan_enabled: true, stop_requested: false, scan_stop_requested: false });
+        const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
+        await syncBotControlState({
+          last_action_requested: (bc?.last_action_requested === 'start_universal' && bc?.submit_status !== 'running') ? 'start_universal' : null,
+          trigger_requested: false,
+          is_running: true,
+          stage: targetStage,
+          mode: targetStage,
+          scan_status: 'running',
+          scan_enabled: true,
+          stop_requested: false,
+          scan_stop_requested: false
+        });
         if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
         runScanAndResolveParallel().catch(console.error);
         return;
@@ -1909,7 +1957,8 @@ export async function initOnStartup() {
         (bc && bc.is_running !== false && (
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
-          (bc.trigger_requested && (bc.stage === 'submitting' || bc.submit_status === 'running')) ||
+          bc.last_action_requested === 'start_universal' ||
+          (bc.trigger_requested && (bc.stage === 'submitting' || bc.stage === 'parallel' || bc.submit_status === 'running')) ||
           (bc.submit_status === 'running')
         )) ||
         (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested) ||

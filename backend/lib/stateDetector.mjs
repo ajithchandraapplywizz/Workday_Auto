@@ -121,7 +121,10 @@ export async function detectWorkdayStep(page) {
     }
 
     // 3. Direct Review & Submit page detection (must precede bodyText because Review contains full text of all previous steps)
-    const hasSubmitButton = Boolean(document.querySelector('button[data-automation-id*="submit" i], button:has-text("Submit"), [data-automation-id="pageFooterSubmitButton"]'));
+    const hasSubmitButton = Boolean(
+      document.querySelector('button[data-automation-id*="submit" i], [data-automation-id="pageFooterSubmitButton"], button[type="submit"]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test(b.textContent || ''))
+    );
     if (hasSubmitButton && (/review/i.test(document.title) || /review\s*(?:and|&)\s*submit/i.test(document.body?.innerText || ''))) {
       return 'Review';
     }

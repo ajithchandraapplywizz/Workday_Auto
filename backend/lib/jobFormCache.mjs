@@ -259,9 +259,13 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           sourceTag = 'Tier 4: QA Bank';
           tier = 4;
           rawSource = 'qa_bank';
-        } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter')) {
-          sourceTag = 'Tier 5: AI / LLM';
+        } else if (rawSource.includes('fuzzy') || rawSource.includes('semantic')) {
+          sourceTag = 'Tier 5: Semantic / Fuzzy Match';
           tier = 5;
+          rawSource = 'fuzzy';
+        } else if (rawSource.includes('llm') || rawSource.includes('ai') || rawSource.includes('openrouter') || rawSource.includes('claude')) {
+          sourceTag = 'Tier 6: Claude Haiku LLM';
+          tier = 6;
           rawSource = 'llm';
           if (awlId && ansVal) {
             recordNovelQABankAnswer({

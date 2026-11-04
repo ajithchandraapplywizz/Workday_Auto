@@ -3,7 +3,7 @@
  */
 
 import { writeFile } from 'fs/promises';
-import { handleDropdown, clickVisiblePromptOption, fuzzyScore, typeAndClickOption } from './fields.mjs';
+import { handleDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, fuzzyScore, typeAndClickOption } from './fields.mjs';
 import {
   isForegoingStatementCertifyLabel,
   isShiftAvailabilityQuestion,
@@ -1843,18 +1843,30 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
   await combo.scrollIntoViewIfNeeded().catch(() => {});
 
   const directAgreementSelected = await selectExactAgreementOption(page, label, answer);
-  if (directAgreementSelected) return true;
+  if (directAgreementSelected) {
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.press('Tab').catch(() => {});
+    return true;
+  }
 
   const yesNo = /^(yes|no)$/i.test(String(answer || '').trim()) || isYesNoDropdownQuestion(label);
   if (!yesNo) {
     const typed = await typeAndClickOption(page, fieldBox, answer);
-    if (typed.ok) return true;
+    if (typed.ok) {
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.keyboard.press('Tab').catch(() => {});
+      return true;
+    }
   }
 
   const result = await handleDropdown(page, combo, answer, label);
   const visibleValue = (await combo.textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
   const selectionStuck = /^select(\s+one)?$/i.test(visibleValue);
-  if (result.success && !selectionStuck) return true;
+  if (result.success && !selectionStuck) {
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.press('Tab').catch(() => {});
+    return true;
+  }
 
   await combo.click({ force: true });
   const options = /notice\s*period/i.test(label)
@@ -1865,9 +1877,45 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
         ? [answer, 'I have read and agree to the Non Disclosure Agreement', 'I agree', 'Agree']
         : [answer, 'Yes', 'No'];
   const clicked = await clickVisiblePromptOption(page, options);
-  if (clicked) return true;
+  if (clicked) {
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.press('Tab').catch(() => {});
+    await page.waitForTimeout(200);
+    return true;
+  }
   if (yesNo) return false;
+
+  if (/field\s*of\s*study|^major$|area\s*of\s*study/i.test(label)) {
+    console.log(`    ↻ [Field of Study Question] Options did not match typed words — executing 1-letter typing + first dropdown option fallback on "${label}"...`);
+    const letter = (String(answer || '').trim()[0] || 'c').toLowerCase();
+    const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[role="combobox"]:visible').last();
+    if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
+      await search.fill('').catch(() => {});
+      await search.pressSequentially(letter, { delay: 45 });
+    } else {
+      await page.keyboard.type(letter, { delay: 45 });
+    }
+    await page.waitForTimeout(500);
+    const pickedFirst = await clickFirstVisiblePromptOption(page);
+    if (!pickedFirst) {
+      await page.keyboard.press('ArrowDown').catch(() => {});
+      await page.waitForTimeout(100);
+      await page.keyboard.press('Enter').catch(() => {});
+    }
+    await page.waitForTimeout(250);
+    await page.keyboard.press('Escape').catch(() => {});
+    const val = (await combo.textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+    if (pickedFirst || (val && !/^select(\s+one)?$/i.test(val))) {
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.keyboard.press('Tab').catch(() => {});
+      return true;
+    }
+  }
   const typed = await typeAndClickOption(page, fieldBox, answer);
+  if (typed.ok) {
+    await page.keyboard.press('Enter').catch(() => {});
+    await page.keyboard.press('Tab').catch(() => {});
+  }
   return typed.ok;
 }
 
