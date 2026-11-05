@@ -730,12 +730,80 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
 
+      const isZohoNotConnected = Boolean(
+        /zoho.*not.*connected|mailbox.*not.*connected/i.test(rawErrMsg) ||
+        result?.isZohoNotConnected ||
+        result?.status === 'zoho_not_connected' ||
+        result?.reason === 'zoho mail not connected' ||
+        result?.reason === 'mailbox_not_connected'
+      );
+
       const isFatalNonRetryable = (
-        /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(rawErrMsg) ||
+        isZohoNotConnected ||
+        /no valid company_email|no company_email|unverified/i.test(rawErrMsg) ||
         /strict auth guard/i.test(failedStep) ||
         result?.status === 'job_expired' ||
         result?.status === 'invalid_url'
       );
+
+      if (isZohoNotConnected) {
+        const cleanAwl = String(task.applywizz_id).replace(/["'\[\]]/g, '').trim().toUpperCase();
+        const zohoErr = `zoho mail not connected (AWL-ID: ${cleanAwl}, mail: ${task.candidateEmail || ''})`;
+        console.log(`\n${'═'.repeat(90)}`);
+        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] ZOHO MAILBOX NOT CONNECTED — MARKING FAILED IMMEDIATELY`);
+        console.log(`   • Candidate: ${task.applywizz_id} (${task.candidateEmail || 'no email'})`);
+        console.log(`   • Status: FAILED (No retries)`);
+        console.log(`   • Reason: ${zohoErr}`);
+        console.log(`   • Updating job_distributions #${task.distribution_id || task.id} -> 'failed'`);
+        console.log(`   • Updating batch_job_queue for candidate -> 'failed'`);
+        console.log(`${'═'.repeat(90)}\n`);
+
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'failed',
+            error_message: zohoErr,
+            application_submitted_screenshot_url: finalShotUrl,
+            updated_at: now,
+          },
+        });
+
+        await supabase.from('batch_job_queue')
+          .update({ status: 'failed', updated_at: now })
+          .ilike('applywizz_id', `%${cleanAwl}%`)
+          .eq('job_url', task.job_url)
+          .catch(() => {});
+
+        if (task.candidateEmail) {
+          const { updateClientZohoStatus } = await import('./supabaseClient.mjs');
+          await updateClientZohoStatus(task.candidateEmail, { status: 'not_connected', connected: false }).catch(() => {});
+        }
+
+        try {
+          const { recordFailedJob } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId: task.applywizz_id,
+            jobId: task.job_id || null,
+            jobUrl: task.job_url,
+            company: task.company || 'Workday Partner',
+            roleTitle: task.role_title || 'Workday Application',
+            failureReason: zohoErr,
+            failedAtStep: 'Auth Gateway / Zoho Mail Verification',
+            screenshotPath: finalShotUrl,
+          });
+        } catch {}
+
+        return {
+          status: 'zoho_not_connected',
+          reason: 'zoho mail not connected',
+          error: zohoErr,
+          isZohoNotConnected: true,
+          stoppedAtStep: 'Auth Gateway / Zoho Mail Verification',
+        };
+      }
 
       if (currentAttempt < 3 && !isFatalNonRetryable) {
         // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)

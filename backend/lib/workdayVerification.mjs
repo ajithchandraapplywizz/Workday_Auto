@@ -6,7 +6,7 @@
  */
 
 import { extractWorkdayCompanyName, isInNavOrHeader, isWorkdayWizardVisible } from './discovery.mjs';
-import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers } from './zohoMailClient.mjs';
+import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers, isZohoMailboxConnected } from './zohoMailClient.mjs';
 
 /**
  * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
@@ -513,11 +513,82 @@ async function checkIfAlreadyOnApplicationWizard(page) {
   }).catch(() => false);
 }
 
-export async function resolveWorkdayVerification(page, { email, password, company, startTime, timeoutMs = 75000 }) {
+export async function resolveWorkdayVerification(page, {
+  email,
+  password,
+  company,
+  startTime,
+  timeoutMs = 75000,
+  applywizzId = '',
+  taskId = '',
+  distributionId = '',
+  jobUrl = '',
+} = {}) {
   // Fast path: if the page is already on the application form (e.g. My Information), skip polling immediately!
   if (await checkIfAlreadyOnApplicationWizard(page)) {
     console.log('   🎉 [WorkdayBot] Application Wizard / My Information is ALREADY ACTIVE! Skipping email verification polling.');
     return { success: true, type: 'direct_wizard', onWizard: true };
+  }
+
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanAwlId = String(applywizzId || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+  const zohoReason = `zoho mail not connected (AWL-ID: ${cleanAwlId || 'N/A'}, mail: ${cleanEmail})`;
+
+  // FIRST CHECK CONNECTION STATUS: If not connected in Zoho Mail Reader, immediately fail and update tables!
+  const isConnected = await isZohoMailboxConnected(cleanEmail);
+  if (!isConnected) {
+    console.log(`   ❌ [WorkdayBot] Candidate ${cleanEmail} mailbox is NOT CONNECTED in Zoho Mail Reader! Immediately marking failed in batch_job_queue and job_distributions.`);
+    const now = new Date().toISOString();
+    try {
+      const { updateClientZohoStatus, updateQueueTaskStatus, request } = await import('./supabaseClient.mjs');
+      if (cleanEmail) {
+        await updateClientZohoStatus(cleanEmail, { status: 'not_connected', connected: false }).catch(() => {});
+      }
+      if (taskId) {
+        await updateQueueTaskStatus(taskId, { status: 'failed', errorMessage: zohoReason }).catch(() => {});
+      }
+      if (distributionId) {
+        await request('job_distributions', {
+          method: 'PATCH',
+          query: `?id=eq.${encodeURIComponent(distributionId)}`,
+          body: {
+            status: 'failed',
+            error_message: zohoReason,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      } else if (cleanAwlId && jobUrl) {
+        await request('job_distributions', {
+          method: 'PATCH',
+          query: `?applywizz_id=eq.${encodeURIComponent(cleanAwlId)}&job_url=eq.${encodeURIComponent(jobUrl)}`,
+          body: {
+            status: 'failed',
+            error_message: zohoReason,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      }
+      if (cleanAwlId && jobUrl) {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query: `?applywizz_id=ilike.*${encodeURIComponent(cleanAwlId)}*&job_url=eq.${encodeURIComponent(jobUrl)}`,
+          body: {
+            status: 'failed',
+            updated_at: now,
+          },
+        }).catch(() => {});
+      }
+    } catch (err) {
+      console.warn(`   ⚠️ [WorkdayBot] Error updating Zoho disconnected status in database: ${err.message}`);
+    }
+
+    return {
+      success: false,
+      reason: 'zoho mail not connected',
+      status: 'zoho_not_connected',
+      isZohoNotConnected: true,
+      error: zohoReason,
+    };
   }
 
   // Active Trigger: If Workday displays "Resend Account Verification", click it to dispatch a fresh verification email!
@@ -603,8 +674,8 @@ export async function resolveWorkdayVerification(page, { email, password, compan
       }
 
       // If landed on Sign In form post-activation, log in directly:
-      let hasPwd = await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible').catch(() => null);
-      if (!hasPwd) {
+      let hasPwd = typeof page.$ === 'function' ? await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible').catch(() => null) : null;
+      if (!hasPwd && typeof page.waitForSelector === 'function') {
         try {
           await page.waitForSelector('input[data-automation-id="password"]:visible, input[type="password"]:visible', { timeout: 4000 });
           hasPwd = true;
@@ -662,9 +733,15 @@ export async function resolveWorkdayVerification(page, { email, password, compan
     }
   }
 
-  if (pollRes?.reason === 'mailbox_not_connected' || pollRes?.reason === 'zoho mail not connected') {
+  if (pollRes?.reason === 'mailbox_not_connected' || pollRes?.reason === 'zoho mail not connected' || pollRes?.isZohoNotConnected) {
     console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is not connected in Zoho Mail Reader.`);
-    return { success: false, reason: 'mailbox_not_connected' };
+    return {
+      success: false,
+      reason: 'zoho mail not connected',
+      status: 'zoho_not_connected',
+      isZohoNotConnected: true,
+      error: zohoReason,
+    };
   }
 
   console.log(`   ℹ️  [WorkdayBot] Verification email not received for ${email} within timeout (${pollRes?.reason || 'timeout'}).`);
@@ -774,7 +851,13 @@ export async function executeWorkdayForgotPassword(page, { email, password, comp
 
   if (!verifResult?.success) {
     console.log('   ❌ [WorkdayBot] Failed to retrieve password reset link from Zoho Mail Reader.');
-    return { success: false, reason: verifResult?.reason || 'timeout' };
+    return {
+      success: false,
+      reason: verifResult?.reason || 'timeout',
+      status: verifResult?.status || (verifResult?.isZohoNotConnected ? 'zoho_not_connected' : 'failed'),
+      isZohoNotConnected: Boolean(verifResult?.isZohoNotConnected),
+      error: verifResult?.error,
+    };
   }
 
   // Safety net: check if page is still on Password Reset Set form

@@ -2167,7 +2167,15 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
           company: profile?._company || '',
           startTime: confirmStart - 30000,
           timeoutMs: 50000,
+          applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+          jobUrl: canonicalJobUrl,
+          distributionId: profile?._distributionId || '',
         });
+        if (verResult?.isZohoNotConnected || verResult?.reason === 'mailbox_not_connected' || verResult?.reason === 'zoho mail not connected') {
+          console.log(`  ❌ Post-submit verification required but Zoho mailbox not connected for ${email} — marking failed immediately.`);
+          await recordClientApplication(profile, { url: canonicalJobUrl, status: 'failed', failureReason: 'zoho mail not connected' }).catch(() => {});
+          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+        }
         if (verResult?.success) {
           console.log('  ✅ Verification challenge solved via Zoho Mail! Resuming confirmation wait...');
           await page.waitForTimeout(2000);
@@ -3266,14 +3274,14 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           if (ownBrowser) await browser.close().catch(() => {});
           return { status: 'already_applied', screenshotUrl: proofUrl };
         }
-        if (!wdOk || wdOk === 'mailbox_not_connected') {
-          if (wdOk === 'mailbox_not_connected') {
-            console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — skipping client cleanly.');
-            if (ownBrowser) await browser.close();
-            return 'skipped';
+        if (!wdOk || wdOk === 'mailbox_not_connected' || wdOk?.status === 'zoho_not_connected' || wdOk?.reason === 'zoho mail not connected' || wdOk?.isZohoNotConnected) {
+          if (wdOk === 'mailbox_not_connected' || wdOk?.status === 'zoho_not_connected' || wdOk?.reason === 'zoho mail not connected' || wdOk?.isZohoNotConnected) {
+            console.log('  ⚠️ Workday verification required but Zoho mailbox not connected — marking failed immediately.');
+            if (ownBrowser) await browser.close().catch(() => {});
+            return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
           }
           console.log('  ❌ Workday authentication could not be confirmed — aborting wizard loop.');
-          if (ownBrowser) await browser.close();
+          if (ownBrowser) await browser.close().catch(() => {});
           return 'auth-failed';
         }
       } else if (!authNeeded) {

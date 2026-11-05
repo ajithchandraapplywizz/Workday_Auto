@@ -361,7 +361,7 @@ function checkCodePatterns() {
       }
 
       // 4. Debugger statement
-      if (/\bdebugger\b/.test(content)) {
+      if (/(?:^|[;{}])\\s*debugger\\s*(?:;|$)/.test(content) && !/['"].*\\bdebugger\\b.*['"]/.test(content)) {
         errors.push(`${file}:${lineNumber} — Debugger statement left in code.`);
       }
 

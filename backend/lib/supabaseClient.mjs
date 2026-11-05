@@ -1544,6 +1544,12 @@ export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
 /**
  * Update worker state in Supabase worker_status table across the 10 canonical rows.
  */
+const _lastWorkerStatusUpdate = new Map();
+
+/**
+ * Update worker state in Supabase worker_status table across the 10 canonical rows.
+ * Deduplicated via in-memory cache to prevent Supabase log ingestion quota exhaustion.
+ */
 export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null, stage = null, bot_name = null } = {}) {
   if (!isSupabaseConfigured() || !workerId) return false;
   try {
@@ -1555,11 +1561,20 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
     const validState = (state === 'in_flight' || state === 'busy' || state === 'running' || state === 'applying') ? 'in_flight' : 'idle';
     const num = cleanId.replace('worker_', '');
     const meta = WORKER_STAGE_MAP[cleanId] || {};
+    const effectiveStage = stage || meta.stage || 'idle';
+    const effectiveAppId = current_application_id || null;
+    const cacheKey = `${validState}|${effectiveStage}|${effectiveAppId}`;
+
+    // Suppress redundant PATCH requests if worker state, stage, and application have not changed
+    if (_lastWorkerStatusUpdate.get(cleanId) === cacheKey) {
+      return true;
+    }
+    _lastWorkerStatusUpdate.set(cleanId, cacheKey);
 
     const body = {
       state: validState,
-      current_application_id: current_application_id || null,
-      stage: stage || meta.stage || 'idle',
+      current_application_id: effectiveAppId,
+      stage: effectiveStage,
       bot_name: bot_name || meta.botName || `Worker ${num}`,
       updated_at: new Date().toISOString(),
     };

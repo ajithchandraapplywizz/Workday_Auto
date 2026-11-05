@@ -930,6 +930,10 @@ export async function executeWorkerTask({
             company,
             startTime: Date.now() - 120000,
             timeoutMs: 45000,
+            applywizzId,
+            jobUrl,
+            taskId: queueTaskId,
+            distributionId: task.distribution_id || task.distributionId || task.id,
           });
           if (vRes?.success && (vRes?.onWizard || await isWorkdayWizardVisible(page))) {
             recovered = true;
@@ -1007,6 +1011,23 @@ export async function executeWorkerTask({
           await browser.close().catch(() => {});
           if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
 
+          const distId = task.distribution_id || task.distributionId || task.id;
+          if (distId) {
+            const { supabase } = await import('./supabaseClient.mjs');
+            if (supabase) {
+              await supabase.from('job_distributions').update({
+                status: 'failed',
+                error_message: failReasonText,
+                application_submitted_screenshot_url: authShotUrl,
+                updated_at: new Date().toISOString(),
+              }).eq('id', distId).catch(() => {});
+            }
+          }
+          if (isZohoNotConnected && workdayEmail) {
+            const { updateClientZohoStatus } = await import('./supabaseClient.mjs');
+            await updateClientZohoStatus(workdayEmail, { status: 'not_connected', connected: false }).catch(() => {});
+          }
+
           // Only write single-row application and failed_jobs if NOT running in cluster blueprint mode
           if (!options.isClusterBlueprint) {
             await upsertSupabaseApplication({
@@ -1045,8 +1066,9 @@ export async function executeWorkerTask({
           }
 
           return {
-            status: isLinkExpired ? 'job_expired' : 'auth_failed',
-            reason: isLinkExpired ? 'job_expired' : 'auth_failed',
+            status: isZohoNotConnected ? 'zoho_not_connected' : (isLinkExpired ? 'job_expired' : 'auth_failed'),
+            reason: isZohoNotConnected ? 'zoho mail not connected' : (isLinkExpired ? 'job_expired' : 'auth_failed'),
+            isZohoNotConnected: Boolean(isZohoNotConnected),
             screenshotUrl: authShotUrl,
             stoppedAtStep: failedStepName,
             failureReason: failReasonText
