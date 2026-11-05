@@ -40,7 +40,9 @@ export function assertRequiredEnv() {
   loadLocalEnvOnce();
   const missing = [];
   if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY && !process.env.SUPABASE_KEY && !process.env.SUPABASE_SECRET_KEY) {
+    missing.push('SUPABASE_SERVICE_ROLE_KEY');
+  }
   if (missing.length > 0) {
     throw new Error(`[FATAL SECURITY] Missing mandatory environment variables: ${missing.join(', ')}. Refusing to boot.`);
   }
@@ -62,7 +64,7 @@ export function sanitizeEnvKey(val) {
 }
 
 // Global eager sanitization: clean process.env immediately on module evaluation
-for (const envKey of ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', 'SUPABASE_URL', 'CLAUDE_API_KEY', 'AUTH_JWT_SECRET']) {
+for (const envKey of ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_KEY', 'SUPABASE_SECRET_KEY', 'SUPABASE_ANON_KEY', 'SUPABASE_URL', 'CLAUDE_API_KEY', 'AUTH_JWT_SECRET']) {
   if (process.env[envKey]) {
     process.env[envKey] = sanitizeEnvKey(process.env[envKey]);
   }
@@ -71,7 +73,11 @@ for (const envKey of ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_ANON_KEY', 'SUPABAS
 function config() {
   loadLocalEnvOnce();
   const rawUrl = process.env.SUPABASE_URL || '';
-  const rawKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+  const rawKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    '';
   const url = sanitizeEnvKey(rawUrl).replace(/\/+$/, '');
   const key = sanitizeEnvKey(rawKey);
   if (url && process.env.SUPABASE_URL !== url) process.env.SUPABASE_URL = url;

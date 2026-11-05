@@ -13,18 +13,35 @@
  */
 
 import { createClient } from '@supabase/supabase-js';
-import { loadLocalEnvOnce } from './supabaseClient.mjs';
+import {
+  request,
+  loadLocalEnvOnce,
+  isSupabaseConfigured,
+  sanitizeEnvKey,
+} from './supabaseClient.mjs';
 
 loadLocalEnvOnce();
 
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-
-const supabase = (SUPABASE_URL && SUPABASE_KEY)
-  ? createClient(SUPABASE_URL, SUPABASE_KEY, {
+let _lazySupabase = null;
+export function getSupabase() {
+  loadLocalEnvOnce();
+  const rawUrl = process.env.SUPABASE_URL || '';
+  const rawKey =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_KEY ||
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_ANON_KEY ||
+    '';
+  const url = sanitizeEnvKey(rawUrl).replace(/\/+$/, '');
+  const key = sanitizeEnvKey(rawKey);
+  if (!url || !key) return null;
+  if (!_lazySupabase) {
+    _lazySupabase = createClient(url, key, {
       auth: { persistSession: false },
-    })
-  : null;
+    });
+  }
+  return _lazySupabase;
+}
 
 const ACTIVE_CLIENTS_API_URL = 'https://applywizz-ca-management.vercel.app/api/active-clients';
 const CLIENT_DETAILS_API_URL = 'https://www.apply-wizz.me/api/get-client-details';
@@ -100,13 +117,12 @@ export async function fetchActiveClientsFromApi({ force = false } = {}) {
     return cachedActiveClients;
   }
 
-  // Graceful fallback: retrieve active client IDs from Supabase if network fails
-  if (supabase) {
+  // Graceful fallback: retrieve active client IDs from Supabase via sanitized request()
+  if (isSupabaseConfigured()) {
     try {
-      const { data: dbClients } = await supabase
-        .from('clients')
-        .select('applywizz_id')
-        .not('applywizz_id', 'is', null);
+      const dbClients = await request('clients', {
+        query: '?select=applywizz_id&applywizz_id=not.is.null',
+      });
 
       const dbIds = [...new Set((dbClients || []).map((c) => normalizeAwlId(c.applywizz_id)).filter(Boolean))];
       if (dbIds.length > 0) {
@@ -141,17 +157,21 @@ export async function syncActiveClientProfiles({ force = false, concurrency = 4 
   const activeData = await fetchActiveClientsFromApi({ force });
   const activeIds = activeData.applywizz_ids || [];
 
-  if (!activeIds.length || !supabase) {
+  if (!activeIds.length || !isSupabaseConfigured()) {
     return { totalActive: activeIds.length, newlySynced: 0, alreadyPresent: 0, errors: 0 };
   }
 
   // 1. Identify which clients are already in the DB
-  const { data: existingRows, error: checkErr } = await supabase
-    .from('clients')
-    .select('applywizz_id, client_name')
-    .in('applywizz_id', activeIds);
-
-  if (checkErr) {
+  const existingRows = [];
+  try {
+    for (let i = 0; i < activeIds.length; i += 100) {
+      const chunk = activeIds.slice(i, i + 100);
+      const rows = await request('clients', {
+        query: `?select=applywizz_id,client_name&applywizz_id=in.(${chunk.map((id) => `"${encodeURIComponent(id)}"`).join(',')})`,
+      });
+      if (Array.isArray(rows)) existingRows.push(...rows);
+    }
+  } catch (checkErr) {
     console.warn('[ACTIVE-CLIENTS] Check existing rows warning:', checkErr.message);
   }
 
@@ -218,18 +238,16 @@ export async function syncActiveClientProfiles({ force = false, concurrency = 4 
             updated_at: new Date().toISOString(),
           };
 
-          const { error: upsertErr } = await supabase
-            .from('clients')
-            .upsert(payload, { onConflict: 'applywizz_id' });
+          await request('clients', {
+            method: 'POST',
+            query: '?on_conflict=applywizz_id',
+            prefer: 'resolution=merge-duplicates,return=minimal',
+            body: payload,
+          });
 
-          if (upsertErr) {
-            console.warn(`[ACTIVE-CLIENTS] Upsert error for ${awlId}:`, upsertErr.message);
-            errors++;
-          } else {
-            newlySynced++;
-          }
+          newlySynced++;
         } catch (err) {
-          console.warn(`[ACTIVE-CLIENTS] Failed syncing ${awlId}:`, err.message);
+          console.warn(`[ACTIVE-CLIENTS] Upsert error for ${awlId}:`, err.message);
           errors++;
         }
       })
@@ -253,7 +271,7 @@ export async function getActiveClientsRoster({ force = false } = {}) {
   const activeData = await fetchActiveClientsFromApi({ force });
   const activeIds = activeData.applywizz_ids || [];
 
-  if (!supabase || !activeIds.length) {
+  if (!isSupabaseConfigured() || !activeIds.length) {
     return {
       count: activeIds.length,
       clients: activeIds.map((id) => ({ applywizz_id: id, client_name: id })),
@@ -262,10 +280,18 @@ export async function getActiveClientsRoster({ force = false } = {}) {
     };
   }
 
-  const { data: dbClients } = await supabase
-    .from('clients')
-    .select('applywizz_id, client_name, first_name, last_name, company_email, resume_url, latest_job_title')
-    .in('applywizz_id', activeIds);
+  let dbClients = [];
+  try {
+    for (let i = 0; i < activeIds.length; i += 100) {
+      const chunk = activeIds.slice(i, i + 100);
+      const rows = await request('clients', {
+        query: `?select=applywizz_id,client_name,first_name,last_name,company_email,resume_url,latest_job_title&applywizz_id=in.(${chunk.map((id) => `"${encodeURIComponent(id)}"`).join(',')})`,
+      });
+      if (Array.isArray(rows)) dbClients.push(...rows);
+    }
+  } catch (dbErr) {
+    console.warn('[ACTIVE-CLIENTS] Roster query warning:', dbErr.message);
+  }
 
   const clientMap = new Map();
   for (const c of dbClients || []) {
