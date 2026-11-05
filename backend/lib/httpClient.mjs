@@ -32,6 +32,11 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
   return new Promise((resolve, reject) => {
     const target = new URL(url);
     const payload = body == null ? null : (typeof body === 'string' ? body : JSON.stringify(body));
+    const cleanHeaders = {};
+    for (const [k, v] of Object.entries(headers || {})) {
+      if (v == null) continue;
+      cleanHeaders[k] = String(v).replace(/[\r\n\t]/g, '').replace(/[^\x20-\x7E]/g, '').trim();
+    }
     const req = https.request({
       protocol: target.protocol,
       hostname: target.hostname,
@@ -44,7 +49,7 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
         Accept: 'application/json',
         'User-Agent': 'workday-auto-apply',
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
-        ...headers,
+        ...cleanHeaders,
       },
       timeout: timeoutMs,
     }, (res) => {
