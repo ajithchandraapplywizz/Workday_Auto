@@ -244,16 +244,42 @@ async function syncBotControlState(patch = {}) {
     }
   }
 
+  const sanitizedPatch = { ...patch };
+
+  if (SERVICE_ROLE === 'submitter') {
+    delete sanitizedPatch.scan_status;
+    delete sanitizedPatch.scan_enabled;
+    delete sanitizedPatch.scan_stop_requested;
+    delete sanitizedPatch.scan_run_id;
+    delete sanitizedPatch.scan_run_started_at;
+  } else if (SERVICE_ROLE === 'scanner') {
+    delete sanitizedPatch.submit_status;
+    delete sanitizedPatch.submit_enabled;
+    delete sanitizedPatch.submit_stop_requested;
+  }
+
+  if (sanitizedPatch.last_action_requested === null) {
+    const bc = await getBotControl().catch(() => null);
+    if (bc?.last_action_requested === 'start_universal') {
+      const isScanActive = (SERVICE_ROLE === 'scanner' && isPoolRunning) || bc?.scan_status === 'running';
+      const isSubmitActive = (SERVICE_ROLE === 'submitter' && isPoolRunning) || bc?.submit_status === 'running';
+      if (!isScanActive || !isSubmitActive) {
+        sanitizedPatch.last_action_requested = 'start_universal';
+        sanitizedPatch.trigger_requested = true;
+      }
+    }
+  }
+
   await updateBotControl({
-    stage: patch.stage || currentStage,
-    is_running: patch.is_running !== undefined ? patch.is_running : isPoolRunning,
-    is_paused: patch.is_paused !== undefined ? patch.is_paused : isPoolPaused,
-    stop_requested: patch.stop_requested !== undefined ? patch.stop_requested : isGlobalStopRequested(),
-    trigger_requested: patch.trigger_requested !== undefined ? patch.trigger_requested : false,
-    last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : null,
-    current_action: patch.current_action || (isPoolRunning ? `Running ${currentStage}...` : 'Idle'),
-    active_worker_count: patch.active_worker_count !== undefined ? patch.active_worker_count : (isPoolRunning ? (currentStage === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0),
-    ...patch,
+    stage: sanitizedPatch.stage || currentStage,
+    is_running: sanitizedPatch.is_running !== undefined ? sanitizedPatch.is_running : isPoolRunning,
+    is_paused: sanitizedPatch.is_paused !== undefined ? sanitizedPatch.is_paused : isPoolPaused,
+    stop_requested: sanitizedPatch.stop_requested !== undefined ? sanitizedPatch.stop_requested : isGlobalStopRequested(),
+    trigger_requested: sanitizedPatch.trigger_requested !== undefined ? sanitizedPatch.trigger_requested : false,
+    last_action_requested: sanitizedPatch.last_action_requested !== undefined ? sanitizedPatch.last_action_requested : null,
+    current_action: sanitizedPatch.current_action || (isPoolRunning ? `Running ${currentStage}...` : 'Idle'),
+    active_worker_count: sanitizedPatch.active_worker_count !== undefined ? sanitizedPatch.active_worker_count : (isPoolRunning ? (currentStage === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0),
+    ...sanitizedPatch,
   }).catch(() => { });
 }
 
@@ -588,7 +614,6 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
   await syncBotControlState({
     mode: isParallel ? 'parallel' : 'submitting',
     stage: isParallel ? 'parallel' : 'submitting',
-    scan_status: scanStatus,
     submit_enabled: true,
     submit_status: 'running',
     submit_stop_requested: false,
@@ -2238,12 +2263,11 @@ export async function initOnStartup() {
         const targetSubmitStage = isParallelSignal ? 'parallel' : 'submitting';
         console.log(`\n🚀 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions (stage: ${targetSubmitStage})...`);
         await syncBotControlState({
-          last_action_requested: null,
-          trigger_requested: false,
+          last_action_requested: (bc?.last_action_requested === 'start_universal' && bc?.scan_status !== 'running') ? 'start_universal' : null,
+          trigger_requested: (bc?.last_action_requested === 'start_universal' && bc?.scan_status !== 'running') ? true : false,
           is_running: true,
           stage: targetSubmitStage,
           mode: targetSubmitStage,
-          scan_status: scanStatus,
           submit_status: 'running',
           submit_enabled: true,
           stop_requested: false,

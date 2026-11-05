@@ -94,8 +94,8 @@ export async function isClusterStopRequested() {
       bc?.stop_requested ||
       bc?.scan_stop_requested ||
       bc?.scan_status === 'stopping' ||
-      bc?.scan_status === 'off' ||
-      bc?.is_running === false ||
+
+
       bc?.last_action_requested === 'stop' ||
       bc?.last_action_requested === 'stop_scan'
     ) {
@@ -214,7 +214,8 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   let rows = [];
   try {
     let offset = 0;
-    while (true) {
+    let hasMore = true;
+    while (hasMore) {
       const chunk = await queueDbRequest('batch_job_queue', {
         query: `?select=id,applywizz_id,job_url,status,company,role_title,screenshot_path,job_id,attempt_count&limit=1000&offset=${offset}`,
       });
@@ -226,8 +227,9 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   } catch (err) {
     if (String(err?.message || '').includes('42703') || String(err?.message || '').includes('batch_job_queue.id')) {
       let offset = 0;
+      let hasMore = true;
       rows = [];
-      while (true) {
+      while (hasMore) {
         const chunk = await queueDbRequest('batch_job_queue', {
           query: `?select=applywizz_id,job_url,status,company,role_title,screenshot_path,job_id,attempt_count&limit=1000&offset=${offset}`,
         });
@@ -898,7 +900,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       mockAwlId: blueprintTask.applywizz_id,
       jobUrl,
     });
-  } catch (yamlErr) { }
+  } catch (yamlErr) {
+    console.warn(`[SCANNER] [${workerId}] Non-critical: Failed to save master YAML template:`, yamlErr?.message || yamlErr);
+  }
 
   // PHASE 2: Dump row into scanned_jobs with Candidate 1's AWL ID, review screenshot, and total client count!
   console.log(`📍 [${workerId}] PHASE 2: Inserting unique job blueprint into scanned_jobs table...`);

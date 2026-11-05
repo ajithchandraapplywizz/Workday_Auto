@@ -458,6 +458,7 @@ export async function executeWorkerTask({
     const isDirectSubmission = Boolean(options.isDirectSubmission || options.isSubmissionOnly || task.isDirectSubmission || isApprovedForSubmission);
     let status;
     let scan = null;
+    let completionShotUrl = profile?._submissionScreenshotUrl || null;
 
     if (isDirectSubmission) {
       appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
@@ -1258,7 +1259,7 @@ export async function executeWorkerTask({
     }
 
     // Step F: Record status to Supabase
-    let completionShotUrl = profile?._submissionScreenshotUrl || null;
+    if (!completionShotUrl) completionShotUrl = profile?._submissionScreenshotUrl || null;
     let detectedStep = null;
     try {
       if (!completionShotUrl) {
