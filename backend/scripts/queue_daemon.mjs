@@ -133,6 +133,48 @@ export const submitLogs = [];
 const origLog = console.log;
 const origErr = console.error;
 
+// Streamlined Log Filter: Strips micro-step DOM noise and large ASCII banners so Railway logs never exceed limits
+const NOISE_PATTERNS = [
+  /^[═─┌└┼│\s\-─=]{6,}$/,
+  /data-automation-id/i,
+  /querySelector|querySelectorAll/i,
+  /waiting for selector/i,
+  /dispatching (change|blur|input)/i,
+  /fuzzyScore|tokenSetRatio/i,
+  /finding container/i,
+  /clicking option/i,
+  /element evaluated/i,
+  /looking up label/i,
+  /parsing resume/i,
+  /found \d+ inputs/i,
+  /table:\s*job_distributions\s*#\d+/i,
+  /raw_profile_json/i,
+  /^\s*•\s*(Candidate AWL-ID|Target URL|Submission Attempt|Worker Concurrency|Table:)/i,
+];
+
+function isNoisyLog(text) {
+  if (!text) return true;
+  const trimmed = text.trim();
+  if (!trimmed) return true;
+  // Always permit structured milestone logs with AWL- and Status:
+  if (/^\[(SCANNER|SUBMITTER|DAEMON|MAIN APP)\]/i.test(trimmed) && /Status:/i.test(trimmed)) {
+    return false;
+  }
+  // Permit high-level triggers and service start/stop messages
+  if (/^\[DAEMON.*TRIGGER\]|^\[(MAIN APP|DAEMON)\] (Detected|Start|Stop|Launching|Sync complete|Active clients)/i.test(trimmed)) {
+    return false;
+  }
+  // Check against noise patterns
+  for (const pat of NOISE_PATTERNS) {
+    if (pat.test(trimmed)) return true;
+  }
+  // Suppress multi-line blocks or excessive dump strings unless they carry a Supabase screenshot
+  if (trimmed.length > 250 && !trimmed.includes('Screenshot:')) {
+    return true;
+  }
+  return false;
+}
+
 function routeLogEntry(level, args) {
   try {
     const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
@@ -157,11 +199,15 @@ function routeLogEntry(level, args) {
 }
 
 console.log = function (...args) {
+  const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  if (isNoisyLog(text)) return;
   origLog.apply(console, args);
   routeLogEntry('info', args);
 };
 
 console.error = function (...args) {
+  const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
+  if (isNoisyLog(text)) return;
   origErr.apply(console, args);
   routeLogEntry('error', args);
 };
@@ -518,7 +564,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
     .in('status', ['ready_for_review', 'queued', 'applying']);
 
   const tasksCount = initialCount || 0;
-  if (tasksCount === 0 && !isStreaming) {
+  if (tasksCount === 0 && !isStreaming && scanStatus !== 'running') {
     console.log(`ℹ️ [DAEMON] 0 applications ready for submission.`);
     submitStatus = 'off';
     currentMode = 'idle';
@@ -535,15 +581,22 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
     return;
   }
 
+  if (tasksCount === 0 && (isStreaming || scanStatus === 'running')) {
+    console.log(`ℹ️ [DAEMON] 0 applications ready right now. Submitter standing by for newly scanned & resolved applications...`);
+  }
+
   await syncBotControlState({
-    mode: 'submitting',
-    stage: 'submitting',
+    mode: isParallel ? 'parallel' : 'submitting',
+    stage: isParallel ? 'parallel' : 'submitting',
+    scan_status: scanStatus,
     submit_enabled: true,
     submit_status: 'running',
     submit_stop_requested: false,
     is_running: true,
-    current_action: `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway`,
-    active_worker_count: maxConcurrency,
+    current_action: isParallel
+      ? `Universal Parallel Pipeline: Scanning & Submissions (${tasksCount} ready) running concurrently across workers`
+      : `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway`,
+    active_worker_count: maxConcurrency + (isParallel ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0),
   });
 
   console.log(`\n🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
@@ -886,18 +939,30 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  if ((pathname === '/api/bot/submit/stop' || pathname === '/api/bot/stop-submit') && req.method === 'POST') {
-    console.log(`\n🛑 [DAEMON WEBHOOK] Direct submit stop requested on ${pathname}`);
-    await stopSubmitPool();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      success: true,
-      message: 'Submission pipeline halted cleanly. Submitting workers idle.',
-      submit_status: 'off',
-    }));
-    return;
-  }
-
+  if ((pathname === '/api/bot/submit/stop' || pathname === '/api/bot/stop-submit') && req.method === 'POST') {
+
+    console.log(`\n🛑 [DAEMON WEBHOOK] Direct submit stop requested on ${pathname}`);
+
+    await stopSubmitPool();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+
+    res.end(JSON.stringify({
+
+      success: true,
+
+      message: 'Submission pipeline halted cleanly. Submitting workers idle.',
+
+      submit_status: 'off',
+
+    }));
+
+    return;
+
+  }
+
+
+
   if ((pathname === '/api/bot/universal' || pathname === '/api/bot/start-all') && req.method === 'POST') {
     console.log(`\n⚡ [DAEMON WEBHOOK (${SERVICE_ROLE.toUpperCase()})] Direct universal trigger requested on ${pathname}! Launching all stages concurrently.`);
     if (SERVICE_ROLE === 'main') {
@@ -1328,21 +1393,36 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 3c. Dedicated Submit Stop Webhook
-  if (pathname === '/api/bot/submit/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop_submit' || body.action === 'submit_stop'))) {
-    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
-    if (!authUser) return;
-    await stopSubmitPool();
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      success: true,
-      message: 'Submission workers safely halted. Active browser contexts aborted.',
-      submitStatus: 'off',
-      isRunning: scanStatus === 'running',
-    }));
-    return;
-  }
-
+  // 3c. Dedicated Submit Stop Webhook
+
+  if (pathname === '/api/bot/submit/stop' || (pathname === '/api/bot/webhook' && (body.action === 'stop_submit' || body.action === 'submit_stop'))) {
+
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+
+    if (!authUser) return;
+
+    await stopSubmitPool();
+
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+
+    res.end(JSON.stringify({
+
+      success: true,
+
+      message: 'Submission workers safely halted. Active browser contexts aborted.',
+
+      submitStatus: 'off',
+
+      isRunning: scanStatus === 'running',
+
+    }));
+
+    return;
+
+  }
+
+
+
   // 3d. Dedicated Universal Start Webhook (starts all stages concurrently)
   if (pathname === '/api/bot/universal' || pathname === '/api/bot/start-all' || (pathname === '/api/bot/webhook' && (body.action === 'start_universal' || body.action === 'trigger_all'))) {
     const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
@@ -1391,7 +1471,7 @@ const server = http.createServer(async (req, res) => {
       isPoolRunning = true;
       currentStage = 'submitting';
       currentMode = 'submitting';
-      runStage3Submissions().catch(console.error);
+      runStage3Submissions({ isStreaming: true }).catch(console.error);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: true, message: 'Submit pool launched.' }));
       return;
@@ -1403,7 +1483,7 @@ const server = http.createServer(async (req, res) => {
     currentStage = 'parallel';
     currentMode = 'parallel';
     runScanAndResolveParallel().catch(console.error);
-    runStage3Submissions().catch(console.error);
+    runStage3Submissions({ isStreaming: true }).catch(console.error);
 
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
@@ -2154,14 +2234,27 @@ export async function initOnStartup() {
           console.log(`\n⏸️ [SUBMITTER SERVICE] Submit signal received, but SUBMIT_RUN is explicitly disabled in environment. Remaining safely idle.`);
           return;
         }
-        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions...`);
-        await syncBotControlState({ last_action_requested: null, trigger_requested: false, is_running: true, stage: 'submitting', submit_status: 'running', submit_enabled: true, stop_requested: false, submit_stop_requested: false });
+        const isParallelSignal = scanStatus === 'running' || bc?.stage === 'parallel' || bc?.last_action_requested === 'start_universal';
+        const targetSubmitStage = isParallelSignal ? 'parallel' : 'submitting';
+        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions (stage: ${targetSubmitStage})...`);
+        await syncBotControlState({
+          last_action_requested: null,
+          trigger_requested: false,
+          is_running: true,
+          stage: targetSubmitStage,
+          mode: targetSubmitStage,
+          scan_status: scanStatus,
+          submit_status: 'running',
+          submit_enabled: true,
+          stop_requested: false,
+          submit_stop_requested: false
+        });
         if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false, status: 'running' }).catch(() => { });
         isPoolRunning = true;
-        currentStage = 'submitting';
-        currentMode = 'submitting';
+        currentStage = targetSubmitStage;
+        currentMode = targetSubmitStage;
         submitStatus = 'running';
-        runStage3Submissions().catch(console.error);
+        runStage3Submissions({ isStreaming: isParallelSignal }).catch(console.error);
         return;
       }
 

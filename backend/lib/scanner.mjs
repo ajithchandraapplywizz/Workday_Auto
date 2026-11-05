@@ -285,15 +285,14 @@ export function discoverFieldsInDOM(container = document) {
 
   const fields = [];
   for (const el of nodes) {
-    if (el.getAttribute('data-automation-id') === 'beecatcher' || el.name === 'website') continue;
+    const automationId = el.getAttribute('data-automation-id')
+      || el.closest('[data-automation-id]')?.getAttribute('data-automation-id')
+      || '';
+    if (automationId === 'beecatcher' || el.name === 'website') continue;
     const type = classifyFieldType(el);
     const isCustomSelect = /select-?widget|select-?one/i.test(automationId) || el.getAttribute('aria-haspopup') === 'listbox';
     if (['hidden', 'submit', 'button', 'image', 'reset'].includes(type) && !isCustomSelect) continue;
     if (!isVisible(el)) continue;
-
-    const automationId = el.getAttribute('data-automation-id')
-      || el.closest('[data-automation-id]')?.getAttribute('data-automation-id')
-      || '';
     const key = resolveStableKey(el);
     const label = getLabelText(el) || '';
     const id = el.id || '';

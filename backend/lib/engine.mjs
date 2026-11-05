@@ -3177,7 +3177,17 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
 
   const ats = detectATS(url);
   const ownBrowser = !existingBrowser;
-  const browser = existingBrowser || await chromium.launch({ headless });
+  const browser = existingBrowser || await chromium.launch({
+    headless: Boolean(headless),
+    args: [
+      '--disable-blink-features=AutomationControlled',
+      '--no-sandbox',
+      '--disable-setuid-sandbox',
+      '--disable-infobars',
+      '--disable-dev-shm-usage',
+      '--window-size=1280,900',
+    ],
+  });
   if (ownBrowser) registerActiveBrowser(browser, { role: isScanOnly ? 'scan' : 'submit' });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({
     viewport: { width: 1280, height: 900 },

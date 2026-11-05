@@ -202,10 +202,13 @@ export async function syncActiveClientProfiles({ force = false, concurrency = 4 
   console.log(`[ACTIVE-CLIENTS] Syncing ${toSync.length} client profile(s) from CRM...`);
 
   // 2. Fetch and upsert missing client profiles in concurrent batches
+  let authFailureEncountered = false;
   for (let i = 0; i < toSync.length; i += concurrency) {
+    if (authFailureEncountered) break;
     const batch = toSync.slice(i, i + concurrency);
     await Promise.all(
       batch.map(async (awlId) => {
+        if (authFailureEncountered) return;
         try {
           const detailRes = await fetch(`${CLIENT_DETAILS_API_URL}?applywizz_id=${encodeURIComponent(awlId)}`, {
             signal: AbortSignal.timeout(10000),
@@ -249,9 +252,17 @@ export async function syncActiveClientProfiles({ force = false, concurrency = 4 
         } catch (err) {
           console.warn(`[ACTIVE-CLIENTS] Upsert error for ${awlId}:`, err.message);
           errors++;
+          if (err.message && err.message.includes('401')) {
+            authFailureEncountered = true;
+          }
         }
       })
     );
+
+    if (authFailureEncountered) {
+      console.error('[ACTIVE-CLIENTS] Sync halted: Supabase authentication 401 error. Please verify SUPABASE_SERVICE_ROLE_KEY matches SUPABASE_URL.');
+      break;
+    }
   }
 
   console.log(`[ACTIVE-CLIENTS] Sync complete: ${newlySynced} synced, ${errors} error(s), total active: ${activeIds.length}`);

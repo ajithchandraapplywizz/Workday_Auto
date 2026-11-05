@@ -75,8 +75,10 @@ function config() {
   const rawUrl = process.env.SUPABASE_URL || '';
   const rawKey =
     process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
     process.env.SUPABASE_SECRET_KEY ||
+    process.env.SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_KEY ||
     '';
   const url = sanitizeEnvKey(rawUrl).replace(/\/+$/, '');
   const key = sanitizeEnvKey(rawKey);
@@ -103,7 +105,26 @@ export async function request(path, { method = 'GET', query = '', body = null, p
     body,
     timeoutMs: 20000,
   }, { attempts: 2, label: 'Supabase' });
-  if (!res.ok) throw new Error(`Supabase ${res.status}: ${String(res.text || '').slice(0, 180)}`);
+  if (!res.ok) {
+    if (res.status === 401) {
+      let keyInfo = 'empty';
+      if (key) {
+        try {
+          const parts = key.split('.');
+          if (parts.length === 3) {
+            const p = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
+            keyInfo = `role=${p.role || 'unknown'}, ref=${p.ref || 'unknown'}, exp=${p.exp ? new Date(p.exp * 1000).toISOString() : 'none'}`;
+          } else {
+            keyInfo = `length=${key.length}, prefix=${key.slice(0, 8)}...`;
+          }
+        } catch {
+          keyInfo = `length=${key.length}`;
+        }
+      }
+      console.error(`[SUPABASE AUTH ERROR 401] Path: ${path} | URL: ${url} | Key Details: [${keyInfo}]`);
+    }
+    throw new Error(`Supabase ${res.status}: ${String(res.text || '').slice(0, 180)}`);
+  }
   if (!res.text) return null;
   return res.json();
 }
