@@ -2,8 +2,8 @@ title: Workday Auto Master Question & Answer Reference Bank
 description: Consolidated, deduplicated form questions, types, and sample
   answers captured by Blueprint Workers
 version: 1.0.0
-last_updated: 2026-11-04T09:39:18.063Z
-total_unique_questions: 117
+last_updated: 2026-11-06T05:53:25.772Z
+total_unique_questions: 159
 questions:
   are you legally authorized to work in the united states:
     question: Are you legally authorized to work in the United States?
@@ -72,7 +72,13 @@ questions:
     question: How Did You Hear About Us?*
     field_type: text
     step: My Information
-    options: []
+    options:
+      - LinkedIn
+      - Glassdoor
+      - Indeed
+      - Company Website
+      - Referral
+      - Other
     sample_answer: I know someone at this company / I know someone at this company
     source: scan_placeholder
     tenant: global
@@ -113,6 +119,10 @@ questions:
     step: My Information
     options:
       - United States of America
+      - Canada
+      - United Kingdom
+      - India
+      - Australia
     sample_answer: United States of America (+1)
     source: scan_placeholder
     tenant: global
@@ -257,7 +267,11 @@ questions:
     question: Phone Device Type*
     field_type: dropdown
     step: My Information
-    options: []
+    options:
+      - Mobile
+      - Landline
+      - Home
+      - Work
     sample_answer: Mobile
     source: scan_placeholder
     tenant: global
@@ -515,7 +529,7 @@ questions:
     field_type: text
     step: My Information
     options: []
-    sample_answer: null
+    sample_answer: Sai Sunai Madhamshetty
     source: scan_placeholder
     tenant: global
     first_seen_company: Zoom
@@ -1719,3 +1733,586 @@ questions:
     first_seen_role: Staff Software Engineer
     mock_client_id: AWL-1568
     created_at: 2026-11-04T09:39:18.063Z
+  password:
+    question: Password*
+    field_type: unknown
+    step: Unknown
+    options: []
+    sample_answer: Applywizz@2026789
+    source: llm_scan_learned
+    tenant: monotype
+    first_seen_company: Monotype
+    first_seen_role: Sr Full Stack AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T20:09:39.027Z
+  email address:
+    question: Email Address*
+    field_type: text
+    step: Unknown
+    options: []
+    sample_answer: sai.madhamshetty@applywizard.ai
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Monotype
+    first_seen_role: Sr. Full Stack AI Engineer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T20:10:23.897Z
+  multiselect input container:
+    question: Multiselect Input Container
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: AI Engineer
+    source: llm_scan_learned
+    tenant: wgu
+    first_seen_company: Western Governors University
+    first_seen_role: Careers at WGU
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T20:58:04.985Z
+  1266d0e2-7e8f-48db-9273-47b4bd298755:
+    question: 1266d0e2-7e8f-48db-9273-47b4bd298755
+    field_type: text
+    step: My Experience
+    options: []
+    sample_answer: Master of Science in Computer & Information Sciences
+    source: llm_scan_learned
+    tenant: wgu
+    first_seen_company: Western Governors University
+    first_seen_role: Careers at WGU
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:01:09.502Z
+  this position requires you to work in the posted location’s office five days a week are you willing to commit to this requirement:
+    question: This position requires you to work in the posted location’s office
+      five days a week. Are you willing to commit to this requirement?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options: []
+    sample_answer: Yes
+    source: llm_scan_learned
+    tenant: wgu
+    first_seen_company: Western Governors University
+    first_seen_role: Careers at WGU
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:01:48.334Z
+  when does your current work authorization expire:
+    question: When does your current work authorization expire?*
+    field_type: date
+    step: Application Questions
+    options: []
+    sample_answer: 11/06/2026
+    source: scan_mandatory_fallback
+    tenant: wgu
+    first_seen_company: Western Governors University
+    first_seen_role: Careers at WGU
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:01:51.752Z
+  if you are not currently located in the posted location would you be willing to relocate:
+    question: If you are not currently located in the posted location, would you be
+      willing to relocate?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: N/A
+    source: scan_mandatory_fallback
+    tenant: wgu
+    first_seen_company: Western Governors University
+    first_seen_role: Careers at WGU
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:04:58.919Z
+  have you previously worked for western governors university if yes please answer the questions below if no please continue to the next page:
+    question: Have you previously worked for Western Governors University? If Yes,
+      please answer the questions below. If No, please continue to the next
+      page.*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  55e42ad5-efb4-48f8-9ed3-372e1cffecec:
+    question: 55e42ad5-efb4-48f8-9ed3-372e1cffecec
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: United States of America (+1)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  prompt selection label:
+    question: Prompt Selection Label
+    field_type: text
+    step: My Experience
+    options: []
+    sample_answer: null
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  items selected:
+    question: items selected
+    field_type: text
+    step: My Experience
+    options: []
+    sample_answer: Agricultural Education
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  india +91 press delete to clear value:
+    question: India (+91), press delete to clear value.
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: India (+91)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  united states of america +1 press delete to clear value:
+    question: United States of America (+1), press delete to clear value.
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: Florida
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  job title:
+    question: Job Title*
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: AI Engineer
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  company:
+    question: Company*
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: Chime
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  from:
+    question: From*
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: 03/2024
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  current value is 3/2024:
+    question: current value is 3/2024
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: 03/2024
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  school or university:
+    question: School or University*
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: Florida Atlantic University
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  degree master degree:
+    question: Degree Master Degree
+    field_type: dropdown
+    step: Application Questions
+    options:
+      - Bachelor's Degree
+      - Master's Degree
+      - Doctorate
+      - Associate's Degree
+      - High School Diploma
+    sample_answer: Master Degree
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  field of study:
+    question: Field of Study*
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: Agricultural Education
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  degree:
+    question: Degree*
+    field_type: select
+    step: My Experience
+    options:
+      - Bachelor's Degree
+      - Master's Degree
+      - Doctorate
+      - Associate's Degree
+      - High School Diploma
+    sample_answer: Master Degree
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  agricultural education press delete to clear value:
+    question: Agricultural Education, press delete to clear value.
+    field_type: text
+    step: My Experience
+    options: []
+    sample_answer: Agricultural Education
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  will you require any employer assistance with immigration-related work authorization to accept or maintain employment with wguthis includes but is not limited tovisa sponsorship eg h-1b or other work visae-verify enrollment or employment verification eg for opt stem opt cptfuture support to extend transfer or change your work authorization status:
+    question: Will you require any employer assistance with immigration-related work
+      authorization to accept or maintain employment with WGU?This includes, but
+      is not limited to:Visa sponsorship (e.g., H-1B or other work visa)E-Verify
+      enrollment or employment verification (e.g., for OPT, STEM OPT, CPT)Future
+      support to extend, transfer, or change your work authorization status*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  current value is 11/5/2026:
+    question: current value is 11/5/2026
+    field_type: date
+    step: Self Identify
+    options: []
+    sample_answer: 11/05/2026
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  do you have relatives who work for wgu:
+    question: Do you have relatives who work for WGU?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  what is your desired salary for the position you are applying to:
+    question: What is your desired salary for the position you are applying to?*
+    field_type: text
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: "100000"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  what is the highest degree you have obtained:
+    question: What is the highest degree you have obtained?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Bachelor's Degree
+      - Master's Degree
+      - Doctorate
+      - Associate's Degree
+      - High School Diploma
+    sample_answer: Master's Degree
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  when are you available to start:
+    question: When are you available to start?*
+    field_type: date
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: 11/05/2026
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  what is your gender:
+    question: What is your gender?
+    field_type: dropdown
+    step: Self Identify
+    options:
+      - Female
+      - Male
+    sample_answer: Male
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  are you hispanic or latino:
+    question: Are you Hispanic or Latino?
+    field_type: dropdown
+    step: Self Identify
+    options:
+      - Yes
+      - No
+      - Decline to self-identify
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  what is your race/ethnicity:
+    question: What is your race/ethnicity?
+    field_type: dropdown
+    step: Self Identify
+    options:
+      - Decline to self-identify
+      - White
+      - Black or African American
+      - Hispanic or Latino
+      - Asian
+      - American Indian or Alaska Native
+      - Native Hawaiian or Other Pacific Islander
+      - Two or More Races
+    sample_answer: Asian (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  what is your veteran status:
+    question: What is your veteran status?
+    field_type: dropdown
+    step: Self Identify
+    options:
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
+    sample_answer: I am not a veteran.
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: Western Governors University
+    first_seen_role: Manager, Software Engineer Student LifeCycle Services
+    mock_client_id: AWL-1568
+    created_at: 2026-11-05T21:08:20.773Z
+  have you previously worked for gn hearing:
+    question: Have you previously worked for GN Hearing?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  8973d194-51e5-4fd6-af1c-81b00ca60731:
+    question: 8973d194-51e5-4fd6-af1c-81b00ca60731
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: United States of America (+1)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  what are your salary expectations:
+    question: What are your salary expectations?*
+    field_type: textarea
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: "90000"
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  are you eligible to work in the country in which this position is located:
+    question: Are you eligible to work in the country in which this position is located?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: United States of America
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  will you now or in the future require sponsorship to legally work in the us for the position you are applying for:
+    question: Will you now or in the future require sponsorship to legally work in
+      the US for the position you are applying for?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  please indicate which of the following that best represents your ethnic heritage:
+    question: Please indicate which of the following that best represents your
+      ethnic heritage.*
+    field_type: checkbox-group
+    step: Voluntary Disclosures
+    options:
+      - American Indian or Alaska Native (Not Hispanic or Latino) (United States
+        of America)
+      - Asian (Not Hispanic or Latino) (United States of America)
+      - Black or African American (Not Hispanic or Latino) (United States of
+        America)
+      - Hispanic or Latino (United States of America)
+      - Native Hawaiian or Other Pacific Islander (Not Hispanic or Latino)
+        (United States of America)
+      - Not Specified (United States of America)
+      - Two or More Races (Not Hispanic or Latino) (United States of America)
+      - White (Not Hispanic or Latino) (United States of America)
+    sample_answer: American Indian or Alaska Native (Not Hispanic or Latino) (United
+      States of America), Asian (Not Hispanic or Latino) (United States of
+      America), Black or African American (Not Hispanic or Latino) (United
+      States of America), Hispanic or Latino (United States of America), Native
+      Hawaiian or Other Pacific Islander (Not Hispanic or Latino) (United States
+      of America), Not Specified (United States of America), Two or More Races
+      (Not Hispanic or Latino) (United States of America), White (Not Hispanic
+      or Latino) (United States of America)
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  please identify your veteran status:
+    question: Please identify your veteran status.*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
+    sample_answer: I AM NOT A VETERAN
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  i accept how gn hearing uses my data as part as the recruitment process:
+    question: I accept how GN Hearing uses my data as part as the recruitment process.*
+    field_type: checkbox
+    step: Voluntary Disclosures
+    options:
+      - I accept how GN Hearing uses my data as part as the recruitment process.*
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  current value is 11/6/2026:
+    question: current value is 11/6/2026
+    field_type: date
+    step: Self Identify
+    options: []
+    sample_answer: 11/06/2026
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z
+  not specified united states of america:
+    question: Not Specified (United States of America)
+    field_type: radio
+    step: Review
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: scan_placeholder
+    tenant: global
+    first_seen_company: GN Group
+    first_seen_role: Software Engineer (Glenview, IL)
+    mock_client_id: AWL-6307
+    created_at: 2026-11-06T05:53:25.772Z

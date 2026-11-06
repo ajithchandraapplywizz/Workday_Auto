@@ -916,6 +916,8 @@ Usage:
 async function cmdClusterRun() {
   // User explicitly wants HEADED only: defaults to false (HEADED browser), visible windows
   const isHeadless = process.argv.includes('--headless') && !process.argv.includes('--headed');
+  const targetUrlIdx = process.argv.findIndex((a) => a === '--url' || a === '--job-url');
+  const targetUrl = targetUrlIdx !== -1 ? process.argv[targetUrlIdx + 1] : null;
   const { runClusterBatchRunner } = await import('./lib/clusterBatchRunner.mjs');
 
   await runClusterBatchRunner({
@@ -924,6 +926,7 @@ async function cmdClusterRun() {
     headless: isHeadless,
     confirmSubmit,
     limitPerLink,
+    targetUrl,
     defaultPassword: workdayPassword || process.env.WORKDAY_PASSWORD || '',
   });
 }

@@ -1576,10 +1576,15 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
 
   await runStepDomPrep(page, stepName, profile);
 
-  await runWorkdayQuestionWorkflow(page, profile, plan, stepName, {
-    maxPasses: /application questions/i.test(stepName) ? 3 : 2,
-    maxOuterPasses: 1,
-  });
+  const unfilledAfterPrep = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+  if (unfilledAfterPrep > 0) {
+    await runWorkdayQuestionWorkflow(page, profile, plan, stepName, {
+      maxPasses: /application questions/i.test(stepName) ? 3 : 2,
+      maxOuterPasses: 1,
+    });
+  } else {
+    console.log(`  ✓ "${stepName}" — all required fields verified & satisfied (skipping redundant orchestrator cycles)`);
+  }
 
   const agreementsChecked = await acknowledgeAllPageAgreements(page, profile, stepName);
   if (agreementsChecked > 0) {
@@ -1719,6 +1724,25 @@ export async function verifyAndRepairPageValidation(page, stepName = '') {
         await page.waitForTimeout(100);
       }
     }
+
+    // 3. Active Error Interception & Self-Healing: Focus-blur committal on any flagged error containers
+    const errorBanners = await page.$('[data-automation-id="errorMessage"], [data-automation-id="form-error"], .error-message, [aria-invalid="true"]');
+    if (errorBanners.length > 0) {
+      console.log(`  🔧 Pre-advance: Detected ${errorBanners.length} error banner(s) — attempting focus-blur committal`);
+      for (const err of errorBanners) {
+        try {
+          const container = await err.evaluateHandle((el) => el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el.parentElement);
+          if (container) {
+            const innerInp = await container.$('input:not([type="hidden"]), select, textarea, button[aria-haspopup="listbox"]');
+            if (innerInp) {
+              await innerInp.focus().catch(() => {});
+              await page.keyboard.press('Tab').catch(() => {});
+              await page.waitForTimeout(50);
+            }
+          }
+        } catch {}
+      }
+    }
   } catch (err) {
     // Non-fatal pre-advance check
   }
@@ -1780,13 +1804,18 @@ async function advanceWorkdayStep(page, currentStep = '') {
   }
 
   if (!saveBtn) {
-    const hasSubmit = await page.evaluate(() => {
-      const btn = document.querySelector('button[data-automation-id*="submit" i], [data-automation-id="pageFooterSubmitButton"], button[type="submit"]') || Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test(b.textContent || ''));
-      return Boolean(btn);
-    }).catch(() => false);
-    if (hasSubmit) {
-      console.log('  🛑 Submit button detected on page — Review & Submit reached.');
-      return { hasSaveButton: false, submitBlocked: true };
+    const isWizard = await isWorkdayWizardVisible(page).catch(() => false);
+    const stepNow = await detectWorkdayStep(page).catch(() => 'Unknown');
+    if (isWizard && stepNow === 'Review') {
+      const hasRealSubmit = await page.evaluate(() => {
+        const btn = document.querySelector('[data-automation-id="pageFooterSubmitButton"], button[data-automation-id="bottom-navigation-next-button"]');
+        const hasSubmitText = Array.from(document.querySelectorAll('button[data-automation-id*="navigation"], button[data-automation-id*="pageFooter"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()));
+        return Boolean(btn || hasSubmitText);
+      }).catch(() => false);
+      if (hasRealSubmit) {
+        console.log('  🛑 True application Submit button detected on Review page — Review reached.');
+        return { hasSaveButton: false, submitBlocked: true };
+      }
     }
     return { hasSaveButton: false };
   }
@@ -1952,6 +1981,12 @@ export async function promptScanReviewDecision({ company = '', url = '' } = {}) 
 }
 
 async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dryRun = false } = {}) {
+  const currentStepNow = await detectWorkdayStep(page).catch(() => 'Unknown');
+  const isRealReview = currentStepNow === 'Review' || await isWorkdayReviewPage(page).catch(() => false);
+  if (!isRealReview) {
+    console.log(`  ❌ False-positive review invocation: Page is "${currentStepNow}", NOT genuine Review page! Aborting.`);
+    return 'incomplete';
+  }
   console.log('\n📋 Review step — parsing DOM before submit.');
   profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
@@ -2580,7 +2615,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
 
     const maybeReview = await detectWorkdayStep(page);
-    if (maybeReview === 'Review' || advanceResult.submitBlocked) {
+    if (maybeReview === 'Review' && (advanceResult.submitBlocked || await isWorkdayReviewPage(page).catch(() => false))) {
       await recordClientApplication(profile, {
         url: profile._canonicalJobUrl || plan?.url || page.url(),
         company: profile._company || '',

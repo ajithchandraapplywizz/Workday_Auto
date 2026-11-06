@@ -31,12 +31,44 @@ export function inferStandardOptions(label = '', fieldType = '') {
   const type = String(fieldType || '').toLowerCase();
   const isChoice = /dropdown|select|radio|combobox/i.test(type);
 
+  // 1. Referral Source ("How Did You Hear About Us?")
+  if (/how did you hear|referral source|source/i.test(norm) && !/phone|device|code/i.test(norm)) {
+    return ['LinkedIn', 'Glassdoor', 'Indeed', 'Company Website', 'Referral', 'Other'];
+  }
+  // 2. Phone Device Type
+  if (/phone\s*(device)?\s*type|device\s*type/i.test(norm)) {
+    return ['Mobile', 'Landline', 'Home', 'Work'];
+  }
+  // 3. Country / Territory
+  if (/^country(\s*\/\s*territory)?$/i.test(norm.replace(/\*+/g, '').trim())) {
+    return ['United States of America', 'Canada', 'United Kingdom', 'India', 'Australia'];
+  }
+  // 4. Country Phone Code
+  if (/country.*phone.*code|phone.*country.*code/i.test(norm)) {
+    return ['United States of America (+1)', 'Canada (+1)', 'United Kingdom (+44)', 'India (+91)'];
+  }
+  // 5. Gender / Sex
   if (/^(gender|sex)\b/i.test(norm)) {
     return ['Male', 'Female', 'Decline to self-identify'];
   }
+  // 6. Hispanic / Latino
   if (/hispanic|latino/i.test(norm)) {
     return ['Yes', 'No', 'Decline to self-identify'];
   }
+  // 7. Race / Ethnicity
+  if (/race|ethnicity/i.test(norm)) {
+    return [
+      'Decline to self-identify',
+      'White',
+      'Black or African American',
+      'Hispanic or Latino',
+      'Asian',
+      'American Indian or Alaska Native',
+      'Native Hawaiian or Other Pacific Islander',
+      'Two or More Races'
+    ];
+  }
+  // 8. Protected Veteran
   if (/veteran/i.test(norm)) {
     return [
       'I am not a protected veteran',
@@ -44,6 +76,7 @@ export function inferStandardOptions(label = '', fieldType = '') {
       'I do not wish to self-identify',
     ];
   }
+  // 9. Disability (CC-305)
   if (/disability/i.test(norm)) {
     return [
       'Yes, I have a disability, or have a history/record of having a disability',
@@ -51,12 +84,18 @@ export function inferStandardOptions(label = '', fieldType = '') {
       'I do not wish to answer',
     ];
   }
+  // 10. Notice Period
   if (/notice\s*period/i.test(norm)) {
     return ['Immediate', '2 Weeks', '1 Month', 'More than 1 month'];
   }
+  // 11. Degree / Highest Education
+  if (/degree|highest\s*level\s*of\s*education/i.test(norm)) {
+    return ["Bachelor's Degree", "Master's Degree", "Doctorate", "Associate's Degree", "High School Diploma"];
+  }
+  // 12. Universal Yes / No Questions
   if (isChoice || /\?/.test(norm)) {
     if (
-      /\b(authorized|authorization|sponsorship|visa|over\s*18|age|previously|former|non-compete|convicted|felony|agree|consent|certify)\b/i.test(norm) ||
+      /\b(authorized|authorization|sponsorship|visa|over\s*18|age|previously|former|prior|non-compete|convicted|felony|agree|consent|certify|relocate|remote|background\s*check|drug\s*test)\b/i.test(norm) ||
       /^(are you|have you|will you|do you|is your|were you|did you|can you|should you|would you)\b/i.test(norm)
     ) {
       return ['Yes', 'No'];
@@ -93,7 +132,7 @@ export async function harvestPageQuestions(page, { company, url, stepName }) {
     if (options.length === 0 && /dropdown|select|checkbox|radio|combobox/i.test(item.fieldType)) {
       // 1. Safe attempt to read live Workday DOM options first
       try {
-        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 1500));
+        const timeoutPromise = new Promise((resolve) => setTimeout(() => resolve([]), 3500));
         const livePromise = collectLiveFieldOptions(page, item.label, item.fieldType);
         const liveOpts = await Promise.race([livePromise, timeoutPromise]);
         if (Array.isArray(liveOpts) && liveOpts.length > 0) {

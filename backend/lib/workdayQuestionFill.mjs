@@ -2943,15 +2943,17 @@ export async function handleSelfIdentifyStep(page, profile) {
 
   if (await fillSelfIdentifyLanguage(page, profile)) filled++;
 
-  if (fullName) {
-    let nameOk = await fillApplicationQuestionField(page, 'Name', 'text', fullName, profile, selfIdentifyMeta);
-    if (!nameOk) {
-      const brute = await bruteForceSelfIdentifyNameDate(page, fullName, today);
-      nameOk = brute.name;
-      if (nameOk) console.log(`    ✅ [text] Name ← "${fullName}" (direct DOM)`);
-    } else {
-      console.log(`    ✅ [text] Name ← "${fullName}"`);
-    }
+  // 1. Fast-track: Direct DOM injection for OFCCP CC-305 Name & Date spinbuttons
+  const brute = await bruteForceSelfIdentifyNameDate(page, fullName, today).catch(() => ({ name: false, date: false }));
+  let nameOk = brute.name;
+  let dateOk = brute.date;
+
+  if (nameOk) {
+    recordField(profile, 'Name', fullName);
+    console.log(`    ✅ [text] Name ← "${fullName}" (fast-track CC-305 DOM)`);
+    filled++;
+  } else if (fullName) {
+    nameOk = await fillApplicationQuestionField(page, 'Name', 'text', fullName, profile, selfIdentifyMeta);
     if (!nameOk) {
       console.log('    ⚠️  Name field fill failed — retrying with getByLabel...');
       const byLabel = page.getByLabel(/^Name\b/i).first();
@@ -2962,6 +2964,8 @@ export async function handleSelfIdentifyStep(page, profile) {
         nameOk = true;
         console.log(`    ✅ [text] Name ← "${fullName}" (getByLabel)`);
       }
+    } else {
+      console.log(`    ✅ [text] Name ← "${fullName}"`);
     }
     if (nameOk) {
       recordField(profile, 'Name', fullName);
@@ -2969,34 +2973,35 @@ export async function handleSelfIdentifyStep(page, profile) {
     }
   }
 
-  let dateOk = await fillApplicationQuestionField(page, 'Date', 'date', today, profile, selfIdentifyMeta);
-  if (!dateOk) {
-    const brute = await bruteForceSelfIdentifyNameDate(page, fullName, today);
-    dateOk = brute.date;
-    if (dateOk) console.log(`    ✅ [date] Date ← "${today}" (direct DOM spinbuttons)`);
-  } else {
-    console.log(`    ✅ [date] Date ← "${today}"`);
-  }
-  if (!dateOk) {
-    console.log('    ⚠️  Date field fill failed — retrying spinbutton locators...');
-    const dateField = page.locator('[data-automation-id*="formField"]').filter({ hasText: /date/i }).first();
-    let spins = dateField.locator('input[role="spinbutton"]');
-    if (await spins.count().catch(() => 0) < 3) {
-      spins = page.locator('input[role="spinbutton"]');
-    }
-    if (await spins.count().catch(() => 0) >= 3) {
-      const [, month, day, year] = today.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
-      await spins.nth(0).fill(String(Number(month)));
-      await spins.nth(1).fill(String(Number(day)));
-      await spins.nth(2).fill(year);
-      await spins.nth(2).press('Tab');
-      dateOk = true;
-      console.log(`    ✅ [date] Date ← "${today}" (spinbutton locator)`);
-    }
-  }
   if (dateOk) {
+    console.log(`    ✅ [date] Date ← "${today}" (fast-track CC-305 spinbuttons)`);
     recordField(profile, 'Date', today);
     filled++;
+  } else {
+    dateOk = await fillApplicationQuestionField(page, 'Date', 'date', today, profile, selfIdentifyMeta);
+    if (!dateOk) {
+      console.log('    ⚠️  Date field fill failed — retrying spinbutton locators...');
+      const dateField = page.locator('[data-automation-id*="formField"]').filter({ hasText: /date/i }).first();
+      let spins = dateField.locator('input[role="spinbutton"]');
+      if (await spins.count().catch(() => 0) < 3) {
+        spins = page.locator('input[role="spinbutton"]');
+      }
+      if (await spins.count().catch(() => 0) >= 3) {
+        const [, month, day, year] = today.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || [];
+        await spins.nth(0).fill(String(Number(month)));
+        await spins.nth(1).fill(String(Number(day)));
+        await spins.nth(2).fill(year);
+        await spins.nth(2).press('Tab');
+        dateOk = true;
+        console.log(`    ✅ [date] Date ← "${today}" (spinbutton locator)`);
+      }
+    } else {
+      console.log(`    ✅ [date] Date ← "${today}"`);
+    }
+    if (dateOk) {
+      recordField(profile, 'Date', today);
+      filled++;
+    }
   }
 
   if (await fillSelfIdentifyDisability(page, profile)) filled++;

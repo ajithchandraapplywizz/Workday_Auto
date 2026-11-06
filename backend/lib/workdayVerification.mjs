@@ -491,28 +491,22 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
  * @param {number} [options.timeoutMs=60000] - Max wait time (default: 60s)
  * @returns {Promise<{ success: boolean, type: string, url?: string, code?: string, onWizard?: boolean }>}
  */
-async function checkIfAlreadyOnApplicationWizard(page) {
-  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
-  if (typeof page.evaluate !== 'function') return false;
-  if (await isWorkdayWizardVisible(page).catch(() => false)) return true;
-  return await page.evaluate(() => {
-    const text = (document.body?.innerText || '').toLowerCase();
-    const hasNextBtn = Boolean(
-      document.querySelector('[data-automation-id="bottom-navigation-next-button"]') ||
-      document.querySelector('[data-automation-id="next-button"]') ||
-      document.querySelector('[data-automation-id="progressBar"]')
-    );
-    const hasFormInputs = Boolean(
-      document.querySelector('input[data-automation-id*="legalName" i]') ||
-      document.querySelector('input[data-automation-id*="address" i]') ||
-      document.querySelector('input[data-automation-id*="phone" i]') ||
-      document.querySelector('[data-automation-id*="formField"]')
-    );
-    const hasStepText = text.includes('my information') || text.includes('my experience') || text.includes('application questions') || text.includes('voluntary disclosures');
-    return (hasNextBtn || hasFormInputs) && (hasStepText || hasNextBtn);
-  }).catch(() => false);
-}
-
+async function checkIfAlreadyOnApplicationWizard(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  if (typeof page.evaluate !== 'function') return false;
+
+  const isAuthOrVerification = await page.evaluate(() => {
+    const isLoginInput = document.querySelector('input[type="password"]:visible, input[data-automation-id="password"]:visible, [data-automation-id="signInSubmitButton"]:visible');
+    const pageText = (document.body?.innerText || '').toLowerCase();
+    const isVerifyScreen = /verify\s*(?:your)?\s*email|check\s*your\s*inbox|security\s*code|enter\s*(?:the)?\s*code/i.test(pageText);
+    const hasVerifyBtn = Boolean(document.querySelector('button[data-automation-id*="verify" i], button[data-automation-id*="code" i]'));
+    return Boolean(isLoginInput || (isVerifyScreen && hasVerifyBtn));
+  }).catch(() => false);
+
+  if (isAuthOrVerification) return false;
+  return await isWorkdayWizardVisible(page).catch(() => false);
+}
+
 export async function resolveWorkdayVerification(page, {
   email,
   password,

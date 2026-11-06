@@ -319,11 +319,48 @@ export function discoverFieldsInDOM(container = document) {
       disabled: Boolean(el.disabled || el.readOnly),
     };
 
-    if (type === 'select' && el.tagName.toLowerCase() === 'select') {
-      field.options = Array.from(el.options || []).map(o => ({
-        value: o.value,
-        text: o.textContent.trim(),
-      })).filter(o => o.value !== '');
+    if (type === 'select' || controlType === 'custom-dropdown') {
+      if (el.tagName.toLowerCase() === 'select') {
+        field.options = Array.from(el.options || []).map(o => ({
+          value: o.value,
+          text: o.textContent.trim(),
+        })).filter(o => o.value !== '');
+      } else {
+        const container = el.closest('[data-automation-id*="formField"], [role="group"], fieldset') || el.parentElement;
+        const liveOpts = container ? container.querySelectorAll('[role="option"], [data-automation-id="promptOption"]') : [];
+        if (liveOpts.length > 0) {
+          field.options = Array.from(liveOpts).map(o => ({
+            value: o.getAttribute('data-value') || o.textContent.trim(),
+            text: o.textContent.trim()
+          })).filter(o => o.text);
+        } else {
+          // Standard Workday option enums based on field label
+          const norm = (label || '').toLowerCase();
+          let stdOpts = [];
+          if (/how did you hear|source/i.test(norm) && !/phone|device|code/i.test(norm)) {
+            stdOpts = ['LinkedIn', 'Glassdoor', 'Indeed', 'Company Website', 'Referral', 'Other'];
+          } else if (/phone\s*(device)?\s*type|device\s*type/i.test(norm)) {
+            stdOpts = ['Mobile', 'Landline', 'Home', 'Work'];
+          } else if (/^country/i.test(norm.replace(/\*+/g, '').trim())) {
+            stdOpts = ['United States of America', 'Canada', 'United Kingdom', 'India', 'Australia'];
+          } else if (/country.*phone.*code|phone.*country.*code/i.test(norm)) {
+            stdOpts = ['United States of America (+1)', 'Canada (+1)', 'United Kingdom (+44)', 'India (+91)'];
+          } else if (/gender|sex/i.test(norm)) {
+            stdOpts = ['Male', 'Female', 'Decline to self-identify'];
+          } else if (/hispanic|latino/i.test(norm)) {
+            stdOpts = ['Yes', 'No', 'Decline to self-identify'];
+          } else if (/veteran/i.test(norm)) {
+            stdOpts = ['I am not a protected veteran', 'I identify as one or more of the classifications of protected veteran', 'I do not wish to self-identify'];
+          } else if (/disability/i.test(norm)) {
+            stdOpts = ['Yes, I have a disability, or have a history/record of having a disability', 'No, I do not have a disability, or have a history/record of having a disability', 'I do not wish to answer'];
+          } else if (/authorized|authorization|sponsorship|visa|over\s*18|age|previously|former|prior|non-compete|convicted|felony|agree|consent|certify/i.test(norm) || /^(are you|have you|will you|do you|is your|were you|did you|can you)\b/i.test(norm)) {
+            stdOpts = ['Yes', 'No'];
+          }
+          if (stdOpts.length > 0) {
+            field.options = stdOpts.map(t => ({ value: t, text: t }));
+          }
+        }
+      }
     }
 
     if (controlType === 'checkbox-group') {
@@ -550,18 +587,27 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
           };
         }
 
-        if (!authOk || authOk === 'mailbox_not_connected') {
-          console.log('   ⚠️  Workday authentication was not completed — skipping premature gateway scan.');
+        const isAuthFailed = !authOk ||
+          authOk === 'auth_failed' ||
+          authOk === 'mailbox_not_connected' ||
+          authOk === false ||
+          (typeof authOk === 'object' && (authOk.isZohoNotConnected || authOk.status === 'zoho_not_connected' || authOk.status === 'auth_failed' || authOk.reason === 'zoho mail not connected' || authOk.reason === 'mailbox_not_connected' || authOk.success === false));
+
+        if (isAuthFailed) {
+          const isZohoIssue = authOk === 'mailbox_not_connected' || Boolean(authOk?.isZohoNotConnected || authOk?.status === 'zoho_not_connected' || authOk?.reason === 'zoho mail not connected' || authOk?.reason === 'mailbox_not_connected');
+          const reasonLabel = isZohoIssue ? 'zoho mail not connected' : 'auth_failed';
+          console.log(`   ⚠️  Workday authentication was not completed (${reasonLabel}) — skipping premature gateway scan.`);
           return {
             url: page.url(),
             original_url: url,
-            title: await page.title(),
+            title: await page.title().catch(() => ''),
             scanned_at: new Date().toISOString(),
             field_count: 0,
             fields: [],
             submit_buttons: [],
             authFailed: true,
-            authReason: authOk === 'mailbox_not_connected' ? 'mailbox_not_connected' : 'auth_failed',
+            authReason: reasonLabel,
+            isZohoNotConnected: isZohoIssue,
           };
         }
 

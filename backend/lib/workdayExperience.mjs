@@ -1183,6 +1183,13 @@ async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable
     : [value];
   let uniqueOptions = [...new Set(options.map(String).filter(Boolean))];
 
+  // 1. Fast check: is field already populated with matching value?
+  const existingVal = await readFieldValue(fieldLoc).catch(() => '');
+  if (existingVal && !/select(\s+one)?/i.test(existingVal) && (valuesMatch(existingVal, value) || uniqueOptions.some((o) => valuesMatch(existingVal, o)))) {
+    attempts.push(`already filled with "${existingVal}" ✓`);
+    return { ok: true, selected: existingVal, attempts };
+  }
+
   const live = await collectLiveFieldOptions(page, label, 'dropdown').catch(() => []);
   if (live.length) {
     const present = uniqueOptions.filter((opt) => live.some((o) => valuesMatch(o, opt)));
@@ -1201,7 +1208,28 @@ async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable
     }
   }
 
-  for (const opt of uniqueOptions) {
+  // 2. High-speed Direct Dropdown Trigger: Click once, evaluate all options in DOM in one single-shot
+  const trigger = fieldLoc.locator(
+    '[data-automation-id="selectWidget"] button, button[aria-haspopup="listbox"], [role="combobox"], input[role="combobox"]'
+  ).first();
+
+  if (await trigger.isVisible({ timeout: 600 }).catch(() => false)) {
+    await trigger.scrollIntoViewIfNeeded().catch(() => {});
+    await trigger.click({ force: true }).catch(() => {});
+    await page.waitForTimeout(250);
+
+    const clicked = await clickVisiblePromptOption(page, uniqueOptions);
+    const after = await readFieldValue(fieldLoc);
+    if (clicked || valuesMatch(after, value) || uniqueOptions.some((o) => valuesMatch(after, o))) {
+      attempts.push(`single-shot prompt click "${clicked || after || value}" ✓`);
+      return { ok: true, selected: clicked || after || value, attempts };
+    }
+    await page.keyboard.press('Escape').catch(() => {});
+  }
+
+  // 3. Fallback: Type and click top variants only (max 2 attempts, zero 12-cycle lag)
+  const topCandidates = uniqueOptions.slice(0, 2);
+  for (const opt of topCandidates) {
     const typed = await typeAndClickOption(page, fieldLoc, opt);
     const after = await readFieldValue(fieldLoc);
     if (typed.ok || valuesMatch(after, opt)) {
@@ -1212,35 +1240,18 @@ async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable
     await page.keyboard.press('Escape').catch(() => {});
   }
 
-  const trigger = fieldLoc.locator(
-    '[data-automation-id="selectWidget"] button, button[aria-haspopup="listbox"], [role="combobox"], input[role="combobox"]'
-  ).first();
-
-  if (!(await trigger.isVisible({ timeout: 800 }).catch(() => false))) {
-    const appOk = await fillApplicationQuestionField(page, label, 'select', value);
-    attempts.push(appOk ? 'fillApplicationQuestionField(select) ✓' : 'no dropdown trigger ✗');
-    return { ok: appOk, selected: value, attempts };
-  }
-
-  for (const opt of uniqueOptions) {
-    await trigger.scrollIntoViewIfNeeded().catch(() => {});
-    await trigger.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(400);
-    const clicked = await clickVisiblePromptOption(page, [opt, String(opt)]);
-    if (clicked || valuesMatch(await readFieldValue(fieldLoc), opt)) {
-      attempts.push(`selected "${clicked || opt}" ✓`);
-      return { ok: true, selected: clicked || opt, attempts };
-    }
-    const result = await handleDropdown(page, trigger, opt, label);
+  // 4. Secondary fallback: handleDropdown on top candidate
+  if (await trigger.isVisible({ timeout: 400 }).catch(() => false)) {
+    const result = await handleDropdown(page, trigger, uniqueOptions[0] || value, label);
     if (result.success) {
-      attempts.push(`handleDropdown("${opt}") ✓`);
-      return { ok: true, selected: opt, attempts };
+      attempts.push(`handleDropdown("${uniqueOptions[0] || value}") ✓`);
+      return { ok: true, selected: uniqueOptions[0] || value, attempts };
     }
-    attempts.push(`try "${opt}" ✗`);
-    await page.keyboard.press('Escape').catch(() => {});
   }
 
-  return { ok: false, attempts };
+  const appOk = await fillApplicationQuestionField(page, label, 'select', value);
+  attempts.push(appOk ? 'fillApplicationQuestionField(select) ✓' : 'fillApplicationQuestionField ✗');
+  return { ok: appOk, selected: value, attempts };
 }
 
 function isFieldOfStudyFilled(current, leaf = '') {

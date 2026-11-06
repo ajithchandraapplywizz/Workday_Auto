@@ -797,7 +797,11 @@ export async function executeWorkerTask({
           const { handleWorkday } = await import('./workday.mjs');
           const authRes = await handleWorkday(page, { email: workdayEmail, password: workdayPassword, mode: 'signin', profile });
           page._lastAuthRes = authRes;
-          if (authRes === 'mailbox_not_connected') { scan.authFailed = true; scan.reason = 'zoho mail not connected'; }
+          if (authRes === 'mailbox_not_connected' || authRes?.isZohoNotConnected || authRes?.status === 'zoho_not_connected' || authRes?.reason === 'zoho mail not connected') {
+            scan.authFailed = true;
+            scan.reason = 'zoho mail not connected';
+            scan.isZohoNotConnected = true;
+          }
           await page.waitForTimeout(1500);
           if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
             console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
@@ -937,10 +941,17 @@ export async function executeWorkerTask({
             distributionId: task.distribution_id || task.distributionId || task.id,
           });
           if (vRes?.success && (vRes?.onWizard || await isWorkdayWizardVisible(page))) {
-            recovered = true;
-            console.log(`   🎉 [${workerId}] Successfully verified and authenticated via Zoho Mail! Continuing form fill.`);
-            scan = await scanForm(jobUrl, { browser, context, page, workdayEmail, workdayPassword, isBatch: true, candidateId: applywizzId });
-            scan.authFailed = false;
+            const freshWizard = await isWorkdayWizardVisible(page).catch(() => false);
+            if (freshWizard) {
+              recovered = true;
+              console.log(`   🎉 [${workerId}] Successfully verified and authenticated via Zoho Mail! Continuing form fill.`);
+              scan = await scanForm(jobUrl, { browser, context, page, workdayEmail, workdayPassword, isBatch: true, candidateId: applywizzId });
+              if (scan.authFailed) {
+                recovered = false;
+              }
+            } else {
+              recovered = false;
+            }
           }
         } catch (zErr) {
           console.warn(`   ⚠️ [${workerId}] Zoho verification attempt notice: ${zErr.message}`);
@@ -974,7 +985,15 @@ export async function executeWorkerTask({
             }).catch(() => null);
           } catch {}
 
-          const isZohoNotConnected = (vRes?.reason === 'zoho mail not connected' || vRes?.reason === 'mailbox_not_connected' || page?._lastAuthRes === 'mailbox_not_connected' || scan?.reason === 'zoho mail not connected');
+          const isZohoNotConnected = Boolean(
+            scan?.isZohoNotConnected ||
+            vRes?.reason === 'zoho mail not connected' ||
+            vRes?.reason === 'mailbox_not_connected' ||
+            page?._lastAuthRes === 'mailbox_not_connected' ||
+            page?._lastAuthRes?.isZohoNotConnected ||
+            page?._lastAuthRes?.status === 'zoho_not_connected' ||
+            scan?.reason === 'zoho mail not connected'
+          );
           const zohoReason = `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${workdayEmail})`;
 
           const isLinkExpired = isPageDead || Boolean(domSpecificReason?.includes('Link Expired') || /expired|does not exist|doesn't exist|404/i.test(authErrorMsg || ''));
