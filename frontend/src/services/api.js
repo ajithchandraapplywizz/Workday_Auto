@@ -3166,37 +3166,44 @@ export async function fetchBotDaemonStatus() {
     );
 
     // Explicit user stop requests
-    const isScanHalted = botControl?.scan_status === 'off' ||
-      (botControl?.last_action_requested === 'stop_scan' && botControl?.scan_stop_requested) ||
-      (scanWc?.stop_requested === true);
+    const isScanExplicitlyStopped = Boolean(
+      botControl?.scan_stop_requested ||
+      botControl?.last_action_requested === 'stop_scan' ||
+      scanWc?.stop_requested
+    );
 
-    const isSubmitHalted = botControl?.submit_status === 'off' ||
-      (botControl?.last_action_requested === 'stop_submit' && botControl?.submit_stop_requested) ||
-      (submitWc?.stop_requested === true);
+    const isSubmitExplicitlyStopped = Boolean(
+      botControl?.submit_stop_requested ||
+      botControl?.last_action_requested === 'stop_submit' ||
+      submitWc?.stop_requested
+    );
 
-    const isScanning = !isScanHalted && Boolean(
+    const isGlobalStopped = Boolean(
+      botControl?.stop_requested ||
+      botControl?.last_action_requested === 'stop' ||
+      botControl?.last_action_requested === 'stop_all' ||
+      botControl?.last_action_requested === 'stop_pipeline'
+    );
+
+    const isScanning = !isGlobalStopped && !isScanExplicitlyStopped && Boolean(
+      botControl?.scan_status === 'running' ||
       scannerApiRunning ||
       hasActiveScanWorkers ||
-      botControl?.scan_status === 'running' ||
-      (scanWc?.status === 'running' || scanWc?.enabled === true) ||
-      (botControl?.stage === 'scanning' && botControl?.is_running && !botControl?.stop_requested) ||
-      ((botControl?.stage === 'parallel' || botControl?.stage === 'parallel_pipeline') && botControl?.is_running && !botControl?.stop_requested && botControl?.scan_status !== 'off') ||
+      (botControl?.is_running && (botControl?.stage === 'scanning' || botControl?.stage === 'parallel' || botControl?.mode === 'parallel')) ||
       (botControl?.last_action_requested === 'start_scan' && (botControl?.trigger_requested || botControl?.is_running)) ||
       (botControl?.last_action_requested === 'start_universal' && (botControl?.trigger_requested || botControl?.is_running))
     );
 
-    const isSubmitting = !isSubmitHalted && Boolean(
+    const isSubmitting = !isGlobalStopped && !isSubmitExplicitlyStopped && Boolean(
+      botControl?.submit_status === 'running' ||
       submitterApiRunning ||
       hasActiveSubmitWorkers ||
-      botControl?.submit_status === 'running' ||
-      (submitWc?.status === 'running' || submitWc?.enabled === true) ||
-      (botControl?.stage === 'submitting' && botControl?.is_running && !botControl?.stop_requested) ||
-      ((botControl?.stage === 'parallel' || botControl?.stage === 'parallel_pipeline') && botControl?.is_running && !botControl?.stop_requested && botControl?.submit_status !== 'off') ||
+      (botControl?.is_running && (botControl?.stage === 'submitting' || botControl?.stage === 'parallel' || botControl?.mode === 'parallel')) ||
       (botControl?.last_action_requested === 'start_submit' && (botControl?.trigger_requested || botControl?.is_running)) ||
       (botControl?.last_action_requested === 'start_universal' && (botControl?.trigger_requested || botControl?.is_running))
     );
 
-    const isRunning = isScanning || isSubmitting || (daemonApiRunning && !botControl?.stop_requested);
+    const isRunning = isScanning || isSubmitting || (daemonApiRunning && !isGlobalStopped);
     let currentStage = 'idle';
     if (isScanning && isSubmitting) currentStage = 'parallel';
     else if (isSubmitting) currentStage = 'submitting';

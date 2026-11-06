@@ -5,6 +5,7 @@ import {
   fetchClientDetails,
   fetchClientQuestions,
   saveClientQuestion,
+  saveAnswerToQaBank,
   submitApplicationRecord,
   fetchClients,
   fetchAssignedClientsForCA,
@@ -56,6 +57,9 @@ export default function CADashboard() {
   const [questions, setQuestions] = useState([]);
   const [questionSearch, setQuestionSearch] = useState('');
   const [candidateList, setCandidateList] = useState([]);
+  const [editingQaValues, setEditingQaValues] = useState({});
+  const [savingQaId, setSavingQaId] = useState(null);
+  const [savedQaSuccessIds, setSavedQaSuccessIds] = useState(new Set());
 
   // Autonomous Background Worker status & control
   const [workerState, setWorkerState] = useState('stopped'); // 'stopped' | 'running' | 'idle'
@@ -322,10 +326,6 @@ export default function CADashboard() {
         setClientData(null);
       }
 
-      if (qaRes.success) {
-        setQuestions(qaRes.questions || []);
-      }
-
       // Map scanned_jobs by clean URL for instant blueprint screenshot & question lookups
       const scannedMap = new Map();
       if (scannedRes.data && Array.isArray(scannedRes.data)) {
@@ -334,6 +334,57 @@ export default function CADashboard() {
           if (u) scannedMap.set(u, sj);
         }
       }
+
+      // STRICT: Extract ONLY AI/LLM resolved questions for this candidate
+      const aiQuestionsMap = new Map();
+      if (distRes.data && distRes.data.length > 0) {
+        for (const dj of distRes.data) {
+          const resolved = Array.isArray(dj.resolved_answers) ? dj.resolved_answers : [];
+          for (const r of resolved) {
+            const src = String(r.source || '').toLowerCase();
+            const srcLabel = String(r.sourceLabel || '').toLowerCase();
+            const isAi = r.tier === 4 || r.tier === 6 || src === 'ai' || src === 'llm' || /ai|llm/i.test(src) || /ai|llm/i.test(srcLabel);
+            if (!isAi) continue; // STRICTLY EXCLUDE non-AI questions
+
+            const qLabel = r.question || r.label || r.question_raw || '';
+            const qKey = qLabel.toLowerCase().trim();
+            if (qKey && !aiQuestionsMap.has(qKey)) {
+              aiQuestionsMap.set(qKey, {
+                id: r.id || `${dj.id}_${qKey}`,
+                distribution_id: dj.id,
+                job_url: dj.job_url,
+                company: dj.company,
+                question_raw: qLabel,
+                question_normalized: qKey,
+                answer: r.answer !== undefined ? r.answer : (r.value || ''),
+                field_type: r.field_type || (Array.isArray(r.options) && r.options.length > 0 ? 'dropdown' : 'text'),
+                options: Array.isArray(r.options) ? r.options : [],
+                answer_source: 'AI/LLM',
+                source: 'AI/LLM',
+              });
+            }
+          }
+        }
+      }
+
+      if (qaRes.success && Array.isArray(qaRes.questions)) {
+        for (const q of qaRes.questions) {
+          const src = String(q.answer_source || q.source || '').toLowerCase();
+          const isAi = src === 'ai' || src === 'llm' || /ai|llm/i.test(src);
+          if (!isAi) continue;
+          const qKey = String(q.question_raw || q.question_normalized || '').toLowerCase().trim();
+          if (qKey && !aiQuestionsMap.has(qKey)) {
+            aiQuestionsMap.set(qKey, {
+              ...q,
+              answer_source: 'AI/LLM',
+              source: 'AI/LLM',
+              options: Array.isArray(q.options) ? q.options : [],
+            });
+          }
+        }
+      }
+
+      setQuestions(Array.from(aiQuestionsMap.values()));
 
       // Query job_distributions: display all candidate applications in review & submission pipeline
       const jobsMap = new Map();
@@ -578,6 +629,42 @@ export default function CADashboard() {
       setNewQuestion('');
       setNewAnswer('');
       loadClientProfile(applywizzId);
+    }
+  };
+
+  // Save inline edit for AI/LLM resolved questions directly on CA Dashboard
+  const handleSaveInlineQa = async (q) => {
+    const newVal = editingQaValues[q.id] !== undefined ? editingQaValues[q.id] : q.answer;
+    if (newVal === undefined || newVal === null || String(newVal).trim() === '') {
+      return;
+    }
+    setSavingQaId(q.id);
+    try {
+      const res = await saveAnswerToQaBank({
+        applywizzId: clientData?.applywizz_id || applywizzId,
+        question: q.question_raw,
+        questionNormalized: q.question_normalized,
+        answer: String(newVal).trim(),
+        fieldType: q.field_type || 'input',
+        source: 'ca_answered',
+        jobUrl: q.job_url || null,
+        distributionId: q.distribution_id || null,
+      });
+      if (res.success) {
+        setSavedQaSuccessIds((prev) => new Set([...prev, q.id]));
+        setQuestions((prev) => prev.map((item) => (item.id === q.id ? { ...item, answer: String(newVal).trim() } : item)));
+        setTimeout(() => {
+          setSavedQaSuccessIds((prev) => {
+            const next = new Set(prev);
+            next.delete(q.id);
+            return next;
+          });
+        }, 4000);
+      }
+    } catch (err) {
+      console.error('Save inline QA error:', err);
+    } finally {
+      setSavingQaId(null);
     }
   };
 
@@ -1216,12 +1303,12 @@ export default function CADashboard() {
             </div>
           </div>
 
-        {/* Right Column: Q&A Answers Manager */}
+        {/* Right Column: Q&A Answers Manager (STRICTLY SOURCE === AI/LLM ONLY) */}
         <div className="panel-card qa-card">
           <div className="panel-header">
             <div className="panel-title-group">
-              <HelpCircle size={18} className="text-accent" />
-              <h2 className="panel-title">Semantic Q&A Knowledge ({questions.length})</h2>
+              <Sparkles size={18} className="text-accent" />
+              <h2 className="panel-title">AI / LLM Resolved Questions ({filteredQuestions.length})</h2>
             </div>
             <button
               type="button"
@@ -1242,36 +1329,195 @@ export default function CADashboard() {
                 type="text"
                 value={questionSearch}
                 onChange={(e) => setQuestionSearch(e.target.value)}
-                placeholder="Search candidate questions or answers..."
+                placeholder="Search candidate AI questions or answers..."
                 className="search-input"
               />
             </div>
           </div>
 
-          {/* Q&A Items List */}
+          {/* Q&A Items List: Renders exact Workday live scraped controls (Dropdown, Radio, Textarea, Date, Text) + Inline Edit */}
           <div className="qa-list-wrapper">
             {filteredQuestions.length > 0 ? (
-              filteredQuestions.map((q) => (
-                <div key={q.id || q.question_normalized} className="qa-item-box">
-                  <div className="qa-question-row">
-                    <span className="qa-q-text">{q.question_raw || q.question_normalized}</span>
-                    <span className={`source-pill ${q.answer_source || 'ai'}`}>
-                      {q.answer_source || 'AI'}
-                    </span>
+              filteredQuestions.map((q) => {
+                const currentVal = editingQaValues[q.id] !== undefined ? editingQaValues[q.id] : (q.answer || '');
+                const isSaving = savingQaId === q.id;
+                const isSaved = savedQaSuccessIds.has(q.id);
+                const hasOptions = Array.isArray(q.options) && q.options.length > 0;
+                const rawType = String(q.field_type || '').toLowerCase();
+                const isRadio = rawType === 'radio';
+                const isDropdown = rawType === 'dropdown' || rawType === 'select' || rawType === 'combobox' || (!isRadio && hasOptions);
+                const isTextarea = rawType === 'textarea';
+                const isDate = rawType === 'date';
+
+                return (
+                  <div key={q.id || q.question_normalized} className="qa-item-box" style={{ background: '#0f172a', border: '1px solid #1e293b', borderRadius: '8px', padding: '12px 16px', marginBottom: '10px' }}>
+                    <div className="qa-question-row" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px', flexWrap: 'wrap', gap: '6px' }}>
+                      <span className="qa-q-text" style={{ fontWeight: 600, color: '#f8fafc', fontSize: '0.88rem' }}>{q.question_raw || q.question_normalized}</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                        <span style={{
+                          fontSize: '0.66rem',
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          background: 'rgba(56, 189, 248, 0.15)',
+                          border: '1px solid rgba(56, 189, 248, 0.35)',
+                          color: '#38bdf8',
+                          fontWeight: 800,
+                          letterSpacing: '0.04em',
+                          textTransform: 'uppercase',
+                        }}>
+                          [TYPE: {isRadio ? 'RADIO' : isDropdown ? 'DROPDOWN' : isTextarea ? 'TEXTAREA' : isDate ? 'DATE' : 'TEXT'}]
+                        </span>
+                        <span className="source-pill ai" style={{
+                          background: 'rgba(245, 158, 11, 0.15)',
+                          color: '#fbbf24',
+                          border: '1px solid rgba(245, 158, 11, 0.3)',
+                          padding: '2px 8px',
+                          borderRadius: '12px',
+                          fontSize: '0.72rem',
+                          fontWeight: 700,
+                        }}>
+                          AI / LLM
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Interactive Form Field matching Workday DOM */}
+                    <div className="qa-answer-row" style={{ display: 'flex', gap: '10px', alignItems: 'center', flexWrap: 'wrap', marginTop: '6px' }}>
+                      {isDropdown ? (
+                        <select
+                          value={currentVal}
+                          onChange={(e) => setEditingQaValues((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          style={{
+                            flex: '1 1 240px',
+                            padding: '8px 12px',
+                            background: '#090d16',
+                            border: '1px solid #334155',
+                            borderRadius: '6px',
+                            color: '#f8fafc',
+                            fontSize: '0.85rem',
+                          }}
+                        >
+                          <option value="">-- Select Workday Option --</option>
+                          {(hasOptions ? q.options : ['Yes', 'No']).map((opt) => {
+                            const optStr = String(typeof opt === 'string' ? opt : (opt?.text || opt?.value || ''));
+                            return (
+                              <option key={optStr} value={optStr}>
+                                {optStr}
+                              </option>
+                            );
+                          })}
+                        </select>
+                      ) : isRadio ? (
+                        <div style={{ flex: '1 1 auto', display: 'flex', gap: '6px', flexWrap: 'wrap' }}>
+                          {(hasOptions ? q.options : ['Yes', 'No']).map((opt) => {
+                            const optStr = String(typeof opt === 'string' ? opt : (opt?.text || opt?.value || ''));
+                            const isSelected = String(currentVal || '').trim().toLowerCase() === optStr.trim().toLowerCase();
+                            return (
+                              <button
+                                key={optStr}
+                                type="button"
+                                onClick={() => setEditingQaValues((prev) => ({ ...prev, [q.id]: optStr }))}
+                                style={{
+                                  padding: '5px 12px',
+                                  borderRadius: '16px',
+                                  fontSize: '0.8rem',
+                                  fontWeight: isSelected ? 700 : 500,
+                                  background: isSelected ? '#0284c7' : '#1e293b',
+                                  border: isSelected ? '1px solid #38bdf8' : '1px solid #334155',
+                                  color: isSelected ? '#ffffff' : '#cbd5e1',
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {optStr}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : isTextarea ? (
+                        <textarea
+                          rows={2}
+                          value={currentVal}
+                          onChange={(e) => setEditingQaValues((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          style={{
+                            flex: '1 1 260px',
+                            padding: '8px 12px',
+                            background: '#090d16',
+                            border: '1px solid #334155',
+                            borderRadius: '6px',
+                            color: '#f8fafc',
+                            fontSize: '0.85rem',
+                          }}
+                        />
+                      ) : isDate ? (
+                        <input
+                          type="text"
+                          value={currentVal}
+                          onChange={(e) => setEditingQaValues((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          placeholder="MM/DD/YYYY"
+                          style={{
+                            flex: '1 1 200px',
+                            padding: '8px 12px',
+                            background: '#090d16',
+                            border: '1px solid #334155',
+                            borderRadius: '6px',
+                            color: '#f8fafc',
+                            fontSize: '0.85rem',
+                          }}
+                        />
+                      ) : (
+                        <input
+                          type="text"
+                          value={currentVal}
+                          onChange={(e) => setEditingQaValues((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                          style={{
+                            flex: '1 1 240px',
+                            padding: '8px 12px',
+                            background: '#090d16',
+                            border: '1px solid #334155',
+                            borderRadius: '6px',
+                            color: '#f8fafc',
+                            fontSize: '0.85rem',
+                          }}
+                        />
+                      )}
+
+                      {/* Inline Edit / Save Button */}
+                      <button
+                        type="button"
+                        onClick={() => handleSaveInlineQa(q)}
+                        disabled={isSaving}
+                        style={{
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          gap: '6px',
+                          padding: '7px 14px',
+                          background: isSaved ? 'rgba(16, 185, 129, 0.2)' : 'linear-gradient(135deg, #0284c7 0%, #0369a1 100%)',
+                          border: isSaved ? '1px solid #10b981' : 'none',
+                          borderRadius: '6px',
+                          color: isSaved ? '#34d399' : '#ffffff',
+                          fontSize: '0.78rem',
+                          fontWeight: 700,
+                          cursor: isSaving ? 'not-allowed' : 'pointer',
+                          transition: 'all 0.15s ease',
+                          flexShrink: 0,
+                        }}
+                      >
+                        {isSaved ? '✓ Saved' : isSaving ? 'Saving...' : 'Save Edit'}
+                      </button>
+                    </div>
+
+                    {q.company && (
+                      <div className="qa-meta-row" style={{ marginTop: '8px', fontSize: '0.72rem', color: '#64748b' }}>
+                        <span>Job: {q.company}</span>
+                      </div>
+                    )}
                   </div>
-                  <div className="qa-answer-row">
-                    <span className="qa-a-text">{q.answer}</span>
-                  </div>
-                  <div className="qa-meta-row">
-                    <span className="qa-type-text">Type: {q.field_type || 'text'}</span>
-                    <span className="qa-conf-text">Confidence: {q.confidence_score ? `${Math.round(q.confidence_score * 100)}%` : '100%'}</span>
-                  </div>
-                </div>
-              ))
+                );
+              })
             ) : (
               <div className="empty-state">
-                <HelpCircle size={28} className="text-muted" />
-                <p>No cached questions found for this candidate. Add one to expand automation coverage.</p>
+                <Sparkles size={28} className="text-muted" />
+                <p>No AI/LLM resolved questions found for this candidate. Only novel questions answered by AI are displayed here.</p>
               </div>
             )}
           </div>

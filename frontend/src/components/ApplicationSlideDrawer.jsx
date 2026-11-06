@@ -229,21 +229,17 @@ export default function ApplicationSlideDrawer({
     });
   }, [fields]);
 
-  // Active list of fields to display: STRICTLY AI/LLM answered questions or unresolved questions
-  // Answers from Supabase DB, Resume extraction, CRM facts, QA bank, and Blueprint are strictly halted.
+  // Active list of fields to display: STRICTLY AI/LLM answered questions ONLY.
+  // Questions with source NOT equal to AI/LLM are strictly prohibited and hidden.
   const displayedFields = useMemo(() => {
     return fields.filter((f) => {
       if (f.isPersonal) return false;
-
-      const val = editValues[f.id] !== undefined ? editValues[f.id] : f.value;
-      const isMissing = f.isUnanswered || !val || String(val).trim() === '' || val === 'null';
-      if (isMissing) return true;
 
       const src = (f.source || '').toLowerCase();
       const rawSrc = (f.raw_source || '').toLowerCase();
       const srcLabel = (f.sourceLabel || '').toLowerCase();
 
-      // Strictly halt trusted / deterministic answer sources
+      // Strictly halt non-AI sources (Supabase DB, Resume extraction, CRM facts, QA bank, Blueprint)
       if (
         f.tier === 1 || f.tier === 2 || f.tier === 3 || f.tier === 5 ||
         src.includes('supabase') || rawSrc === 'supabase' ||
@@ -256,8 +252,8 @@ export default function ApplicationSlideDrawer({
         return false;
       }
 
-      // ONLY display if source is explicitly AI / LLM
-      const isAi = f.tier === 4
+      // STRICT REQUIREMENT: ONLY display if source is explicitly AI / LLM
+      const isAi = f.tier === 4 || f.tier === 6
         || src === 'ai' || src === 'llm'
         || rawSrc === 'ai' || rawSrc === 'llm'
         || srcLabel.includes('ai') || srcLabel.includes('llm')

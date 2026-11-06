@@ -2231,9 +2231,8 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     // Only capture full-page screenshot when application submission is 100% complete
     const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
     profile._submissionScreenshotUrl = finalProofUrl;
-    console.log(`\n${'═'.repeat(90)}`);
-    console.log(`✅ This application was submitted with screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
-    console.log(`${'═'.repeat(90)}\n`);
+    const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+    console.log(`[${cleanAwl}] submission_completed | Screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
     return 'submitted';
@@ -2241,12 +2240,10 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   if (isAlreadyApplied) {
     profile?._onLog?.(5, 'Step 5: Workday verified: candidate has already applied to this position.');
-    console.log('ℹ️ Application already applied on Workday!');
     const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
     profile._submissionScreenshotUrl = alreadyProofUrl;
-    console.log(`\n${'═'.repeat(90)}`);
-    console.log(`ℹ️ This application was ALREADY APPLIED with screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
-    console.log(`${'═'.repeat(90)}\n`);
+    const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+    console.log(`[${cleanAwl}] already_applied | Screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
     await recordClientApplication(profile, { url: canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
     return 'already_applied';
@@ -2452,11 +2449,36 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       }
     }
 
-    const widTag = profile?._workerId ? `[${profile._workerId}] ` : '';
-    if (refreshed) {
-      console.log(`\n📍 ${widTag}[Wizard Step ${currentIteration}] Page refreshed; re-detected Page: "${stepName}"`);
-    } else {
-      console.log(`\n📍 ${widTag}[Wizard Step ${currentIteration}] Detected Page: "${stepName}"`);
+    const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+    const isScan = Boolean(profile?._isScanning || mode === 'scan' || mode === 'scanning');
+    const action = isScan ? 'Scanning' : 'Submitting';
+
+    // Standardized single-line uppercase step name
+    let formattedStep = String(stepName || '').toUpperCase();
+    if (/my\s*information/i.test(stepName)) {
+      formattedStep = 'MY INFORMATION';
+    } else if (/my\s*experience/i.test(stepName)) {
+      formattedStep = 'MY EXPERIENCE';
+    } else if (/application\s*questions/i.test(stepName)) {
+      const aqInfo = await getApplicationQuestionsPageInfo(page).catch(() => null);
+      if (aqInfo && aqInfo.current > 1) {
+        formattedStep = `APPLICATION QUESTIONS ${aqInfo.current}`;
+      } else {
+        formattedStep = 'APPLICATION QUESTIONS';
+      }
+    } else if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(stepName)) {
+      formattedStep = 'VOLUNTARY DISCLOSURES';
+    } else if (/self[- ]?identif|disability|cc-?305/i.test(stepName)) {
+      formattedStep = 'SELF IDENTIFY';
+    } else if (/review/i.test(stepName)) {
+      formattedStep = 'REVIEW AND SUBMIT';
+    }
+
+    if (stepName && stepName !== 'Unknown' && stepName !== 'Already Applied') {
+      if (profile._lastLoggedStep !== formattedStep) {
+        profile._lastLoggedStep = formattedStep;
+        console.log(`[${cleanAwl}] ${action}: ${formattedStep}`);
+      }
     }
     profile._currentStep = stepName;
     profile._currentStepIndex = currentIteration;

@@ -540,7 +540,7 @@ export async function claimNextTask(workerId) {
 
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
 
-      .in('status', ['ready_for_review', 'queued'])
+      .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
 
       .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
 
@@ -568,7 +568,7 @@ export async function claimNextTask(workerId) {
 
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
 
-        .in('status', ['ready_for_review', 'queued'])
+        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
 
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
 
@@ -594,7 +594,7 @@ export async function claimNextTask(workerId) {
 
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
 
-        .in('status', ['ready_for_review', 'queued'])
+        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
 
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
 
@@ -1349,8 +1349,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
     if (isSuccess) {
-
-      console.log(`[SUBMITTER] [${workerId}] [${task.applywizz_id}] Company: ${task.company || 'Workday'} | Status: submitted | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
+      const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`[${cleanId}] submission_completed | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
 
 
 
@@ -1379,8 +1379,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       });
 
     } else if (isAlreadyApplied) {
-
-      console.log(`[SUBMITTER] [${workerId}] [${task.applywizz_id}] Company: ${task.company || 'Workday'} | Status: already applied | Screenshot: ${finalShotUrl || 'None'}`);
+      const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`[${cleanId}] already_applied | Screenshot: ${finalShotUrl || 'None'}`);
 
 
 

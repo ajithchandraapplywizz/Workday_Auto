@@ -435,6 +435,7 @@ export async function runResolvingWorkerPool(options = {}) {
             }
 
             await recordJobDistributions({
+              scannedJobId: job.id,
               leadApplywizzId: job.applywizz_id,
               jobId: job.id,
               jobUrl: job.job_url,

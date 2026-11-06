@@ -483,10 +483,6 @@ export async function executeWorkerTask({
       profile._workerId = workerId;
       profile._onStepChange = (iteration, stepName) => {
         appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
-        console.log(`\n📍 [${workerId}] ──────────────────────────────────────────────────────────`);
-        console.log(`📍 [${workerId}] 🚶 WIZARD STEP ${iteration}: "${String(stepName || '').toUpperCase()}"`);
-        console.log(`📍 [${workerId}]    Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-        console.log(`📍 [${workerId}] ──────────────────────────────────────────────────────────\n`);
         updateWorkerStatus(workerId, {
           state: 'in_flight',
           current_application_id: `${applywizzId} [Step ${iteration}: ${stepName}]`,
@@ -1123,10 +1119,6 @@ export async function executeWorkerTask({
     profile._workerId = workerId;
     profile._onStepChange = (iteration, stepName) => {
       appLog(7 + iteration, `Workday Wizard: Step ${iteration} -> "${stepName}". Auto-filling fields & dispatching form events.`);
-      console.log(`\n📍 [${workerId}] ──────────────────────────────────────────────────────────`);
-      console.log(`📍 [${workerId}] 🚶 WIZARD STEP ${iteration}: "${String(stepName || '').toUpperCase()}"`);
-      console.log(`📍 [${workerId}]    Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-      console.log(`📍 [${workerId}] ──────────────────────────────────────────────────────────\n`);
       updateWorkerStatus(workerId, {
         state: 'in_flight',
         current_application_id: `${applywizzId} [Step ${iteration}: ${stepName}]`,
@@ -1340,19 +1332,11 @@ export async function executeWorkerTask({
       }
 
     if (status === 'submitted') {
-      console.log(`\n${'═'.repeat(90)}`);
-      console.log(`✅ [${workerId}] This application was submitted with screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-      console.log(`   • Status: SUBMITTED`);
-      console.log(`   • Proof Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`${'═'.repeat(90)}\n`);
+      console.log(`[${cleanAwl}] submission_completed | Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
     } else if (status === 'already_applied') {
-      console.log(`\n${'═'.repeat(90)}`);
-      console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-      console.log(`   • Status: ALREADY_APPLIED`);
-      console.log(`   • Proof Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`${'═'.repeat(90)}\n`);
+      console.log(`[${cleanAwl}] already_applied | Screenshot: ${completionShotUrl || 'Uploaded to Supabase Storage'}`);
+    } else if (status === 'reached-review' || status === 'reached_review') {
+      console.log(`[${cleanAwl}] scanned_completed | Status: ready_for_review`);
     }
 
     const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
@@ -1429,7 +1413,7 @@ export async function executeWorkerTask({
         : (status === 'already_applied')
           ? 'already_applied'
           : (status === 'reached-review' || status === 'reached_review')
-            ? 'ready_for_review'
+            ? 'reached_review'
             : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
       const answersMap = {
         ...(profile._scrapedReviewMap || {}),
@@ -1726,7 +1710,7 @@ export async function executeWorkerTask({
         try {
           const { saveResolvedAnswers, saveScannedJob, recordJobDistributions } = await import('./supabaseClient.mjs');
 
-          await saveScannedJob({
+          const savedScanned = await saveScannedJob({
             applywizzId,
             jobId: task.job_id || task.jobId || null,
             jobUrl,
@@ -1788,6 +1772,7 @@ export async function executeWorkerTask({
 
           if (finalScrapedQuestions.length > 0) {
             await recordJobDistributions({
+              scannedJobId: savedScanned?.id || null,
               leadApplywizzId: applywizzId,
               jobId: task.job_id || task.jobId || null,
               jobUrl,

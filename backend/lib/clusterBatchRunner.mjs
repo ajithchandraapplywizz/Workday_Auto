@@ -717,11 +717,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       break;
     }
 
-    const isUserHalted = (await isClusterStopRequested()) ||
-      String(leadFailReason).toLowerCase().includes('halt') ||
-      String(leadFailReason).toLowerCase().includes('stop') ||
-      String(leadFailReason).includes('Target closed') ||
-      String(leadFailReason).includes('browser has been closed');
+    const isUserHalted = await isClusterStopRequested();
 
     if (isUserHalted) {
       console.log(`🛑 [${workerId}] User HALT / STOP detected for "${company}" (${jobUrl}). Rolling back ${allTaskIds.length} tasks to pending status...`);
@@ -1367,7 +1363,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       const isFullyAnswered = true;
       const clientStatus = 'ready_for_review';
 
-      console.log(`   ⚡ [Phase 3 Client #${idx + 1}: ${awlId}] Resolved ${answeredCount}/${harvestedQuestions.length} questions across 5 tiers | Status: "${clientStatus}" (MANDATORILY marked ready_for_review)`);
+      console.log(`[${awlId}] scanned_completed | Status: ready_for_review`);
 
       return {
         taskId: task.id,
@@ -1395,6 +1391,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   try {
     const { recordJobDistributions, saveScannedJob } = await import('./supabaseClient.mjs');
     await recordJobDistributions({
+      scannedJobId,
       leadApplywizzId: blueprintTask.applywizz_id,
       jobId: blueprintTask.job_id || cluster.reqId || null,
       jobUrl,
@@ -1451,7 +1448,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           body: {
             scanned_job_id: scannedJobId,
             screenshot_path: reviewShotUrl || null,
-            status: 'ready_for_review',
+            status: 'reached_review',
             job_id: blueprintTask?.job_id || cluster.reqId || null,
             error_message: null,
             worker_id: null,
@@ -1470,7 +1467,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         body: {
           scanned_job_id: scannedJobId,
           screenshot_path: reviewShotUrl || null,
-          status: 'ready_for_review',
+          status: 'reached_review',
           job_id: blueprintTask?.job_id || cluster.reqId || null,
           error_message: null,
           worker_id: null,
@@ -1675,11 +1672,7 @@ export async function runClusterBatchRunner({
           });
         } catch (err) {
           const errorUrl = cluster.jobUrl || cluster.primaryRawUrl || cluster.canonicalKey || 'Unknown URL';
-          const isStop = (await isClusterStopRequested()) ||
-            err.message?.includes('Target closed') ||
-            err.message?.includes('browser has been closed') ||
-            err.message?.includes('abort') ||
-            err.name === 'AbortError';
+          const isStop = await isClusterStopRequested();
 
           if (isStop) {
             console.log(`🛑 [Scanning Worker ${slot}] User HALT / STOP detected on batch #${myIndex + 1} (${errorUrl}). Safely resetting task(s) to pending.`);
@@ -1817,15 +1810,16 @@ export async function runClusterBatchRunner({
   }
 
   // If no clusters ran at all across both phases
+  const isStopActive = await isClusterStopRequested();
   if (clusterResults.length === 0) {
-    console.log(`ℹ️ No pending tasks were processed in batch_job_queue. Setting scanning workers to idle.`);
+    console.log(`ℹ️ No pending tasks were processed in batch_job_queue.`);
     const workerLimit = Number(workers) || 2;
     for (let slot = 1; slot <= workerLimit; slot++) {
       await updateWorkerStatus(`scanning_worker_${slot}`, {
-        state: 'idle',
+        state: isStopActive ? 'idle' : 'running',
         stage: 'scanning',
         bot_name: `Scanning Worker ${slot}`,
-        current_application_id: 'Ready (0 pending queue items)',
+        current_application_id: isStopActive ? null : 'Standing by for new jobs...',
       }).catch(() => { });
     }
     return;
@@ -1847,14 +1841,25 @@ export async function runClusterBatchRunner({
     current10BatchCycle = [];
   }
 
-  // Return all scanning workers to idle
+  // Return scanning workers to idle if stopped, or keep in standing-by state if still running
+  const isHalted = await isClusterStopRequested();
+  const workerLimit = Number(workers) || 2;
   for (let slot = 1; slot <= 10; slot++) {
-    await updateWorkerStatus(`scanning_worker_${slot}`, {
-      state: 'idle',
-      current_application_id: null,
-      stage: 'scanning',
-      bot_name: `Scanning Worker ${slot}`,
-    }).catch(() => { });
+    if (slot <= workerLimit && !isHalted) {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
+        state: 'running',
+        current_application_id: 'Batch complete. Standing by for next batch...',
+        stage: 'scanning',
+        bot_name: `Scanning Worker ${slot}`,
+      }).catch(() => { });
+    } else {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
+        state: 'idle',
+        current_application_id: null,
+        stage: 'scanning',
+        bot_name: `Scanning Worker ${slot}`,
+      }).catch(() => { });
+    }
   }
 
   // Step 3: Final Execution Summary
