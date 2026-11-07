@@ -141,11 +141,13 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     }
   }
 
-  // 1. Persist to Supabase qa_bank table via UPSERT (deduplicated by applywizz_id + question_normalized)
+  // 1. Persist to Supabase qa_bank table via UPSERT (deduplicated by tenant + normalized_question)
   if (isSupabaseConfigured() && dbRows.length > 0) {
     const dedupedDbRows = Array.from(
       dbRows.reduce((map, r) => {
-        const k = `${r.applywizz_id}:${r.question_normalized}`;
+        const tenantKey = String(r.tenant || 'global').trim().toLowerCase();
+        const normKey = String(r.normalized_question || r.question_normalized || '').trim().toLowerCase();
+        const k = `${tenantKey}:${normKey}`;
         if (!map.has(k)) map.set(k, r);
         return map;
       }, new Map()).values()
@@ -154,13 +156,32 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     try {
       await request('qa_bank', {
         method: 'POST',
-        query: '?on_conflict=applywizz_id,question_normalized',
+        query: '?on_conflict=tenant,normalized_question',
         prefer: 'resolution=merge-duplicates,return=minimal',
         body: dedupedDbRows,
       });
       console.log(`🏦 [qa_bank] Persisted ${dedupedDbRows.length} questions to Supabase qa_bank table.`);
     } catch (dbErr) {
-      console.warn(`⚠️ [qa_bank] Note on saving to qa_bank table: ${dbErr?.message?.slice(0, 140)}`);
+      // Row-by-row fallback to ensure individual items are persisted even if one collides
+      let individualSuccess = 0;
+      for (const row of dedupedDbRows) {
+        try {
+          await request('qa_bank', {
+            method: 'POST',
+            query: '?on_conflict=tenant,normalized_question',
+            prefer: 'resolution=merge-duplicates,return=minimal',
+            body: row,
+          });
+          individualSuccess++;
+        } catch {
+          // ignore individual conflict
+        }
+      }
+      if (individualSuccess > 0) {
+        console.log(`🏦 [qa_bank] Recovered and persisted ${individualSuccess}/${dedupedDbRows.length} questions to qa_bank.`);
+      } else {
+        console.warn(`⚠️ [qa_bank] Note on saving to qa_bank table: ${dbErr?.message?.slice(0, 140)}`);
+      }
     }
   }
 

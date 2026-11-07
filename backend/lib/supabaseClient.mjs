@@ -2485,7 +2485,7 @@ export async function recordNovelQABankAnswer({
   try {
     // 2. Strict deduplication: Check if question is already present in qa_bank
     const existing = await request('qa_bank', {
-      query: `?applywizz_id=eq.${encode(cleanId)}&question_normalized=eq.${encode(norm)}&select=id,answer&limit=1`,
+      query: `?tenant=eq.global&normalized_question=eq.${encode(norm)}&select=id,answer&limit=1`,
     }).catch(() => null);
 
     if (Array.isArray(existing) && existing.length > 0) {
@@ -2496,12 +2496,14 @@ export async function recordNovelQABankAnswer({
     // 3. Store ONLY unique new unresolved question
     await request('qa_bank', {
       method: 'POST',
-      query: '?on_conflict=applywizz_id,question_normalized',
+      query: '?on_conflict=tenant,normalized_question',
       prefer: 'resolution=merge-duplicates,return=minimal',
       body: {
+        tenant: 'global',
         applywizz_id: cleanId,
         question: qStr,
         question_normalized: norm,
+        normalized_question: norm,
         answer: ansStr,
         field_type: fieldType,
         source: validSource,
@@ -3376,12 +3378,14 @@ export async function persistNewResolvedAnswer({
   try {
     await request('qa_bank', {
       method: 'POST',
-      query: '?on_conflict=applywizz_id,question_normalized',
+      query: '?on_conflict=tenant,normalized_question',
       prefer: 'resolution=merge-duplicates,return=minimal',
       body: {
+        tenant: 'global',
         applywizz_id: cleanId,
         question: qStr,
         question_normalized: norm,
+        normalized_question: norm,
         answer: ansStr,
         field_type: fieldType,
         source: ['supabase', 'api', 'resume', 'llm', 'manual'].includes(source) ? source : 'llm',

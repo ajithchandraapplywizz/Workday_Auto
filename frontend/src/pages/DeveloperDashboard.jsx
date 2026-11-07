@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import {
   fetchApplicationsDynamic,
@@ -112,38 +112,108 @@ export default function DeveloperDashboard() {
     } catch {}
   }, [botStatus]);
 
-  // Fast initial check on mount & persistent 3.5s real-time sync across devices
+  const syncStatus = useCallback(() => {
+    fetchBotDaemonStatus().then((res) => {
+      if (res?.success) setBotStatus(res);
+    }).catch(() => {});
+  }, []);
+
+  const syncStatusRef = useRef(syncStatus);
+  useEffect(() => {
+    syncStatusRef.current = syncStatus;
+  }, [syncStatus]);
+
+  // Dynamic data loading function with visibility awareness
+  const loadDynamicData = useCallback(async (silent = false) => {
+    // Guard: never poll if user is on another browser tab or window is minimized
+    if (silent && typeof document !== 'undefined' && document.hidden) return;
+    if (!silent) setLoading(true);
+    try {
+      const [kpiRes, workerRes, appsRes, queueRes, daemonRes] = await Promise.all([
+        fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
+        fetchWorkerStatuses(),
+        fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 300 }),
+        fetchBatchQueue(),
+        fetchBotDaemonStatus(),
+      ]);
+
+      if (daemonRes?.success) {
+        setBotStatus(daemonRes);
+      }
+
+      if (workerRes?.success) {
+        setWorkerPool(workerRes);
+      }
+
+      if (kpiRes.success) {
+        setKpis({
+          submitted: kpiRes.submitted,
+          applying: kpiRes.applying,
+          failed: kpiRes.failed,
+          queued: kpiRes.queued,
+          total: kpiRes.total,
+        });
+      }
+
+      if (appsRes.success) {
+        setApplications(appsRes.applications || []);
+      }
+
+      if (queueRes.success) {
+        setQueueItems(queueRes.queue || []);
+      }
+    } catch (err) {
+      console.error('Error loading developer dynamic data:', err);
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, [date, timeframe]);
+
+  const loadDynamicDataRef = useRef(loadDynamicData);
+  useEffect(() => {
+    loadDynamicDataRef.current = loadDynamicData;
+  }, [loadDynamicData]);
+
+  // Fast initial check on mount & persistent single-channel Realtime sync (mounted once, zero socket thrashing)
   useEffect(() => {
     let isMounted = true;
-    const syncStatus = () => {
-      fetchBotDaemonStatus().then((res) => {
-        if (res?.success && isMounted) setBotStatus(res);
-      }).catch(() => {});
-    };
-    syncStatus();
+    syncStatusRef.current?.();
 
-    // Realtime channel for instant sub-second push updates on bot_control across mobile & laptop
-    const botControlChannel = supabase
-      ?.channel('dev_bot_control_realtime_sync')
+    // Single consolidated Realtime channel across tables for instant push updates
+    const channel = supabase
+      ?.channel('dev_dashboard_realtime_sync')
       ?.on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'bot_control' },
         () => {
-          syncStatus();
+          if (!isMounted) return;
+          syncStatusRef.current?.();
         }
       )
-      ?.subscribe();
+      ?.on(
+        'postgres_changes',
+        { event: '*', schema: 'public', table: 'job_distributions' },
+        () => {
+          if (!isMounted || (typeof document !== 'undefined' && document.hidden)) return;
+          loadDynamicDataRef.current?.(true);
+        }
+      )
+      ?.subscribe((status) => {
+        if (status === 'CHANNEL_ERROR' || status === 'TIMED_OUT') {
+          console.warn(`[REALTIME] Notice: realtime channel ${status}. Polling fallback active.`);
+        }
+      });
 
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
-      syncStatus();
+      syncStatusRef.current?.();
     }, 3500);
 
     return () => {
       isMounted = false;
       clearInterval(interval);
-      if (botControlChannel && supabase?.removeChannel) {
-        supabase.removeChannel(botControlChannel);
+      if (channel && supabase?.removeChannel) {
+        supabase.removeChannel(channel).catch(() => {});
       }
     };
   }, []);
@@ -291,52 +361,6 @@ export default function DeveloperDashboard() {
   // 3. Load dynamic real-time data with visibility awareness & intelligent rate throttling
   useEffect(() => {
     let isMounted = true;
-    async function loadDynamicData(silent = false) {
-      // Guard: never poll if user is on another browser tab or window is minimized
-      if (silent && typeof document !== 'undefined' && document.hidden) return;
-      if (!silent) setLoading(true);
-      try {
-        const [kpiRes, workerRes, appsRes, queueRes, daemonRes] = await Promise.all([
-          fetchDynamicKPIMetrics({ dateStr: date, timeframe }),
-          fetchWorkerStatuses(),
-          fetchApplicationsDynamic({ dateStr: date, timeframe, limit: 300 }),
-          fetchBatchQueue(),
-          fetchBotDaemonStatus(),
-        ]);
-
-        if (!isMounted) return;
-
-        if (daemonRes?.success) {
-          setBotStatus(daemonRes);
-        }
-
-        if (workerRes?.success) {
-          setWorkerPool(workerRes);
-        }
-
-        if (kpiRes.success) {
-          setKpis({
-            submitted: kpiRes.submitted,
-            applying: kpiRes.applying,
-            failed: kpiRes.failed,
-            queued: kpiRes.queued,
-            total: kpiRes.total,
-          });
-        }
-
-        if (appsRes.success) {
-          setApplications(appsRes.applications || []);
-        }
-
-        if (queueRes.success) {
-          setQueueItems(queueRes.queue || []);
-        }
-      } catch (err) {
-        console.error('Error loading developer dynamic data:', err);
-      } finally {
-        if (isMounted && !silent) setLoading(false);
-      }
-    }
 
     loadDynamicData(false);
 
@@ -350,23 +374,10 @@ export default function DeveloperDashboard() {
       document.addEventListener('visibilitychange', handleVisibilityChange);
     }
 
-    // Realtime channel for instant sub-second DB synchronization on job_distributions
-    const realtimeChannel = supabase
-      ?.channel('dev_job_distributions_realtime')
-      ?.on(
-        'postgres_changes',
-        { event: '*', schema: 'public', table: 'job_distributions' },
-        () => {
-          if (typeof document !== 'undefined' && document.hidden) return;
-          loadDynamicData(true);
-        }
-      )
-      ?.subscribe();
-
     // Intelligent polling rate: 10s during active pipeline execution, 30s when idle (saving 95%+ API requests)
     const intervalMs = isAnyPipelineActive ? 10000 : 30000;
     const pollInterval = setInterval(() => {
-      loadDynamicData(true);
+      if (isMounted) loadDynamicData(true);
     }, intervalMs);
 
     return () => {
@@ -375,11 +386,8 @@ export default function DeveloperDashboard() {
       if (typeof document !== 'undefined') {
         document.removeEventListener('visibilitychange', handleVisibilityChange);
       }
-      if (realtimeChannel && supabase?.removeChannel) {
-        supabase.removeChannel(realtimeChannel);
-      }
     };
-  }, [date, timeframe, isAnyPipelineActive]);
+  }, [loadDynamicData, isAnyPipelineActive]);
 
   // Filtered runs for Runs tab
   const filteredRuns = useMemo(() => {
