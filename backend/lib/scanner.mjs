@@ -13,7 +13,7 @@
  * 5. css path fallback
  */
 
-import { chromium } from 'playwright';
+import { chromium } from './stealthBrowser.mjs';
 import { writeFile, mkdir } from 'fs/promises';
 import { resolve } from 'path';
 import { discoverApplicationForm, detectATS, isWorkdayWizardVisible, isWorkdayJobPageMissing, isWorkdayAlreadyApplied } from './discovery.mjs';
@@ -435,12 +435,14 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
   const ownBrowser = !existingBrowser;
   const browser = existingBrowser || await chromium.launch({
     headless: Boolean(headless),
+    channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
     args: [
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-infobars',
       '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
       '--window-size=1280,900',
     ],
   });

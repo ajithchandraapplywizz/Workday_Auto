@@ -4,6 +4,7 @@ FROM mcr.microsoft.com/playwright:v1.64.1-noble
 WORKDIR /app
 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_CHROMIUM_CHANNEL=chromium
 
 # Copy workspace package manifests first for optimal layer caching
 COPY package*.json ./

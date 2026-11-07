@@ -8,7 +8,7 @@
  * Includes verification pass and submit retry loop.
  */
 
-import { chromium } from 'playwright';
+import { chromium } from './stealthBrowser.mjs';
 import { readFile, writeFile } from 'fs/promises';
 import { resolve, basename } from 'path';
 import { existsSync } from 'fs';
@@ -3236,12 +3236,14 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   const ownBrowser = !existingBrowser;
   const browser = existingBrowser || await chromium.launch({
     headless: Boolean(headless),
+    channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
     args: [
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-infobars',
       '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
       '--window-size=1280,900',
     ],
   });

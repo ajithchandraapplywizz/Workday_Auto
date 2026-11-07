@@ -1900,12 +1900,19 @@ export async function dispatchQueuedSubmissions() {
       }
     }
 
-    // Auto-off: when no tasks claimed and no active workers, check if any ready_for_review or queued remain
+    // Auto-off: when no tasks claimed and no active workers, check if any ready_for_review, ready_to_review or queued remain
     if (!claimedAny && activeSubmittingWorkers.size === 0) {
+      // In parallel / universal mode or while scanning is running, DO NOT auto-turn off!
+      // The scanner is actively scanning and feeding job_distributions.
+      const isScanActive = scanStatus === 'running' || currentStage === 'parallel' || currentMode === 'parallel';
+      if (isScanActive) {
+        return; // Standby: keep submission service waiting for newly arrived jobs!
+      }
+
       const { data: remaining } = await supabase
         .from('job_distributions')
         .select('id')
-        .in('status', ['ready_for_review', 'queued', 'applying'])
+        .in('status', ['ready_for_review', 'ready_to_review', 'queued', 'applying'])
         .limit(1);
 
       if (!remaining || remaining.length === 0) {

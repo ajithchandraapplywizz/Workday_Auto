@@ -5,6 +5,7 @@ WORKDIR /app
 
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+ENV PLAYWRIGHT_CHROMIUM_CHANNEL=chromium
 
 # 1. Copy dependency manifests first for layer caching
 COPY package*.json ./

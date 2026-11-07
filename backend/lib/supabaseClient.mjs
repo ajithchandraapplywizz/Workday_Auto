@@ -1404,14 +1404,18 @@ export async function updateQueueTaskStatus(taskId, {
 export async function purgeDeadJobUrlFromQueue(jobUrl, { expiredReason = 'Link Expired', screenshotUrl = null } = {}) {
   if (!isSupabaseConfigured() || !jobUrl) return false;
   try {
+    const isExpired = String(expiredReason).toLowerCase().includes('expired');
+    const targetStatus = isExpired ? 'expired' : 'failed';
     const payload = {
-      status: 'failed',
+      status: targetStatus,
+      worker_id: null,
+      locked_at: null,
       updated_at: new Date().toISOString(),
     };
     if (screenshotUrl) payload.screenshot_path = screenshotUrl;
     await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?job_url=eq.${encode(jobUrl)}&status=eq.pending`,
+      query: `?job_url=eq.${encode(jobUrl)}`,
       prefer: 'return=minimal',
       body: payload,
     });
@@ -3185,14 +3189,18 @@ export async function recordFailedJob({
       },
     }).catch(() => {});
 
+    const isExpired = cleanReason.toLowerCase().includes('expired') || cleanStep.toLowerCase().includes('expired');
+    const targetStatus = isExpired ? 'expired' : 'failed';
+
     await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(cleanUrl)}`,
+      query: `?job_url=eq.${encode(cleanUrl)}`,
       prefer: 'return=minimal',
       body: {
-        status: 'failed',
-        error_message: `${cleanReason} (stopped at ${cleanStep})`,
+        status: targetStatus,
         screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
+        worker_id: null,
+        locked_at: null,
         updated_at: now,
       },
     }).catch(() => {});
@@ -3267,13 +3275,15 @@ export async function syncQueueWithScannedAndFailedJobs() {
           },
         }).catch(() => {});
         markedScanned++;
-      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'submitted') {
+      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'expired' && row.status !== 'submitted') {
+        const isExp = String(matchedFj.failure_reason || '').toLowerCase().includes('expired');
+        const targetSt = isExp ? 'expired' : 'failed';
         await request('batch_job_queue', {
           method: 'PATCH',
           query: `?id=eq.${row.id}`,
           prefer: 'return=minimal',
           body: {
-            status: 'failed',
+            status: targetSt,
             screenshot_path: matchedFj.screenshot_path || null,
             worker_id: null,
             locked_at: null,

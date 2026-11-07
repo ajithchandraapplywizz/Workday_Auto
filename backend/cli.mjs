@@ -34,7 +34,7 @@ import { readClientJobsCsvFile, parseClientJobsCsvContent } from './lib/csvJobPa
 import { runWorkerPool, runQueueWorkerPool } from './lib/workerPool.mjs';
 import { ingestCsvToBatchQueue, getBatchQueueStats } from './lib/supabaseClient.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm } from './lib/jobFormCache.mjs';
-import { chromium } from 'playwright';
+import { chromium } from './lib/stealthBrowser.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 

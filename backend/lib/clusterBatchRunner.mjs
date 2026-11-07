@@ -480,6 +480,8 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
     const isComposite = taskIds.some((id) => String(id).includes(':::'));
+    const isExpired = String(reason).toLowerCase().includes('expired');
+    const targetStatus = isExpired ? 'expired' : 'failed';
     if (isComposite) {
       const urls = Array.from(new Set(taskIds.map((cid) => {
         const [, ...rest] = String(cid).split(':::');
@@ -491,7 +493,7 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
           query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
           prefer: 'return=minimal',
           body: {
-            status: 'failed',
+            status: targetStatus,
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
@@ -504,13 +506,13 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
         query: `?id=in.(${idFilter})`,
         prefer: 'return=minimal',
         body: {
-          status: 'failed',
+          status: targetStatus,
           locked_at: null,
           updated_at: new Date().toISOString(),
         },
       });
     }
-    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} candidate tasks marked status = 'failed' | reason: ${reason})\n`);
+    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} candidate tasks marked status = '${targetStatus}' | reason: ${reason})\n`);
   } catch (err) {
     console.log(`  ⚠️ Note on failing cluster tasks: ${err.message}`);
   }
@@ -1361,9 +1363,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       // Every profile (including the lead) is evaluated solely by authentic 5-tier answers and mandatorily marked ready_for_review.
       const unansweredCount = unansweredQuestions.length;
       const isFullyAnswered = true;
-      const clientStatus = 'ready_for_review';
+      const clientStatus = 'ready_to_review';
 
-      console.log(`[${awlId}] scanned_completed | Status: ready_for_review`);
+      console.log(`[${awlId}] scanned_completed | Status: ready_to_review`);
 
       return {
         taskId: task.id,
@@ -1402,9 +1404,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       status: 'distributed',
       clients: distributionRows,
     });
-    const readyCount = distributionRows.filter((r) => r.status === 'ready_for_review').length;
+    const readyCount = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review').length;
     const needsCount = distributionRows.length - readyCount;
-    console.log(`\n💾 [UPSERT → job_distributions] ${distributionRows.length} rows written (${readyCount} ready_for_review, ${needsCount} needs_answers)`);
+    console.log(`\n💾 [UPSERT → job_distributions] ${distributionRows.length} rows written (${readyCount} ready_to_review, ${needsCount} needs_answers)`);
 
     // Also update scanned_jobs row with Candidate 1's resolved_answers
     const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
@@ -1424,10 +1426,35 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       console.log(`💾 [${workerId}] PHASE 2 REFINED: Updated scanned_jobs with ${leadRow.resolvedAnswers.length} master resolved answers from lead blueprint candidate.`);
     }
 
-    // PHASE 4: Single source of truth is job_distributions with status 'ready_for_review'
-    const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_for_review');
+    // PHASE 4: Single source of truth is job_distributions with status 'ready_to_review'
+    const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review');
     const needsAnswersRows = distributionRows.filter((r) => r.status === 'needs_answers');
     console.log(`💾 [SINGLE TABLE: job_distributions] ${readyToReviewRows.length} applications ready for submission (${needsAnswersRows.length} pending answers)`);
+
+    // Signal bot_control so submission services pick up ready applications immediately
+    if (readyToReviewRows.length > 0) {
+      try {
+        const bc = await queueDbRequest('bot_control', { query: '?id=eq.primary&limit=1' });
+        const primaryBc = Array.isArray(bc) && bc[0];
+        if (primaryBc && primaryBc.is_running && primaryBc.submit_status !== 'running') {
+          await queueDbRequest('bot_control', {
+            method: 'PATCH',
+            query: '?id=eq.primary',
+            prefer: 'return=minimal',
+            body: {
+              submit_status: 'running',
+              submit_enabled: true,
+              trigger_requested: true,
+              stage: 'parallel',
+              updated_at: new Date().toISOString(),
+            },
+          }).catch(() => {});
+          console.log(`⚡ [${workerId}] Signaled submission service in bot_control: ${readyToReviewRows.length} applications ready for immediate submission pickup!`);
+        }
+      } catch (bcSigErr) {
+        console.warn(`[${workerId}] Non-critical: submission signal error:`, bcSigErr?.message);
+      }
+    }
   } catch (distErr) {
     console.log(`⚠️ [${workerId}] Phase 3 note on job_distributions / scanned_jobs: ${distErr.message}`);
   }

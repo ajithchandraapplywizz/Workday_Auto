@@ -426,12 +426,14 @@ export async function executeWorkerTask({
   appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
   const browser = await chromium.launch({
     headless: Boolean(headless),
+    channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
     args: [
-      '--disable-blink-features=AutomationControlled',
       '--no-sandbox',
       '--disable-setuid-sandbox',
       '--disable-infobars',
       '--disable-dev-shm-usage',
+      '--disable-gpu',
+      '--disable-software-rasterizer',
       '--window-size=1280,900',
     ],
   });

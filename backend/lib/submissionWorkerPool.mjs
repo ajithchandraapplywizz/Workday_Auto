@@ -1355,28 +1355,28 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
       await updateJobDistributionWithCheck({
-
         distributionId: task.distribution_id || task.id,
-
         applywizzId: task.applywizz_id,
-
         jobUrl: task.job_url,
-
         workerId,
-
         patch: {
-
           status: 'submitted',
-
           error_message: null,
-
           application_submitted_screenshot_url: finalShotUrl,
-
           updated_at: now,
-
         },
-
       });
+
+      // Also update batch_job_queue status for this candidate / job link
+      try {
+        await supabase.from('batch_job_queue')
+          .update({
+            status: 'submitted',
+            screenshot_path: finalShotUrl,
+            updated_at: now,
+          })
+          .eq('job_url', task.job_url);
+      } catch {}
 
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
@@ -1739,27 +1739,33 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           await recordFailedJob({
 
             applywizzId: task.applywizz_id,
-
             jobId: task.job_id || null,
-
             jobUrl: task.job_url,
-
             company: task.company || 'Workday Partner',
-
             roleTitle: task.role_title || 'Workday Application',
-
-            failureReason: `${rawErrMsg} (Attempt 3/3 exhausted)`,
-
-            failedAtStep: failedStep,
-
+            failureReason: isFatalNonRetryable && (result?.status === 'job_expired' || /expired|no longer available/i.test(rawErrMsg))
+              ? 'expired'
+              : `${rawErrMsg} (Attempt 3/3 exhausted)`,
+            failedAtStep: isFatalNonRetryable && (result?.status === 'job_expired' || /expired|no longer available/i.test(rawErrMsg))
+              ? 'Job Discovery / Link Expired'
+              : failedStep,
             screenshotPath: finalShotUrl,
-
           });
 
+          if (result?.status === 'job_expired' || /expired|no longer available/i.test(rawErrMsg)) {
+            await supabase.from('batch_job_queue')
+              .update({
+                status: 'expired',
+                screenshot_path: finalShotUrl,
+                worker_id: null,
+                locked_at: null,
+                updated_at: now,
+              })
+              .eq('job_url', task.job_url)
+              .catch(() => {});
+          }
         } catch (recErr) {
-
           console.warn(`[${workerId}] Warning writing to failed_jobs:`, recErr.message);
-
         }
 
       }
