@@ -82,25 +82,32 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     const cleanOptions = Array.isArray(item.options)
       ? Array.from(new Set(item.options.map((o) => String(o).trim()).filter(Boolean)))
       : [];
-    const source = item.source || 'scan_placeholder';
+    const source = ['supabase', 'api', 'resume', 'llm', 'manual'].includes(item.source) ? item.source : 'manual';
     const fieldType = item.field_type || item.type || 'text';
     const stepName = item.step || 'Application Questions';
+    const mockAwl = String(metadata.mockAwlId || 'AWL-1568').trim().toUpperCase();
+    const effectiveAnswer = sampleVal ? String(sampleVal).trim() : '';
 
-    // Prepare DB row for qa_bank
-    dbRows.push({
-      tenant,
-      normalized_question: normKey,
-      field_type: fieldType,
-      options: cleanOptions,
-      answer: sampleVal ? String(sampleVal).trim() : null,
-      source,
-      step_name: stepName,
-      updated_at: now,
-    });
+    // Prepare DB row for qa_bank matching NOT NULL schema constraints
+    if (effectiveAnswer) {
+      dbRows.push({
+        applywizz_id: mockAwl,
+        question: rawLabel.trim(),
+        question_normalized: normKey,
+        normalized_question: normKey,
+        field_type: fieldType,
+        options: cleanOptions,
+        answer: effectiveAnswer,
+        source,
+        step_name: stepName,
+        tenant,
+        updated_at: now,
+      });
+    }
 
     // Update in-memory lookup cache
     QA_BANK_CACHE.set(`${tenant}:${normKey}`, {
-      answer: sampleVal ? String(sampleVal).trim() : null,
+      answer: effectiveAnswer || null,
       source,
       options: cleanOptions,
       fieldType,
@@ -112,12 +119,12 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
         field_type: fieldType,
         step: stepName,
         options: cleanOptions,
-        sample_answer: sampleVal ? String(sampleVal).trim() : null,
+        sample_answer: effectiveAnswer || null,
         source,
         tenant,
         first_seen_company: metadata.company || 'Workday Partner',
         first_seen_role: metadata.roleTitle || 'Application',
-        mock_client_id: metadata.mockAwlId || 'AWL-1568',
+        mock_client_id: mockAwl,
         created_at: now,
       };
       addedCount++;
@@ -127,23 +134,31 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
         entry.options = cleanOptions;
         updatedCount++;
       }
-      if (!entry.sample_answer && sampleVal) {
-        entry.sample_answer = String(sampleVal).trim();
+      if (!entry.sample_answer && effectiveAnswer) {
+        entry.sample_answer = effectiveAnswer;
         updatedCount++;
       }
     }
   }
 
-  // 1. Persist to Supabase qa_bank table via UPSERT
+  // 1. Persist to Supabase qa_bank table via UPSERT (deduplicated by applywizz_id + question_normalized)
   if (isSupabaseConfigured() && dbRows.length > 0) {
+    const dedupedDbRows = Array.from(
+      dbRows.reduce((map, r) => {
+        const k = `${r.applywizz_id}:${r.question_normalized}`;
+        if (!map.has(k)) map.set(k, r);
+        return map;
+      }, new Map()).values()
+    );
+
     try {
       await request('qa_bank', {
         method: 'POST',
-        query: '?on_conflict=tenant,normalized_question',
+        query: '?on_conflict=applywizz_id,question_normalized',
         prefer: 'resolution=merge-duplicates,return=minimal',
-        body: dbRows,
+        body: dedupedDbRows,
       });
-      console.log(`🏦 [qa_bank] Persisted ${dbRows.length} questions to Supabase qa_bank table.`);
+      console.log(`🏦 [qa_bank] Persisted ${dedupedDbRows.length} questions to Supabase qa_bank table.`);
     } catch (dbErr) {
       console.warn(`⚠️ [qa_bank] Note on saving to qa_bank table: ${dbErr?.message?.slice(0, 140)}`);
     }
