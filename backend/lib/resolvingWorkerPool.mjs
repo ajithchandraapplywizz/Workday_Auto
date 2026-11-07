@@ -15,6 +15,7 @@ import { preResolveClientAnswersDetailed } from './jobFormCache.mjs';
 import { isGlobalStopRequested, isScanStopRequested } from './browserLifecycle.mjs';
 import { getCleanSupabaseEnv } from './clusterBatchRunner.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
+import { parseCandidateAwlIds } from './candidateParser.mjs';
 
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
@@ -42,7 +43,7 @@ export async function runResolvingWorkerPool(options = {}) {
   }
 
   const scannedRes = await httpsJsonWithRetry({
-    url: `${url}/rest/v1/scanned_jobs?question_count=gt.0&select=id,applywizz_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=200`,
+    url: `${url}/rest/v1/scanned_jobs?select=id,applywizz_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=200`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   });
 
@@ -84,9 +85,7 @@ export async function runResolvingWorkerPool(options = {}) {
       });
       if (bqRes.ok) {
         const bqRows = bqRes.json() || [];
-        const bqIds = bqRows
-          .map((r) => String(r.applywizz_id || '').toUpperCase().trim())
-          .filter(Boolean);
+        const bqIds = bqRows.flatMap((r) => parseCandidateAwlIds(r.applywizz_id));
         activeCandidateIds = Array.from(new Set([...activeCandidateIds, ...bqIds]));
       }
     } catch {}
@@ -111,7 +110,18 @@ export async function runResolvingWorkerPool(options = {}) {
 
       const company = job.company || 'Workday Partner';
       const roleTitle = job.role_title || 'Workday Application';
-      const questions = job.scraped_questions || [];
+      let questions = Array.isArray(job.scraped_questions) ? [...job.scraped_questions] : [];
+      if (questions.length === 0 && Array.isArray(job.resolved_answers) && job.resolved_answers.length > 0) {
+        questions = job.resolved_answers.map(a => ({
+          question: a.question || a.label,
+          label: a.question || a.label,
+          field_type: a.field_type || 'text',
+          type: a.field_type || 'text',
+          required: true,
+          is_required: true,
+          value: a.answer || a.value,
+        }));
+      }
 
       await updateWorkerStatus(workerId, {
         state: 'in_flight',
@@ -130,19 +140,7 @@ export async function runResolvingWorkerPool(options = {}) {
         });
         if (queueRes.ok) {
           const qRows = queueRes.json() || [];
-          const rawAwls = [];
-          for (const r of qRows) {
-            if (!r.applywizz_id) continue;
-            try {
-              const parsed = JSON.parse(r.applywizz_id);
-              if (Array.isArray(parsed)) {
-                rawAwls.push(...parsed);
-                continue;
-              }
-            } catch {}
-            rawAwls.push(...String(r.applywizz_id).split(','));
-          }
-          candidatesToProcess = [...new Set(rawAwls.map(id => String(id).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean))];
+          candidatesToProcess = [...new Set(qRows.flatMap((r) => parseCandidateAwlIds(r.applywizz_id)))];
         }
       } catch {}
 

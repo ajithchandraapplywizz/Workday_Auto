@@ -226,7 +226,7 @@ export async function executeWorkerTask({
   const effectiveConfirmSubmit = isApprovedForSubmission ? true : confirmSubmit;
   const isDirectSubmission = Boolean(task.isDirectSubmission || options.isDirectSubmission);
   const currentAttempt = Number(task.currentAttempt || options.currentAttempt || 1);
-  const maxAttempts = Number(task.maxAttempts || options.maxAttempts || 3);
+  const maxAttempts = Number(task.maxAttempts || options.maxAttempts || 10);
   const isFinalAttempt = Boolean(task.isFinalAttempt ?? options.isFinalAttempt ?? (currentAttempt >= maxAttempts));
 
   const applywizzId = task.applywizzId || task.applywizz_id || task.candidateId || '';
@@ -1305,7 +1305,7 @@ export async function executeWorkerTask({
             bucket = 'submitted-applications';
             filename = `${compPrefix}_${cleanTaskId}_already_applied.jpg`;
             storagePath = filename;
-          } else if (status === 'reached-review' || status === 'reached_review') {
+          } else if (status === 'reached-review' || status === 'reached_review' || status === 'ready_for_review' || isSuccessStatus || onReviewPage) {
             // Upload full-page Review & Submit blueprint screenshot to submitted-applications bucket for scanned_jobs
             bucket = 'submitted-applications';
             filename = `${compPrefix}_${cleanTaskId}_review_blueprint.jpg`;
@@ -1391,8 +1391,9 @@ export async function executeWorkerTask({
       TASK_ATTEMPTS.set(taskKey, currentAttempt);
     }
 
+    const MAX_ATTEMPTS = 10;
     const isMiddleStepFailure = !isSuccessStatus && !isExpired;
-    const shouldRetryMiddleStep = isMiddleStepFailure && currentAttempt < 3;
+    const shouldRetryMiddleStep = isMiddleStepFailure && currentAttempt < MAX_ATTEMPTS;
 
     if (!isDirectSubmission) {
       await upsertSupabaseApplication({
@@ -1409,12 +1410,12 @@ export async function executeWorkerTask({
       }).catch(() => {});
     }
 
-    if (queueTaskId) {
+    if (queueTaskId && !options.isClusterBlueprint) {
       const finalStatus = (status === 'submitted')
         ? 'submitted'
         : (status === 'already_applied')
           ? 'already_applied'
-          : (status === 'reached-review' || status === 'reached_review')
+          : (status === 'reached-review' || status === 'reached_review' || status === 'ready_for_review' || isSuccessStatus || onReviewPage)
             ? 'reached_review'
             : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
       const answersMap = {
@@ -1424,7 +1425,7 @@ export async function executeWorkerTask({
       };
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
-        errorMessage: shouldRetryMiddleStep ? `Retrying (attempt ${currentAttempt}/3): stopped at ${stoppedBlock}` : fullFailureReason,
+        errorMessage: shouldRetryMiddleStep ? `Retrying (attempt ${currentAttempt}/${MAX_ATTEMPTS}): stopped at ${stoppedBlock}` : fullFailureReason,
         preResolvedAnswers: answersMap,
         screenshotPath: completionShotUrl,
       });
@@ -1432,9 +1433,9 @@ export async function executeWorkerTask({
 
     if (!isSuccessStatus && !options.isClusterBlueprint && !isDirectSubmission) {
       if (shouldRetryMiddleStep) {
-        console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${currentAttempt}/3). Retrying — will NOT record to failed_jobs until 3 attempts are exhausted.`);
+        console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${currentAttempt}/${MAX_ATTEMPTS}). Retrying — will NOT record to failed_jobs until ${MAX_ATTEMPTS} attempts are exhausted.`);
       } else {
-        console.log(`\n❌ [${workerId}] Recording permanently failed job for ${applywizzId} (expired=${isExpired}, attempt=${currentAttempt}/3). Recording to failed_jobs.`);
+        console.log(`\n❌ [${workerId}] Recording permanently failed job for ${applywizzId} (expired=${isExpired}, attempt=${currentAttempt}/${MAX_ATTEMPTS}). Recording to failed_jobs.`);
         const answeredSoFar = [];
         if (profile?._filledValues) {
           for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
@@ -1727,13 +1728,13 @@ export async function executeWorkerTask({
           const unansweredQuestions = [];
 
           // Check review questions that have empty / incomplete answers
-          for (const q of reviewQuestionsFormatted) {
+          for (const q of finalScrapedQuestions) {
             const val = String(q.value || '').trim();
             if (!val || /^(select(\s*one)?|select\.\.\.|choose(\s*one)?|unanswered|please\s*select)$/i.test(val)) {
               unansweredQuestions.push({
-                question: q.label,
-                field_type: q.type || 'text',
-                step: 'Review & Submit',
+                question: q.label || q.question,
+                field_type: q.field_type || q.type || 'text',
+                step: q.step || 'Review & Submit',
                 options: q.options || [],
               });
             }
@@ -1909,7 +1910,25 @@ export async function executeWorkerTask({
       }
     }
 
-    if (!isDirectSubmission || isFinalAttempt) {
+    const isAtReview = String(errStep).toLowerCase().includes('review') || String(profile?._currentStep).toLowerCase().includes('review');
+
+    if (isAtReview) {
+      console.log(`ℹ️ [${workerId}] Exception occurred after reaching Review step ("${errStep}"). Will NOT record to failed_jobs.`);
+      if (options.isClusterBlueprint || options.isScanOnly) {
+        return {
+          status: 'reached-review',
+          stoppedAtStep: 'Step 5: Review & Submit',
+          screenshotUrl: errShotUrl || profile?._submissionScreenshotUrl || null,
+          answersMap: {
+            ...(profile?._scrapedReviewMap || {}),
+            ...(profile?._filledValues || {}),
+            ...(profile?._answers || {}),
+          },
+          harvestedFields: profile?._scrapedQuestions || [],
+          scrapedQuestions: profile?._scrapedQuestions || [],
+        };
+      }
+    } else if (!options.isClusterBlueprint && !options.isScanOnly && isFinalAttempt) {
       try {
         const { recordFailedJob, recordApplicationFailure } = await import('./supabaseClient.mjs');
         await recordFailedJob({

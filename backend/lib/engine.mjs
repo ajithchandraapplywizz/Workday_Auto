@@ -35,7 +35,7 @@ import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
 import { isAutoApplyMode } from './claudeLlm.mjs';
-import { detectWorkdayStep } from './stateDetector.mjs';
+import { detectWorkdayStep, isWorkdayReviewPage } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,
   countUnfilledMandatoryQuestions,
@@ -2076,11 +2076,49 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       }
     }
     profile._scrapedQuestions = Array.from(profile._scrapedWizardQuestions.values());
-    profile._scrapedReviewFields = profile._scrapedQuestions;
   } else {
     profile._scrapedQuestions = [];
-    profile._scrapedReviewFields = [];
   }
+
+  // Robust Review Page Fallback & Ingestion:
+  // Capture all answered question pairs from Review DOM so scraped questions are NEVER empty!
+  const knownNorms = new Set(
+    (profile._scrapedQuestions || []).map(q =>
+      (q.question_normalized || q.normalized || q.label || q.question || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim()
+    )
+  );
+
+  let inferOptsFn = null;
+  try {
+    const { inferStandardOptions } = await import('./workdayScanHarvest.mjs');
+    inferOptsFn = inferStandardOptions;
+  } catch {}
+
+  for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
+    if (!lbl || lbl.length < 2) continue;
+    if (/password\b|upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(lbl)) continue;
+    const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!normLbl || knownNorms.has(normLbl)) continue;
+
+    const isChoice = /select|gender|race|veteran|disability|country|state|phone.*type|source|hear about/i.test(normLbl);
+    const fieldType = isChoice ? 'dropdown' : (/\bdate\b/i.test(normLbl) ? 'date' : 'text');
+    const inferredItem = {
+      label: lbl,
+      question: lbl,
+      question_normalized: normLbl,
+      field_type: fieldType,
+      type: fieldType,
+      options: (isChoice && inferOptsFn) ? inferOptsFn(lbl, fieldType) : [],
+      required: true,
+      is_required: true,
+      step: 'Application',
+      value: String(val || ''),
+    };
+    if (!profile._scrapedQuestions) profile._scrapedQuestions = [];
+    profile._scrapedQuestions.push(inferredItem);
+    knownNorms.add(normLbl);
+  }
+  profile._scrapedReviewFields = profile._scrapedQuestions;
 
   const scrapedCount = profile._scrapedQuestions?.length || Object.keys(scrapedReviewMap).length;
   console.log(`  📋 Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);

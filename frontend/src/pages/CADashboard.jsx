@@ -265,7 +265,7 @@ export default function CADashboard() {
               if (!countMap[id]) countMap[id] = { toExecute: 0, submitted: 0, total: 0 };
               countMap[id].total++;
               const st = (row.status || '').toLowerCase();
-              if (st === 'submitted' || st === 'completed') {
+              if (st === 'submitted' || st === 'completed' || st === 'already_applied') {
                 countMap[id].submitted++;
               } else {
                 countMap[id].toExecute++;
@@ -395,7 +395,7 @@ export default function CADashboard() {
 
           const sj = scannedMap.get(u) || scannedMap.get((dj.job_url || '').trim().toLowerCase());
           const st = (dj.status || '').toLowerCase();
-          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'needs_answers', 'failed'].includes(st);
+          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'already_applied', 'needs_answers', 'failed'].includes(st);
           if (!isAllowedStatus) continue;
 
             const rawProof = dj.application_submitted_screenshot_url
@@ -1134,11 +1134,12 @@ export default function CADashboard() {
                   <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
                     {clientJobs.map((j, idx) => {
                       const isSub = j.status === 'submitted';
+                      const isAlreadyApplied = j.status === 'already_applied';
                       const isApplying = j.status === 'applying' || j.status === 'in_flight' || j.status === 'in_progress';
                       const isQ = j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission';
                       const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
                       const isSelected = activeTask?.id === j.id;
-                      const isSubmitted = j.status === 'submitted';
+                      const isSubmitted = j.status === 'submitted' || j.status === 'already_applied';
                       const cardScreenshot = (isSubmitted || j.application_submitted_screenshot_url || j.applied_screenshot)
                         ? (j.application_submitted_screenshot_url || j.applied_screenshot || j.screenshot_url || null)
                         : null;
@@ -1153,6 +1154,11 @@ export default function CADashboard() {
                         badgeColor = '#34d399';
                         badgeBorder = 'rgba(16, 185, 129, 0.3)';
                         badgeText = 'SUBMITTED';
+                      } else if (isAlreadyApplied) {
+                        badgeBg = 'rgba(16, 185, 129, 0.15)';
+                        badgeColor = '#34d399';
+                        badgeBorder = 'rgba(16, 185, 129, 0.3)';
+                        badgeText = 'ALREADY APPLIED';
                       } else if (isApplying) {
                         badgeBg = 'rgba(168, 85, 247, 0.15)';
                         badgeColor = '#c084fc';

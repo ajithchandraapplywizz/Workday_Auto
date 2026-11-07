@@ -149,8 +149,30 @@ export function isMandatoryField(label = '', field = {}, stepName = '') {
   if (isMinimumAgeQuestion(text)) return true;
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   const plain = text.replace(/\*+$/, '').trim();
-  if (/^(race|ethnicity|gender|sex|hispanic|veteran(\s*status)?)$/i.test(plain)) return true;
-  if (/voluntary|self[- ]?identif|disclos|eeo|equal|diversity/i.test(stepName || field?.stepName || '') && /gender|sex|race|ethnic|veteran|hispanic|latino|disability/i.test(text)) return true;
+  if (/^(race(\s*[\/\-]\s*ethnicity)?|ethnicity|gender|sex|hispanic|latino|veteran(\s*status)?)$/i.test(plain)) return true;
+  const effectiveStep = String(stepName || field?.stepName || '');
+  if (/voluntary|self[- ]?identif|disclos|eeo|equal|diversity/i.test(effectiveStep) && /gender|sex|race|ethnic|veteran|hispanic|latino|disability/i.test(text)) return true;
+
+  // Workday Application Questions step: all custom questions on this page are mandatory to submit application
+  if (/application\s*questions?|custom\s*questions?|candidate\s*questions?|additional\s*questions?|assessment/i.test(effectiveStep)) {
+    if (!SKIP_LABEL_PATTERNS.some((re) => re.test(text.toLowerCase()))) {
+      return true;
+    }
+  }
+
+  // Any explicit question format (ends with ? or starts with question verb)
+  const looksLikeQuestion = /\?/.test(text)
+    || /^(are you|have you|do you|will you|can you|how many|what is|which|please (select|indicate|confirm|specify|choose))\b/i.test(text);
+  if (looksLikeQuestion && !SKIP_LABEL_PATTERNS.some((re) => re.test(text.toLowerCase()))) {
+    return true;
+  }
+
+  // Choice fields (dropdown, radio, select, combobox) for core application data
+  const fType = String(field?.fieldType || field?.type || '').toLowerCase();
+  if (/dropdown|select|radio|combobox/i.test(fType) && !SKIP_LABEL_PATTERNS.some((re) => re.test(text.toLowerCase()))) {
+    if (/how did you hear|referral source|source|country|phone.*type/i.test(text)) return true;
+  }
+
   return hasRequiredSignal(text, field);
 }
 
@@ -171,8 +193,13 @@ export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   if (text.length < 3) return false;
   if (/upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(text)) return false;
 
-  // STRICT REQUIREMENT: Only scrape mandatory / required questions (indicated by red asterisk, required attribute, or compliance mandate).
-  // If not mandatory, do not scrape or harvest.
+  const effectiveStep = String(stepName || field?.stepName || '');
+  if (/application\s*questions?|custom\s*questions?|candidate\s*questions?/i.test(effectiveStep)) {
+    if (!SKIP_LABEL_PATTERNS.some((re) => re.test(text.toLowerCase()))) {
+      return true;
+    }
+  }
+
   return false;
 }
 

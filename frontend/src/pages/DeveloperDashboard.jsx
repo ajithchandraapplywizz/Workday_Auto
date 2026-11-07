@@ -385,7 +385,12 @@ export default function DeveloperDashboard() {
   const filteredRuns = useMemo(() => {
     return applications.filter((app) => {
       if (statusFilter === 'All') return true;
-      return app.status?.toLowerCase() === statusFilter.toLowerCase();
+      const s = statusFilter.toLowerCase();
+      const st = (app.status || '').toLowerCase();
+      if (s === 'submitted') return st === 'submitted' || st === 'completed';
+      if (s === 'already_applied') return st === 'already_applied';
+      if (s === 'applying' || s === 'in_progress') return ['applying', 'in_flight', 'in_progress', 'started'].includes(st);
+      return st === s;
     });
   }, [applications, statusFilter]);
 
@@ -976,29 +981,55 @@ export default function DeveloperDashboard() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           {/* Universal Parallel Pipeline Trigger */}
-          <button
-            type="button"
-            onClick={handleTriggerAllParallel}
-            disabled={isTriggering || isSubmitTriggering}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              padding: '0.65rem 1.25rem',
-              borderRadius: '6px',
-              border: 'none',
-              background: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)',
-              color: '#ffffff',
-              fontSize: '0.88rem',
-              fontWeight: 700,
-              cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
-              boxShadow: '0 4px 12px rgba(139, 92, 246, 0.35)',
-              transition: 'all 0.15s ease',
-            }}
-            title="Run scanning/resolving and submission pipelines simultaneously across all active workers"
-          >
-            <span>⚡ Trigger All (Parallel Pipeline)</span>
-          </button>
+          {(isScanActive || isSubmitActive) ? (
+            <button
+              type="button"
+              onClick={handleStopAllParallel}
+              disabled={isTriggering || isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #ef4444 0%, #b91c1c 100%)',
+                color: '#ffffff',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(239, 68, 68, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Stop universal pipeline across all workers immediately"
+            >
+              <span>🛑 Stop Universal Pipeline (Running)</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={handleTriggerAllParallel}
+              disabled={isTriggering || isSubmitTriggering}
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                padding: '0.65rem 1.25rem',
+                borderRadius: '6px',
+                border: 'none',
+                background: 'linear-gradient(135deg, #8b5cf6 0%, #6d28d9 100%)',
+                color: '#ffffff',
+                fontSize: '0.88rem',
+                fontWeight: 700,
+                cursor: (isTriggering || isSubmitTriggering) ? 'not-allowed' : 'pointer',
+                boxShadow: '0 4px 12px rgba(139, 92, 246, 0.35)',
+                transition: 'all 0.15s ease',
+              }}
+              title="Run scanning/resolving and submission pipelines simultaneously across all active workers"
+            >
+              <span>⚡ Trigger All (Parallel Pipeline)</span>
+            </button>
+          )}
 
           {/* Stage 1: Trigger / Stop Scanning & Resolving (3 Workers) */}
           {isScanActive ? (
@@ -2318,10 +2349,10 @@ export default function DeveloperDashboard() {
             >
               <option value="All">All Statuses</option>
               <option value="queued">Queued</option>
-              <option value="started">Started</option>
-              <option value="in_progress">In Progress</option>
+              <option value="applying">Applying (In Progress)</option>
               <option value="ready_for_review">Ready For Review</option>
               <option value="submitted">Submitted</option>
+              <option value="already_applied">Already Applied</option>
               <option value="failed">Failed</option>
               <option value="skipped">Skipped</option>
             </select>

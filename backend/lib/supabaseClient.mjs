@@ -9,6 +9,7 @@ import { fuzzyScore, tokenSetRatio } from './fields.mjs';
 import { alignAnswerToWorkdayOptions, stripWorkdayQuestionLabel, resolveCompanyEmail } from './applyWizzClient.mjs';
 import { trace } from './trace.mjs';
 import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
+import { parseCandidateAwlIds } from './candidateParser.mjs';
 
 let envLoaded = false;
 
@@ -2197,6 +2198,15 @@ export async function saveScannedJob({
   }
 
   if (savedRow) {
+    // STRICT RULE: If a job is successfully upserted into scanned_jobs,
+    // it MUST NEVER exist in failed_jobs! Clean up any errant failed_jobs row immediately.
+    try {
+      await request('failed_jobs', {
+        method: 'DELETE',
+        query: `?job_url=eq.${encode(cleanUrl)}`,
+      });
+    } catch {}
+
     console.log(`\n📥 [SUPABASE INGESTION] table: scanned_jobs | action: UPSERT`);
     console.log(`   • Scanned Job ID:       ${savedRow.id || 'Generated'}`);
     console.log(`   • Company & Role:       ${payload.company} — ${payload.role_title}`);
@@ -2805,7 +2815,23 @@ export async function recordJobDistributions({
     const directQuestions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
     const effectiveQuestions = directQuestions.length > 0 ? directQuestions : scannedQuestions;
 
-    if (effectiveQuestions.length === 0) {
+    const ansFallback = (Array.isArray(resolvedAnswers) && resolvedAnswers.length > 0)
+      ? resolvedAnswers
+      : (Array.isArray(directScannedRecord?.resolved_answers) ? directScannedRecord.resolved_answers : (Array.isArray(scannedJobRecord?.resolved_answers) ? scannedJobRecord.resolved_answers : []));
+    if (effectiveQuestions.length === 0 && ansFallback.length > 0) {
+      for (const a of ansFallback) {
+        effectiveQuestions.push({
+          question: a.question || a.label,
+          label: a.question || a.label,
+          field_type: a.field_type || 'text',
+          required: true,
+          is_required: true,
+          value: a.answer || a.value,
+        });
+      }
+    }
+
+    if (effectiveQuestions.length === 0 && (!clients || clients.length === 0)) {
       console.log(`   ⛔ [Distribution Gate] Blocked distribution for "${cleanUrl}": 0 scraped questions available.`);
       return false;
     }
@@ -2866,13 +2892,11 @@ export async function recordJobDistributions({
       } catch {}
     }
 
-    // Expand any comma-separated applywizzId in targetClients so EVERY client has an authentic row
+    // Expand any candidate IDs in targetClients so EVERY client has an authentic row
     const expandedClients = [];
     for (const c of targetClients) {
-      const raw = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim();
-      const ids = raw.includes(',')
-        ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-        : [raw.toUpperCase()];
+      const raw = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
+      const ids = parseCandidateAwlIds(raw);
       for (const singleId of ids) {
         if (!singleId) continue;
         expandedClients.push(typeof c === 'object' ? { ...c, applywizzId: singleId, applywizz_id: singleId } : singleId);
@@ -3108,6 +3132,30 @@ export async function recordFailedJob({
     const cleanUrl = String(jobUrl).trim();
     const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
     const cleanStep = String(failedAtStep || 'Unknown').trim();
+
+    // STRICT GUARD 1: If job reached Review & Submit, it is NEVER a failed job!
+    // It belongs strictly in scanned_jobs. Refuse to insert into failed_jobs.
+    if (
+      cleanStep.toLowerCase().includes('review') ||
+      cleanReason.toLowerCase().includes('reached-review') ||
+      cleanReason.toLowerCase().includes('reached_review') ||
+      cleanReason.toLowerCase().includes('ready_for_review')
+    ) {
+      console.warn(`⚠️ [failed_jobs GUARD] Refused write to failed_jobs: Job reached "${cleanStep}" (Review & Submit). This link belongs in scanned_jobs only!`);
+      return false;
+    }
+
+    // STRICT GUARD 2: If this job URL is already present in scanned_jobs with scan_status = 'completed',
+    // it MUST NEVER be written into failed_jobs!
+    try {
+      const existingScanned = await request('scanned_jobs', {
+        query: `?job_url=eq.${encode(cleanUrl)}&scan_status=eq.completed&select=id&limit=1`,
+      });
+      if (Array.isArray(existingScanned) && existingScanned.length > 0) {
+        console.warn(`⚠️ [failed_jobs GUARD] Refused write to failed_jobs: Job "${cleanUrl}" is already completed in scanned_jobs (#${existingScanned[0].id})!`);
+        return false;
+      }
+    } catch {}
     const now = new Date().toISOString();
     const parsedClientIds = Array.isArray(clientIds) && clientIds.length > 0
       ? clientIds.map((s) => String(s).trim().toUpperCase()).filter(Boolean)

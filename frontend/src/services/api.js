@@ -864,6 +864,10 @@ export async function fetchApplicationsDynamic({
         query = query.in('status', ['queued', 'queued_for_submission', 'pending', 'distributed', 'ready_for_review', 'ready_to_review', 'review_and_submit', 'approved_for_submission']);
       } else if (s === 'ready_for_review' || s === 'ready_to_review') {
         query = query.in('status', ['ready_for_review', 'ready_to_review', 'distributed', 'review_and_submit']);
+      } else if (s === 'submitted' || s === 'completed') {
+        query = query.in('status', ['submitted', 'completed', 'already_applied']);
+      } else if (s === 'already_applied') {
+        query = query.eq('status', 'already_applied');
       } else {
         query = query.eq('status', s);
       }
@@ -980,10 +984,10 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     const allApps = apps || [];
     const now = Date.now();
 
-    // 1. Submitted: status in ('submitted', 'completed')
+    // 1. Submitted: status in ('submitted', 'completed', 'already_applied')
     const submitted = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      return st === 'submitted' || st === 'completed';
+      return st === 'submitted' || st === 'completed' || st === 'already_applied';
     }).length;
 
     // 2. Applying: strictly direct sync to database status ('applying', 'in_flight', 'in_progress', 'started')

@@ -147,6 +147,49 @@ export async function detectWorkdayStep(page) {
 }
 
 /**
+ * Double-verify with the DOM that the page is genuinely the Review & Submit page (last page of wizard).
+ */
+export async function isWorkdayReviewPage(page) {
+  if (!page || page.isClosed()) return false;
+  return await page.evaluate(() => {
+    // 1. Explicit reviewPage container or review step
+    if (document.querySelector('[data-automation-id="reviewPage"], [data-automation-id="reviewStep"]')) {
+      return true;
+    }
+
+    // 2. Submit button presence
+    const hasSubmitButton = Boolean(
+      document.querySelector('button[data-automation-id*="submit" i], [data-automation-id="pageFooterSubmitButton"], button[type="submit"]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test(b.textContent || ''))
+    );
+
+    // 3. Review heading or title
+    const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"]'));
+    const hasReviewHeading = headings.some(h => /review\s*(?:and|&)\s*submit|review\s*(?:your\s*)?application|^review$/i.test((h.textContent || '').trim()));
+
+    // 4. Progress bar active step is Review
+    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active');
+    const isReviewActiveStep = activeStep && /review/i.test(activeStep.textContent || '');
+
+    // 5. Body text indicators
+    const bodyText = (document.body?.innerText || '').slice(0, 5000);
+    const hasReviewText = /review\s*(?:and|&)\s*submit|review\s*your\s*application/i.test(bodyText) || /review/i.test(document.title);
+
+    if (hasSubmitButton && (hasReviewHeading || isReviewActiveStep || hasReviewText)) {
+      return true;
+    }
+    if (hasReviewHeading && (hasSubmitButton || document.querySelectorAll('dt, [data-automation-id*="formField"]').length > 5)) {
+      return true;
+    }
+    if (isReviewActiveStep && hasSubmitButton) {
+      return true;
+    }
+
+    return false;
+  }).catch(() => false);
+}
+
+/**
  * Canonical sequence order for Workday wizard pages.
  */
 export const WORKDAY_STEP_SEQUENCE = [

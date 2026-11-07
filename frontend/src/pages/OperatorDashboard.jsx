@@ -733,13 +733,13 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                         {(() => {
                           const displayableApps = applications.filter((app) => {
                             const raw = (app.status || '').toLowerCase().trim();
-                            return ['ready_for_review', 'ready_to_review', 'approved_for_submission', 'queued', 'applying', 'in_flight', 'submitted', 'completed', 'failed'].includes(raw);
+                            return ['ready_for_review', 'ready_to_review', 'approved_for_submission', 'queued', 'applying', 'in_flight', 'submitted', 'completed', 'already_applied', 'failed'].includes(raw);
                           });
 
                           return displayableApps.length > 0 ? (
                             displayableApps.map((app) => {
                               const rawStatus = (app.status || '').toLowerCase();
-                              const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed';
+                              const isSubmitted = rawStatus === 'submitted' || rawStatus === 'completed' || rawStatus === 'already_applied';
                               const isApplying = rawStatus === 'applying' || rawStatus === 'in_flight';
                               const isQueued = rawStatus === 'queued' || rawStatus === 'approved_for_submission';
                               const isFailed = rawStatus === 'failed';
@@ -783,7 +783,11 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
                                   <td style={{ color: '#cbd5e1' }}>{app.company || 'Workday Tenant'}</td>
                                   <td style={{ color: '#94a3b8' }}>{app.ats || 'Workday'}</td>
                                   <td>
-                                    {isSubmitted ? (
+                                    {rawStatus === 'already_applied' ? (
+                                      <span className="video-status-tag submitted" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
+                                        ✓ ALREADY APPLIED
+                                      </span>
+                                    ) : isSubmitted ? (
                                       <span className="video-status-tag submitted" style={{ background: 'rgba(16, 185, 129, 0.15)', color: '#34d399', border: '1px solid rgba(16, 185, 129, 0.3)' }}>
                                         ✓ SUBMITTED
                                       </span>

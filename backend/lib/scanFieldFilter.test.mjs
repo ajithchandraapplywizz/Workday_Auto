@@ -58,3 +58,22 @@ test('required hourly and essay questions stay in the scan', () => {
   assert.equal(isMandatoryField(essay, { required: true }), true);
   assert.equal(shouldIncludeInScan(essay, { required: true }), true);
 });
+
+test('Application Questions step harvested even without asterisk', () => {
+  const customQ = 'Are you legally authorized to work in the United States?';
+  const yearsExp = 'How many years of relevant experience do you have?';
+  const reqSponsor = 'Will you now or in the future require employment sponsorship?';
+  const step = 'Application Questions';
+
+  assert.equal(isMandatoryField(customQ, {}, step), true);
+  assert.equal(shouldIncludeInScan(customQ, {}, step), true);
+  assert.equal(isMandatoryField(yearsExp, {}, step), true);
+  assert.equal(shouldIncludeInScan(yearsExp, {}, step), true);
+  assert.equal(isMandatoryField(reqSponsor, {}, step), true);
+  assert.equal(shouldIncludeInScan(reqSponsor, {}, step), true);
+});
+
+test('Referral source and core choice fields are included in scan', () => {
+  assert.equal(isMandatoryField('How Did You Hear About Us?', { fieldType: 'dropdown' }), true);
+  assert.equal(shouldIncludeInScan('How Did You Hear About Us?', { fieldType: 'dropdown' }), true);
+});

@@ -35,6 +35,7 @@ import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
 import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
+import { parseCandidateAwlIds } from './candidateParser.mjs';
 
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
@@ -321,20 +322,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
     }
 
     const c = clusterMap.get(canonicalKey);
-    const rawAwl = String(row.applywizz_id || '').trim();
-    let awlList = [];
-    if (rawAwl.startsWith('[') && rawAwl.endsWith(']')) {
-      try {
-        awlList = JSON.parse(rawAwl).map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean);
-      } catch {}
-    }
-    if (!awlList.length) {
-      awlList = rawAwl.includes(',')
-        ? rawAwl.split(',').map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean)
-        : (Array.isArray(row.client_ids) && row.client_ids.length > 0
-            ? row.client_ids.map((s) => String(s).replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean)
-            : [rawAwl.replace(/["'\[\]\\]/g, '').trim().toUpperCase()].filter(Boolean));
-    }
+    const awlList = parseCandidateAwlIds(row.applywizz_id || row.client_ids);
 
     for (const singleAwl of awlList) {
       c.tasks.push({
@@ -646,7 +634,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
   // Parse all sibling AWL IDs
   const allSiblingAwlIds = Array.from(new Set(
-    allTasks.flatMap((t) => String(t.applywizz_id || '').split(',').map((s) => s.replace(/["'\[\]\\]/g, '').trim().toUpperCase()).filter(Boolean))
+    allTasks.flatMap((t) => parseCandidateAwlIds(t.applywizz_id || t.client_ids))
   ));
 
   // Sibling AWL-ID cascade: If a candidate requires Zoho verification but their mailbox is not connected,
@@ -744,7 +732,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     // Check if candidate already applied to this job (rollover to next candidate):
     const isAlreadyApplied = result?.status === 'already_applied' ||
       result?.reason === 'already_applied' ||
-      result?.stoppedAtStep === 'Job Discovery / Already Applied';
+      result?.stoppedAtStep === 'Job Discovery / Already Applied' ||
+      /(?:already\s*applied|already\s*submitted)/i.test(String(result?.failureReason || result?.reason || result?.status || result?.stoppedAtStep || ''));
 
     if (isAlreadyApplied && cIdx < candidatePool.length - 1) {
       console.log(`\nℹ️ [${workerId}] Candidate ${candidateAwlId} has ALREADY APPLIED to this job (${company}).`);
@@ -775,6 +764,13 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
   if (bpSuccess) {
     // Candidate reached review step / completed scan successfully
+    // STRICT RULE: If a unique job link reached Review & Submit, it MUST NEVER exist in failed_jobs!
+    try {
+      await queueDbRequest('failed_jobs', {
+        method: 'DELETE',
+        query: `?job_url=eq.${encodeURIComponent(jobUrl)}`,
+      }).catch(() => {});
+    } catch {}
   } else {
     if (deadJob) {
       // RULE C: Expired link -> no retry, direct single-row upsert into failed_jobs
@@ -858,26 +854,48 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           retrying: true,
         };
       } else {
-        // Attempt 3 failed -> Upsert into failed_jobs
-        console.log(`[SCANNER] [${workerId}] [${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] Company: ${company} | Status: failed | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
-        const { recordFailedJob } = await import('./supabaseClient.mjs');
-        await recordFailedJob({
-          applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
-          clientIds: allSiblingAwlIds,
-          failedClientCount: allSiblingAwlIds.length,
-          clientCount: allSiblingAwlIds.length,
-          jobId: leadTask.job_id || cluster.reqId || null,
-          jobUrl,
-          company,
-          roleTitle: role,
-          failureReason: leadFailReason,
-          failedAtStep: leadFailStep,
-          screenshotPath: leadProofShot,
-        }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
+        // Attempt 10 failed -> Upsert into failed_jobs ONLY if it never reached Review
+        const reachedReview = Boolean(
+          String(leadFailStep).toLowerCase().includes('review') ||
+          String(leadFailReason).toLowerCase().includes('review')
+        );
+        if (!reachedReview) {
+          console.log(`[SCANNER] [${workerId}] [${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] Company: ${company} | Status: failed | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
+          const { recordFailedJob } = await import('./supabaseClient.mjs');
+          await recordFailedJob({
+            applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
+            clientIds: allSiblingAwlIds,
+            failedClientCount: allSiblingAwlIds.length,
+            clientCount: allSiblingAwlIds.length,
+            jobId: leadTask.job_id || cluster.reqId || null,
+            jobUrl,
+            company,
+            roleTitle: role,
+            failureReason: leadFailReason,
+            failedAtStep: leadFailStep,
+            screenshotPath: leadProofShot,
+          }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
 
-        if (allTaskIds.length > 0) {
-          await failClusterTasksByIds(allTaskIds, leadFailReason);
-          console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
+          if (allTaskIds.length > 0) {
+            await failClusterTasksByIds(allTaskIds, leadFailReason);
+            console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
+          }
+        } else {
+          console.log(`ℹ️ [${workerId}] Link reached Review step ("${leadFailStep}"). Marking queue as reached_review.`);
+          for (const tId of allTaskIds) {
+            await queueDbRequest('batch_job_queue', {
+              method: 'PATCH',
+              query: `?id=eq.${encodeURIComponent(tId)}`,
+              prefer: 'return=minimal',
+              body: {
+                status: 'reached_review',
+                screenshot_path: leadProofShot || null,
+                worker_id: null,
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+              },
+            }).catch(() => {});
+          }
         }
 
         return {
@@ -1060,24 +1078,42 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     };
   }
 
-  // STRICT FLOW: Only proceed with distributing to job_distributions if scanned questions are present!
+  // If harvestedQuestions was empty, fallback to leadAnswers or blueprint answersMap
   if (!harvestedQuestions || harvestedQuestions.length === 0) {
-    console.log(`⛔ [${workerId}] Skipping distribution to job_distributions: 0 questions were harvested for "${company} - ${role}".`);
-    return {
-      workerId,
-      jobUrl,
-      company,
-      role,
-      succeeded: 0,
-      failed: 0,
-      total: allTasks.length,
-      scrapedQaCount: 0,
-    };
+    if (leadAnswers && leadAnswers.length > 0) {
+      for (const la of leadAnswers) {
+        harvestedQuestions.push({
+          question: la.question,
+          label: la.question,
+          field_type: la.field_type || 'text',
+          type: la.field_type || 'text',
+          required: true,
+          is_required: true,
+          value: la.answer,
+          step: la.step || 'Application',
+        });
+      }
+    } else if (blueprintResult?.answersMap) {
+      for (const [k, v] of Object.entries(blueprintResult.answersMap)) {
+        if (k && v != null) {
+          harvestedQuestions.push({
+            question: k,
+            label: k,
+            field_type: 'text',
+            type: 'text',
+            required: true,
+            is_required: true,
+            value: String(v),
+            step: 'Application',
+          });
+        }
+      }
+    }
   }
 
   // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!
   console.log(`📍 [${workerId}] PHASE 3: Resolving answers & distributing into job_distributions table in PARALLEL...`);
-  console.log(`   Target: ${allTasks.length} candidates allotted to this unique link`);
+  console.log(`   Target: ${allSiblingAwlIds.length} candidate(s) allotted to this unique link`);
 
   const { loadProfile } = await import('./planner.mjs');
   const { preResolveClientAnswersDetailed } = await import('./jobFormCache.mjs');
@@ -1093,12 +1129,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   // Deduplicate and expand allTasks strictly: exactly 1 candidate task per unique applywizz_id
   const uniqueCandidateTasksMap = new Map();
   for (const t of allTasks) {
-    const rawAwl = String(t.applywizz_id || '').trim();
-    const ids = rawAwl.includes(',')
-      ? rawAwl.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-      : (Array.isArray(t.client_ids) && t.client_ids.length > 0
-          ? t.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-          : [rawAwl.toUpperCase()]);
+    const ids = parseCandidateAwlIds(t.applywizz_id || t.client_ids);
     for (const singleId of ids) {
       if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
         uniqueCandidateTasksMap.set(singleId, {
