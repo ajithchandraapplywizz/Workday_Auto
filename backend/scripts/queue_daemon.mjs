@@ -661,6 +661,8 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
           headless: HEADLESS,
         });
 
+        const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
+        console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
         console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
         submissionCycleResults.push({
           job_url: claimedTask.job_url,
@@ -1870,7 +1872,9 @@ export async function dispatchQueuedSubmissions() {
           headless: HEADLESS,
         })
           .then((res) => {
-            console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
+            const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
+        console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
+        console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
             submissionCycleResults.push({
               job_url: claimedTask.job_url,
               applywizz_id: claimedTask.applywizz_id,

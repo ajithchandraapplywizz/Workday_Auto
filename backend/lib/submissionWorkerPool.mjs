@@ -1350,6 +1350,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     if (isSuccess) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`\n✅ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: SUBMITTED | Company: ${task.company || 'Workday'} | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}\n`);
       console.log(`[${cleanId}] submission_completed | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
 
 
@@ -1380,6 +1381,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`\nℹ️ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: ALREADY_APPLIED | Company: ${task.company || 'Workday'} | Screenshot: ${finalShotUrl || 'None'}\n`);
       console.log(`[${cleanId}] already_applied | Screenshot: ${finalShotUrl || 'None'}`);
 
 
@@ -1698,7 +1700,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
         const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
 
-        console.log(`[SUBMITTER] [${workerId}] [${task.applywizz_id}] Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}`);
+        const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+        console.log(`\n❌ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: FAILED | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}\n`);
+        console.log(`[${cleanId}] submission_failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}`);
 
 
 

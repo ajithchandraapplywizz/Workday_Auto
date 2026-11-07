@@ -1272,6 +1272,7 @@ export async function executeWorkerTask({
     }
 
     // Step F: Record status to Supabase
+    const cleanAwl = String(applywizzId || profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
     if (!completionShotUrl) completionShotUrl = profile?._submissionScreenshotUrl || null;
     let detectedStep = null;
     try {
@@ -1292,7 +1293,6 @@ export async function executeWorkerTask({
           let storagePath = null;
           let bucket = null;
           let filename = null;
-          const cleanAwl = String(applywizzId || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
           const cleanTaskId = String(taskId || task.id || Date.now()).replace(/["'\[\]\\]/g, '').trim();
           const cleanComp = String(company || profile?._company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
           const compPrefix = cleanComp ? `${cleanAwl}_${cleanComp}` : cleanAwl;
