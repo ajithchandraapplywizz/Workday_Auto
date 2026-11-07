@@ -3008,6 +3008,36 @@ export async function recordJobDistributions({
 
     if (dedupedRows.length === 0) return false;
 
+    // Guard against overwriting completed/submitted applications:
+    // If a candidate already has status in ('submitted', 'completed', 'already_applied', 'applying', 'in_flight'),
+    // do NOT downgrade back to 'ready_for_review' or wipe their proof screenshot!
+    try {
+      const existingDistRows = await request('job_distributions', {
+        query: `?job_url=eq.${encode(cleanUrl)}&select=applywizz_id,status,application_submitted_screenshot_url`,
+      });
+      if (Array.isArray(existingDistRows) && existingDistRows.length > 0) {
+        const protectedMap = new Map();
+        for (const ex of existingDistRows) {
+          const rawSt = (ex.status || '').toLowerCase();
+          const isProtected = ['submitted', 'completed', 'already_applied', 'applying', 'in_flight'].includes(rawSt);
+          if (isProtected) {
+            protectedMap.set(String(ex.applywizz_id).trim().toUpperCase(), ex);
+          }
+        }
+        for (const r of dedupedRows) {
+          const exMatch = protectedMap.get(r.applywizz_id);
+          if (exMatch) {
+            r.status = exMatch.status;
+            if (exMatch.application_submitted_screenshot_url) {
+              r.application_submitted_screenshot_url = exMatch.application_submitted_screenshot_url;
+            }
+          }
+        }
+      }
+    } catch (checkErr) {
+      console.warn(`   ⚠️ [recordJobDistributions] Note on existing status check: ${checkErr?.message?.slice(0, 100)}`);
+    }
+
     // Batch upsert into job_distributions in chunks of 50
     const CHUNK_SIZE = 50;
     let totalIngested = 0;

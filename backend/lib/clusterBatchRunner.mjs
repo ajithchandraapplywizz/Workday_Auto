@@ -1723,7 +1723,7 @@ export async function runClusterBatchRunner({
         try {
           res = await runClusterWorker(workerId, cluster, {
             headless: Boolean(headless),
-            confirmSubmit,
+            confirmSubmit: false, // STRICT STAGE 1 POLICY: Scanning must NEVER submit on Workday
             limitPerLink,
             defaultPassword,
             scanRunId,

@@ -1990,6 +1990,15 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log('\n📋 Review step — parsing DOM before submit.');
   profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
+  const isScanOrBlueprint = Boolean(
+    profile?._isScanOnly ||
+    profile?._isClusterBlueprint ||
+    profile?._stage === 'scanning' ||
+    profile?._stage === 'blueprint' ||
+    profile?._stage === 'stage1' ||
+    profile?._mode === 'scan'
+  );
+
   const realHumanRequired = (profile?._humanRequired || []).filter((item) =>
     !/terms|read and understood|consent|agreement|statement and certify|acknowledge|state that i have read/i.test(item.label || '')
   );
@@ -2001,11 +2010,11 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     if (realHumanRequired.length > 8) {
       console.log(`     … and ${realHumanRequired.length - 8} more`);
     }
-    if (confirmSubmit && !dryRun) {
+    if (confirmSubmit && !dryRun && !isScanOrBlueprint) {
       console.log('  ⚡ [Direct Submission Policy] Human-required check bypassed at Review step. Proceeding immediately to submit application without blocking.');
       // Direct submission mode: proceed straight to submit
     } else {
-      console.log('  ℹ️  Blueprint / review scanning mode: proceeding to parse Review DOM & harvest questions for candidate resolution.');
+      console.log('  ℹ️  [Stage 1 Blueprint / Review Scanning Mode] HALT at Review — proceeding to parse Review DOM & harvest questions for candidate resolution.');
     }
   }
 
@@ -2124,11 +2133,12 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log(`  📋 Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
   profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
 
-  // If auto-submit is disabled (default for queue daemon), stop here at Review & Submit for CA review
-  if (!confirmSubmit || dryRun) {
+  // STRICT STAGE 1 POLICY: If scanning / blueprinting (Stage 1), NEVER submit under ANY circumstances!
+  // Always halt at Review & Submit, capture full-page screenshot for scanned_jobs, and return 'reached-review'.
+  if (!confirmSubmit || dryRun || isScanOrBlueprint) {
     // Capture full-page Review & Submit screenshot for scanned_jobs
     try {
-      console.log('  📸 Capturing full-page Review & Submit blueprint screenshot for scanned_jobs...');
+      console.log('  📸 [Stage 1 Scanning] Reached Review & Submit! Capturing full-page blueprint screenshot for scanned_jobs...');
       await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
       await page.waitForTimeout(400).catch(() => {});
       profile._submissionScreenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
@@ -2136,8 +2146,8 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile._submissionScreenshotUrl = null;
 
     // Stay for 5 seconds at Review & Submit before advancing to next unique link
-    console.log('  ⏳ Reached Review & Submit! Staying on page for 5 seconds before advancing to next unique link...');
-    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. Staying for 5 seconds, then advancing to next unique link.');
+    console.log('  ⏳ [Stage 1 Scanning] HALT: Reached Review & Submit. Staying for 5 seconds (NOT submitting), then advancing to candidate distribution...');
+    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. HALTED without submitting. Capturing blueprint screenshot & distributing to candidates.');
     await page.waitForTimeout(5000).catch(() => {});
 
     return 'reached-review';

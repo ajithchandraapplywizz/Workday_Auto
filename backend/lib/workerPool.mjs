@@ -222,9 +222,10 @@ export async function executeWorkerTask({
     allowedCandidateIds = null,
   } = options;
 
-  const isApprovedForSubmission = task.status === 'approved_for_submission' || task.status === 'approved_by_ca' || task.status === 'queued_for_submission';
-  const effectiveConfirmSubmit = isApprovedForSubmission ? true : confirmSubmit;
-  const isDirectSubmission = Boolean(task.isDirectSubmission || options.isDirectSubmission);
+  const isScanTask = Boolean(options.isClusterBlueprint || options.isScanOnly || task.isScanOnly || task.isClusterBlueprint);
+  const isApprovedForSubmission = !isScanTask && (task.status === 'approved_for_submission' || task.status === 'approved_by_ca' || task.status === 'queued_for_submission');
+  const effectiveConfirmSubmit = isScanTask ? false : (isApprovedForSubmission ? true : confirmSubmit);
+  const isDirectSubmission = !isScanTask && Boolean(task.isDirectSubmission || options.isDirectSubmission || options.isSubmissionOnly || isApprovedForSubmission);
   const currentAttempt = Number(task.currentAttempt || options.currentAttempt || 1);
   const maxAttempts = Number(task.maxAttempts || options.maxAttempts || 10);
   const isFinalAttempt = Boolean(task.isFinalAttempt ?? options.isFinalAttempt ?? (currentAttempt >= maxAttempts));
@@ -307,7 +308,10 @@ export async function executeWorkerTask({
     profile._applyWizzId = applywizzId;
     profile._canonicalJobUrl = jobUrl;
     profile._jobUrl = jobUrl;
-    profile._isDirectSubmission = Boolean(task?.isDirectSubmission || options?.isDirectSubmission);
+    profile._isScanOnly = isScanTask;
+    profile._isClusterBlueprint = Boolean(options.isClusterBlueprint || task.isClusterBlueprint);
+    profile._stage = isScanTask ? 'scanning' : (isDirectSubmission ? 'submitting' : 'resolving');
+    profile._isDirectSubmission = isDirectSubmission;
     profile._applicationId = liveApplicationId;
     profile._onLog = (stepIndex, msg) => appLog(stepIndex, msg);
     if (company) profile._company = company;
@@ -457,12 +461,13 @@ export async function executeWorkerTask({
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
-    const isDirectSubmission = Boolean(options.isDirectSubmission || options.isSubmissionOnly || task.isDirectSubmission || isApprovedForSubmission);
+    // Direct submission is strictly forbidden during scan / blueprint tasks (Stage 1)
+    const directSubmit = isDirectSubmission && !isScanTask;
     let status;
     let scan = null;
     let completionShotUrl = profile?._submissionScreenshotUrl || null;
 
-    if (isDirectSubmission) {
+    if (directSubmit) {
       appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
       console.log(`   ⚡ [${workerId}] Direct Submission Mode: Skipping scanForm & generatePlan. Filling directly from pre-resolved answers.`);
 
@@ -1135,8 +1140,9 @@ export async function executeWorkerTask({
       await writeFile(planOut, JSON.stringify(plan, null, 2));
     } catch {}
 
-    profile._isScanOnly = Boolean(options.isScanOnly || options.isClusterBlueprint);
-    profile._isClusterBlueprint = Boolean(options.isClusterBlueprint);
+    profile._isScanOnly = isScanTask;
+    profile._isClusterBlueprint = Boolean(options.isClusterBlueprint || task.isClusterBlueprint);
+    profile._stage = isScanTask ? 'scanning' : (directSubmit ? 'submitting' : 'resolving');
 
       // Step D: Fill & Submit
       appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
@@ -1149,11 +1155,11 @@ export async function executeWorkerTask({
         workdayEmail,
         workdayPassword,
         mode: 'signin',
-        confirmSubmit: effectiveConfirmSubmit,
-        dryRun,
+        confirmSubmit: isScanTask ? false : effectiveConfirmSubmit,
+        dryRun: isScanTask ? true : dryRun,
         isBatch: true,
-        isScanOnly: Boolean(options.isScanOnly || options.isClusterBlueprint),
-        isClusterBlueprint: Boolean(options.isClusterBlueprint),
+        isScanOnly: isScanTask,
+        isClusterBlueprint: Boolean(options.isClusterBlueprint || task.isClusterBlueprint),
       });
     }
 
@@ -1220,7 +1226,7 @@ export async function executeWorkerTask({
 
     let combinedFields = [];
     // Step E: Save newly discovered form schema to Supabase if unique link (only in scanning mode)
-    if (!isDirectSubmission) {
+    if (!directSubmit) {
       combinedFields = [
         ...(Array.isArray(scan?.fields) ? scan.fields : []),
         ...(Array.isArray(profile._harvestedFields) ? profile._harvestedFields : []),
@@ -1312,8 +1318,8 @@ export async function executeWorkerTask({
             storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
-            // STRICT RULE: If isDirectSubmission is true, only upload on final attempt (Attempt 3):
-            const isSubmissionRetry = Boolean(isDirectSubmission && !isFinalAttempt);
+            // STRICT RULE: If directSubmit is true, only upload on final attempt (Attempt 3):
+            const isSubmissionRetry = Boolean(directSubmit && !isFinalAttempt);
             if (!isSubmissionRetry) {
               bucket = 'failed-applications';
               const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
