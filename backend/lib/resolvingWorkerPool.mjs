@@ -424,29 +424,10 @@ export async function runResolvingWorkerPool(options = {}) {
             const unansweredCount = unanswered.length;
             // STRICT INSTRUCTION: Every application is resolved across 5 tiers with client details and mandatorily marked as ready_for_review
             const isFully = true;
-            let clientStatus = 'ready_for_review';
-            let clientShot = null;
-
-            // Preserve terminal statuses: NEVER downgrade an already submitted/completed/already_applied application
-            try {
-              const { data: existingDist } = await supabase
-                .from('job_distributions')
-                .select('status, application_submitted_screenshot_url')
-                .eq('applywizz_id', awlId)
-                .eq('job_url', job.job_url)
-                .maybeSingle();
-
-              const exSt = (existingDist?.status || '').toLowerCase();
-              if (['submitted', 'completed', 'already_applied'].includes(exSt)) {
-                clientStatus = existingDist.status;
-                clientShot = existingDist.application_submitted_screenshot_url || null;
-                console.log(`   🛡️ [${workerId}] Preserving terminal status '${existingDist.status}' for ${awlId}`);
-              }
-            } catch {}
-
+            const clientStatus = 'ready_for_review';
             const answeredTotal = structuredAnswers.filter(q => q.is_answered).length;
 
-            console.log(`✅ [STAGE 2: RESOLVER] [${workerId}] ${awlId} 100% resolved across 5 tiers (${answeredTotal}/${totalQCount}) → status: ${clientStatus}`);
+            console.log(`✅ [STAGE 2: RESOLVER] [${workerId}] ${awlId} 100% resolved across 5 tiers (${answeredTotal}/${totalQCount}) → MANDATORILY marked as "ready_for_review"`);
             if (job.screenshot_path) {
               console.log(`   📸 Review Screenshot: ${job.screenshot_path}`);
             }
@@ -462,7 +443,7 @@ export async function runResolvingWorkerPool(options = {}) {
               resolvedAnswers: structuredAnswers,
               unansweredQuestions: [],
               unansweredCount: 0,
-              screenshotUrl: clientShot,
+              screenshotUrl: null, // STRICT POLICY: Scanned review screenshot belongs in scanned_jobs only; job_distributions screenshot is authentic post-submission proof only
               status: clientStatus,
               clients: [{
                 applywizzId: awlId,
@@ -472,7 +453,7 @@ export async function runResolvingWorkerPool(options = {}) {
                 unansweredQuestions: [],
                 unansweredCount: 0,
                 isFullyAnswered: isFully,
-                screenshotUrl: clientShot,
+                screenshotUrl: null,
                 status: clientStatus,
               }],
             }).catch(() => {});

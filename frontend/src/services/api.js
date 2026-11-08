@@ -564,10 +564,10 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
     }
 
     const [authRes, clientRes, appRes, mgrsRes] = await Promise.all([
-      Promise.resolve(supabase.from('auth_users').select('email, status, last_sign_in')).catch(() => ({ data: [] })),
-      Promise.resolve(supabase.from('clients').select('applywizz_id, current_ca_email')).catch(() => ({ data: [] })),
-      Promise.resolve(supabase.from('job_distributions').select('applywizz_id, status')).catch(() => ({ data: [] })),
-      Promise.resolve(supabase.from('managers').select('id, name')).catch(() => ({ data: [] })),
+      supabase.from('auth_users').select('email, status, last_sign_in').catch(() => ({ data: [] })),
+      supabase.from('clients').select('applywizz_id, current_ca_email').catch(() => ({ data: [] })),
+      supabase.from('job_distributions').select('applywizz_id, status').catch(() => ({ data: [] })),
+      supabase.from('managers').select('id, name').catch(() => ({ data: [] })),
     ]);
 
     const mgrMap = new Map((mgrsRes.data || []).map((m) => [m.id, m.name]));
@@ -990,18 +990,6 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return st === 'submitted' || st === 'completed' || st === 'already_applied';
     }).length;
 
-    // Fresh Submitted: strictly newly submitted/completed
-    const freshSubmitted = allApps.filter((a) => {
-      const st = (a.status || '').toLowerCase();
-      return st === 'submitted' || st === 'completed';
-    }).length;
-
-    // Already Applied: strictly verified as already submitted on Workday
-    const alreadyApplied = allApps.filter((a) => {
-      const st = (a.status || '').toLowerCase();
-      return st === 'already_applied';
-    }).length;
-
     // 2. Applying: strictly direct sync to database status ('applying', 'in_flight', 'in_progress', 'started')
     const applying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
@@ -1068,8 +1056,6 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       success: true,
       total: allApps.length,
       submitted,
-      freshSubmitted,
-      alreadyApplied,
       applying,
       failed,
       queued,
@@ -1087,8 +1073,6 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       success: false,
       total: 0,
       submitted: 0,
-      freshSubmitted: 0,
-      alreadyApplied: 0,
       applying: 0,
       failed: 0,
       queued: 0,
@@ -3149,19 +3133,16 @@ export async function fetchBotDaemonStatus() {
     }
 
     const [workersRes, controlRes] = await Promise.all([
-      Promise.resolve(
-        supabase
-          .from('worker_status')
-          .select('*')
-          .order('worker_id')
-      ).catch(() => ({ data: [] })),
-      Promise.resolve(
-        supabase
-          .from('bot_control')
-          .select('*')
-          .eq('id', 'primary')
-          .maybeSingle()
-      ).catch(() => ({ data: null })),
+      supabase
+        .from('worker_status')
+        .select('*')
+        .order('worker_id'),
+      supabase
+        .from('bot_control')
+        .select('*')
+        .eq('id', 'primary')
+        .maybeSingle()
+        .catch(() => ({ data: null })),
     ]);
 
     const workers = workersRes.data || [];

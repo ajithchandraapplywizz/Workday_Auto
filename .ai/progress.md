@@ -1,6 +1,8 @@
 # Project Progress & Roadmap
 
 ## What's Shipped (✅ Fully Shipped)
+- ✅ **Preserve Terminal Statuses on Job Distribution**: Guarded `recordJobDistributions` in `supabaseClient.mjs` against overwriting rows that are already in terminal states (`submitted`, `completed`, `already_applied`) or in flight (`applying`), ensuring submission counts and proof screenshots remain permanently intact across re-scans and re-distributions.
+- ✅ **QA Bank 409 Conflict Resolution**: Aligned PostgREST conflict target in `masterYamlManager.mjs` and `supabaseClient.mjs` to `?on_conflict=tenant,normalized_question`, added pre-upsert deduplication and row-by-row fallback, and generated migration `051_align_qa_bank_unique_constraint.sql`.
 - ✅ **Centralized Queue Consolidation (1 Row Per Link)**: Migrated `batch_job_queue` from 679 repetitive rows down to 20 unique links, storing all candidate AWL IDs in a single cell (`applywizz_id`).
 - ✅ **Master YAML Reference Bank**: Implemented `masterYamlManager.mjs` creating a single deduplicated `config/master_scan_template.yml` on first run for automatic question matching across all clients.
 - ✅ **Strict Deduplication on `submission_tasks`**: Deduplicated existing 2,522 rows down to the authentic 272 tasks, fixed `distRes.json()` response handling, and enforced pre-check and uniqueness.

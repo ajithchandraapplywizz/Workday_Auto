@@ -69,7 +69,6 @@ export default function DeveloperDashboard() {
   // Real dynamic states from Supabase & backend
   const [kpis, setKpis] = useState({
     submitted: 0,
-    alreadyApplied: 0,
     applying: 0,
     failed: 0,
     queued: 0,
@@ -148,8 +147,7 @@ export default function DeveloperDashboard() {
 
       if (kpiRes.success) {
         setKpis({
-          submitted: kpiRes.freshSubmitted ?? (kpiRes.submitted - (kpiRes.alreadyApplied || 0)),
-          alreadyApplied: kpiRes.alreadyApplied || 0,
+          submitted: kpiRes.submitted,
           applying: kpiRes.applying,
           failed: kpiRes.failed,
           queued: kpiRes.queued,
@@ -369,7 +367,6 @@ export default function DeveloperDashboard() {
     // Refresh immediately when returning to tab from background
     const handleVisibilityChange = () => {
       if (typeof document !== 'undefined' && !document.hidden && isMounted) {
-        syncStatusRef.current?.();
         loadDynamicData(true);
       }
     };
@@ -630,12 +627,11 @@ export default function DeveloperDashboard() {
     try {
       await updateOperatorStatus(op.id, newStatus);
       if (op.email) {
-        await Promise.resolve(
-          supabase
-            .from('auth_users')
-            .update({ status: newStatus, updated_at: nowIso })
-            .ilike('email', op.email.toLowerCase().trim())
-        ).catch(() => {});
+        await supabase
+          .from('auth_users')
+          .update({ status: newStatus, updated_at: nowIso })
+          .ilike('email', op.email.toLowerCase().trim())
+          .catch(() => {});
       }
       setOperators((prev) =>
         prev.map((o) => (o.id === op.id ? { ...o, status: newStatus, updated_at: nowIso } : o))
@@ -1205,39 +1201,33 @@ export default function DeveloperDashboard() {
       {/* 1. SYSTEM TAB — Exactly the 11 tiles specified in Master Prompt */}
       {activeTab === 'System' && (
         <div className="tab-body-fade">
-          {/* Top 6 KPI Summary Tiles — Kept strictly in the same line */}
-          <div className="video-kpi-row" style={{ gridTemplateColumns: 'repeat(6, minmax(0, 1fr))' }}>
+          {/* Top 5 KPI Summary Tiles */}
+          <div className="video-kpi-row">
             {/* Tile 1: Submitted */}
             <div className="video-kpi-box">
               <span className="vkpi-label">SUBMITTED</span>
-              <span className="vkpi-val" style={{ color: '#10b981' }}>{kpis.submitted}</span>
+              <span className="vkpi-val">{kpis.submitted}</span>
             </div>
 
-            {/* Tile 2: Already Applied */}
-            <div className="video-kpi-box">
-              <span className="vkpi-label">ALREADY APPLIED</span>
-              <span className="vkpi-val" style={{ color: '#0ea5e9' }}>{kpis.alreadyApplied}</span>
-            </div>
-
-            {/* Tile 3: Selected Period */}
+            {/* Tile 2: Selected Period */}
             <div className="video-kpi-box highlighted">
               <span className="vkpi-label">SELECTED PERIOD</span>
               <span className="vkpi-val text-sm">{periodLabel}</span>
             </div>
 
-            {/* Tile 4: Applying */}
+            {/* Tile 3: Applying */}
             <div className="video-kpi-box">
               <span className="vkpi-label">APPLYING</span>
               <span className="vkpi-val">{kpis.applying}</span>
             </div>
 
-            {/* Tile 5: Failed */}
+            {/* Tile 4: Failed */}
             <div className="video-kpi-box">
               <span className="vkpi-label">FAILED</span>
               <span className="vkpi-val">{kpis.failed}</span>
             </div>
 
-            {/* Tile 6: Queued */}
+            {/* Tile 5: Queued */}
             <div className="video-kpi-box">
               <span className="vkpi-label">QUEUED</span>
               <span className="vkpi-val">{kpis.queued}</span>
@@ -1325,8 +1315,7 @@ export default function DeveloperDashboard() {
             <div className="vcs-content-line">
               Active Date: <strong>{date}</strong> &bull; Period: <strong>{periodLabel}</strong> &bull; Workers:{' '}
               <strong>{workerPool.idle}/{workerPool.total} idle</strong> &bull; Applying: <strong>{kpis.applying}</strong> &bull; Submitted:{' '}
-              <strong>{kpis.submitted}</strong> &bull; Already Applied:{' '}
-              <strong>{kpis.alreadyApplied}</strong>
+              <strong>{kpis.submitted}</strong>
             </div>
           </div>
         </div>

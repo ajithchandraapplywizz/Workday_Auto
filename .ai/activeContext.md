@@ -2,6 +2,9 @@
 
 ## Current Sprint / Focus
 Implemented centralized architectural fixes for Workday automation pipeline:
+0. Fixed `job_distributions` terminal status overwrite bug in `backend/lib/supabaseClient.mjs`: added status guard in `recordJobDistributions` so existing `submitted`, `completed`, `already_applied`, or `applying` rows and their screenshot URLs are strictly preserved when re-distributing a scanned job, preventing the dashboard Submitted counter from resetting.
+1. Fixed `qa_bank` Supabase 409 duplicate key conflict on `(tenant, normalized_question)` by aligning PostgREST `on_conflict=tenant,normalized_question` in `backend/lib/masterYamlManager.mjs` and `backend/lib/supabaseClient.mjs`, deduplicating rows on `(tenant, normalized_question)`, and adding row-by-row fallback.
+2. Created migration `051_align_qa_bank_unique_constraint.sql` ensuring `qa_bank_tenant_question_unique` is active and dropping legacy constraints.
 1. Deduplicated `submission_tasks` down to exact matching count (272) and fixed `distRes.json()` response handling.
 2. Migrated `batch_job_queue` to 1 row per unique link format with all candidate AWL IDs stored in a single cell (`applywizz_id`), reducing 679 rows to 20 unique links.
 3. Implemented `masterYamlManager.mjs` to generate a single deduplicated master reference YAML template (`config/master_scan_template.yml`) on first blueprint scan.
