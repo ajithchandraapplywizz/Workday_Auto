@@ -136,8 +136,35 @@ function profileFactForLabel(label, profile = {}) {
   if (/linkedin/.test(n)) return p.linkedin || null;
 
   if (/authorized to work|legally authorized|eligible to work/.test(n)) return w.authorized_us || null;
+  if (/(which|what)?\s*(category|type).*sponsor|sponsor.*(category|type)|visa\s*category|visa\s*type/i.test(n)) {
+    return w.visa_type || 'H1B';
+  }
+  if (/(optional\s*practical\s*training|\bopt\b|stem\s*opt).*begin\s*employment|using.*(opt|stem\s*opt)/i.test(n)) {
+    const vt = String(w.visa_type || '').toLowerCase();
+    const resumeText = String(profile._resumeText || '').toLowerCase();
+    if (/opt|stem|f-?1/.test(vt) || /\b(opt|stem opt)\b/.test(resumeText)) {
+      return 'Yes';
+    }
+    return 'No';
+  }
   if (/sponsor|visa sponsorship/.test(n)) return w.sponsorship_needed || null;
   if (/visa type/.test(n)) return w.visa_type || null;
+
+  if (/military\s+training|military\s+certification|military\s+course/i.test(n)) {
+    const vet = String(eeo.veteran_status || '').toLowerCase();
+    const isVet = /veteran|active duty|armed forces/i.test(vet) && !/not\s+a\s+veteran|not\s+a\s+protected|no\b/i.test(vet);
+    const resumeText = String(profile._resumeText || '').toLowerCase();
+    if (isVet || /\b(military|navy|army|air force|marines)\b/i.test(resumeText)) {
+      return 'Yes';
+    }
+    return 'No';
+  }
+  if (/relatives?\s+(employed|working|work)|family\s+members?\s+(employed|working|work)|related\s+to\s+(an?\s+)?employee/i.test(n)) {
+    if (profile.personal?.has_relatives != null) {
+      return profile.personal.has_relatives ? 'Yes' : 'No';
+    }
+    return 'No';
+  }
 
   if (/please select your gender|^gender$|^sex$/.test(n) || (/\bgender\b/.test(n) && /identify|select|please/.test(n))) {
     return eeo.gender || null;
@@ -198,7 +225,7 @@ function profileFactForLabel(label, profile = {}) {
 /** Resolve named prior-employer questions from the complete hydrated profile. */
 export function priorEmployerAnswer(label, profile = {}) {
   const text = String(label || '').replace(/\s+/g, ' ').trim();
-  if (!/\b(ever\s+been\s+employed|previously\s+employed|worked\s+(for|at)|prior\s+(employment|employee)|former\s+employee)/i.test(text)) {
+  if (!/\b(ever\s+been\s+employed|previously\s+employed|worked\s+(for|at)|prior\s+(employment|employee)|former\s+employee|ever\s+been\s+a\s+contractor|contractor\s+(at|for|with)|consultant\s+(at|for|with))\b/i.test(text)) {
     return null;
   }
 

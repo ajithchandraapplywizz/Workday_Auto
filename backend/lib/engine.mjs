@@ -1038,7 +1038,17 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      const state = String(profile?.personal?.state || '').toLowerCase();
+      if (!pin || (pin === '75201' && state && !state.includes('tx') && !state.includes('texas'))) {
+        const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+        pin = await resolvePostalCodeWithContext({
+          country: profile?.personal?.country,
+          state: profile?.personal?.state,
+          city: profile?.personal?.city,
+          profile,
+        });
+      }
       await interactAndRescan(page, async () => {
         await postalInput.fill(pin);
         await postalInput.press('Enter').catch(() => {});
@@ -1280,7 +1290,17 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .or(page.getByLabel('Postal Code', { exact: false }))
       .first();
     if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
+      const state = String(profile?.personal?.state || '').toLowerCase();
+      if (!pin || (pin === '75201' && state && !state.includes('tx') && !state.includes('texas'))) {
+        const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+        pin = await resolvePostalCodeWithContext({
+          country: profile?.personal?.country,
+          state: profile?.personal?.state,
+          city: profile?.personal?.city,
+          profile,
+        });
+      }
       await interactAndRescan(page, async () => {
         await postalInput.fill(pin);
         await postalInput.press('Enter').catch(() => {});

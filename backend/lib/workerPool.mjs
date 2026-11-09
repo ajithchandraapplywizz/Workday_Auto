@@ -1874,7 +1874,8 @@ export async function executeWorkerTask({
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
         const isSubmissionRetry = Boolean(isDirectSubmission && !isFinalAttempt);
         if (!isSubmissionRetry) {
-          const buf = await page.screenshot({ type: 'png' }).catch(() => null);
+          const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+            .catch(() => page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
           if (buf) {
             const timestamp = Date.now();
             const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();

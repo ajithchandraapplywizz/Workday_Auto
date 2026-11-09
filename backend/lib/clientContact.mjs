@@ -718,3 +718,81 @@ export function resolvePostalForWorkday(profile = {}, indiaFallback) {
   if (typeof indiaFallback === 'function') return indiaFallback(profile);
   return usZip || '500001';
 }
+
+/**
+ * Contextual postal code resolution using Country, State, and City.
+ * If candidate profile information is corrupted, mismatched, or rejected by Workday,
+ * asks the LLM for a valid postal code given the exact location context, updates the profile,
+ * and records it into qa_bank and Supabase for future use.
+ */
+export async function resolvePostalCodeWithContext({
+  country = '',
+  state = '',
+  city = '',
+  profile = {},
+} = {}) {
+  const targetCountry = String(country || profile?.personal?.country || 'United States').trim();
+  const targetState = String(state || profile?.personal?.state || '').trim();
+  const targetCity = String(city || profile?.personal?.city || '').trim();
+  const isUs = /united states|\+1/i.test(targetCountry) || /^(us|usa)$/i.test(targetCountry);
+
+  // 1. Check in-memory cached QA
+  const cachedQa = profile?._supabaseQa?.['postal code'] || profile?.qa_answers?.['postal code'];
+  if (cachedQa && isUs && /^\d{5}$/.test(String(cachedQa).trim())) {
+    return String(cachedQa).trim();
+  }
+
+  // 2. Query LLM with explicit location context
+  try {
+    const { claudeChat } = await import('./claudeLlm.mjs');
+    const prompt = `Context:
+Country: "${targetCountry}"
+State/Province: "${targetState}"
+City: "${targetCity}"
+
+What is a valid standard ${isUs ? '5-digit US ZIP code' : 'postal code'} for this city, state, and country?
+Return ONLY the ${isUs ? '5-digit numeric ZIP code' : 'postal code'} as plain text (e.g. 43215), with NO explanation, no punctuation, and no other words.`;
+
+    const res = await claudeChat({
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 30,
+    });
+
+    const raw = String(res || '').trim();
+    const zipMatch = isUs ? raw.match(/\b\d{5}\b/) : raw.match(/\b\w{3,10}\b/);
+    if (zipMatch) {
+      const pin = zipMatch[0];
+      console.log(`    📮 [LLM Postal Code Recovery] Context: (${targetCity}, ${targetState}, ${targetCountry}) → "${pin}"`);
+
+      // Update in profile
+      profile.personal = profile.personal || {};
+      profile.personal.postal_code = pin;
+      if (!profile.qa_answers) profile.qa_answers = {};
+      profile.qa_answers['postal code'] = pin;
+      if (!profile._supabaseQa) profile._supabaseQa = {};
+      profile._supabaseQa['postal code'] = pin;
+
+      // Persist to qa_bank and Supabase for future use
+      const applywizzId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id;
+      if (applywizzId) {
+        try {
+          const { persistNewResolvedAnswer } = await import('./supabaseClient.mjs');
+          await persistNewResolvedAnswer({
+            applywizzId,
+            question: 'Postal Code',
+            answer: pin,
+            fieldType: 'text',
+            source: 'llm',
+          });
+        } catch (e) {
+          console.warn(`    ⚠️ [Postal qa_bank] could not persist: ${e.message}`);
+        }
+      }
+      return pin;
+    }
+  } catch (err) {
+    console.warn(`    ⚠️ [LLM Postal Code Recovery Error] ${err.message}`);
+  }
+
+  return resolvePostalForWorkday(profile);
+}

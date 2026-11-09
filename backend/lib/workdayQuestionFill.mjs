@@ -620,7 +620,20 @@ function buildSelectOneOptionCandidates(answer, labelText = '') {
   if (/authorized to work|legally authorized/i.test(labelText)) {
     opts.push('Yes', 'Yes, I am authorized to work in the country where this job is located');
   }
-  if (/sponsor|visa|immigration filing/i.test(labelText)) {
+  if (/(category|type).*sponsor|sponsor.*(category|type)|visa/i.test(labelText) || /h1b|opt|cpt|stem/i.test(a)) {
+    if (/stem/i.test(a)) {
+      opts.push('F-1 Foreign Student with OPT STEM Extension', 'F-1 Foreign Student with OPT', 'OPT STEM Extension', 'STEM OPT');
+    } else if (/opt/i.test(a)) {
+      opts.push('F-1 Foreign Student with OPT', 'F-1 Foreign Student with OPT STEM Extension', 'OPT', 'F-1 Foreign Student with CPT');
+    } else if (/cpt/i.test(a)) {
+      opts.push('F-1 Foreign Student with CPT', 'CPT');
+    } else if (/h1b1/i.test(a)) {
+      opts.push('H1B1', 'H1B');
+    } else if (/h-?1b/i.test(a)) {
+      opts.push('H1B', 'H-1B', 'H1B1');
+    }
+  }
+  if (/sponsor|visa|immigration filing/i.test(labelText) && !/category|type|which|what/i.test(labelText)) {
     opts.push('No', 'No, I will not require sponsorship', 'No, I do not require sponsorship');
   }
   if (/acknowledge|truthfully/i.test(labelText)) {
@@ -967,6 +980,10 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
   }
 
   await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => {
+    const openPopup = document.querySelector('[data-automation-id="promptOption"], [role="listbox"], [data-automation-id="menuItem"]');
+    if (openPopup) document.body.click();
+  }).catch(() => {});
   await trigger.scrollIntoViewIfNeeded().catch(() => {});
   await trigger.click({ force: true });
   await page.waitForTimeout(500);
@@ -988,6 +1005,11 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
     console.log(`    ⚠️  No prompt option matched for: "${labelText.slice(0, 45)}..." → "${String(answer).slice(0, 40)}"`);
   }
 
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.evaluate(() => {
+    const openPopup = document.querySelector('[data-automation-id="promptOption"], [role="listbox"], [data-automation-id="menuItem"]');
+    if (openPopup) document.body.click();
+  }).catch(() => {});
   await page.keyboard.press('Escape').catch(() => {});
   await page.waitForTimeout(300);
   await waitForDomSettled(page);

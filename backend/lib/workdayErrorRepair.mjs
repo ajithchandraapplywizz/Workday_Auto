@@ -275,7 +275,7 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
 async function fillMarkedField(page, descriptor, answer) {
   const field = page.locator(`[data-wd-error-fix="${descriptor.id}"]`).first();
   if (!(await field.count())) return false;
-  await field.scrollIntoViewIfNeeded().catch(() => {});
+  await field.scrollIntoViewIfNeeded().catch(() => { });
   const wanted = String(answer);
 
   if (descriptor.fieldType === 'radio' || descriptor.fieldType === 'checkbox-group') {
@@ -314,11 +314,11 @@ async function fillMarkedField(page, descriptor, answer) {
     if (typed.ok) return true;
     const trigger = field.locator('[role="combobox"], button[aria-haspopup="listbox"], [data-automation-id="selectWidget"] button').first();
     if (await trigger.isVisible({ timeout: 600 }).catch(() => false)) {
-      await trigger.click({ force: true }).catch(() => {});
+      await trigger.click({ force: true }).catch(() => { });
       await page.waitForTimeout(400);
       const picked = await clickVisiblePromptOption(page, [wanted]);
       if (picked) {
-        await page.keyboard.press('Escape').catch(() => {});
+        await page.keyboard.press('Escape').catch(() => { });
         return true;
       }
     }
@@ -343,9 +343,9 @@ async function fillMarkedField(page, descriptor, answer) {
 
   const control = field.locator('textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([role="spinbutton"])').first();
   if (!(await control.isVisible({ timeout: 600 }).catch(() => false))) return false;
-  await control.click({ force: true }).catch(() => {});
-  await control.fill(wanted).catch(() => {});
-  await control.press('Tab').catch(() => {});
+  await control.click({ force: true }).catch(() => { });
+  await control.fill(wanted).catch(() => { });
+  await control.press('Tab').catch(() => { });
   const after = await control.inputValue().catch(() => '');
   return Boolean(after);
 }
@@ -385,23 +385,54 @@ async function readMarkedFieldValue(page, descriptor) {
  * @returns {Promise<number>} fields verified as filled
  */
 export async function repairRequiredFieldsFromErrors(page, profile, stepName = '', errors = []) {
+  let filled = 0;
   for (const raw of errors) {
     const text = String(raw || '');
     const stateMismatch = text.match(/is not a valid postal code for\s+([A-Za-z\s]+)/i);
-    if (stateMismatch && stateMismatch[1]) {
-      const errState = stateMismatch[1].replace(/[.]*$/, '').trim();
+    const isPostalError = stateMismatch || /postal\s*code|zip\s*code/i.test(text);
+
+    if (isPostalError) {
+      const errState = stateMismatch?.[1]?.replace(/[.]*$/, '').trim() || profile?.personal?.state || '';
+      const errCity = profile?.personal?.city || '';
+      const errCountry = profile?.personal?.country || 'United States';
+
       if (errState) {
         profile.personal = profile.personal || {};
         profile.personal.state = errState;
-        const { resolvePostalForWorkday } = await import('./clientContact.mjs');
-        profile.personal.postal_code = resolvePostalForWorkday(profile);
-        console.log(`    📍 Workday indicates address state is "${errState}" — aligned postal code to "${profile.personal.postal_code}"`);
+      }
+
+      const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+      const fixedPostal = await resolvePostalCodeWithContext({
+        country: errCountry,
+        state: errState,
+        city: errCity,
+        profile,
+      });
+
+      if (fixedPostal) {
+        profile.personal = profile.personal || {};
+        profile.personal.postal_code = fixedPostal;
+        console.log(`    📍 Workday flagged postal code — resolved with context (${errCity}, ${errState}, ${errCountry}) → "${fixedPostal}"`);
+
+        // Re-fill postal input directly in DOM
+        try {
+          const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
+            .or(page.getByLabel('Postal Code', { exact: false }))
+            .first();
+          if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await postalInput.fill('');
+            await postalInput.fill(fixedPostal);
+            await postalInput.press('Enter').catch(() => { });
+            await postalInput.press('Tab').catch(() => { });
+            console.log(`    📮 [Error Repair] Re-filled and committed Postal Code with "${fixedPostal}"`);
+            filled++;
+          }
+        } catch { }
       }
     }
   }
 
   const names = parseErrorFieldNames(errors);
-  let filled = 0;
 
   if (names.some(n => /resume|cv/i.test(n))) {
     console.log('    📎 Workday validation flagged Resume — retrying resume upload from resumes/ folder...');
@@ -416,7 +447,7 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
           filled++;
         }
       }
-    } catch {}
+    } catch { }
   }
 
   const descriptors = await markErrorFields(page, names);
@@ -436,7 +467,7 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
       }
     }
 
-    if (descriptor.currentValue) continue;
+    if (descriptor.currentValue && !/postal|zip/i.test(descriptor.label || descriptor.name || '')) continue;
 
     const answer = await resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepName);
     if (!answer) {
@@ -445,7 +476,7 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
     }
 
     const ok = await fillMarkedField(page, descriptor, answer);
-    await waitForDomSettled(page, { timeout: 1200 }).catch(() => {});
+    await waitForDomSettled(page, { timeout: 1200 }).catch(() => { });
     const verified = await readMarkedFieldValue(page, descriptor);
 
     if (!ok && !verified) {
@@ -464,7 +495,7 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
 
   await page.evaluate(() => {
     document.querySelectorAll('[data-wd-error-fix]').forEach((el) => el.removeAttribute('data-wd-error-fix'));
-  }).catch(() => {});
+  }).catch(() => { });
 
   return filled;
 }

@@ -160,9 +160,11 @@ const PRIOR_ASSOCIATION_RE = new RegExp([
   'volunteered\\s+(at|for|with)',
   '(worked|employed|placed)\\s+.*(through|via|by)\\s+(an?\\s+)?(outside|external|staffing|temp\\w*|third[-\\s]?party|contract)\\s+agency',
   'have\\s+you\\s+ever\\s+(worked|been\\s+employed|been\\s+an\\s+employee|applied|interviewed|been\\s+a\\s+(patient|student|contractor|intern))',
+  'are\\s+you\\s+(now\\s+or\\s+have\\s+you\\s+ever\\s+been|currently)\\s+(a\\s+)?(contractor|employee|intern|volunteer)',
   'have\\s+you\\s+(ever\\s+)?(previously\\s+)?(applied|interviewed|submitted\\s+an\\s+application|filed\\s+an\\s+application)',
   'are\\s+you\\s+(currently\\s+)?(related\\s+to|a\\s+relative\\s+of)',
-  'do\\s+you\\s+have\\s+(a\\s+)?(relative|family\\s+member)s?\\s+(who|that|currently)',
+  'do\\s+you\\s+have\\s+(any\\s+|a\\s+)?(relative|family\\s+member)s?\\s+(who|that|currently|employed|working|work|at|with)',
+  'relatives?\\s+(employed|working|work)',
   'do\\s+any\\s+of\\s+your\\s+(friends|relatives|family\\s+members?)',
   'friends?\\s+or\\s+relatives?\\s+(work|employed|currently)',
   'previously\\s+interviewed\\s+(at|with)',
@@ -330,6 +332,7 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (isWorkEligibilityQuestion(label)) return 'Yes';
   if (isAdverseHistoryQuestion(label)) return 'No';
   if (isPriorAssociationQuestion(label)) return 'No';
+  if (/military\s+training|military\s+certification|military\s+course/i.test(String(label || ''))) return 'No';
   // "I have a preferred name" — always "No" to avoid opening required sub-textboxes
   if (/i have a preferred name|do you have a preferred name|preferred name checkbox/i.test(String(label || ''))) return 'No';
   if (isMinimumAgeQuestion(label)) return 'Yes';

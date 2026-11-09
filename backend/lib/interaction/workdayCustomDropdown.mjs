@@ -111,6 +111,31 @@ export function matchDemographicOption(answer, options = []) {
     if (hits.length === 1) return hits[0];
   }
 
+  // Visa type matching: H-1B <-> H1B, OPT <-> F-1 Foreign Student with OPT, etc.
+  if (/h-?1b|opt|cpt|stem/i.test(wanted)) {
+    const wantNorm = wanted.toLowerCase().replace(/[^a-z0-9]/g, '');
+    if (wantNorm.includes('stem') || wantNorm.includes('stemopt') || wantNorm.includes('optstem')) {
+      const stemHit = cleaned.find((o) => /stem/i.test(o));
+      if (stemHit) return stemHit;
+    }
+    if (wantNorm.includes('opt')) {
+      const optHit = cleaned.find((o) => /opt\b/i.test(o) && !/stem/i.test(o)) || cleaned.find((o) => /opt/i.test(o));
+      if (optHit) return optHit;
+    }
+    if (wantNorm.includes('cpt')) {
+      const cptHit = cleaned.find((o) => /cpt/i.test(o));
+      if (cptHit) return cptHit;
+    }
+    if (wantNorm.includes('h1b1')) {
+      const h1b1Hit = cleaned.find((o) => /h1b1/i.test(o.replace(/[^a-zA-Z0-9]/g, '')));
+      if (h1b1Hit) return h1b1Hit;
+    }
+    if (wantNorm.includes('h1b')) {
+      const h1bHit = cleaned.find((o) => /^h-?1b\b/i.test(o) || /h1b/i.test(o.replace(/[^a-zA-Z0-9]/g, '')));
+      if (h1bHit) return h1bHit;
+    }
+  }
+
   const uniquePrefix = cleaned.filter((o) => {
     const n = normalizeDemoText(o);
     return n === wanted || n === stripped

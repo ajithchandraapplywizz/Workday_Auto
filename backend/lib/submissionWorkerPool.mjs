@@ -1139,7 +1139,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           // Strictly capture and upload failure screenshot on ANY attempt where failure/timeout occurs
           if (ctx?.page && !ctx.page.isClosed()) {
 
-            const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+            const buf = await ctx.page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+              .catch(() => ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
 
             if (buf) {
 
@@ -1548,7 +1549,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           try {
             const ctx = getWorkerContext(workerId);
             if (ctx?.page && !ctx.page.isClosed()) {
-              const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+              const buf = await ctx.page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+                .catch(() => ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
               if (buf) {
                 const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
                 const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
@@ -1652,7 +1654,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
             if (ctx?.page && !ctx.page.isClosed()) {
 
-              const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+              const buf = await ctx.page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+                .catch(() => ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
 
               if (buf) {
 
@@ -1821,7 +1824,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
       if (ctx?.page && !ctx.page.isClosed()) {
 
-        const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+        const buf = await ctx.page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+          .catch(() => ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
 
         if (buf) {
 
