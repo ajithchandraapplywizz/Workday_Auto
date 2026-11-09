@@ -277,7 +277,15 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   const clusterMap = new Map();
 
   for (const row of rows) {
-    if (row.status === 'submitted' || row.status === 'pre_resolved' || row.status === 'reached_review' || row.status === 'failed') continue;
+    if (
+      row.status === 'submitted' ||
+      row.status === 'pre_resolved' ||
+      row.status === 'reached_review' ||
+      row.status === 'already_reached_review' ||
+      row.status === 'failed' ||
+      row.status === 'already_expired' ||
+      row.status === 'expired'
+    ) continue;
     const rawUrl = String(row.job_url || '').trim();
     if (targetUrl && !rawUrl.toLowerCase().includes(String(targetUrl).toLowerCase().trim())) continue;
     if (!rawUrl) continue;
@@ -657,7 +665,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       jobUrl: leadTask.job_url || jobUrl,
     };
 
-    console.log(`[SCANNER] [${workerId}] [${candidateAwlId}] Company: ${company} | Status: scanning`);
+    console.log(`[${candidateAwlId}] | Company: ${company} | Status: scanning | Screenshot: none`);
 
     const result = await executeWorkerTask({
       task: candidateTask,
@@ -1397,7 +1405,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       const isFullyAnswered = true;
       const clientStatus = 'ready_to_review';
 
-      console.log(`[${awlId}] scanned_completed | Status: ready_to_review`);
+      console.log(`[${awlId}] | Company: ${company} | Status: scanned | Screenshot: ${reviewShotUrl || 'none'}`);
 
       return {
         taskId: task.id,
@@ -1437,8 +1445,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       clients: distributionRows,
     });
     const readyCount = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review').length;
-    const needsCount = distributionRows.length - readyCount;
-    console.log(`\n💾 [UPSERT → job_distributions] ${distributionRows.length} rows written (${readyCount} ready_to_review, ${needsCount} needs_answers)`);
+    console.log(`[DISTRIBUTION] ${distributionRows.length} candidates distributed to job_distributions (${readyCount} ready_for_review)`);
 
     // Also update scanned_jobs row with Candidate 1's resolved_answers
     const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
@@ -1455,13 +1462,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         clientCount: allSiblingAwlIds.length,
         scanStatus: 'completed',
       });
-      console.log(`💾 [${workerId}] PHASE 2 REFINED: Updated scanned_jobs with ${leadRow.resolvedAnswers.length} master resolved answers from lead blueprint candidate.`);
     }
 
     // PHASE 4: Single source of truth is job_distributions with status 'ready_to_review'
     const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review');
-    const needsAnswersRows = distributionRows.filter((r) => r.status === 'needs_answers');
-    console.log(`💾 [SINGLE TABLE: job_distributions] ${readyToReviewRows.length} applications ready for submission (${needsAnswersRows.length} pending answers)`);
 
     // Signal bot_control so submission services pick up ready applications immediately
     if (readyToReviewRows.length > 0) {

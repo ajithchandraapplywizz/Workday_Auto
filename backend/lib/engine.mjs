@@ -2428,9 +2428,18 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
   while (currentIteration < maxSteps) {
     const isScanOperation = Boolean(profile?._isScanning || mode === 'scan' || mode === 'scanning');
-    const isStop = isGlobalStopRequested() || (isScanOperation ? isScanStopRequested() : isSubmitStopRequested());
+    let isStop = isGlobalStopRequested() || (isScanOperation ? isScanStopRequested() : isSubmitStopRequested());
+    if (!isStop) {
+      try {
+        const { getBotControl } = await import('./supabaseClient.mjs');
+        const bc = await getBotControl().catch(() => null);
+        if (bc?.stop_requested) isStop = true;
+        else if (isScanOperation && (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping' || bc?.scan_status === 'off')) isStop = true;
+        else if (!isScanOperation && (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping' || bc?.submit_status === 'off')) isStop = true;
+      } catch {}
+    }
     if (isStop) {
-      console.log(`🛑 [Workday Wizard] Stop requested (${isScanOperation ? 'SCAN' : 'SUBMIT'})! Terminating wizard loop immediately.`);
+      console.log(`[${profile?._applyWizzId || 'Candidate'}] | Company: ${profile?._company || 'Workday'} | Status: stopped`);
       return 'stopped';
     }
     currentIteration++;

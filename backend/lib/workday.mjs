@@ -866,7 +866,7 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           email,
           password: effectivePassword,
           company,
-          startTime: Date.now() - 300000,
+          startTime: page._lastLoginAttemptTime || (Date.now() - 45000),
           timeoutMs: 50000,
           applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
           jobUrl: page.url(),

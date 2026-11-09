@@ -409,7 +409,7 @@ export async function stopScanPool() {
     }
   } finally {
     scanStatus = 'off';
-    scanStopRequested = false;
+    // setScanStop(true) and setClusterStop(true) remain active until a new scan run is triggered
 
     if (currentMode === 'scanning') {
       currentMode = submitStatus === 'running' ? 'submitting' : 'idle';
@@ -2181,7 +2181,7 @@ export async function initOnStartup() {
       }
 
       let handledScanStop = false;
-      if (SERVICE_ROLE !== 'submitter' && hasScanStopSignal && isScanActive) {
+      if (SERVICE_ROLE !== 'submitter' && hasScanStopSignal) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping scanning workers...`);
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
@@ -2189,7 +2189,7 @@ export async function initOnStartup() {
       }
 
       let handledSubmitStop = false;
-      if (SERVICE_ROLE !== 'scanner' && hasSubmitStopSignal && isSubmitActive) {
+      if (SERVICE_ROLE !== 'scanner' && hasSubmitStopSignal) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping submission workers...`);
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });

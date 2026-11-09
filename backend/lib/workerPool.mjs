@@ -78,7 +78,19 @@ export function getWorkerPoolStop(workerId = '') {
 }
 
 export async function isWorkerPoolStopRequested(workerId = '') {
-  return getWorkerPoolStop(workerId);
+  if (getWorkerPoolStop(workerId)) return true;
+  try {
+    const { getBotControl } = await import('./supabaseClient.mjs');
+    const bc = await getBotControl().catch(() => null);
+    if (bc?.stop_requested) return true;
+    const w = String(workerId).toLowerCase();
+    if (w.startsWith('submitting')) {
+      if (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping' || bc?.submit_status === 'off') return true;
+    } else {
+      if (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping' || bc?.scan_status === 'off') return true;
+    }
+  } catch {}
+  return false;
 }
 
 /**
@@ -237,11 +249,9 @@ export async function executeWorkerTask({
   const queueTaskId = task.queueTaskId || task.queue_task_id || task.id || '';
   const company = task.company || extractWorkdayCompanyName(jobUrl);
 
-  console.log(`\n${'─'.repeat(70)}`);
-  console.log(`🚀 [${workerId}] [${taskIndex}/${totalTasks}] Starting task for ${applywizzId}`);
-  console.log(`   🏢 Company: ${company || 'Workday'}`);
-  console.log(`   🔗 URL: ${jobUrl}`);
-  console.log(`${'─'.repeat(70)}`);
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(`[${workerId}] [${taskIndex}/${totalTasks}] Task for ${applywizzId} @ ${company}`);
+  }
 
   if (await isWorkerPoolStopRequested(workerId)) {
     console.log(`   🛑 [${workerId}] Stop requested! Aborting task execution.`);

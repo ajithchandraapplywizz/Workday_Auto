@@ -48,6 +48,12 @@ import {
   pickShiftOption,
   isSpecificManagerOrLocationQuestion,
 } from './questionEngine/intents.mjs';
+
+const logResolution = (...args) => {
+  if (process.env.DEBUG_RESOLUTION === 'true' || process.env.VERBOSE_LOGS === 'true') {
+    console.log(...args);
+  }
+};
 import { toTitleCase } from './personName.mjs';
 import { formatToMMDDYYYY } from './fillHandlers.mjs';
 import { extractDobFromResumeText } from './resumeParser.mjs';
@@ -526,7 +532,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   // 0. Legal & safety guards
   if (/password/i.test(label) || fieldType === 'password') {
     const pwd = profile.password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
-    console.log(`    🔑 [Password] "${label.slice(0, 55)}" ← (auto-filled workday password)`);
+    logResolution(`    🔑 [Password] "${label.slice(0, 55)}" ← (auto-filled workday password)`);
     return { answer: pwd, source: 'workday_password', field_type_code: code, field_type: fieldType };
   }
 
@@ -537,7 +543,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (preResolvedHit?.answer) {
     const validated = finish(preResolvedHit.answer, preResolvedHit.source);
     if (validated) {
-      console.log(`    ⚡ [Tier 0 Pre-Resolved JSON] "${label.slice(0, 55)}" ← "${validated.answer}" (${preResolvedHit.matched_question || 'exact'})`);
+      logResolution(`    ⚡ [Tier 0 Pre-Resolved JSON] "${label.slice(0, 55)}" ← "${validated.answer}" (${preResolvedHit.matched_question || 'exact'})`);
       profile?._onLog?.(currentStep, `[Tier 0 JSON Match] "${label.slice(0, 50)}" ← "${validated.answer}"`);
       return validated;
     }
@@ -546,7 +552,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   const ageYes = resolveMinimumAgeAnswer(label, profile);
   if (ageYes) {
     const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
-    console.log(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
+    logResolution(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
     return hit;
   }
 
@@ -557,7 +563,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (fromProfileIdentity) {
     const hit = finish(fromProfileIdentity, 'supabase_client_fact');
     if (hit) {
-      console.log(`    👤 [Identity] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      logResolution(`    👤 [Identity] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Identity Match] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
@@ -568,7 +574,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (fromSupabase?.answer) {
     const supabaseHit = finish(fromSupabase.answer, fromSupabase.source || 'supabase_client_questions');
     if (supabaseHit) {
-      console.log(`    🗄️  [Supabase Tier 1 client_questions] "${label.slice(0, 55)}" ← "${supabaseHit.answer.slice(0, 40)}" (${fromSupabase.source})`);
+      logResolution(`    🗄️  [Supabase Tier 1 client_questions] "${label.slice(0, 55)}" ← "${supabaseHit.answer.slice(0, 40)}" (${fromSupabase.source})`);
       profile?._onLog?.(currentStep, `[Tier 1 Supabase Match] "${label.slice(0, 50)}" ← "${supabaseHit.answer.slice(0, 45)}"`);
       return supabaseHit;
     }
@@ -582,7 +588,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (fromProfile && !domainQuestion) {
     const hit = finish(fromProfile, 'supabase_clients_table');
     if (hit) {
-      console.log(`    🗄️  [Supabase Tier 1 clients table] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
+      logResolution(`    🗄️  [Supabase Tier 1 clients table] "${label.slice(0, 55)}" ← "${hit.answer.slice(0, 40)}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Profile Match] "${label.slice(0, 50)}" ← "${hit.answer.slice(0, 45)}"`);
       return hit;
     }
@@ -592,7 +598,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (priorEmployer) {
     const hit = finish(priorEmployer, 'supabase_clients_table');
     if (hit) {
-      console.log(`    🧾 [Supabase Tier 1 Prior Employer] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      logResolution(`    🧾 [Supabase Tier 1 Prior Employer] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Tier 1 Prior Employer] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
@@ -678,7 +684,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       source: expHit.source || fromExperience?.source || 'resume',
       answer: expHit.answer,
     });
-    console.log(`    📄 [Tier 2 Resume Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
+    logResolution(`    📄 [Tier 2 Resume Match] "${label.slice(0, 55)}" ← "${expHit.answer.slice(0, 40)}"`);
     profile?._onLog?.(currentStep, `[Tier 2 Resume Extraction] "${label.slice(0, 50)}" ← "${expHit.answer.slice(0, 45)}"`);
     return expHit;
   }
@@ -703,7 +709,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         source: fromApi.source,
         answer: apiHit.answer,
       });
-      console.log(`    🗄️  [Tier 3 CRM API Match] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
+      logResolution(`    🗄️  [Tier 3 CRM API Match] "${label.slice(0, 55)}" ← "${apiHit.answer.slice(0, 40)}"`);
       profile?._onLog?.(currentStep, `[Tier 3 CRM Match] "${label.slice(0, 50)}" ← "${apiHit.answer.slice(0, 45)}"`);
       return apiHit;
     }
@@ -725,7 +731,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       const qaHit = finish(qaBankAnswer, 'qa_bank');
       if (qaHit) {
         trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
-        console.log(`    🏦 [Tier 4 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
+        logResolution(`    🏦 [Tier 4 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
         profile?._onLog?.(currentStep, `[Tier 4 QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
         return qaHit;
       }
@@ -737,7 +743,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   if (combinedMemoryHit?.answer) {
     const fHit = finish(combinedMemoryHit.answer, combinedMemoryHit.source || 'fuzzy_resume_supabase');
     if (fHit) {
-      console.log(`    🔍 [Tier 5 Semantic/Fuzzy Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
+      logResolution(`    🔍 [Tier 5 Semantic/Fuzzy Match] "${label.slice(0, 55)}" ← "${fHit.answer.slice(0, 40)}"`);
       profile?._onLog?.(currentStep, `[Tier 5 Semantic/Fuzzy Match] "${label.slice(0, 50)}" ← "${fHit.answer.slice(0, 45)}"`);
       return fHit;
     }
@@ -756,7 +762,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         hit: true,
         answer: hit.answer,
       });
-      console.log(`    🛡️  [Sensitive Safe Compliance] "${label.slice(0, 55)}" ← "${hit.answer}"`);
+      logResolution(`    🛡️  [Sensitive Safe Compliance] "${label.slice(0, 55)}" ← "${hit.answer}"`);
       profile?._onLog?.(currentStep, `[Compliance Safe] "${label.slice(0, 50)}" ← "${hit.answer}"`);
       return hit;
     }
@@ -779,12 +785,12 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       hit: false,
       rejectionReason: 'llm_blocked_for_compliance',
     });
-    console.log(`    🛑 [Tier 6 LLM blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
+    logResolution(`    🛑 [Tier 6 LLM blocked] Work-auth, sponsorship, and EEO questions cannot be answered by LLM: "${label.slice(0, 50)}"`);
     profile?._onLog?.(currentStep, `[Compliance Blocked] "${label.slice(0, 50)}" — protected question, manual answer needed`);
     return null;
   }
 
-  console.log(`    🤖 [Tier 6 LLM] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
+  logResolution(`    🤖 [Tier 6 LLM] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
   const llmAnswer = await resolveUnknownWithLlm(label, {
     ...enriched,
     fieldType,
@@ -817,7 +823,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         llmAnswer,
         profileFact: pFact,
       });
-      console.log(`    🛑 [Tier 6 LLM rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
+      logResolution(`    🛑 [Tier 6 LLM rejected] Contradicts stored profile fact (${pFact} vs ${llmAnswer})`);
       return null;
     }
   }
@@ -852,7 +858,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
           source: 'llm',
         });
       } catch (e) {
-        console.log(`    ⚠️  Persist Q&A error: ${e.message?.slice(0, 80)}`);
+        logResolution(`    ⚠️  Persist Q&A error: ${e.message?.slice(0, 80)}`);
       }
       recordSupabaseAnswerInMemory(profile, label, llmHit.answer);
       if (profile._resolvedAnswersMap instanceof Map) {
@@ -860,7 +866,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
         profile._resolvedAnswersMap.set(normalizeLabel(label), { answer: llmHit.answer, rawQ: label });
       }
     }
-    console.log(`    🤖 [Tier 6 LLM → Saved to QA Bank & job_distributions] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
+    logResolution(`    🤖 [Tier 6 LLM → Saved to QA Bank & job_distributions] "${label.slice(0, 55)}" ← "${llmHit.answer.slice(0, 40)}"`);
     return llmHit;
   }
   trace({ stage: 'tier6', clientId, tenant, query: normalizeLabel(label), hit: false, allowedOptions: options });
@@ -869,7 +875,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
     const yes = options.find((opt) => /^yes\b/i.test(opt)) || 'Yes';
     const proceed = finish(yes, 'proceed_continue');
     if (proceed) {
-      console.log(`    ✅ [Proceed] "${label.slice(0, 55)}" ← "${proceed.answer}"`);
+      logResolution(`    ✅ [Proceed] "${label.slice(0, 55)}" ← "${proceed.answer}"`);
       return proceed;
     }
   }
@@ -892,7 +898,7 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
     const placeholderHit = finish(placeholder, 'scan_placeholder');
     if (placeholderHit) {
-      console.log(`    🛠️  [Scan Placeholder Rule A] "${label.slice(0, 55)}" ← "${placeholderHit.answer}"`);
+      logResolution(`    🛠️  [Scan Placeholder Rule A] "${label.slice(0, 55)}" ← "${placeholderHit.answer}"`);
       import('./masterYamlManager.mjs').then(({ saveMasterYamlTemplate }) => {
         saveMasterYamlTemplate([{
           question: label,
@@ -985,13 +991,13 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
     const t5Hit = finish(fallback, 'tier5_safe_fallback');
     if (t5Hit) {
-      console.log(`    🛡️  [Tier 5 Safe Required Fallback] "${label.slice(0, 55)}" ← "${t5Hit.answer}"`);
+      logResolution(`    🛡️  [Tier 5 Safe Required Fallback] "${label.slice(0, 55)}" ← "${t5Hit.answer}"`);
       return t5Hit;
     }
   }
 
   // At submission, an unanswerable non-scan field returns { answer: null, requiresReview: true }
-  console.log(`    ⚠️  No answer found across Tier 0 (JSON), Tier 1 (Supabase), Tier 2 (CRM), Tier 3 (Resume), Tier 4 (Claude), Tier 5 (Fallback) for "${label.slice(0, 55)}"`);
+  logResolution(`    ⚠️  No answer found across Tier 0 (JSON), Tier 1 (Supabase), Tier 2 (CRM), Tier 3 (Resume), Tier 4 (Claude), Tier 5 (Fallback) for "${label.slice(0, 55)}"`);
   return { answer: null, requiresReview: true, status: 'needs_answers' };
 }
 

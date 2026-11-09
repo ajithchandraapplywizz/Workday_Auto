@@ -94,16 +94,29 @@ async function upload() {
   console.log(`\n📊 Filtered into exactly ${urlMap.size} unique Workday job URLs with task_count >= 15.`);
 
   // Check existing scanned_jobs to link scanned_job_id if already scanned
-  const scannedJobs = await request('scanned_jobs', { query: '?select=id,job_url' }).catch(() => []);
+  const scannedJobs = await request('scanned_jobs', { query: '?select=id,job_url,screenshot_path' }).catch(() => []);
   const scannedMap = new Map();
   if (Array.isArray(scannedJobs)) {
     for (const sj of scannedJobs) {
-      if (sj.job_url) scannedMap.set(sj.job_url.trim().toLowerCase(), sj.id);
+      if (sj.job_url) scannedMap.set(sj.job_url.trim().toLowerCase(), sj);
+    }
+  }
+
+  // Check existing failed_jobs to check for expired status
+  const failedJobs = await request('failed_jobs', { query: '?select=id,job_url,failure_reason,failed_at_step,screenshot_path' }).catch(() => []);
+  const expiredMap = new Map();
+  if (Array.isArray(failedJobs)) {
+    for (const fj of failedJobs) {
+      if (fj.job_url) {
+        const isExp = String(fj.failure_reason || '').toLowerCase().includes('expired') ||
+                      String(fj.failed_at_step || '').toLowerCase().includes('expired');
+        if (isExp) expiredMap.set(fj.job_url.trim().toLowerCase(), fj);
+      }
     }
   }
 
   // Check existing batch_job_queue items to merge or insert cleanly
-  const existingQueue = await request('batch_job_queue', { query: '?select=id,job_url,applywizz_id' }).catch(() => []);
+  const existingQueue = await request('batch_job_queue', { query: '?select=id,job_url,applywizz_id,status,screenshot_path,scanned_job_id' }).catch(() => []);
   const existingQueueMap = new Map();
   if (Array.isArray(existingQueue)) {
     for (const eq of existingQueue) {
@@ -120,8 +133,31 @@ async function upload() {
     const awlArray = Array.from(item.awlIds);
     totalCandidateAssociations += awlArray.length;
 
-    const scannedId = scannedMap.get(url.toLowerCase()) || null;
-    const existing = existingQueueMap.get(url.toLowerCase());
+    const urlKey = url.toLowerCase();
+    const matchedSj = scannedMap.get(urlKey);
+    const matchedFj = expiredMap.get(urlKey);
+    const existing = existingQueueMap.get(urlKey);
+
+    let initialStatus = 'pending';
+    let scannedId = matchedSj?.id || null;
+    let screenshotPath = matchedSj?.screenshot_path || null;
+
+    if (
+      existing?.status === 'already_reached_review' ||
+      existing?.status === 'reached_review' ||
+      matchedSj
+    ) {
+      initialStatus = 'already_reached_review';
+      scannedId = matchedSj?.id || existing?.scanned_job_id || null;
+      screenshotPath = matchedSj?.screenshot_path || existing?.screenshot_path || null;
+    } else if (
+      existing?.status === 'already_expired' ||
+      existing?.status === 'expired' ||
+      matchedFj
+    ) {
+      initialStatus = 'already_expired';
+      screenshotPath = matchedFj?.screenshot_path || existing?.screenshot_path || null;
+    }
 
     if (existing) {
       let currentAwl = [];
@@ -138,11 +174,12 @@ async function upload() {
           company: item.company || 'Workday Company',
           role_title: item.role_title || 'Workday Role',
           applywizz_id: JSON.stringify(mergedAwl),
-          status: 'pending',
+          status: initialStatus,
           attempt_count: 0,
           worker_id: null,
           locked_at: null,
           scanned_job_id: scannedId,
+          screenshot_path: screenshotPath,
           updated_at: now,
         },
       });
@@ -153,11 +190,11 @@ async function upload() {
         role_title: item.role_title || 'Workday Role',
         job_url: item.job_url,
         applywizz_id: JSON.stringify(awlArray),
-        status: 'pending',
+        status: initialStatus,
         attempt_count: 0,
         worker_id: null,
         locked_at: null,
-        screenshot_path: null,
+        screenshot_path: screenshotPath,
         scanned_job_id: scannedId,
         created_at: now,
         updated_at: now,

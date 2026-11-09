@@ -10,6 +10,7 @@ import { fuzzyScore, tokenSetRatio } from './fields.mjs';
 import { alignAnswerToWorkdayOptions, stripWorkdayQuestionLabel, resolveCompanyEmail } from './applyWizzClient.mjs';
 import { trace } from './trace.mjs';
 import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
+import { parseCandidateAwlIds } from './candidateParser.mjs';
 
 let envLoaded = false;
 
@@ -1206,17 +1207,91 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
     }
   }
 
+  function normUrl(u) {
+    try {
+      const p = new URL(u);
+      return (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
+    } catch {
+      return String(u || '').toLowerCase().trim();
+    }
+  }
+
+  // Pre-fetch stored data from yesterday to recognize reached_review and expired links
+  const [sjList, fjList, bqList] = await Promise.all([
+    request('scanned_jobs', { query: '?select=id,job_url,screenshot_path,scan_status&limit=5000' }).catch(() => []),
+    request('failed_jobs', { query: '?select=id,job_url,failure_reason,failed_at_step,screenshot_path&limit=5000' }).catch(() => []),
+    request('batch_job_queue', { query: '?select=id,job_url,status,screenshot_path,scanned_job_id&limit=5000' }).catch(() => []),
+  ]);
+
+  const scannedMap = new Map();
+  for (const s of (sjList || [])) {
+    if (s.job_url) {
+      const k = normUrl(s.job_url);
+      if (!scannedMap.has(k) || s.screenshot_path) scannedMap.set(k, s);
+    }
+  }
+
+  const expiredMap = new Map();
+  for (const f of (fjList || [])) {
+    if (f.job_url) {
+      const isExp = String(f.failure_reason || '').toLowerCase().includes('expired') ||
+                    String(f.failed_at_step || '').toLowerCase().includes('expired');
+      if (isExp) {
+        const k = normUrl(f.job_url);
+        if (!expiredMap.has(k) || f.screenshot_path) expiredMap.set(k, f);
+      }
+    }
+  }
+
+  const bqStatusMap = new Map();
+  for (const q of (bqList || [])) {
+    if (q.job_url) {
+      const k = normUrl(q.job_url);
+      bqStatusMap.set(k, q);
+    }
+  }
+
   const now = new Date().toISOString();
-  const rows = Array.from(urlMap.values()).map((entry) => ({
-    applywizz_id: Array.from(entry.clientIds).join(', '),
-    job_url: entry.job_url,
-    company: entry.company,
-    role_title: entry.role_title,
-    job_id: entry.job_id,
-    status: 'pending',
-    created_at: now,
-    updated_at: now,
-  }));
+  const rows = Array.from(urlMap.values()).map((entry) => {
+    const k = normUrl(entry.job_url);
+    const existingQueueRow = bqStatusMap.get(k);
+    const matchedSj = scannedMap.get(k);
+    const matchedFj = expiredMap.get(k);
+
+    let status = 'pending';
+    let scanned_job_id = null;
+    let screenshot_path = null;
+
+    if (
+      existingQueueRow?.status === 'already_reached_review' ||
+      existingQueueRow?.status === 'reached_review' ||
+      matchedSj
+    ) {
+      status = 'already_reached_review';
+      scanned_job_id = matchedSj?.id || existingQueueRow?.scanned_job_id || null;
+      screenshot_path = matchedSj?.screenshot_path || existingQueueRow?.screenshot_path || null;
+    } else if (
+      existingQueueRow?.status === 'already_expired' ||
+      existingQueueRow?.status === 'expired' ||
+      matchedFj
+    ) {
+      status = 'already_expired';
+      screenshot_path = matchedFj?.screenshot_path || existingQueueRow?.screenshot_path || null;
+    }
+
+    return {
+      applywizz_id: Array.from(entry.clientIds).join(', '),
+      job_url: entry.job_url,
+      company: entry.company,
+      role_title: entry.role_title,
+      job_id: entry.job_id,
+      status,
+      scanned_job_id,
+      screenshot_path,
+      created_at: now,
+      updated_at: now,
+    };
+  });
 
   if (!rows.length) return { inserted: 0 };
 
@@ -2737,12 +2812,7 @@ export async function findQueueTasksForJobUrl(jobUrl) {
       if (!Array.isArray(taskList)) return [];
       const out = [];
       for (const t of taskList) {
-        const raw = String(t.applywizz_id || '').trim();
-        const ids = raw.includes(',')
-          ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-          : (Array.isArray(t.client_ids) && t.client_ids.length > 0
-            ? t.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-            : [raw.toUpperCase()]);
+        const ids = parseCandidateAwlIds(t.applywizz_id || t.client_ids);
         for (const singleId of ids) {
           if (!singleId) continue;
           out.push({
@@ -2785,6 +2855,39 @@ export async function findQueueTasksForJobUrl(jobUrl) {
   }
 }
 
+const VALID_JOB_DISTRIBUTION_COLUMNS = new Set([
+  'applywizz_id',
+  'job_id',
+  'job_url',
+  'scanned_job_id',
+  'company',
+  'role_title',
+  'lead_applywizz_id',
+  'scraped_questions',
+  'question_count',
+  'resolved_answers',
+  'unanswered_questions',
+  'unanswered_count',
+  'is_fully_answered',
+  'application_submitted_screenshot_url',
+  'status',
+  'created_at',
+  'updated_at',
+  'error_message',
+  'worker_id',
+  'worker_leased_at',
+]);
+
+function sanitizeJobDistributionRow(raw) {
+  const clean = {};
+  for (const [k, v] of Object.entries(raw || {})) {
+    if (VALID_JOB_DISTRIBUTION_COLUMNS.has(k)) {
+      clean[k] = v;
+    }
+  }
+  return clean;
+}
+
 /**
  * Record distribution of scraped questions from a unique job link to all clients
  * who have the same or similar job link in their queue into `job_distributions`.
@@ -2822,10 +2925,8 @@ export async function recordJobDistributions({
     const directQuestions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
     const effectiveQuestions = directQuestions.length > 0 ? directQuestions : scannedQuestions;
 
-    if (effectiveQuestions.length === 0) {
-      console.log(`   ⛔ [Distribution Gate] Blocked distribution for "${cleanUrl}": 0 scraped questions available.`);
-      return false;
-    }
+    // Non-blocking questions gate: Standard application flows without custom questions are distributed cleanly
+    questions = effectiveQuestions;
 
     // Automatically ensure the job exists in scanned_jobs
     if (!scannedJobRecord) {
@@ -2876,13 +2977,11 @@ export async function recordJobDistributions({
       } catch { }
     }
 
-    // Expand any comma-separated applywizzId in targetClients so EVERY client has an authentic row
+    // Expand any candidate AWL IDs (including JSON string arrays like '["AWL-101", "AWL-102"]') so EVERY client has an authentic row
     const expandedClients = [];
     for (const c of targetClients) {
-      const raw = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim();
-      const ids = raw.includes(',')
-        ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
-        : [raw.toUpperCase()];
+      const raw = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || c.client_ids || '');
+      const ids = parseCandidateAwlIds(raw);
       for (const singleId of ids) {
         if (!singleId) continue;
         expandedClients.push(typeof c === 'object' ? { ...c, applywizzId: singleId, applywizz_id: singleId } : singleId);
@@ -2993,8 +3092,6 @@ export async function recordJobDistributions({
         resolved_answers: structuredClientResolved,
         unanswered_questions: allUnresolvedFields,
         unanswered_count: clientCountUnanswered,
-        unresolved_fields: allUnresolvedFields,
-        ready_for_review: clientIsFully,
         is_fully_answered: clientIsFully,
         application_submitted_screenshot_url: clientStatus === 'submitted' ? clientShot : null,
         status: clientStatus,
@@ -3023,7 +3120,8 @@ export async function recordJobDistributions({
     const CHUNK_SIZE = 50;
     let totalIngested = 0;
     for (let i = 0; i < dedupedRows.length; i += CHUNK_SIZE) {
-      const chunk = dedupedRows.slice(i, i + CHUNK_SIZE);
+      const rawChunk = dedupedRows.slice(i, i + CHUNK_SIZE);
+      const chunk = rawChunk.map(sanitizeJobDistributionRow);
       try {
         await request('job_distributions', {
           method: 'POST',
@@ -3034,16 +3132,20 @@ export async function recordJobDistributions({
         totalIngested += chunk.length;
       } catch (err) {
         console.log(`   ⚠️ [job_distributions] Upsert batch error: ${err?.message?.slice(0, 140)}`);
-        // Graceful fallback if any non-existent column causes error
-        const stripped = chunk.map(({ applied_screenshot, ...rest }) => rest);
-        await request('job_distributions', {
-          method: 'POST',
-          query: '?on_conflict=applywizz_id,job_url',
-          prefer: 'resolution=merge-duplicates,return=minimal',
-          body: stripped,
-        }).then(() => { totalIngested += chunk.length; }).catch((subErr) => {
-          console.log(`   ⚠️ [job_distributions] Fallback batch error: ${subErr.message?.slice(0, 140)}`);
-        });
+        // Fallback row-by-row if batch fails
+        for (const singleRow of chunk) {
+          try {
+            await request('job_distributions', {
+              method: 'POST',
+              query: '?on_conflict=applywizz_id,job_url',
+              prefer: 'resolution=merge-duplicates,return=minimal',
+              body: [singleRow],
+            });
+            totalIngested++;
+          } catch (singleErr) {
+            console.log(`   ⚠️ [job_distributions] Fallback single error (${singleRow.applywizz_id}): ${singleErr.message?.slice(0, 140)}`);
+          }
+        }
       }
     }
 
@@ -3051,17 +3153,7 @@ export async function recordJobDistributions({
     const needsAnswersCount = dedupedRows.filter(r => r.status === 'needs_answers').length;
 
 
-    console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions | action: BATCH UPSERT (${totalIngested} clients)`);
-    console.log(`   • Company & Role:       ${cleanCompany} — ${cleanRole}`);
-    console.log(`   • Job URL:              ${jobUrl}`);
-    console.log(`   • Lead Candidate:       ${cleanLead || 'N/A'}`);
-    const effectiveScreenshot = screenshotUrl || (rows.find(r => r.application_submitted_screenshot_url)?.application_submitted_screenshot_url) || null;
-    console.log(`   • Screenshot:           ${effectiveScreenshot || 'Uploaded to Supabase Storage'}`);
-    console.log(`   • Mandatory Questions:  ${questionCount} fields`);
-    console.log(`   • Total Clients:        ${rows.length} candidates`);
-    console.log(`   • Ready for Review:     ${readyReviewCount} candidates (100% mandatory answered)`);
-    console.log(`   • Needs Answers:        ${needsAnswersCount} candidates (awaiting candidate data)`);
-    console.log(`   • Sample Clients:       ${rows.slice(0, 4).map(r => `${r.applywizz_id} (${r.status})`).join(', ')}${rows.length > 4 ? ` + ${rows.length - 4} more` : ''}\n`);
+    console.log(`[DISTRIBUTION UPSERT] ${cleanCompany} | Ingested: ${totalIngested}/${rows.length} candidates (${readyReviewCount} ready_for_review)`);
     return true;
   } catch (err) {
     console.log(`⚠️ Failed to record job distributions: ${err.message}`);
@@ -3294,13 +3386,31 @@ export async function syncQueueWithScannedAndFailedJobs() {
       const matchedSj = scannedMap.get(normKey);
       const matchedFj = failedMap.get(normKey);
 
-      if (matchedSj && row.status !== 'reached_review' && row.status !== 'submitted') {
+      if (matchedSj && row.status !== 'reached_review' && row.status !== 'already_reached_review' && row.status !== 'submitted') {
+        // Ensure distribution exists in job_distributions so jobs never get stranded
+        try {
+          const distCheck = await request('job_distributions', {
+            query: `?job_url=eq.${encode(row.job_url)}&select=id&limit=1`,
+          });
+          if (!Array.isArray(distCheck) || distCheck.length === 0) {
+            await recordJobDistributions({
+              jobUrl: row.job_url,
+              company: row.company,
+              roleTitle: row.role_title,
+              scrapedQuestions: matchedSj.scraped_questions || [],
+              screenshotUrl: matchedSj.screenshot_path || null,
+              status: 'distributed',
+              leadApplywizzId: parseCandidateAwlIds(row.applywizz_id)[0] || null,
+            }).catch(() => {});
+          }
+        } catch {}
+
         await request('batch_job_queue', {
           method: 'PATCH',
           query: `?id=eq.${row.id}`,
           prefer: 'return=minimal',
           body: {
-            status: 'reached_review',
+            status: 'already_reached_review',
             scanned_job_id: matchedSj.id || null,
             screenshot_path: matchedSj.screenshot_path || null,
             worker_id: null,
@@ -3309,13 +3419,16 @@ export async function syncQueueWithScannedAndFailedJobs() {
           },
         }).catch(() => { });
         markedScanned++;
-      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'submitted') {
+      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'already_expired' && row.status !== 'submitted') {
+        const isExpired = String(matchedFj.failure_reason || '').toLowerCase().includes('expired') ||
+                          String(matchedFj.failed_at_step || '').toLowerCase().includes('expired');
+        const targetStatus = isExpired ? 'already_expired' : 'failed';
         await request('batch_job_queue', {
           method: 'PATCH',
           query: `?id=eq.${row.id}`,
           prefer: 'return=minimal',
           body: {
-            status: 'failed',
+            status: targetStatus,
             screenshot_path: matchedFj.screenshot_path || null,
             worker_id: null,
             locked_at: null,

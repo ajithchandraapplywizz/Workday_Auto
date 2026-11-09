@@ -40,46 +40,72 @@ async function ingest() {
   console.log(`Job URL:      ${job_url}`);
   console.log(`Candidates:   ${awlIds.length} AWL IDs -> ${awlIds.join(', ')}`);
 
+  // Check scanned_jobs for pre-existing scan
+  const scannedJobs = await request('scanned_jobs', {
+    query: `?job_url=eq.${encodeURIComponent(job_url)}&select=id,screenshot_path`,
+  }).catch(() => []);
+  const matchedSj = Array.isArray(scannedJobs) && scannedJobs.length > 0 ? scannedJobs[0] : null;
+
+  // Check failed_jobs for expired status
+  const failedJobs = await request('failed_jobs', {
+    query: `?job_url=eq.${encodeURIComponent(job_url)}&select=id,failure_reason,failed_at_step,screenshot_path`,
+  }).catch(() => []);
+  const matchedFj = Array.isArray(failedJobs) && failedJobs.length > 0 ? failedJobs[0] : null;
+  const isExp = matchedFj && (
+    String(matchedFj.failure_reason || '').toLowerCase().includes('expired') ||
+    String(matchedFj.failed_at_step || '').toLowerCase().includes('expired')
+  );
+
   // Check if job_url already exists in batch_job_queue
   const existingQueue = await request('batch_job_queue', {
     query: `?job_url=eq.${encodeURIComponent(job_url)}`,
   }).catch(() => []);
+  const eq = Array.isArray(existingQueue) && existingQueue.length > 0 ? existingQueue[0] : null;
 
-  if (Array.isArray(existingQueue) && existingQueue.length > 0) {
-    console.log(`\n⚠️  URL already exists in batch_job_queue (id: ${existingQueue[0].id}). Updating with merged AWL IDs...`);
+  let initialStatus = 'pending';
+  let scannedId = matchedSj?.id || null;
+  let screenshotPath = matchedSj?.screenshot_path || null;
+
+  if (eq?.status === 'already_reached_review' || eq?.status === 'reached_review' || matchedSj) {
+    initialStatus = 'already_reached_review';
+    scannedId = matchedSj?.id || eq?.scanned_job_id || null;
+    screenshotPath = matchedSj?.screenshot_path || eq?.screenshot_path || null;
+  } else if (eq?.status === 'already_expired' || eq?.status === 'expired' || isExp) {
+    initialStatus = 'already_expired';
+    screenshotPath = matchedFj?.screenshot_path || eq?.screenshot_path || null;
+  }
+
+  if (eq) {
+    console.log(`\n⚠️  URL already exists in batch_job_queue (id: ${eq.id}). Updating with merged AWL IDs (Status: ${initialStatus})...`);
     let currentAwl = [];
     try {
-      currentAwl = JSON.parse(existingQueue[0].applywizz_id);
+      currentAwl = JSON.parse(eq.applywizz_id);
     } catch {
-      currentAwl = [existingQueue[0].applywizz_id].filter(Boolean);
+      currentAwl = [eq.applywizz_id].filter(Boolean);
     }
     const merged = Array.from(new Set([...currentAwl, ...awlIds]));
 
     const updateRes = await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?id=eq.${existingQueue[0].id}`,
+      query: `?id=eq.${eq.id}`,
       prefer: 'return=representation',
       body: {
         job_id,
         company,
         role_title,
         applywizz_id: JSON.stringify(merged),
-        status: 'pending',
+        status: initialStatus,
         attempt_count: 0,
         worker_id: null,
         locked_at: null,
+        scanned_job_id: scannedId,
+        screenshot_path: screenshotPath,
         updated_at: new Date().toISOString(),
       },
     });
     console.log('✅ Updated existing batch_job_queue record:', updateRes);
     return;
   }
-
-  // Check scanned_jobs for pre-existing scan
-  const scannedJobs = await request('scanned_jobs', {
-    query: `?job_url=eq.${encodeURIComponent(job_url)}&select=id`,
-  }).catch(() => []);
-  const scannedId = Array.isArray(scannedJobs) && scannedJobs.length > 0 ? scannedJobs[0].id : null;
 
   const now = new Date().toISOString();
   const newRow = {
@@ -88,11 +114,11 @@ async function ingest() {
     role_title,
     job_url,
     applywizz_id: JSON.stringify(awlIds),
-    status: 'pending',
+    status: initialStatus,
     attempt_count: 0,
     worker_id: null,
     locked_at: null,
-    screenshot_path: null,
+    screenshot_path: screenshotPath,
     scanned_job_id: scannedId,
     created_at: now,
     updated_at: now,

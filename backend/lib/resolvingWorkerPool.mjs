@@ -427,10 +427,7 @@ export async function runResolvingWorkerPool(options = {}) {
             const clientStatus = 'ready_for_review';
             const answeredTotal = structuredAnswers.filter(q => q.is_answered).length;
 
-            console.log(`✅ [STAGE 2: RESOLVER] [${workerId}] ${awlId} 100% resolved across 5 tiers (${answeredTotal}/${totalQCount}) → MANDATORILY marked as "ready_for_review"`);
-            if (job.screenshot_path) {
-              console.log(`   📸 Review Screenshot: ${job.screenshot_path}`);
-            }
+            // Silent resolution in background without logging to stdout to save CPU/memory and log storage
 
             await recordJobDistributions({
               scannedJobId: job.id,
@@ -456,7 +453,9 @@ export async function runResolvingWorkerPool(options = {}) {
                 screenshotUrl: null,
                 status: clientStatus,
               }],
-            }).catch(() => {});
+            }).catch((distErr) => {
+              console.warn(`⚠️ [${workerId}] Failed to record distribution for ${awlId}:`, distErr?.message || distErr);
+            });
 
             // In single-table architecture, recordJobDistributions already sets job_distributions to ready_for_review.
 // [SILENCED]             console.log(`${'═'.repeat(64)}\n`);

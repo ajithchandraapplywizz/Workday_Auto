@@ -868,7 +868,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-  console.log(`[SUBMITTER] [${workerId}] [${task.applywizz_id}] Company: ${task.company || 'Workday'} | Status: submitting`);
+  console.log(`[${task.applywizz_id}] | Company: ${task.company || 'Workday'} | Status: submitting | Screenshot: none`);
 
 
 
@@ -1348,10 +1348,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     if (isSuccess) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`\n✅ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: SUBMITTED | Company: ${task.company || 'Workday'} | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}\n`);
-      console.log(`[${cleanId}] submission_completed | Screenshot: ${finalShotUrl || 'Uploaded to Supabase Storage'}`);
-
-
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Screenshot: ${finalShotUrl || 'none'}`);
 
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,
@@ -1368,8 +1365,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`\nℹ️ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: ALREADY_APPLIED | Company: ${task.company || 'Workday'} | Screenshot: ${finalShotUrl || 'None'}\n`);
-      console.log(`[${cleanId}] already_applied | Screenshot: ${finalShotUrl || 'None'}`);
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 
@@ -1706,8 +1702,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
 
         const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-        console.log(`\n❌ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: FAILED | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}\n`);
-        console.log(`[${cleanId}] submission_failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}`);
+        console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 
@@ -2073,85 +2068,7 @@ export function print10ClientSubmissionMilestoneReport({ cycleIndex = 1, cycleSt
 
 
 
-  console.log(`\n${'═'.repeat(120)}`);
-
-  console.log(`📊 10-SUBMISSION BATCH MILESTONE REPORT — CYCLE #${cycleIndex} (SUBMISSIONS #${cycleStartNum} TO #${cycleEndNum})`);
-
-  console.log(`   • Batch Items Processed: ${count} applications | Total All-Time: ${totalCount}`);
-
-  console.log(`   • ✅ Succeeded: ${submittedCount}/${count} | ❌ Failed: ${failedCount}/${count} | 📈 Batch Success Rate: ${successRate}%`);
-
-  console.log(`${'─'.repeat(120)}`);
-
-  console.log(
-
-    `#`.padEnd(4) + ' | ' +
-
-    `Candidate`.padEnd(16) + ' | ' +
-
-    `Company`.padEnd(22) + ' | ' +
-
-    `Status`.padEnd(12) + ' | ' +
-
-    `Result / Reason`.padEnd(28) + ' | ' +
-
-    `Proof Screenshot URL`
-
-  );
-
-  console.log(`${'─'.repeat(120)}`);
-
-
-
-  items.forEach((item, idx) => {
-
-    const num = String(cycleStartNum + idx).padEnd(4);
-
-    const awlId = String(item.applywizz_id || item.applywizzId || 'AWL').slice(0, 16).padEnd(16);
-
-    const comp = String(item.company || 'Workday Partner').slice(0, 22).padEnd(22);
-
-    const isSuccess = item.status === 'submitted' || item.status === 'success';
-
-    const st = (isSuccess ? 'SUBMITTED' : 'FAILED').padEnd(12);
-
-    const reason = String(item.reason || item.error || (isSuccess ? 'Application Confirmed' : 'Submission error')).slice(0, 28).padEnd(28);
-
-    const shot = item.screenshotUrl || item.screenshotPath || item.application_submitted_screenshot_url || 'None';
-
-    console.log(`${num} | ${awlId} | ${comp} | ${st} | ${reason} | ${shot}`);
-
-  });
-
-
-
-  console.log(`\n📸 [10-SUBMISSION BATCH PROOF SCREENSHOTS — CYCLE #${cycleIndex}]`);
-
-  items.forEach((item, idx) => {
-
-    const num = cycleStartNum + idx;
-
-    const awl = item.applywizz_id || item.applywizzId || 'AWL';
-
-    const comp = item.company || 'Workday Partner';
-
-    const shot = item.screenshotUrl || item.screenshotPath || item.application_submitted_screenshot_url || 'No screenshot captured';
-
-    const isSuccess = item.status === 'submitted' || item.status === 'success';
-
-    const stIcon = isSuccess ? '✅ SUBMITTED' : '❌ FAILED';
-
-    console.log(`   [#${num}] ${stIcon} | ${awl} @ ${comp} ➔ Screenshot URL: ${shot}`);
-
-  });
-
-
-
-  console.log(`${'─'.repeat(120)}`);
-
-  console.log(`📌 STATS SUMMARY: ${submittedCount} SUBMITTED, ${failedCount} FAILED (${successRate}% SUCCESS RATE) | MILESTONE #${cycleIndex} LOGGED`);
-
-  console.log(`${'═'.repeat(120)}\n`);
+  console.log(`[BATCH SUMMARY] Cycle #${cycleIndex}: ${submittedCount}/${count} submitted (${successRate}%), ${failedCount} failed | Total: ${totalCount}`);
 
 }
 
