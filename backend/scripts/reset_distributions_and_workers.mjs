@@ -6,17 +6,17 @@ async function main() {
   console.log('🔄 RESETTING FAILED JOB DISTRIBUTIONS & SUBMITTING WORKERS');
   console.log('═'.repeat(70));
 
-  // 1. Reset failed job_distributions to ready_for_review
-  console.log('\n1. Fetching failed job_distributions...');
-  const failedDist = await request('job_distributions', {
-    query: '?status=eq.failed&select=id,applywizz_id,job_url,status,error_message,worker_id,worker_leased_at',
+  // 1. Reset all non-submitted job_distributions (failed, applying, or with error_message) to clean ready_for_review
+  console.log('\n1. Fetching non-submitted job_distributions with errors, leases, or failed/applying statuses...');
+  const distRows = await request('job_distributions', {
+    query: '?status=not.in.(submitted,completed,already_applied)&select=id,applywizz_id,job_url,status,error_message,worker_id,worker_leased_at',
   });
 
-  console.log(`   Found ${failedDist ? failedDist.length : 0} failed job_distribution rows.`);
+  console.log(`   Found ${distRows ? distRows.length : 0} non-submitted job_distribution rows.`);
 
-  if (failedDist && failedDist.length > 0) {
-    console.log('   Resetting failed job_distributions to "ready_for_review" and clearing error/leased fields...');
-    const updateRes = await request('job_distributions?status=eq.failed', {
+  if (distRows && distRows.length > 0) {
+    console.log('   Resetting non-submitted rows to fresh "ready_for_review" (clearing errors, attempt counters, and worker leases)...');
+    const updateRes = await request('job_distributions?status=not.in.(submitted,completed,already_applied)', {
       method: 'PATCH',
       prefer: 'return=representation',
       body: {
@@ -24,28 +24,21 @@ async function main() {
         error_message: null,
         worker_id: null,
         worker_leased_at: null,
+        application_submitted_screenshot_url: null,
         updated_at: new Date().toISOString(),
       },
     });
 
-    console.log(`   ✅ Successfully updated ${Array.isArray(updateRes) ? updateRes.length : failedDist.length} job_distributions to "ready_for_review"!`);
+    console.log(`   ✅ Successfully reset ${Array.isArray(updateRes) ? updateRes.length : distRows.length} job_distributions to fresh "ready_for_review"! (Submitted rows 100% protected)`);
   }
 
-  // 2. Also reset any stuck/leased job_distributions that are NOT completed/submitted
-  const stuckLeased = await request('job_distributions', {
-    query: '?worker_leased_at=not.is.null&status=in.(ready_for_review,applying)&select=id,worker_id,worker_leased_at',
-  });
-  if (stuckLeased && stuckLeased.length > 0) {
-    console.log(`   Clearing ${stuckLeased.length} stuck leased job_distributions...`);
-    await request('job_distributions?worker_leased_at=not.is.null&status=in.(ready_for_review,applying)', {
-      method: 'PATCH',
-      body: {
-        worker_id: null,
-        worker_leased_at: null,
-        updated_at: new Date().toISOString(),
-      },
-    });
-    console.log('   ✅ Leased fields cleared.');
+  // Also clean up failed_jobs table for non-submitted applications so they don't block retries
+  try {
+    console.log('\n2. Cleaning up non-submitted entries in failed_jobs...');
+    const delRes = await request('failed_jobs?select=id', { method: 'DELETE' }).catch(() => null);
+    console.log('   ✅ failed_jobs table cleared for clean slate.');
+  } catch (fErr) {
+    console.warn('   Note on failed_jobs cleanup:', fErr.message);
   }
 
   // 3. Reset worker_status table

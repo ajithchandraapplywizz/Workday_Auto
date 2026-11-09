@@ -31,6 +31,7 @@ import { trace, logFieldTrace } from '../trace.mjs';
 import { makeGuard } from '../loopGuard.mjs';
 import { verifyProvenance } from '../provenanceGate.mjs';
 import { autoRecordVerifiedFieldAnswer } from '../supabaseClient.mjs';
+import { resolveAnswerFromLiveOptions } from '../workdayQuestionFill.mjs';
 
 const MAX_FIELD_RETRIES = 2;
 const MAX_FILLS_PER_CYCLE = 24;
@@ -536,6 +537,50 @@ export async function runPageOrchestrator({
       };
       gate = { ok: true, answer: scanAnswer };
     }
+
+    if (!gate.ok && mandatory && !isScanMode) {
+      // Dynamic answer selection: search client profile and live options for closest match
+      let liveOpts = (field.options || []).map((o) => (typeof o === 'string' ? o : o?.text || o?.value || '')).filter(Boolean);
+      if (!liveOpts.length && (field.elementType === 'select' || field.elementType === 'combobox' || field.elementType === 'radio' || field.controlRole === 'combobox')) {
+        liveOpts = await collectLiveFieldOptions(page, field).catch(() => []);
+      }
+      if (liveOpts.length > 0) {
+        const smartMatch = resolveAnswerFromLiveOptions({
+          liveOptions: liveOpts,
+          labelText: field.label,
+          profile,
+          preferredAnswer: decision?.answer || '',
+        });
+        if (smartMatch) {
+          console.log(`    💡 [Dynamic Profile Match] Mandatory field matched closely to profile: "${field.label.slice(0, 50)}" → "${smartMatch}"`);
+          decision = {
+            questionId: field.questionId,
+            intent: classifyQuestionIntent(field.label, field),
+            answer: smartMatch,
+            confidence: 0.88,
+            requiresReview: false,
+            source: 'profile_dynamic_match',
+          };
+          gate = { ok: true, answer: smartMatch };
+        }
+      }
+      if (!gate.ok) {
+        const fallbackAnswer = synthesizeScanMandatoryAnswer(field, profile);
+        if (fallbackAnswer) {
+          console.log(`    💡 [Dynamic Mandatory Fallback] Selected safe answer for required field: "${field.label.slice(0, 50)}" → "${fallbackAnswer}"`);
+          decision = {
+            questionId: field.questionId,
+            intent: classifyQuestionIntent(field.label, field),
+            answer: fallbackAnswer,
+            confidence: 0.82,
+            requiresReview: false,
+            source: 'mandatory_safe_fallback',
+          };
+          gate = { ok: true, answer: fallbackAnswer };
+        }
+      }
+    }
+
     if (!gate.ok) {
       const highRisk = isHighRiskIntent(decision?.intent || classifyQuestionIntent(field.label, field)) && mandatory;
       logOrchestrator('skip_fill', {

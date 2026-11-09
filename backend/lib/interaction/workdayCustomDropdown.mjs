@@ -88,6 +88,20 @@ export function matchDemographicOption(answer, options = []) {
   const exactStripped = cleaned.find((o) => stripLeadingYesNoPhrase(o) === stripped);
   if (exactStripped) return exactStripped;
 
+  // Gender matching: "Male" ↔ "Male", "Female" ↔ "Female"
+  if (/^(male|female|non-binary|decline)\b/i.test(wanted)) {
+    const isFemale = /^female/i.test(wanted);
+    const isMale = /^male/i.test(wanted) && !isFemale;
+    if (isMale) {
+      const maleHit = cleaned.find((o) => /^male\b/i.test(normalizeDemoText(o)) && !/female/i.test(normalizeDemoText(o)));
+      if (maleHit) return maleHit;
+    }
+    if (isFemale) {
+      const femaleHit = cleaned.find((o) => /^female\b/i.test(normalizeDemoText(o)));
+      if (femaleHit) return femaleHit;
+    }
+  }
+
   const wantVet = veteranStatusKind(wanted);
   if (wantVet) {
     const same = cleaned.filter((o) => veteranStatusKind(o) === wantVet);

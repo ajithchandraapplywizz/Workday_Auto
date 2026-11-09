@@ -14,6 +14,7 @@
 
 import { waitForDomSettled } from '../workdayDom.mjs';
 import { okResult, failResult } from './_result.mjs';
+import { resolveAnswerFromLiveOptions } from '../workdayQuestionFill.mjs';
 
 const LISTBOX_SELECTOR = '[role="listbox"], [data-automation-id="promptPopup"], [data-automation-id="promptOption"], [role="option"]';
 const OPTION_SELECTOR = '[role="option"], [data-automation-id="promptOption"], [data-automation-id="promptLeafNode"], [data-automation-id="menuItem"]';
@@ -167,16 +168,25 @@ export async function fillSelectVerified(page, field, answer, ctx = {}) {
   }
 
   const matchResult = matchOptionSafely(answer, liveTexts);
-  if (!matchResult.match) {
-    await page.keyboard.press('Escape').catch(() => {});
-    return failResult(field, `match_live_option_failed:${matchResult.reason}`, {
-      recoverable: false,
-      step: 'match_live_option',
-      options: liveTexts,
+  let targetOptionText = matchResult.match;
+  if (!targetOptionText) {
+    const smart = resolveAnswerFromLiveOptions({
+      liveOptions: liveTexts,
+      labelText: label,
+      profile: ctx.profile,
+      preferredAnswer: answer,
     });
+    if (smart) {
+      targetOptionText = smart;
+    } else {
+      await page.keyboard.press('Escape').catch(() => {});
+      return failResult(field, `match_live_option_failed:${matchResult.reason}`, {
+        recoverable: false,
+        step: 'match_live_option',
+        options: liveTexts,
+      });
+    }
   }
-
-  const targetOptionText = matchResult.match;
 
   // Step 3: Click matched option & wait for detach
   const optionLoc = page.locator(OPTION_SELECTOR).filter({ hasText: new RegExp(`^\\s*${targetOptionText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\s*$`, 'i') }).first();

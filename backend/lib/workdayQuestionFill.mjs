@@ -420,6 +420,20 @@ const NON_AGREEMENT_CHECKBOX_RES = [
   /^on[\s-]*site$/i,
   /type\s*to\s*add\s*skills/i,
   /enter\s*a\s*skill/i,
+  // Strict demographic / race / ethnicity exclusions (never treat as agreements):
+  /asian/i,
+  /black|african\s*american/i,
+  /hispanic|latino/i,
+  /white|caucasian/i,
+  /native\s*hawaiian|pacific\s*islander/i,
+  /two\s*or\s*more\s*races/i,
+  /american\s*indian|alaska\s*native/i,
+  /i\s*do\s*not\s*wish\s*to\s*answer/i,
+  /decline\s*to\s*(state|self-identify|answer|disclose)/i,
+  /prefer\s*not\s*to\s*(say|disclose|answer)/i,
+  /not\s*declared/i,
+  /\bmale\b|\bfemale\b|\bnon-binary\b/i,
+  /veteran|disability/i,
 ];
 
 function isAgreementCheckboxLabel(labelText = '') {
@@ -486,19 +500,16 @@ export async function acknowledgeAllPageAgreements(page, profile, stepName = '')
       const label = getLabel(cb);
       if (!label || seen.has(label)) continue;
 
+      // Never treat demographic, race, ethnicity, or question options as agreement checkboxes
+      if (skipPatterns.some((re) => re.test(label))) continue;
+
       const rect = cb.getBoundingClientRect();
       const absTop = rect.top + window.scrollY;
       const inBottomHalf = absTop >= bottomCutoff;
-      const required = cb.required
-        || cb.getAttribute('aria-required') === 'true'
-        || /\*/.test(label)
-        || Boolean(cb.closest('[data-automation-id*="formField"]')?.querySelector('[aria-required="true"], abbr[title*="required" i]'));
 
-      // If it's an agreement, consent, terms, statement, or required box — ALWAYS check it!
+      // A checkbox MUST be an authentic agreement/consent/terms/privacy box to be checked here
       const agreement = isAgreement(label);
-      if (requiredOnly && !required && !agreement) continue;
-
-      if (!agreement && !required && !(inBottomHalf && /confirm|certify|acknowledge|consent|agree|privacy|terms|statement|accurate|understand/i.test(label))) {
+      if (!agreement && !(inBottomHalf && /confirm|certify|acknowledge|consent|agree|privacy|terms|statement|accurate|understand/i.test(label))) {
         continue;
       }
 
@@ -859,6 +870,270 @@ async function markSelectOneWidget(page, { labelText = '', selectOneIndex = null
   }, labelText);
 }
 
+/**
+ * Smart Question & Answer Resolver from Live Dropdown Options.
+ * Classifies generic questions (e.g. "Please select from the dropdown menu below.*")
+ * by analyzing live options (Gender, Race, Veteran, Hispanic, Disability, Yes/No),
+ * performs Tier 5 close-matching against profile resolved_answers, and provides safe fallbacks.
+ */
+export function resolveAnswerFromLiveOptions({ liveOptions = [], labelText = '', profile = {}, preferredAnswer = '' } = {}) {
+  if (!Array.isArray(liveOptions) || liveOptions.length === 0) return null;
+  const cleanOpts = liveOptions.map((o) => String(o || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+  if (!cleanOpts.length) return null;
+
+  const lowerOpts = cleanOpts.map((o) => o.toLowerCase());
+  const labelNorm = String(labelText || '').toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+  const findOpt = (re) => cleanOpts.find((o) => re.test(o));
+
+  // 1. GENDER CLASSIFICATION
+  const hasMale = lowerOpts.some((o) => /\bmale\b|\bman\b/i.test(o));
+  const hasFemale = lowerOpts.some((o) => /\bfemale\b|\bwoman\b/i.test(o));
+  if (hasMale && hasFemale) {
+    const userGender = String(profile?.eeo?.gender || profile?.gender || profile?._gender || preferredAnswer || '').trim().toLowerCase();
+    if (/female|woman/i.test(userGender)) {
+      return findOpt(/\bfemale\b|\bwoman\b/i) || 'Female';
+    }
+    if (/male|man/i.test(userGender)) {
+      return findOpt(/\bmale\b/i) || 'Male';
+    }
+    if (/decline|prefer not|choose not/i.test(userGender)) {
+      return findOpt(/decline|choose not|prefer not/i) || 'I choose not to disclose';
+    }
+    return findOpt(/\bmale\b/i) || findOpt(/\bfemale\b/i) || cleanOpts[0];
+  }
+
+  // 2. RACE / ETHNICITY CLASSIFICATION
+  // Checked before Hispanic so EEOC multi-race lists (which also list Hispanic/Latino) are classified as Race
+  const raceSignals = ['white', 'black', 'african american', 'asian', 'american indian', 'alaska native', 'native hawaiian', 'pacific islander', 'two or more'];
+  const matchedRaceSignals = raceSignals.filter((sig) => lowerOpts.some((o) => o.includes(sig)));
+  if (matchedRaceSignals.length >= 2) {
+    const userRace = String(profile?.eeo?.race || profile?.race || profile?._race || preferredAnswer || 'Asian').trim().toLowerCase();
+    if (/asian/i.test(userRace)) {
+      return findOpt(/asian/i) || 'Asian';
+    }
+    if (/white/i.test(userRace)) {
+      return findOpt(/white/i) || 'White';
+    }
+    if (/black|african/i.test(userRace)) {
+      return findOpt(/black|african/i) || 'Black or African American';
+    }
+    if (/two or more/i.test(userRace)) {
+      return findOpt(/two or more/i) || 'Two or More Races';
+    }
+    if (/decline|choose not|prefer not/i.test(userRace)) {
+      return findOpt(/decline|choose not|prefer not/i) || 'I choose not to disclose';
+    }
+    return findOpt(/asian/i) || findOpt(/white/i) || cleanOpts[0];
+  }
+
+  // 3. HISPANIC / LATINO CLASSIFICATION (isolated question with Yes/No or Hispanic/Not Hispanic)
+  const hasHisp = lowerOpts.some((o) => /hispanic|latino/i.test(o));
+  if (hasHisp) {
+    const userHisp = String(profile?.eeo?.hispanic || profile?.hispanic_latino || profile?._hispanic || preferredAnswer || '').trim().toLowerCase();
+    const isYes = (/^yes\b|^hispanic\b|^latino\b|^true\b/i.test(userHisp) && !/not\s*hispanic|non-hispanic|\bno\b/i.test(userHisp));
+    if (isYes) {
+      return cleanOpts.find((o) => /hispanic|latino/i.test(o) && !/not\s*hispanic|non-hispanic|\bno\b/i.test(o)) || 'Yes';
+    }
+    return cleanOpts.find((o) => /not\s*hispanic|non-hispanic|\bno\b/i.test(o)) || 'No';
+  }
+
+  // 4. VETERAN STATUS CLASSIFICATION
+  const hasVeteran = lowerOpts.some((o) => /veteran|protected veteran/i.test(o));
+  if (hasVeteran) {
+    const userVet = String(profile?.eeo?.veteran || profile?.veteran_status || profile?._veteran || preferredAnswer || '').trim().toLowerCase();
+    if (/i am a (protected )?veteran|^yes\b/i.test(userVet)) {
+      return findOpt(/identify as one or more|i am a protected veteran|yes/i) || 'Yes';
+    }
+    return findOpt(/not a protected veteran|not a veteran|i am not/i) || findOpt(/^no\b/i) || 'I am not a veteran';
+  }
+
+  // 5. DISABILITY STATUS CLASSIFICATION
+  const hasDisability = lowerOpts.some((o) => /disability|impairment/i.test(o));
+  if (hasDisability) {
+    const userDis = String(profile?.eeo?.disability || profile?.disability_status || preferredAnswer || '').trim().toLowerCase();
+    const isDisabilityYes = (/^yes\b|identify as having a disability/i.test(userDis) && !/do not have a disability|\bno\b/i.test(userDis));
+    if (isDisabilityYes) {
+      return findOpt(/yes.*have a disability|^yes\b/i) || cleanOpts.find((o) => /have a disability/i.test(o) && !/do not have/i.test(o)) || 'Yes';
+    }
+    return findOpt(/do not have a disability|\bno\b/i) || 'No';
+  }
+
+  // 6. CONSENT / DATA RETENTION / ACKNOWLEDGMENT
+  if (/consent|data\s*retention|retain\s*your\s*personal\s*data|privacy|future\s*job\s*opportunities/i.test(labelNorm)) {
+    const consentOpt = findOpt(/^(i\s+consent|consent|yes|i\s+agree|agree|i\s+accept|accept)\b/i);
+    if (consentOpt) return consentOpt;
+  }
+
+  // 7. YES / NO CLASSIFICATION
+  const hasYes = lowerOpts.some((o) => /^yes\b/i.test(o));
+  const hasNo = lowerOpts.some((o) => /^no\b/i.test(o));
+  if (hasYes && hasNo && cleanOpts.length <= 4) {
+    if (preferredAnswer && /^(yes|no)/i.test(preferredAnswer)) {
+      return /^yes/i.test(preferredAnswer) ? (findOpt(/^yes/i) || 'Yes') : (findOpt(/^no/i) || 'No');
+    }
+    if (/sponsor|require.*visa|need.*h-?1b/i.test(labelNorm)) {
+      return findOpt(/^no/i) || 'No';
+    }
+    if (/authorized|eligible to work|18 years|over the age|agree|consent/i.test(labelNorm)) {
+      return findOpt(/^yes/i) || 'Yes';
+    }
+  }
+
+  // 7.5 EDUCATION DEGREE CLASSIFICATION
+  const hasDegreeOpts = lowerOpts.some((o) => /bachelor|master|doctorate|ph\.?d|associate|high school/i.test(o));
+  if (hasDegreeOpts) {
+    const rawDegree = String(
+      profile?.education_level || profile?.degree || profile?.education?.[0]?.degree || profile?._degree || preferredAnswer || ''
+    ).toLowerCase();
+    if (/master|m\.s\.|ms\b/i.test(rawDegree) && !/bachelor/i.test(rawDegree)) {
+      const match = findOpt(/master/i);
+      if (match) return match;
+    }
+    if (/bachelor|b\.s\.|bs\b|b\.?tech|btech/i.test(rawDegree)) {
+      const match = findOpt(/bachelor/i);
+      if (match) return match;
+    }
+    if (/doctor|ph\.?d/i.test(rawDegree)) {
+      const match = findOpt(/doctor|ph\.?d/i);
+      if (match) return match;
+    }
+    if (/associate/i.test(rawDegree)) {
+      const match = findOpt(/associate/i);
+      if (match) return match;
+    }
+  }
+
+  // 8. TIER 5: DEEP DYNAMIC MATCH AGAINST CLIENT PROFILE & RESOLVED ANSWERS
+  const candidateAnswers = [];
+  if (preferredAnswer) candidateAnswers.push(String(preferredAnswer).trim());
+
+  const list = profile?.resolved_answers || profile?._resolvedAnswersJson || profile?._resolvedAnswers || [];
+  if (Array.isArray(list)) {
+    for (const item of list) {
+      const val = item?.answer ?? item?.value;
+      if (val && String(val).trim()) candidateAnswers.push(String(val).trim());
+    }
+  }
+  if (profile?._answers && typeof profile._answers === 'object') {
+    for (const val of Object.values(profile._answers)) {
+      if (val && typeof val === 'string' && val.trim()) candidateAnswers.push(val.trim());
+    }
+  }
+  if (profile?._filledValues && typeof profile._filledValues === 'object') {
+    for (const val of Object.values(profile._filledValues)) {
+      if (val && typeof val === 'string' && val.trim()) candidateAnswers.push(val.trim());
+    }
+  }
+  for (const prop of [
+    'work_authorization', 'visa_status', 'willing_to_relocate', 'notice_period',
+    'education_level', 'degree', 'field_of_study', 'clearance', 'source', 'referral_source',
+    'title', 'current_title', 'skills', 'city', 'state', 'country', 'citizenship'
+  ]) {
+    if (profile?.[prop] && typeof profile[prop] === 'string') candidateAnswers.push(profile[prop].trim());
+  }
+
+  // Add work experience titles and companies
+  if (Array.isArray(profile?.experience)) {
+    for (const exp of profile.experience) {
+      if (exp?.title && typeof exp.title === 'string') candidateAnswers.push(exp.title.trim());
+      if (exp?.company && typeof exp.company === 'string') candidateAnswers.push(exp.company.trim());
+      if (exp?.role && typeof exp.role === 'string') candidateAnswers.push(exp.role.trim());
+    }
+  }
+
+  // Add education degree, school, field of study
+  if (Array.isArray(profile?.education)) {
+    for (const edu of profile.education) {
+      if (edu?.degree && typeof edu.degree === 'string') candidateAnswers.push(edu.degree.trim());
+      if (edu?.school && typeof edu.school === 'string') candidateAnswers.push(edu.school.trim());
+      if (edu?.fieldOfStudy && typeof edu.fieldOfStudy === 'string') candidateAnswers.push(edu.fieldOfStudy.trim());
+      if (edu?.major && typeof edu.major === 'string') candidateAnswers.push(edu.major.trim());
+    }
+  }
+
+  // Add skills list
+  if (Array.isArray(profile?.skills)) {
+    for (const s of profile.skills) {
+      if (typeof s === 'string' && s.trim()) candidateAnswers.push(s.trim());
+    }
+  } else if (typeof profile?.skills === 'string') {
+    profile.skills.split(/[,;\n]+/).forEach((s) => {
+      if (s.trim()) candidateAnswers.push(s.trim());
+    });
+  }
+
+  // Add client question/answer pairs if available
+  if (Array.isArray(profile?.client_questions)) {
+    for (const cq of profile.client_questions) {
+      const val = cq?.answer || cq?.resolved_answer || cq?.value;
+      if (val && typeof val === 'string') candidateAnswers.push(val.trim());
+    }
+  }
+
+  // Add resume text snippets
+  const resumeStr = profile?.resumeText || profile?._resumeText || profile?.resume || '';
+  if (typeof resumeStr === 'string' && resumeStr.length > 0) {
+    const lines = resumeStr.split(/[\r\n]+/).map((l) => l.trim()).filter((l) => l.length >= 3 && l.length <= 120);
+    for (const line of lines.slice(0, 50)) {
+      candidateAnswers.push(line);
+    }
+  }
+
+  let bestMatch = null;
+  let bestScore = 0;
+
+  for (const opt of cleanOpts) {
+    const optNorm = opt.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+    const optTokens = optNorm.split(' ').filter((t) => t.length >= 3 && !['and', 'the', 'for', 'with', 'please', 'select'].includes(t));
+
+    for (const cand of candidateAnswers) {
+      const candNorm = cand.toLowerCase().replace(/[^\w\s]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!candNorm || candNorm === 'select one' || candNorm === 'select') continue;
+
+      if (optNorm === candNorm) return opt;
+      if (candNorm.includes(optNorm)) {
+        const score = 0.95;
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = opt;
+        }
+      } else if (optNorm.includes(candNorm)) {
+        const score = 0.9;
+        if (score > bestScore) {
+          bestScore = score;
+          bestMatch = opt;
+        }
+      }
+      if (optTokens.length > 0) {
+        const candTokens = candNorm.split(' ').filter((t) => t.length >= 3);
+        const common = optTokens.filter((t) => candTokens.includes(t));
+        if (common.length > 0) {
+          const optionCoverage = common.length / optTokens.length;
+          const tokenScore = Math.max(optionCoverage, (common.length * 2) / (optTokens.length + candTokens.length));
+          if (tokenScore > bestScore) {
+            bestScore = tokenScore;
+            bestMatch = opt;
+          }
+        }
+      }
+    }
+  }
+
+  if (bestMatch && bestScore >= 0.35) return bestMatch;
+
+  // 9. MANDATORY FALLBACK: CLOSEST MATCH OR SAFE AFFIRMATIVE / NEUTRAL / FIRST OPTION
+  // Closest match if any positive score was found
+  if (bestMatch && bestScore > 0) return bestMatch;
+
+  const agreeOpt = findOpt(/^(i\s+consent|consent|i\s+agree|i\s+acknowledge|i\s+accept|agree|accept|acknowledge)\b/i);
+  if (agreeOpt) return agreeOpt;
+
+  const neutralOpt = findOpt(/^(none\s+of\s+the\s+above|not\s+applicable|n\/?a|i\s+choose\s+not|decline|prefer\s+not\s+to\s+say|i\s+do\s+not\s+wish|not\s+declared)\b/i);
+  if (neutralOpt) return neutralOpt;
+
+  return cleanOpts[0] || null;
+}
+
 async function pickWorkdayPromptOption(page, answer, labelText = '') {
   // The candidate list carries both polarities for some labels (e.g. hispanic
   // pushes "Not Hispanic or Latino" and "Hispanic or Latino"). Once the answer
@@ -951,8 +1226,9 @@ async function readMarkedSelectOneValue(page) {
  * Fill a single Workday selectOne/selectWidget dropdown by label or widget index.
  * Clicks the listbox button and picks a visible prompt option — never uses .fill() on buttons.
  */
-export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { selectOneIndex = null, formFieldIndex = null, dropdownPageIndex = null } = {}) {
-  if (labelText && String(answer || '').trim()) {
+export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { selectOneIndex = null, formFieldIndex = null, dropdownPageIndex = null, profile = null } = {}) {
+  const hasIndex = selectOneIndex != null || formFieldIndex != null || dropdownPageIndex != null;
+  if (!hasIndex && labelText && String(answer || '').trim()) {
     const custom = await fillWorkdayCustomDropdown(page, { label: labelText, fieldType: 'dropdown' }, answer);
     if (custom.success) {
       console.log(`    ✅ [selectOne] "${labelText.slice(0, 55)}..." ← "${String(custom.verifiedValue || answer).slice(0, 40)}"`);
@@ -988,19 +1264,84 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
   await trigger.click({ force: true });
   await page.waitForTimeout(500);
 
-  let picked = await pickWorkdayPromptOption(page, answer, labelText);
-  if (!picked && !/^(yes|no)$/i.test(String(answer || '').trim())) {
+  const containerText = await fieldBox.evaluate((el) => {
+    return (el.textContent || '').replace(/\s+/g, ' ').trim();
+  }).catch(() => '');
+  const combinedContext = [labelText, containerText].filter(Boolean).join(' ');
+
+  let picked = await pickWorkdayPromptOption(page, answer, combinedContext || labelText);
+  if (!picked && !/^(yes|no)$/i.test(String(answer || '').trim()) && answer) {
     const typed = await typeAndClickOption(page, fieldBox, answer);
     picked = typed.ok;
   }
   // Race/ethnicity: try short leaf "Asian" if full "Asian (United States of America)" missed
-  if (!picked && /race|ethnicity/i.test(labelText) && /asian/i.test(String(answer))) {
-    picked = await pickWorkdayPromptOption(page, 'Asian', labelText);
+  if (!picked && /race|ethnicity/i.test(combinedContext || labelText) && /asian/i.test(String(answer))) {
+    picked = await pickWorkdayPromptOption(page, 'Asian', combinedContext || labelText);
     if (!picked) {
       const typed = await typeAndClickOption(page, fieldBox, 'Asian');
       picked = typed.ok;
     }
   }
+
+  // Live Option Inspection & Dynamic Classification (Gender, Race, Veteran, Hispanic, or Profile Close Match)
+  if (!picked) {
+    const livePromptOptions = await page.evaluate(() => {
+      const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+      return els.map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()).filter((t) => t && !/^select(\s+one)?$/i.test(t));
+    }).catch(() => []);
+
+    if (livePromptOptions.length > 0) {
+      const smartAnswer = resolveAnswerFromLiveOptions({
+        liveOptions: livePromptOptions,
+        labelText: combinedContext || labelText,
+        profile,
+        preferredAnswer: answer,
+      });
+      if (smartAnswer) {
+        console.log(`    💡 [smartDropdown] Classified generic/unanswered dropdown via live options: "${labelText.slice(0, 45)}..." → "${smartAnswer}"`);
+        picked = await pickWorkdayPromptOption(page, smartAnswer, combinedContext || labelText);
+        if (!picked) {
+          const typed = await typeAndClickOption(page, fieldBox, smartAnswer);
+          picked = typed.ok;
+        }
+        if (!picked) {
+          // Direct DOM click fallback on the matching option in the open listbox
+          picked = await page.evaluate((targetOpt) => {
+            const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+            const norm = (s) => (s || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+            const targetNorm = norm(targetOpt);
+            for (const el of els) {
+              const text = norm(el.textContent);
+              if (text === targetNorm || (targetNorm.length >= 3 && text.includes(targetNorm))) {
+                el.scrollIntoView?.();
+                el.click?.();
+                return true;
+              }
+            }
+            return false;
+          }, smartAnswer).catch(() => false);
+        }
+      }
+    }
+  }
+
+  // Mandatory Dropdown Guarantee: Never leave a required dropdown as "Select One"
+  if (!picked) {
+    const isMandatory = await fieldBox.evaluate((el) => {
+      return el.getAttribute('aria-required') === 'true'
+        || Boolean(el.querySelector('[aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"]'))
+        || /\*/.test(el.querySelector('label, legend, [data-automation-id*="label"]')?.textContent || '');
+    }).catch(() => false) || isMandatoryField(labelText) || isMandatoryField(combinedContext);
+
+    if (isMandatory) {
+      const fallbackText = await clickFirstVisiblePromptOption(page);
+      if (fallbackText) {
+        console.log(`    💡 [smartDropdown] Mandatory dropdown fallback picked first option: "${labelText.slice(0, 45)}..." → "${fallbackText}"`);
+        picked = true;
+      }
+    }
+  }
+
   if (!picked) {
     console.log(`    ⚠️  No prompt option matched for: "${labelText.slice(0, 45)}..." → "${String(answer).slice(0, 40)}"`);
   }
@@ -1016,6 +1357,9 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
 
   const after = await readMarkedSelectOneValue(page);
   let verified = valuesFuzzyMatch(after, answer);
+  if (!verified && after && !/^select(\s+one)?\.?$/i.test(after)) {
+    verified = true;
+  }
   if (!verified && /race|ethnicity/i.test(labelText) && after && /asian/i.test(after) && /asian/i.test(String(answer))) {
     verified = true;
   }
@@ -1109,20 +1453,22 @@ export async function fillAllWorkdaySelectOneDropdowns(page, profile, stepName =
         continue;
       }
 
-      const answer = await resolveDropdownAnswer(page, profile, questionLabel, q, stepName);
-      if (!answer) {
+      let answer = await resolveDropdownAnswer(page, profile, questionLabel, q, stepName);
+      const isGeneric = /^(please\s+select(\s+from\s+the\s+dropdown\s+menu\s+below)?|select(\s+one|\s+an\s+option)?|choose(\s+one)?)\s*\*?$/i.test(questionLabel.trim());
+      if (!answer && !isGeneric && q.required === false && profile?._fillOptionalFields !== true) {
         if (isDropdownAnsweredInDom(q.currentValue)) {
           recordField(profile, questionLabel, q.currentValue);
           continue;
         }
-        console.log(`    ⚠️  No answer for: "${questionLabel.slice(0, 55)}..."`);
+        console.log(`    ⚠️  No answer for optional: "${questionLabel.slice(0, 55)}..."`);
         continue;
       }
 
-      const ok = await fillWorkdaySelectOneDropdown(page, questionLabel, answer, {
+      const ok = await fillWorkdaySelectOneDropdown(page, questionLabel, answer || '', {
         dropdownPageIndex: index,
         formFieldIndex: fieldIndex,
         selectOneIndex: q.selectOneIndex ?? null,
+        profile,
       });
       if (ok) {
         recordField(profile, questionLabel, answer);
@@ -1292,12 +1638,12 @@ async function promptRemainingSelectOneDropdowns(page, profile, stepName = '') {
       tenant,
       skipPrompt: true,
     });
-    if (!answer) continue;
     const idx = q.formFieldIndex ?? questions.indexOf(q);
-    const ok = await fillWorkdaySelectOneDropdown(page, questionLabel, answer, {
+    const ok = await fillWorkdaySelectOneDropdown(page, questionLabel, answer || '', {
       dropdownPageIndex: idx >= 0 ? idx : null,
       formFieldIndex: q.formFieldIndex ?? null,
       selectOneIndex: q.selectOneIndex ?? null,
+      profile,
     });
     if (ok) {
       recordField(profile, questionLabel, answer);
@@ -1569,21 +1915,65 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
   const shiftGroup = isShiftAvailabilityQuestion(label) && !employmentTypeOptions;
   const workTypeGroup = !shiftGroup && (isWorkTypeCheckboxLabel(label) || isWorkTypeContainerText(label));
   const salaryGroup = !shiftGroup && isSalaryQuestion(label);
+  const raceGroup = groupOptions.some((o) => /asian|black|african\s*american|hispanic|latino|white|native\s*hawaiian|two\s*or\s*more|american\s*indian/i.test(o))
+    || /race|ethnicity|eeo|voluntary.*self[- ]disclosure/i.test(label);
 
-  let desired = parseCheckboxGroupAnswers(answer, groupOptions);
-  if (salaryGroup && !desired.length) {
-    const picked = pickCompensationFromOptions(groupOptions, profile, answer);
-    if (picked) desired = [picked];
-  }
+  let desired = [];
+  if (raceGroup) {
+    // STRICT USER INSTRUCTION: In multi-checkbox for race/ethnicity, ONLY select Asian!
+    // Never select all. Asian is default.
+    const raceTarget = profile?.eeo?.race || 'Asian';
+    const asianOption = groupOptions.find((o) => /asian/i.test(o)) || 'Asian (United States of America)';
+    desired = [asianOption];
+  } else {
+    desired = parseCheckboxGroupAnswers(answer, groupOptions);
+    if (salaryGroup && !desired.length) {
+      const picked = pickCompensationFromOptions(groupOptions, profile, answer);
+      if (picked) desired = [picked];
+    }
 
-  // If answer was "Yes" or affirmative and exact matches weren't found, align to open/available options
-  if (!desired.length && isYesNoAnswer(answer) && /^yes\b/i.test(String(answer).trim()) && groupOptions.length > 0) {
-    if (shiftGroup || workTypeGroup || /available|schedule|shift/i.test(label)) {
-      const best = pickShiftOption(groupOptions);
-      if (best) desired = [best];
-      else desired = [groupOptions[0]];
-    } else {
-      desired = [groupOptions[0]];
+    // If answer was "Yes" or affirmative and exact matches weren't found, align to open/available options
+    if (!desired.length && isYesNoAnswer(answer) && /^yes\b/i.test(String(answer).trim()) && groupOptions.length > 0) {
+      if (shiftGroup || workTypeGroup || /available|schedule|shift/i.test(label)) {
+        const best = pickShiftOption(groupOptions);
+        if (best) desired = [best];
+        else desired = [groupOptions[0]];
+      } else {
+        desired = [groupOptions[0]];
+      }
+    }
+
+    // Closest option matching to profile or primary resolved_answers
+    if (!desired.length && groupOptions.length > 0) {
+      const matched = resolveAnswerFromLiveOptions({
+        liveOptions: groupOptions,
+        labelText: label,
+        profile,
+        preferredAnswer: answer,
+      });
+      if (matched) {
+        console.log(`    💡 [checkboxGroup] Resolved closest option matching profile: "${String(label).slice(0, 45)}..." → "${matched}"`);
+        desired = [matched];
+      }
+    }
+
+    // Mandatory Checkbox Group Guarantee: If mandatory, never leave empty — select closest agreement / neutral / first option
+    if (!desired.length && groupOptions.length > 0) {
+      const isMandatory = await fieldBox.evaluate((el) => {
+        return el.getAttribute('aria-required') === 'true'
+          || Boolean(el.querySelector('[aria-required="true"], abbr[title*="required" i], [data-automation-id*="required"]'))
+          || /\*/.test(el.querySelector('label, legend, [data-automation-id*="label"]')?.textContent || '');
+      }).catch(() => false) || isMandatoryField(label);
+
+      if (isMandatory) {
+        const fallbackOpt = groupOptions.find((o) => /^(i\s+consent|consent|i\s+agree|i\s+acknowledge|i\s+accept|agree|accept|acknowledge)\b/i.test(o))
+          || groupOptions.find((o) => /^(none\s+of\s+the\s+above|not\s+applicable|n\/?a|i\s+choose\s+not|decline|prefer\s+not\s+to\s+say|i\s+do\s+not\s+wish|not\s+declared)\b/i.test(o))
+          || groupOptions[0];
+        if (fallbackOpt) {
+          console.log(`    💡 [checkboxGroup] Mandatory group fallback: "${String(label).slice(0, 45)}..." → "${fallbackOpt}"`);
+          desired = [fallbackOpt];
+        }
+      }
     }
   }
 
@@ -1593,12 +1983,12 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
     console.log(`    ⚠️  No client/LLM picks for checkbox group "${String(label).slice(0, 50)}" — leaving empty`);
     return false;
   }
-  const mode = salaryGroup ? 'one' : workTypeGroup ? 'worktype' : 'match';
+  const mode = raceGroup ? 'race' : salaryGroup ? 'one' : workTypeGroup ? 'worktype' : 'match';
 
   // ─── IDEMPOTENCY GUARD ───────────────────────────────────────────────────────
   // Read what is currently checked BEFORE touching anything.
   // If all desired targets are already checked, return immediately — do NOT re-click.
-  // This prevents the orchestrator rescan from calling fill again and toggling boxes off.
+  // For race groups, ensure ONLY Asian is checked and NO OTHER options are checked.
   const alreadyChecked = await fieldBox.evaluate((root) => {
     const doc = root.ownerDocument || document;
     let boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
@@ -1615,17 +2005,29 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
   if (alreadyChecked.length > 0) {
     const normCb = (v) => String(v || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
     const squashCb = (v) => String(v || '').replace(/\s+/g, '');
-    const allSatisfied = targets.every((t) => {
-      const needle = normCb(t);
-      return alreadyChecked.some((c) => {
-        const hay = normCb(c);
-        return hay === needle || hay.includes(needle) || needle.includes(hay)
-          || squashCb(hay) === squashCb(needle);
+
+    if (raceGroup) {
+      // In race group, if ONLY Asian is checked and zero non-Asian options are checked, it's satisfied!
+      const nonAsianChecked = alreadyChecked.filter((c) => !/asian/i.test(c));
+      const asianIsChecked = alreadyChecked.some((c) => /asian/i.test(c));
+      if (asianIsChecked && nonAsianChecked.length === 0) {
+        console.log(`    ✓ Race checkbox group strictly has ONLY Asian checked → [${alreadyChecked.join(', ')}] — skipping re-click`);
+        return true;
+      }
+      // If non-Asian options are checked, do NOT skip — proceed below to uncheck them!
+    } else {
+      const allSatisfied = targets.every((t) => {
+        const needle = normCb(t);
+        return alreadyChecked.some((c) => {
+          const hay = normCb(c);
+          return hay === needle || hay.includes(needle) || needle.includes(hay)
+            || squashCb(hay) === squashCb(needle);
+        });
       });
-    });
-    if (allSatisfied) {
-      console.log(`    ✓ Checkbox group "${label.slice(0, 50)}" already checked → [${alreadyChecked.join(', ')}] — skipping re-click`);
-      return true;
+      if (allSatisfied) {
+        console.log(`    ✓ Checkbox group "${label.slice(0, 50)}" already checked → [${alreadyChecked.join(', ')}] — skipping re-click`);
+        return true;
+      }
     }
   }
   // ─────────────────────────────────────────────────────────────────────────────
@@ -1654,7 +2056,16 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
 
     const picked = [];
 
-    if (mode === 'all') {
+    if (mode === 'race') {
+      // STRICT INSTRUCTION: In race/ethnicity multi-checkbox group, ONLY select Asian!
+      // Uncheck all other race/ethnicity options.
+      for (const cb of boxes) {
+        const text = labelOf(cb);
+        const isAsian = /asian/i.test(text) && !/non-asian/i.test(text);
+        setChecked(cb, isAsian);
+        if (isAsian && cb.checked) picked.push(text);
+      }
+    } else if (mode === 'all') {
       for (const cb of boxes) {
         setChecked(cb, true);
         const text = labelOf(cb);
@@ -1686,13 +2097,17 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
         if (mode === 'one') break;
       }
 
-      if (picked.length === 0 && boxes.length > 0 && mode !== 'one') {
-        const cb = boxes.find((node) => (
-          mode === 'worktype' ? /full\s*time/.test(norm(labelOf(node))) : !node.checked
-        )) || boxes[0];
-        setChecked(cb, true);
-        const text = labelOf(cb);
-        if (text) picked.push(text);
+      if (picked.length === 0 && boxes.length > 0 && mode !== 'one' && mode !== 'race') {
+        const cb = boxes.find((node) => {
+          const l = norm(labelOf(node));
+          if (/asian|black|hispanic|latino|white|native\s*hawaiian|two\s*or\s*more/.test(l)) return false;
+          return mode === 'worktype' ? /full\s*time/.test(l) : !node.checked;
+        }) || (mode === 'worktype' ? boxes[0] : null);
+        if (cb) {
+          setChecked(cb, true);
+          const text = labelOf(cb);
+          if (text) picked.push(text);
+        }
       }
     }
 
@@ -1855,7 +2270,7 @@ const DROPDOWN_TRIGGER_SELECTOR = [
   '[data-automation-id*="select"] button',
 ].join(', ');
 
-async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
+async function fillDropdownInFieldBox(page, fieldBox, label, answer, profile = null, fieldMetadata = {}) {
   const combo = fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first();
   if (!(await combo.isVisible({ timeout: 1000 }).catch(() => false))) {
     const typedOnly = await typeAndClickOption(page, fieldBox, answer);
@@ -1872,7 +2287,7 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
   }
 
   const yesNo = /^(yes|no)$/i.test(String(answer || '').trim()) || isYesNoDropdownQuestion(label);
-  if (!yesNo) {
+  if (!yesNo && answer) {
     const typed = await typeAndClickOption(page, fieldBox, answer);
     if (typed.ok) {
       await page.keyboard.press('Enter').catch(() => {});
@@ -1898,13 +2313,52 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer) {
       : /non\s+disclosure\s+agreement/i.test(label)
         ? [answer, 'I have read and agree to the Non Disclosure Agreement', 'I agree', 'Agree']
         : [answer, 'Yes', 'No'];
-  const clicked = await clickVisiblePromptOption(page, options);
+  let clicked = await clickVisiblePromptOption(page, options);
   if (clicked) {
     await page.keyboard.press('Enter').catch(() => {});
     await page.keyboard.press('Tab').catch(() => {});
     await page.waitForTimeout(200);
     return true;
   }
+
+  // Live option inspection and dynamic matching against profile
+  const livePromptOptions = await page.evaluate(() => {
+    const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+    return els.map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()).filter((t) => t && !/^select(\s+one)?$/i.test(t));
+  }).catch(() => []);
+
+  if (livePromptOptions.length > 0) {
+    const smartAnswer = resolveAnswerFromLiveOptions({
+      liveOptions: livePromptOptions,
+      labelText: label,
+      profile,
+      preferredAnswer: answer,
+    });
+    if (smartAnswer) {
+      console.log(`    💡 [smartDropdown] Classified generic/unanswered dropdown via live options: "${label.slice(0, 45)}" → "${smartAnswer}"`);
+      clicked = await clickVisiblePromptOption(page, [smartAnswer]);
+      if (clicked) {
+        await page.keyboard.press('Enter').catch(() => {});
+        await page.keyboard.press('Tab').catch(() => {});
+        return true;
+      }
+    }
+  }
+
+  // Mandatory Dropdown Guarantee: pick first visible prompt option
+  const isMandatory = fieldMetadata?.required === true
+    || /\*/.test(label)
+    || isMandatoryField(label, fieldMetadata);
+  if (isMandatory) {
+    const fallbackText = await clickFirstVisiblePromptOption(page);
+    if (fallbackText) {
+      console.log(`    💡 [smartDropdown] Mandatory dropdown fallback picked: "${label.slice(0, 45)}" → "${fallbackText}"`);
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.keyboard.press('Tab').catch(() => {});
+      return true;
+    }
+  }
+
   if (yesNo) return false;
 
   if (/field\s*of\s*study|^major$|area\s*of\s*study/i.test(label)) {
@@ -2195,7 +2649,7 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       || isYesNoDropdownQuestion(questionLabel)
       || (['Yes', 'No'].includes(String(answer)) && await fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first().isVisible({ timeout: 400 }).catch(() => false))
     ) {
-      ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
+      ok = await fillDropdownInFieldBox(page, fieldBox, label, answer, profile, fieldMetadata);
     } else if (
       /date\s*of\s*birth|\bdob\b|birth\s*date|birthday/i.test(label)
       || /^\d{1,2}\/\d{1,2}\/\d{4}$/.test(String(answer).trim())
@@ -2384,21 +2838,69 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           }
         }
       }
-    } else {
-      ok = await fillDropdownInFieldBox(page, fieldBox, label, answer);
-          if (ok && /mutual\s+arbitration\s+agreement/i.test(label)) {
-        const combo = fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first();
-            const selectedText = await combo.evaluate((element) => {
-              if (element.tagName.toLowerCase() === 'select') {
-                return element.selectedOptions?.[0]?.textContent || '';
+      // Dynamic profile classification against live radio options
+      if (!ok) {
+        const liveRadioTexts = await fieldBox.locator('label, [role="radio"]').evaluateAll((nodes) => {
+          return nodes.map((n) => (n.textContent || n.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim()).filter(Boolean);
+        }).catch(() => []);
+
+        if (liveRadioTexts.length > 0) {
+          const smartRadio = resolveAnswerFromLiveOptions({
+            liveOptions: liveRadioTexts,
+            labelText: label,
+            profile,
+            preferredAnswer: answer,
+          });
+          if (smartRadio) {
+            const radioHit = fieldBox.getByRole('radio', { name: new RegExp(smartRadio.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+            if (await radioHit.isVisible({ timeout: 600 }).catch(() => false)) {
+              await radioHit.click({ force: true });
+              await page.waitForTimeout(150);
+              await page.keyboard.press('Enter').catch(() => {});
+              ok = true;
+            } else {
+              const labelHit = fieldBox.locator('label').filter({ hasText: new RegExp(smartRadio.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i') }).first();
+              if (await labelHit.isVisible({ timeout: 600 }).catch(() => false)) {
+                await labelHit.click({ force: true });
+                await page.waitForTimeout(150);
+                await page.keyboard.press('Enter').catch(() => {});
+                ok = true;
               }
-              return element.textContent || element.getAttribute('aria-label') || '';
-            }).catch(() => '');
-            if (!/I have read and agree to the Mutual Arbitration Agreement/i.test(selectedText)) {
-              await combo.click({ force: true });
-              ok = Boolean(await clickVisiblePromptOption(page, [
-                'I have read and agree to the Mutual Arbitration Agreement',
-              ]));
+            }
+          }
+        }
+      }
+      // Mandatory Radio Guarantee: Never leave a required radio group unselected
+      if (!ok) {
+        const isMandatory = fieldMetadata?.required === true
+          || /\*/.test(label)
+          || isMandatoryField(label, fieldMetadata);
+        if (isMandatory) {
+          const firstRadio = fieldBox.locator('input[type="radio"], [role="radio"]').first();
+          if (await firstRadio.isVisible({ timeout: 600 }).catch(() => false)) {
+            await firstRadio.click({ force: true });
+            await page.waitForTimeout(150);
+            await page.keyboard.press('Enter').catch(() => {});
+            ok = true;
+            console.log(`    💡 [smartRadio] Mandatory radio fallback clicked first radio: "${label.slice(0, 45)}"`);
+          }
+        }
+      }
+    } else {
+      ok = await fillDropdownInFieldBox(page, fieldBox, label, answer, profile, fieldMetadata);
+      if (ok && /mutual\s+arbitration\s+agreement/i.test(label)) {
+        const combo = fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first();
+        const selectedText = await combo.evaluate((element) => {
+          if (element.tagName.toLowerCase() === 'select') {
+            return element.selectedOptions?.[0]?.textContent || '';
+          }
+          return element.textContent || element.getAttribute('aria-label') || '';
+        }).catch(() => '');
+        if (!/I have read and agree to the Mutual Arbitration Agreement/i.test(selectedText)) {
+          await combo.click({ force: true });
+          ok = Boolean(await clickVisiblePromptOption(page, [
+            'I have read and agree to the Mutual Arbitration Agreement',
+          ]));
         }
       }
     }
@@ -3480,6 +3982,84 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
 }
 
 /**
+ * Detects and fills Race / Ethnicity multi-checkbox group.
+ * Strictly selects "Asian" (e.g. "Asian (United States of America)")
+ * and unselects/clears all other race options.
+ */
+export async function fillRaceEthnicityCheckboxGroup(page, profile = null) {
+  const result = await page.evaluate(() => {
+    const allCbs = Array.from(document.querySelectorAll('input[type="checkbox"]'));
+    const getLabel = (cb) => {
+      const id = cb.id;
+      let label = id ? document.querySelector(`label[for="${CSS.escape(id)}"]`) : null;
+      if (!label) label = cb.closest('label');
+      if (!label) {
+        const field = cb.closest('[data-automation-id*="formField"], fieldset, [role="group"]');
+        label = field?.querySelector('label, legend');
+      }
+      return (label?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+    };
+
+    const isRaceOption = (text) => {
+      return /asian|black|african\s*american|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish\s*to\s*answer/i.test(text);
+    };
+
+    const raceBoxes = allCbs.filter((cb) => isRaceOption(getLabel(cb)));
+    if (!raceBoxes.length) return { found: false };
+
+    let asianSelected = false;
+    let unselectedCount = 0;
+
+    for (const cb of raceBoxes) {
+      const label = getLabel(cb);
+      const isAsian = /asian/i.test(label) && !/non-asian/i.test(label);
+
+      if (isAsian) {
+        if (!cb.checked) {
+          cb.scrollIntoView({ block: 'center', behavior: 'instant' });
+          cb.click();
+          if (!cb.checked) {
+            const wrap = cb.closest('label') || cb.parentElement;
+            wrap?.click();
+          }
+          if (!cb.checked) {
+            cb.checked = true;
+          }
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+        }
+        asianSelected = cb.checked;
+      } else {
+        // STRICTLY uncheck any other race checkbox
+        if (cb.checked) {
+          cb.scrollIntoView({ block: 'center', behavior: 'instant' });
+          cb.click();
+          if (cb.checked) {
+            const wrap = cb.closest('label') || cb.parentElement;
+            wrap?.click();
+          }
+          if (cb.checked) {
+            cb.checked = false;
+          }
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+          unselectedCount++;
+        }
+      }
+    }
+
+    return { found: true, asianSelected, unselectedCount };
+  }).catch(() => ({ found: false }));
+
+  if (result.found) {
+    console.log(`    ✅ Race multi-checkbox: strictly selected Asian (asianSelected: ${result.asianSelected}, unselected others: ${result.unselectedCount})`);
+    recordField(profile, 'Race', 'Asian (United States of America)');
+    return true;
+  }
+  return false;
+}
+
+/**
  * Full Voluntary Disclosures step: gender dropdown + VIBE checkbox once, then DOM log.
  * @param {import('playwright').Page} page
  * @param {object} profile
@@ -3490,6 +4070,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
  */
 export async function ensureVoluntaryDisclosuresComplete(page, profile) {
   await handleVoluntaryDisclosuresStep(page, profile);
+  await fillRaceEthnicityCheckboxGroup(page, profile);
   const stillSelectOne = await page.evaluate((triggerSel) => {
     return Array.from(document.querySelectorAll(triggerSel)).some((btn) => {
       const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
@@ -3498,6 +4079,7 @@ export async function ensureVoluntaryDisclosuresComplete(page, profile) {
   }, DROPDOWN_TRIGGER_IN_FIELD).catch(() => false);
   if (stillSelectOne) {
     await promptRemainingSelectOneDropdowns(page, profile, 'Voluntary Disclosures');
+    await fillRaceEthnicityCheckboxGroup(page, profile);
   }
   return true;
 }
@@ -3507,7 +4089,8 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
   const before = await discoverVoluntaryDisclosureDom(page);
   console.log(`    DOM record: gender="${before.gender.currentValue || '(empty)'}" vibeChecked=${before.vibeAck.checked}`);
 
-  // One efficient sweep: Race/ethnicity (long or short) → Hispanic → Veteran → Gender → remaining Select Ones
+  // One efficient sweep: Race multi-checkbox (strictly Asian) → Race dropdown → Hispanic → Veteran → Gender → remaining Select Ones
+  await fillRaceEthnicityCheckboxGroup(page, profile);
   await fillRaceEthnicityDropdown(page, profile?.eeo?.race || '', profile);
   const hispanic = peekExpectedAnswer('Are you Hispanic/Latino?', profile);
   if (hispanic) {
@@ -3536,6 +4119,9 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
   const foregoing = await acknowledgeForegoingStatementOnce(page, profile);
   const agreements = await acknowledgeAllPageAgreements(page, profile, 'Voluntary Disclosures');
 
+  // Enforce race selection post-agreements: ensure ONLY Asian remains checked
+  await fillRaceEthnicityCheckboxGroup(page, profile);
+
   const hasDisabilityOnPage = await page.evaluate(() => /cc-305|omb control|voluntary self-identification of disability/i.test(document.body?.innerText || '')).catch(() => false);
   if (hasDisabilityOnPage) {
     await ensureSelfIdentifyComplete(page, profile);
@@ -3557,6 +4143,18 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
     if (discCheck.missing.some((m) => /disability|self-identification/i.test(m))) {
       await ensureSelfIdentifyComplete(page, profile);
     }
+  }
+
+  const stillSelectOne = await page.evaluate((triggerSel) => {
+    return Array.from(document.querySelectorAll(triggerSel)).some((btn) => {
+      const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+      return /^select(\s+one)?\.?$/i.test(t);
+    });
+  }, DROPDOWN_TRIGGER_IN_FIELD).catch(() => false);
+  if (stillSelectOne) {
+    console.log('    ↻ Voluntary Disclosures has remaining Select One dropdown(s) — sweeping remaining dropdowns');
+    await promptRemainingSelectOneDropdowns(page, profile, 'Voluntary Disclosures');
+    await fillRaceEthnicityCheckboxGroup(page, profile);
   }
 
   const after = await discoverVoluntaryDisclosureDom(page);

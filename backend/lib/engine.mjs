@@ -2199,7 +2199,8 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       const parentText = (parent?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
       const isReq = cb.required || cb.getAttribute('aria-required') === 'true' || parentText.includes('*');
       const isAgree = /agree|accept|terms|certify|acknowledge|consent|privacy|statement|understand|confirm|declaration/.test(parentText);
-      if (isAgree || isReq) {
+      const isDemographic = /asian|black|african|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish|decline|prefer\s*not/.test(parentText);
+      if (!isDemographic && isAgree) {
         cb.scrollIntoView({ block: 'center', behavior: 'instant' });
         cb.click();
         cb.dispatchEvent(new Event('input', { bubbles: true }));

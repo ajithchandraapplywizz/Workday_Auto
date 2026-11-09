@@ -1034,9 +1034,11 @@ export async function executeWorkerTask({
                 else window.scrollTo(0, 0);
               }).catch(() => {});
               await page.waitForTimeout(400);
-              const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
+              const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
+                .catch(() => page.screenshot({ type: 'jpeg', quality: 90, timeout: 5000 }).catch(() => null));
               if (buf) {
-                authShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_${shotPrefix}.jpg`, buf);
+                const attemptSuffix = currentAttempt ? `_attempt${currentAttempt}` : '';
+                authShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${task.id || Date.now()}${attemptSuffix}_${shotPrefix}.png`, buf, 'image/png');
               }
             }
           } catch {}
@@ -1321,9 +1323,13 @@ export async function executeWorkerTask({
             await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
             await page.waitForTimeout(500).catch(() => {});
           }
-          buf = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 8000 }).catch(() => null);
+          // High-resolution full-page screenshot capture (lossless PNG for sharp text & diagnostics)
+          buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 10000 }).catch(() => null);
           if (!buf) {
-            buf = await page.screenshot({ type: 'jpeg', quality: 85, timeout: 5000 }).catch(() => null);
+            buf = await page.screenshot({ type: 'jpeg', quality: 90, fullPage: true, timeout: 8000 }).catch(() => null);
+          }
+          if (!buf) {
+            buf = await page.screenshot({ type: 'jpeg', quality: 90, timeout: 5000 }).catch(() => null);
           }
         }
           let storagePath = null;
@@ -1348,14 +1354,12 @@ export async function executeWorkerTask({
             storagePath = filename;
           } else {
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
-            // STRICT RULE: If directSubmit is true, only upload on final attempt (Attempt 3):
-            const isSubmissionRetry = Boolean(directSubmit && !isFinalAttempt);
-            if (!isSubmissionRetry) {
-              bucket = 'failed-applications';
-              const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-              filename = `${compPrefix}_${cleanTaskId}_failed_${effectiveStep}_${Date.now()}.png`;
-              storagePath = filename;
-            }
+            // MANDATORY ON ALL ATTEMPTS: Always upload failure screenshot on Attempt 1, Attempt 2, and Attempt 3!
+            bucket = 'failed-applications';
+            const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+            const attemptSuffix = currentAttempt ? `_attempt${currentAttempt}` : '';
+            filename = `${compPrefix}_${cleanTaskId}${attemptSuffix}_failed_${effectiveStep}_${Date.now()}.png`;
+            storagePath = filename;
           }
 
           if (bucket && filename && buf) {
@@ -1882,19 +1886,19 @@ export async function executeWorkerTask({
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         const liveStep = await detectWorkdayStep(page).catch(() => null);
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
-        const isSubmissionRetry = Boolean(isDirectSubmission && !isFinalAttempt);
-        if (!isSubmissionRetry) {
-          const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
-            .catch(() => page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
-          if (buf) {
-            const timestamp = Date.now();
-            const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
-            const cleanTaskId = String(taskId || task.id || timestamp).replace(/["'\\]/g, '').trim();
-            const failStoragePath = `${cleanAwl}_${cleanTaskId}_failed_${timestamp}.png`;
-            errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf, 'image/png');
-            if (errShotUrl) {
-              console.log(`[${workerId}] 3rd attempt failure screenshot uploaded: ${failStoragePath}`);
-            }
+        // MANDATORY: Full-page high-resolution screenshot on ANY failure across Attempt 1, Attempt 2, and Attempt 3!
+        const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 10000 })
+          .catch(() => page.screenshot({ type: 'jpeg', quality: 90, fullPage: true, timeout: 8000 }).catch(() => null))
+          .catch(() => page.screenshot({ type: 'jpeg', quality: 90, timeout: 5000 }).catch(() => null));
+        if (buf) {
+          const timestamp = Date.now();
+          const cleanAwl = String(applywizzId || '').replace(/["'\\]/g, '').trim().toUpperCase();
+          const cleanTaskId = String(taskId || task.id || timestamp).replace(/["'\\]/g, '').trim();
+          const attemptSuffix = currentAttempt ? `_attempt${currentAttempt}` : '';
+          const failStoragePath = `${cleanAwl}_${cleanTaskId}${attemptSuffix}_failed_${timestamp}.png`;
+          errShotUrl = await uploadStorageScreenshot('failed-applications', failStoragePath, buf, 'image/png');
+          if (errShotUrl) {
+            console.log(`[${workerId}] Attempt ${currentAttempt} failure screenshot uploaded: ${failStoragePath}`);
           }
         }
       }
