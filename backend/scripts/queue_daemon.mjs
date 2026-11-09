@@ -868,40 +868,34 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
         break;
       }
 
+      // ── STRICT TERMINATION CHECK: Stop scanner_resolver service when all work is finished ──
       // Check remaining pending items in batch_job_queue
       const { data: pendingJobs } = await supabase
         .from('batch_job_queue')
         .select('id')
-        .in('status', ['pending', 'queued'])
+        .in('status', ['pending', 'queued', 'processing'])
         .limit(1);
 
-      if (!pendingJobs || pendingJobs.length === 0) {
-        console.log(`ℹ️ [DAEMON] [SCANNER] All active batch queue items scanned. Scanner standing by for new incoming jobs...`);
-        const scanWorkersCount = Math.min(PIPELINE_CONFIG.workersCount || 2, 2);
-        for (const wId of PIPELINE_CONFIG.scanWorkerIds.slice(0, scanWorkersCount)) {
-          await updateWorkerStatus(wId, {
-            state: 'running',
-            current_application_id: 'Standing by for new jobs...',
-            stage: 'scanning',
-          }).catch(() => { });
-        }
-        await syncBotControlState({
-          mode: 'scanning',
-          stage: 'scanning',
-          scan_enabled: true,
-          scan_status: 'running',
-          scan_stop_requested: false,
-          is_running: true,
-          current_action: 'All current jobs scanned. Scanner standing by for new jobs...',
-          active_worker_count: scanWorkersCount,
-        });
+      // Check remaining unresolved candidate applications in job_distributions
+      const { data: pendingDistributions } = await supabase
+        .from('job_distributions')
+        .select('id')
+        .in('status', ['pending', 'queued', 'resolving'])
+        .limit(1);
 
-        // Standby polling wait: keep scanner ALIVE without terminating
-        let waitSeconds = 0;
-        while (waitSeconds < 5 && scanStatus === 'running' && !isGlobalStopRequested() && !isScanStopRequested() && !isPoolPaused) {
-          await new Promise((r) => setTimeout(r, 1000));
-          waitSeconds++;
-        }
+      const hasPendingQueue = Array.isArray(pendingJobs) && pendingJobs.length > 0;
+      const hasPendingDist = Array.isArray(pendingDistributions) && pendingDistributions.length > 0;
+
+      if (!hasPendingQueue && !hasPendingDist) {
+        console.log(`\n✅ [DAEMON] [SCANNER & RESOLVER COMPLETE] All batch_job_queue links finalized (scanned/expired/failed) and all job_distributions reached ready_for_review.`);
+        console.log(`🛑 [DAEMON] Strictly stopping scanner_resolver service now to save CPU, RAM, memory, and network bandwidth.`);
+        scanCompleteMessage = 'Scan & Resolve complete: all unique links finalized and ready for review.';
+        break;
+      }
+
+      if (!hasPendingQueue) {
+        console.log(`ℹ️ [DAEMON] [SCANNER] All batch queue links scanned. Waiting for resolver to finish remaining distributions...`);
+        await new Promise((r) => setTimeout(r, 2000));
       } else {
         // Brief pause before picking up next batch
         await new Promise((r) => setTimeout(r, 1500));

@@ -1136,9 +1136,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           const ctx = getWorkerContext(workerId);
 
-          // STRICT RULE: Only capture and upload failure screenshot strictly on 3rd attempt
-
-          if (isFinalAttempt && ctx?.page && !ctx.page.isClosed()) {
+          // Strictly capture and upload failure screenshot on ANY attempt where failure/timeout occurs
+          if (ctx?.page && !ctx.page.isClosed()) {
 
             const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
 
@@ -1152,9 +1151,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
               const timestamp = Date.now();
 
-              // Zero nested folders: flat filename directly in root of failed-applications
-
-              shotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
+              shotPath = `${compPrefix}_${task.id}_attempt${currentAttempt}_failed_${timestamp}.png`;
 
               const { error: upErr } = await supabase.storage
 
@@ -1172,7 +1169,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
                 shotUrl = urlData?.publicUrl || null;
 
-                console.log(`[${workerId}] 3rd attempt failure screenshot uploaded: ${shotPath}`);
+                console.log(`[${workerId}] Attempt ${currentAttempt} failure screenshot uploaded: ${shotPath}`);
 
               }
 
@@ -1545,7 +1542,35 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
       if (currentAttempt < 3 && !isFatalNonRetryable) {
 
-        // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY (DO NOT mark failed, revert strictly to ready_for_review)
+        // Attempts 1 and 2: STRICT PROGRESSIVE RETRY POLICY
+        // Strictly capture and save failure screenshot for Attempt 1 / Attempt 2
+        if (!finalShotUrl) {
+          try {
+            const ctx = getWorkerContext(workerId);
+            if (ctx?.page && !ctx.page.isClosed()) {
+              const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+              if (buf) {
+                const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+                const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+                const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
+                const timestamp = Date.now();
+                const shotPath = `${compPrefix}_${task.id}_attempt${currentAttempt}_failed_${timestamp}.png`;
+                const { error: upErr } = await supabase.storage
+                  .from('failed-applications')
+                  .upload(shotPath, buf, { contentType: 'image/png', upsert: true });
+                if (!upErr) {
+                  const { data: urlData } = supabase.storage
+                    .from('failed-applications')
+                    .getPublicUrl(shotPath);
+                  finalShotUrl = urlData?.publicUrl || null;
+                  console.log(`[${workerId}] Attempt ${currentAttempt} failure screenshot uploaded: ${shotPath}`);
+                }
+              }
+            }
+          } catch (fShotErr) {
+            console.warn(`[${workerId}] Attempt ${currentAttempt} screenshot capture error:`, fShotErr.message);
+          }
+        }
 
         const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
 
@@ -1562,6 +1587,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         console.log(`   • Halted At Step: ${failedStep}`);
 
         console.log(`   • Reason: ${rawErrMsg}`);
+
+        console.log(`   • Screenshot Updated: ${finalShotUrl || 'None'}`);
 
         console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'ready_for_review'`);
 
@@ -1589,7 +1616,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
             error_message: retryMsg,
 
-            application_submitted_screenshot_url: null,
+            application_submitted_screenshot_url: finalShotUrl,
 
             updated_at: now,
 
@@ -1787,59 +1814,54 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-    // STRICT RULE: Capture and upload screenshot ONLY strictly on 3rd attempt
+    // Strictly capture and upload failure screenshot on ANY attempt where exception occurs
+    try {
 
-    if (isFinalAttempt) {
+      const ctx = getWorkerContext(workerId);
 
-      try {
+      if (ctx?.page && !ctx.page.isClosed()) {
 
-        const ctx = getWorkerContext(workerId);
+        const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
 
-        if (ctx?.page && !ctx.page.isClosed()) {
+        if (buf) {
 
-          const buf = await ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null);
+          const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
 
-          if (buf) {
+          const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
 
-            const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+          const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
 
-            const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+          const timestamp = Date.now();
 
-            const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
+          errShotPath = `${compPrefix}_${task.id}_attempt${currentAttempt}_failed_${timestamp}.png`;
 
-            const timestamp = Date.now();
+          const { error: upErr } = await supabase.storage
 
-            errShotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
+            .from('failed-applications')
 
-            const { error: upErr } = await supabase.storage
+            .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
+
+          if (!upErr) {
+
+            const { data: urlData } = supabase.storage
 
               .from('failed-applications')
 
-              .upload(errShotPath, buf, { contentType: 'image/png', upsert: true });
+              .getPublicUrl(errShotPath);
 
-            if (!upErr) {
+            errShotUrl = urlData?.publicUrl || null;
 
-              const { data: urlData } = supabase.storage
-
-                .from('failed-applications')
-
-                .getPublicUrl(errShotPath);
-
-              errShotUrl = urlData?.publicUrl || null;
-
-              console.log(`[${workerId}] 3rd attempt exception screenshot uploaded: ${errShotPath}`);
-
-            }
+            console.log(`[${workerId}] Attempt ${currentAttempt} exception screenshot uploaded: ${errShotPath}`);
 
           }
 
         }
 
-      } catch (catchShotErr) {
-
-        console.warn(`[${workerId}] Exception screenshot capture error:`, catchShotErr.message);
-
       }
+
+    } catch (catchShotErr) {
+
+      console.warn(`[${workerId}] Exception screenshot capture error:`, catchShotErr.message);
 
     }
 
@@ -1895,7 +1917,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           error_message: retryMsg,
 
-          application_submitted_screenshot_url: null,
+          application_submitted_screenshot_url: errShotUrl,
 
           updated_at: now,
 

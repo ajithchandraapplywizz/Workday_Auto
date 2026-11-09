@@ -21,8 +21,8 @@ test('getSubmissionAttemptCount correctly parses progressive attempt numbers', (
   assert.equal(getSubmissionAttemptCount('[Attempt 3/3 Failed at "Review & Submit"]: Submit button not clickable'), 3);
 });
 
-test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_review, Attempt 3 marks failed', () => {
-  const evaluateAttempt = (prevErrorMessage, failureReason, failedStep) => {
+test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_review, Attempt 3 marks failed, screenshots captured across all attempts', () => {
+  const evaluateAttempt = (prevErrorMessage, failureReason, failedStep, shotUrl = null) => {
     const prevAttempts = getSubmissionAttemptCount(prevErrorMessage);
     const currentAttempt = prevAttempts + 1;
     const isFinal = currentAttempt >= 3;
@@ -33,7 +33,7 @@ test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_rev
         status: 'ready_for_review',
         isFinal: false,
         errorMessage: `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${failureReason}`,
-        screenshotRequired: false,
+        application_submitted_screenshot_url: shotUrl,
       };
     } else {
       return {
@@ -41,34 +41,37 @@ test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_rev
         status: 'failed',
         isFinal: true,
         errorMessage: `[Attempt 3/3 Failed at "${failedStep}"]: ${failureReason}`,
-        screenshotRequired: true,
+        application_submitted_screenshot_url: shotUrl,
       };
     }
   };
 
-  // Attempt 1: 0 previous attempts -> Attempt 1/3 fails
-  const attempt1 = evaluateAttempt(null, 'Timeout on Next button', 'My Information');
+  // Attempt 1: 0 previous attempts -> Attempt 1/3 fails, captures Attempt 1 screenshot
+  const shot1 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-1_comp_task1_attempt1_failed.png';
+  const attempt1 = evaluateAttempt(null, 'Timeout on Next button', 'My Information', shot1);
   assert.equal(attempt1.currentAttempt, 1);
   assert.equal(attempt1.status, 'ready_for_review', 'Attempt 1 MUST NOT be marked failed');
   assert.equal(attempt1.isFinal, false);
-  assert.equal(attempt1.screenshotRequired, false, 'Attempt 1 MUST NOT submit failure screenshot');
+  assert.equal(attempt1.application_submitted_screenshot_url, shot1, 'Attempt 1 failure screenshot must be saved');
   assert.ok(attempt1.errorMessage.includes('[Attempt 1/3]'));
   assert.ok(attempt1.errorMessage.includes('My Information'));
 
-  // Attempt 2: 1 previous attempt -> Attempt 2/3 fails
-  const attempt2 = evaluateAttempt(attempt1.errorMessage, 'Field postal code invalid', 'My Information');
+  // Attempt 2: 1 previous attempt -> Attempt 2/3 fails, replaces cell with Attempt 2 screenshot
+  const shot2 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-1_comp_task1_attempt2_failed.png';
+  const attempt2 = evaluateAttempt(attempt1.errorMessage, 'Field postal code invalid', 'My Information', shot2);
   assert.equal(attempt2.currentAttempt, 2);
   assert.equal(attempt2.status, 'ready_for_review', 'Attempt 2 MUST NOT be marked failed');
   assert.equal(attempt2.isFinal, false);
-  assert.equal(attempt2.screenshotRequired, false, 'Attempt 2 MUST NOT submit failure screenshot');
+  assert.equal(attempt2.application_submitted_screenshot_url, shot2, 'Attempt 2 failure screenshot must replace Attempt 1');
   assert.ok(attempt2.errorMessage.includes('[Attempt 2/3]'));
 
-  // Attempt 3: 2 previous attempts -> Attempt 3/3 fails (Strict final attempt)
-  const attempt3 = evaluateAttempt(attempt2.errorMessage, 'Application wizard stalled', 'Application Questions');
+  // Attempt 3: 2 previous attempts -> Attempt 3/3 fails, replaces cell with Attempt 3 screenshot and marks failed
+  const shot3 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-1_comp_task1_attempt3_failed.png';
+  const attempt3 = evaluateAttempt(attempt2.errorMessage, 'Application wizard stalled', 'Application Questions', shot3);
   assert.equal(attempt3.currentAttempt, 3);
   assert.equal(attempt3.status, 'failed', 'Attempt 3 MUST be marked failed');
   assert.equal(attempt3.isFinal, true);
-  assert.equal(attempt3.screenshotRequired, true, 'Attempt 3 MUST capture and submit diagnostic screenshot');
+  assert.equal(attempt3.application_submitted_screenshot_url, shot3, 'Attempt 3 final failure screenshot must replace previous');
   assert.ok(attempt3.errorMessage.includes('[Attempt 3/3 Failed at "Application Questions"]'));
 });
 
