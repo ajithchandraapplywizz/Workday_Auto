@@ -990,6 +990,12 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return st === 'submitted' || st === 'completed' || st === 'already_applied';
     }).length;
 
+    // Authentic submitted strictly without already_applied
+    const submittedOnly = allApps.filter((a) => {
+      const st = (a.status || '').toLowerCase();
+      return st === 'submitted' || st === 'completed';
+    }).length;
+
     // 2. Applying: strictly direct sync to database status ('applying', 'in_flight', 'in_progress', 'started')
     const applying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
@@ -1056,6 +1062,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       success: true,
       total: allApps.length,
       submitted,
+      submittedOnly,
       applying,
       failed,
       queued,
@@ -1073,6 +1080,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       success: false,
       total: 0,
       submitted: 0,
+      submittedOnly: 0,
       applying: 0,
       failed: 0,
       queued: 0,

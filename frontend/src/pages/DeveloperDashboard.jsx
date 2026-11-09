@@ -146,8 +146,16 @@ export default function DeveloperDashboard() {
       }
 
       if (kpiRes.success) {
+        // Disconnect already_applied from Dev Dashboard: strictly count authentic submitted applications
+        const authenticSubmitted = (kpiRes.submittedOnly !== undefined)
+          ? kpiRes.submittedOnly
+          : (appsRes.applications || []).filter((a) => {
+              const st = (a.status || '').toLowerCase();
+              return st === 'submitted' || st === 'completed';
+            }).length;
+
         setKpis({
-          submitted: kpiRes.submitted,
+          submitted: authenticSubmitted,
           applying: kpiRes.applying,
           failed: kpiRes.failed,
           queued: kpiRes.queued,
@@ -156,7 +164,11 @@ export default function DeveloperDashboard() {
       }
 
       if (appsRes.success) {
-        setApplications(appsRes.applications || []);
+        // Remove already_applied and its connection from Dev Dashboard applications
+        const cleanApps = (appsRes.applications || []).filter(
+          (a) => (a.status || '').toLowerCase() !== 'already_applied'
+        );
+        setApplications(cleanApps);
       }
 
       if (queueRes.success) {
@@ -392,11 +404,11 @@ export default function DeveloperDashboard() {
   // Filtered runs for Runs tab
   const filteredRuns = useMemo(() => {
     return applications.filter((app) => {
+      const st = (app.status || '').toLowerCase();
+      if (st === 'already_applied') return false;
       if (statusFilter === 'All') return true;
       const s = statusFilter.toLowerCase();
-      const st = (app.status || '').toLowerCase();
       if (s === 'submitted') return st === 'submitted' || st === 'completed';
-      if (s === 'already_applied') return st === 'already_applied';
       if (s === 'applying' || s === 'in_progress') return ['applying', 'in_flight', 'in_progress', 'started'].includes(st);
       return st === s;
     });
@@ -2360,7 +2372,6 @@ export default function DeveloperDashboard() {
               <option value="applying">Applying (In Progress)</option>
               <option value="ready_for_review">Ready For Review</option>
               <option value="submitted">Submitted</option>
-              <option value="already_applied">Already Applied</option>
               <option value="failed">Failed</option>
               <option value="skipped">Skipped</option>
             </select>

@@ -1,18 +1,18 @@
 # Pre-Push Evaluation Gate Report
 
-- **Date**: 2026-10-28T15:49:20.268Z
-- **Branch**: `ajithchandralatestworkdaycompleteupdation`
+- **Date**: 2026-11-08T18:22:52.655Z
+- **Branch**: `100-percent-tested-production`
 - **Evaluation Mode**: `branch`
 - **Merge Base**: `ef5794bbbc6709e9105cb10d133903dfdf3af427`
-- **Files Checked**: `407`
-- **Duration**: `464.45s`
-- **Overall Status**: **FAILED ❌**
+- **Files Checked**: `474`
+- **Duration**: `4577.76s`
+- **Overall Status**: **PASSED WITH WARNINGS ⚠️**
 
 ## Evaluation Summary
 
 | Check | Status | Summary |
 |---|---|---|
-| **git-state** | ❌ FAIL | Git repository state violations found |
+| **git-state** | ✅ PASS | Branch '100-percent-tested-production' state clean |
 | **paths-and-size** | ✅ PASS | All paths and file sizes within limits |
 | **secrets** | ✅ PASS | No unredacted secrets found in changed code |
 | **code-patterns** | ✅ PASS | Clean code patterns; no anti-patterns found |
@@ -20,15 +20,12 @@
 | **imports** | ✅ PASS | All imports valid, extensions present, and case-sensitive |
 | **migrations** | ⚠️ WARN | 6 migration issue(s) detected |
 | **dependencies** | ✅ PASS | Dependencies and lockfile in sync |
-| **smoke-import** | ✅ PASS | 37 module(s) evaluated cleanly on import |
+| **smoke-import** | ✅ PASS | 55 module(s) evaluated cleanly on import |
 | **lint** | ✅ PASS | Project lint checks passed |
 | **tests** | ✅ PASS | Unit test suite passed cleanly |
 | **build** | ✅ PASS | Frontend Vite build compiled successfully |
 
 ## Detailed Findings
-
-### GIT-STATE (FAIL)
-- Working tree has uncommitted changes (M scripts/precheck/precheck.config.json, M scripts/precheck/precheck.mjs). Stash or commit before pushing to ensure clean evaluation.
 
 ### MIGRATIONS (WARN)
 - Duplicate migration number prefix '029' in backend/supabase-migrations: 029_add_client_count_to_failed_jobs.sql and 029_ca_submission_tasks_phase1_migration.sql

@@ -2,6 +2,7 @@
 
 ## Current Sprint / Focus
 Implemented centralized architectural fixes for Workday automation pipeline:
+- Removed `already_applied` label and its connection from Dev Dashboard (`DeveloperDashboard.jsx`): removed the dropdown filter option `<option value="already_applied">Already Applied</option>`, excluded `already_applied` rows from Dev Dashboard applications list and Runs tab filtering, and disconnected `already_applied` from Dev Dashboard's `SUBMITTED` KPI counter so it strictly counts authentic `submitted` / `completed` applications.
 0. Fixed `job_distributions` terminal status overwrite bug in `backend/lib/supabaseClient.mjs`: added status guard in `recordJobDistributions` so existing `submitted`, `completed`, `already_applied`, or `applying` rows and their screenshot URLs are strictly preserved when re-distributing a scanned job, preventing the dashboard Submitted counter from resetting.
 1. Fixed `qa_bank` Supabase 409 duplicate key conflict on `(tenant, normalized_question)` by aligning PostgREST `on_conflict=tenant,normalized_question` in `backend/lib/masterYamlManager.mjs` and `backend/lib/supabaseClient.mjs`, deduplicating rows on `(tenant, normalized_question)`, and adding row-by-row fallback.
 2. Created migration `051_align_qa_bank_unique_constraint.sql` ensuring `qa_bank_tenant_question_unique` is active and dropping legacy constraints.
