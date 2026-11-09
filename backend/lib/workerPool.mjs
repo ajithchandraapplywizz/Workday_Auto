@@ -593,10 +593,10 @@ export async function executeWorkerTask({
           updated_at: now,
         };
         if (distId) {
-          await supabase.from('job_distributions').update(distPatch).eq('id', distId).catch(() => {});
+          await supabase.from('job_distributions').update(distPatch).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
         }
         if (applywizzId && jobUrl) {
-          await supabase.from('job_distributions').update(distPatch).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
+          await supabase.from('job_distributions').update(distPatch).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
         }
       }
 
@@ -675,7 +675,7 @@ export async function executeWorkerTask({
                 error_message: null,
                 application_submitted_screenshot_url: alreadyShotUrl,
                 updated_at: now,
-              }).eq('id', distId).catch(() => {});
+              }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
             }
           }
 
@@ -865,7 +865,7 @@ export async function executeWorkerTask({
               error_message: 'Application already submitted on Workday',
               application_submitted_screenshot_url: alreadyShotUrl,
               updated_at: now,
-            }).eq('id', distId).catch(() => {});
+            }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
           }
         }
 
@@ -1055,7 +1055,7 @@ export async function executeWorkerTask({
                 error_message: failReasonText,
                 application_submitted_screenshot_url: authShotUrl,
                 updated_at: new Date().toISOString(),
-              }).eq('id', distId).catch(() => {});
+              }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
             }
           }
           if (isZohoNotConnected && workdayEmail) {
@@ -1423,17 +1423,17 @@ export async function executeWorkerTask({
       /expired|no longer available|page you are looking for doesn't exist|job_expired|dead\/expired/i.test(fullFailureReason || '')
     );
 
-    let currentAttempt = 1;
+    let attemptNum = 1;
     if (isSuccessStatus) {
       TASK_ATTEMPTS.delete(taskKey);
     } else {
-      currentAttempt = (TASK_ATTEMPTS.get(taskKey) || 0) + 1;
-      TASK_ATTEMPTS.set(taskKey, currentAttempt);
+      attemptNum = (TASK_ATTEMPTS.get(taskKey) || 0) + 1;
+      TASK_ATTEMPTS.set(taskKey, attemptNum);
     }
 
     const MAX_ATTEMPTS = 10;
     const isMiddleStepFailure = !isSuccessStatus && !isExpired;
-    const shouldRetryMiddleStep = isMiddleStepFailure && currentAttempt < MAX_ATTEMPTS;
+    const shouldRetryMiddleStep = isMiddleStepFailure && attemptNum < MAX_ATTEMPTS;
 
     if (!isDirectSubmission) {
       await upsertSupabaseApplication({
@@ -1465,7 +1465,7 @@ export async function executeWorkerTask({
       };
       await updateQueueTaskStatus(queueTaskId, {
         status: finalStatus,
-        errorMessage: shouldRetryMiddleStep ? `Retrying (attempt ${currentAttempt}/${MAX_ATTEMPTS}): stopped at ${stoppedBlock}` : fullFailureReason,
+        errorMessage: shouldRetryMiddleStep ? `Retrying (attempt ${attemptNum}/${MAX_ATTEMPTS}): stopped at ${stoppedBlock}` : fullFailureReason,
         preResolvedAnswers: answersMap,
         screenshotPath: completionShotUrl,
       });
@@ -1473,9 +1473,9 @@ export async function executeWorkerTask({
 
     if (!isSuccessStatus && !options.isClusterBlueprint && !isDirectSubmission) {
       if (shouldRetryMiddleStep) {
-        console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${currentAttempt}/${MAX_ATTEMPTS}). Retrying — will NOT record to failed_jobs until ${MAX_ATTEMPTS} attempts are exhausted.`);
+        console.log(`\n🔄 [${workerId}] Application halted at middle step "${stoppedBlock}" (attempt ${attemptNum}/${MAX_ATTEMPTS}). Retrying — will NOT record to failed_jobs until ${MAX_ATTEMPTS} attempts are exhausted.`);
       } else {
-        console.log(`\n❌ [${workerId}] Recording permanently failed job for ${applywizzId} (expired=${isExpired}, attempt=${currentAttempt}/${MAX_ATTEMPTS}). Recording to failed_jobs.`);
+        console.log(`\n❌ [${workerId}] Recording permanently failed job for ${applywizzId} (expired=${isExpired}, attempt=${attemptNum}/${MAX_ATTEMPTS}). Recording to failed_jobs.`);
         const answeredSoFar = [];
         if (profile?._filledValues) {
           for (const [qLabel, qVal] of Object.entries(profile._filledValues)) {
@@ -2586,10 +2586,10 @@ export async function executeSingleTargetedSubmission({
       updated_at: completionTimestamp,
     };
     if (distributionId) {
-      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).catch(() => {});
+      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
     }
     if (finalApplywizzId && finalJobUrl) {
-      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
+      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
     }
   }
 

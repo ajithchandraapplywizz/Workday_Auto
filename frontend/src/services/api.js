@@ -891,7 +891,7 @@ export async function fetchApplicationsDynamic({
 
     if (dateStr && timeframe) {
       const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso}`);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.submitted`);
     }
 
     const { data, error } = await query;
@@ -974,7 +974,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     }
     if (dateStr && timeframe) {
       const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.applying`);
+      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.applying,status.eq.submitted`);
     }
 
     const { data: apps, error: appsErr } = await query;

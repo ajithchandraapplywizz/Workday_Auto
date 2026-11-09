@@ -663,6 +663,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       applywizz_id: candidateAwlId,
       applywizzId: candidateAwlId,
       jobUrl: leadTask.job_url || jobUrl,
+      dbClient: null,
+      candidateEmail: null,
     };
 
     console.log(`[${candidateAwlId}] | Company: ${company} | Status: scanning | Screenshot: none`);
@@ -751,21 +753,27 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
 
     // Check if failure was due to Zoho mail verification / not connected:
-    const isZohoAuthIssue =
+    const isZohoAuthIssue = Boolean(
       result?.status === 'auth-failed' ||
+      result?.status === 'auth_failed' ||
       result?.status === 'zoho_not_connected' ||
       result?.reason === 'mailbox_not_connected' ||
       result?.reason === 'zoho mail not connected' ||
       result?.isZohoNotConnected ||
+      /zoho.*not.*connected|mailbox.*not.*connected/i.test(String(result?.failureReason || result?.reason || result?.error || '')) ||
       String(leadFailReason).toLowerCase().includes('zoho') ||
-      String(leadFailReason).toLowerCase().includes('verification') ||
-      String(leadFailReason).toLowerCase().includes('auth');
+      String(leadFailReason).toLowerCase().includes('mailbox_not_connected')
+    );
 
-    if (isZohoAuthIssue && cIdx < candidatePool.length - 1) {
-      console.log(`\n⚠️ [${workerId}] Candidate ${candidateAwlId} requires Zoho email verification but was not connected in Zoho Mail Reader.`);
-      console.log(`   ❌ Rejecting candidate ${candidateAwlId} ONLY — keeping job link ALIVE.`);
-      console.log(`   ➡️  Retrying cluster with next candidate in batch queue list: ${candidatePool[cIdx + 1]}...\n`);
-      continue;
+    if (isZohoAuthIssue) {
+      if (cIdx < candidatePool.length - 1) {
+        console.log(`\n⚠️ [${workerId}] Candidate ${candidateAwlId} requires Zoho email verification but was not connected in Zoho Mail Reader (HTTP 400 / disconnected).`);
+        console.log(`   ❌ Rejecting candidate ${candidateAwlId} ONLY — keeping job link ALIVE.`);
+        console.log(`   ➡️  Sibling cascade: Retrying cluster with NEXT candidate in batch queue list: ${candidatePool[cIdx + 1]} for "${company}"...\n`);
+        continue;
+      } else {
+        console.log(`\n⚠️ [${workerId}] All ${candidatePool.length} sibling candidate(s) in pool were attempted and had disconnected Zoho mailboxes for "${company}".`);
+      }
     }
 
     break;

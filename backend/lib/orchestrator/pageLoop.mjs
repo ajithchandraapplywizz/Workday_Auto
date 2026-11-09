@@ -81,6 +81,11 @@ function synthesizeScanMandatoryAnswer(field = {}, profile = {}) {
 
   const elType = String(field.elementType || field.fieldType || field.controlType || '').toLowerCase();
   if (elType === 'checkbox') {
+    // STRICT USER DIRECTIVE: In race/demographic multi-checkbox group, ONLY select Asian!
+    const isDemographicRace = /asian|black|african\s*american|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish|decline\s*to\s*(state|self-identify|answer|disclose)|prefer\s*not\s*to/i.test(label);
+    if (isDemographicRace) {
+      return (/asian/i.test(label) && !/non-asian/i.test(label)) ? 'true' : 'false';
+    }
     return 'true';
   }
 
@@ -128,10 +133,16 @@ function multiCheckboxAnswersMatch(requested, actualChecked = []) {
   });
 }
 
+function isGenericDropdownLabel(label = '') {
+  const norm = normalizeLabel(label || '');
+  return /^(pleaseselect|pleaseselectfromthedropdownmenubelow|pleaseselectfromtheoptionsbelow|selectone|selectanoption|chooseone|select)$/i.test(norm)
+    || norm.length < 5;
+}
+
 function fieldDedupeKey(field = {}) {
   const norm = normalizeLabel(field.label || '');
-  if (norm) return `label:${norm}`;
-  return field.questionId || field.label || '';
+  if (norm && !isGenericDropdownLabel(norm)) return `label:${norm}`;
+  return field.questionId || field.selector || (norm ? `generic:${norm}:${field.id || ''}` : '') || field.label || '';
 }
 
 /** Latest scan wins; one row per normalized question label (guards duplicate wdq ids). */
@@ -150,7 +161,7 @@ function pickNext(fields, filledIds, filledNormLabels, adapter, profile, stepNam
     const id = field.questionId || field.label;
     const norm = normalizeLabel(field.label || '');
     if (filledIds.has(id)) return false;
-    if (norm && filledNormLabels.has(norm)) return false;
+    if (!isGenericDropdownLabel(norm) && norm && filledNormLabels.has(norm)) return false;
     return adapter.shouldFill(field, profile, stepName);
   }) || null;
 }

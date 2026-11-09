@@ -842,12 +842,23 @@ async function markSelectOneWidget(page, { labelText = '', selectOneIndex = null
 
     document.querySelectorAll('[data-wd-so-target]').forEach((el) => el.removeAttribute('data-wd-so-target'));
     const targetNorm = norm(target);
+    const isGenericTarget = /^(pleaseselect|pleaseselectfromthedropdownmenubelow|selectone|selectanoption|chooseone|select)$/i.test(targetNorm);
     const widgets = document.querySelectorAll('[data-automation-id="selectOne"], [data-automation-id="selectWidget"]');
+    let firstMatchedWidget = null;
     for (const widget of widgets) {
       const label = labelForSelectWidget(widget);
       if (!label || !labelsMatch(label, target)) continue;
-      widget.setAttribute('data-wd-so-target', '1');
-      return { found: true, current: readValueFromWidget(widget) };
+      const current = readValueFromWidget(widget);
+      if (!firstMatchedWidget) firstMatchedWidget = { widget, current };
+      // When target has a generic label, prioritize widgets that are still empty or Select One!
+      if (isGenericTarget && (!current || /^select(\s+one)?\.?$/i.test(current))) {
+        widget.setAttribute('data-wd-so-target', '1');
+        return { found: true, current };
+      }
+    }
+    if (firstMatchedWidget) {
+      firstMatchedWidget.widget.setAttribute('data-wd-so-target', '1');
+      return { found: true, current: firstMatchedWidget.current };
     }
 
     // Fallback: mark formField whose short label text equals target (Race / Gender / Hispanic)
@@ -1547,6 +1558,17 @@ export async function checkVoluntaryDisclosuresRequiredFields(page, profile = {}
     if (hasGender && !genderFilled) missing.push('Voluntary Disclosures: Gender');
     if (hasHispanic && !hispanicFilled) missing.push('Voluntary Disclosures: Hispanic/Latino');
     if (hasVeteran && !veteranFilled) missing.push('Voluntary Disclosures: Veteran Status');
+
+    // Check for ANY unfilled dropdown button on the page (Select One / Select)
+    const unfilledDropdowns = Array.from(document.querySelectorAll(
+      '[data-automation-id*="select" i] button, button[aria-haspopup="listbox"], [role="combobox"], [data-automation-id="selectOne"] button'
+    )).filter((btn) => {
+      const t = norm(btn.textContent || btn.getAttribute('aria-label') || '');
+      return !t || /^select(\s+one)?\.?$/i.test(t);
+    });
+    if (unfilledDropdowns.length > 0) {
+      missing.push(`Voluntary Disclosures: ${unfilledDropdowns.length} unfilled dropdown(s)`);
+    }
 
     // CC-305 check if CC-305 is rendered on the page
     const bodyText = document.body?.innerText || '';
@@ -2734,7 +2756,18 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         }, { value: String(fillValue) });
       }
     } else if (fieldType === 'checkbox') {
-      if (isPartTimeWorkTypeLabel(questionLabel)) {
+      const isRaceCheckbox = /asian|black|african\s*american|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish\s*to\s*answer/i.test(label || questionLabel || '');
+      if (isRaceCheckbox) {
+        // STRICT RACE POLICY: In multi-checkbox for race/ethnicity, strictly select Asian only and clear all others
+        const isAsian = /asian/i.test(label || questionLabel || '') && !/non-asian/i.test(label || questionLabel || '');
+        const cb = fieldBox.locator('input[type="checkbox"]').first();
+        if (await cb.isVisible({ timeout: 800 }).catch(() => false)) {
+          const isChecked = await cb.isChecked().catch(() => false);
+          if (isAsian && !isChecked) await cb.click({ force: true });
+          else if (!isAsian && isChecked) await cb.click({ force: true });
+          ok = isAsian ? (await cb.isChecked().catch(() => false)) : !(await cb.isChecked().catch(() => true));
+        }
+      } else if (isPartTimeWorkTypeLabel(questionLabel)) {
         ok = true;
       } else if (isFullTimeWorkTypeLabel(questionLabel) || isWorkTypeCheckboxLabel(questionLabel)) {
       const cb = fieldBox.locator('input[type="checkbox"]').first();
@@ -4153,15 +4186,113 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
   }, DROPDOWN_TRIGGER_IN_FIELD).catch(() => false);
   if (stillSelectOne) {
     console.log('    ↻ Voluntary Disclosures has remaining Select One dropdown(s) — sweeping remaining dropdowns');
+    await sweepAndFillAllRemainingDropdowns(page, profile, 'Voluntary Disclosures');
     await promptRemainingSelectOneDropdowns(page, profile, 'Voluntary Disclosures');
     await fillRaceEthnicityCheckboxGroup(page, profile);
   }
+
+  // Final race multi-checkbox assertion: Asian strictly checked, all other 6 checkboxes unchecked
+  await fillRaceEthnicityCheckboxGroup(page, profile);
 
   const after = await discoverVoluntaryDisclosureDom(page);
   const genderOk = Boolean(after.gender?.currentValue && !/^select/i.test(after.gender.currentValue));
   console.log(`    DOM after fill: gender="${after.gender.currentValue || '(empty)'}" vibeChecked=${after.vibeAck.checked} terms=${terms} foregoingCert=${foregoing} agreements=${agreements}`);
 
   return { gender: genderOk, vibe, foregoing, terms, agreements };
+}
+
+/**
+ * Sweeps the live page DOM for any remaining unfilled dropdown triggers (Select One / Select)
+ * and resolves them using live option classification (Gender, Race, Veteran, or closest profile match).
+ */
+export async function sweepAndFillAllRemainingDropdowns(page, profile = null, stepName = '') {
+  let filledCount = 0;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const unfilledCount = await page.evaluate((triggerSel) => {
+      const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
+      const btns = Array.from(document.querySelectorAll(triggerSel));
+      return btns.filter((btn) => {
+        const t = norm(btn.textContent || btn.getAttribute('aria-label') || '');
+        return !t || /^select(\s+one)?\.?$/i.test(t);
+      }).length;
+    }, DROPDOWN_TRIGGER_IN_FIELD).catch(() => 0);
+
+    if (unfilledCount === 0) break;
+
+    const dropdownButtons = await page.locator(DROPDOWN_TRIGGER_IN_FIELD).all();
+    let handledInThisPass = 0;
+
+    for (const btn of dropdownButtons) {
+      if (!(await btn.isVisible().catch(() => false))) continue;
+      const text = (await btn.textContent().catch(() => '') || '').replace(/\s+/g, ' ').trim();
+      if (!text || /^select(\s+one)?\.?$/i.test(text)) {
+        const contextText = await btn.evaluate((el) => {
+          const container = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el.parentElement;
+          return (container?.textContent || '').replace(/\s+/g, ' ').trim();
+        }).catch(() => '');
+
+        console.log(`    🔍 [sweepDropdown] Opening unfilled dropdown (step: "${stepName}", context: "${contextText.slice(0, 60)}...")`);
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(200);
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ force: true }).catch(() => btn.evaluate((el) => el.click()));
+        await page.waitForTimeout(500);
+
+        const livePromptOptions = await page.evaluate(() => {
+          const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+          return els.map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()).filter((t) => t && !/^select(\s+one)?$/i.test(t));
+        }).catch(() => []);
+
+        let clicked = false;
+        if (livePromptOptions.length > 0) {
+          const smartAnswer = resolveAnswerFromLiveOptions({
+            liveOptions: livePromptOptions,
+            labelText: contextText || 'Please select from the dropdown menu below',
+            profile,
+          });
+
+          if (smartAnswer) {
+            console.log(`    💡 [sweepDropdown] Classified option: "${smartAnswer}"`);
+            clicked = await page.evaluate((targetOpt) => {
+              const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+              const norm = (s) => (s || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+              const targetNorm = norm(targetOpt);
+              for (const el of els) {
+                const optText = norm(el.textContent);
+                if (optText === targetNorm || (targetNorm.length >= 3 && optText.includes(targetNorm))) {
+                  el.scrollIntoView?.();
+                  el.click?.();
+                  return true;
+                }
+              }
+              return false;
+            }, smartAnswer).catch(() => false);
+          }
+        }
+
+        if (!clicked) {
+          const fallbackText = await clickFirstVisiblePromptOption(page);
+          if (fallbackText) {
+            console.log(`    💡 [sweepDropdown] Fallback picked first option: "${fallbackText}"`);
+            clicked = true;
+          }
+        }
+
+        await page.keyboard.press('Escape').catch(() => {});
+        await page.waitForTimeout(250);
+
+        if (clicked) {
+          handledInThisPass++;
+          filledCount++;
+          await waitForDomSettled(page, { timeout: 350 });
+        }
+      }
+    }
+
+    if (handledInThisPass === 0) break;
+  }
+
+  return filledCount;
 }
 
 /**

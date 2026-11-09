@@ -297,35 +297,52 @@ export async function updateJobDistributionWithCheck({
   }
 
   // job_distributions has no completed_at column in schema; updated_at stores the completion timestamp
-
   if ('completed_at' in cleanPatch) {
-
     if (!cleanPatch.updated_at && cleanPatch.completed_at) {
-
       cleanPatch.updated_at = cleanPatch.completed_at;
-
     }
-
     delete cleanPatch.completed_at;
-
   }
 
+  // Never overwrite an existing proof screenshot with null or undefined
+  if (cleanPatch.application_submitted_screenshot_url === null || cleanPatch.application_submitted_screenshot_url === undefined) {
+    delete cleanPatch.application_submitted_screenshot_url;
+  }
 
+  // STRICT IMMUTABILITY GUARD: If row is already 'submitted' or possesses authentic confirmation proof,
+  // permanently refuse any downgrades to 'ready_for_review', 'failed', or 'applying'!
+  if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
+    try {
+      let checkQ = supabase.from('job_distributions').select('id, status, application_submitted_screenshot_url');
+      if (distributionId) checkQ = checkQ.eq('id', distributionId);
+      else checkQ = checkQ.eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+      const { data: targetRows } = await checkQ.limit(1);
+      const targetRow = targetRows?.[0];
+      if (targetRow) {
+        const isAlreadySubmitted = targetRow.status === 'submitted' || targetRow.status === 'completed';
+        const hasAuthenticProof = Boolean(targetRow.application_submitted_screenshot_url && !targetRow.application_submitted_screenshot_url.includes('attempt') && !targetRow.application_submitted_screenshot_url.includes('failed'));
+        if (isAlreadySubmitted || hasAuthenticProof) {
+          console.log(`🔒 [${workerId}] IMMUTABLE PROTECTION: Row #${targetRow.id} (${applywizzId || 'target'}) is already permanently 'submitted' (proof: ${targetRow.application_submitted_screenshot_url || 'confirmed'}). Refusing downgrade to '${cleanPatch.status}'.`);
+          return { success: true, data: targetRow, rowsCount: 1, protected: true };
+        }
+      }
+    } catch (guardErr) {
+      console.warn(`[${workerId}] Immutable pre-check note:`, guardErr.message);
+    }
+  }
 
   for (let attempt = 1; attempt <= maxRetries; attempt++) {
-
     try {
-
       let query = supabase.from('job_distributions').update(cleanPatch);
 
       if (distributionId) {
-
         query = query.eq('id', distributionId);
-
       } else {
-
         query = query.eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+      }
 
+      if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
+        query = query.neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
       }
 
       const { data, error } = await query.select('*');
@@ -352,17 +369,17 @@ export async function updateJobDistributionWithCheck({
 
         if (distributionId && applywizzId && jobUrl) {
 
-          const { data: fbData, error: fbErr } = await supabase
-
+          let fbQuery = supabase
             .from('job_distributions')
-
             .update(cleanPatch)
-
             .eq('applywizz_id', applywizzId)
+            .eq('job_url', jobUrl);
 
-            .eq('job_url', jobUrl)
+          if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
+            fbQuery = fbQuery.neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+          }
 
-            .select('*');
+          const { data: fbData, error: fbErr } = await fbQuery.select('*');
 
           if (!fbErr && fbData && fbData.length > 0) {
 
@@ -531,113 +548,71 @@ export async function claimNextTask(workerId) {
   try {
 
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
-
     // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt)
-
     let { data: candidates, error: candErr } = await supabase
-
       .from('job_distributions')
-
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
-
       .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
-
+      .is('application_submitted_screenshot_url', null)
+      .neq('status', 'submitted')
+      .neq('status', 'completed')
       .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
-
       .order('created_at', { ascending: true })
-
       .limit(10);
 
-
-
     // Cool-down for retries: Don't immediately re-claim a task that just failed seconds ago.
-
     // Give other tasks priority and provide a 60-second backoff before retrying.
-
     const retryCooldownCutoff = new Date(Date.now() - 60 * 1000).toISOString();
 
-
-
     // 2. Only after all 0th attempt applications have finished processing, claim deferred Attempt 1 retries
-
     if (!candidates || candidates.length === 0) {
-
       const { data: retryCandidates } = await supabase
-
         .from('job_distributions')
-
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
-
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
-
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
-
         .lte('updated_at', retryCooldownCutoff)
-
         .order('updated_at', { ascending: true })
-
         .limit(10);
-
       candidates = retryCandidates || [];
-
     }
-
-
 
     // 3. Only after all Attempt 1 retries have finished processing, claim deferred Attempt 2 retries
-
     if (!candidates || candidates.length === 0) {
-
       const { data: retryCandidates2 } = await supabase
-
         .from('job_distributions')
-
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
-
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
-
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
-
         .lte('updated_at', retryCooldownCutoff)
-
         .order('updated_at', { ascending: true })
-
         .limit(10);
-
       candidates = retryCandidates2 || [];
-
     }
-
-
 
     if (!candidates || candidates.length === 0) return null;
 
-
-
     for (const cand of candidates) {
-
       // Atomic claim directly on job_distributions row
-
       const { data: claimed, error: claimErr } = await supabase
-
         .from('job_distributions')
-
         .update({
-
           status: 'applying',
-
           worker_id: workerId,
-
           worker_leased_at: now,
-
           updated_at: now,
-
         })
-
         .eq('id', cand.id)
-
         .eq('status', cand.status)
-
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
         .select('*');
 
 
@@ -765,49 +740,33 @@ export async function reapExpiredLeases(timeoutMinutes = 3) {
 
 
     const { data: expired, error: selErr } = await supabase
-
       .from('job_distributions')
-
       .select('id, worker_id, applywizz_id')
-
       .eq('status', 'applying')
-
+      .is('application_submitted_screenshot_url', null)
+      .neq('status', 'submitted')
+      .neq('status', 'completed')
       .or(`worker_leased_at.lt.${cutoff},worker_leased_at.is.null`);
-
-
 
     if (selErr || !expired || expired.length === 0) return [];
 
-
-
     const reapedRows = [];
-
     for (const exp of expired) {
-
       // Single-ID CAS update checking previous status 'applying'
-
       const { data: updated, error: updErr } = await supabase
-
         .from('job_distributions')
-
         .update({
-
           status: 'ready_for_review',
-
           worker_id: null,
-
           worker_leased_at: null,
-
           error_message: `Worker lease expired (> ${timeoutMinutes}m). Returned to ready_for_review.`,
-
           updated_at: now,
-
         })
-
         .eq('id', exp.id)
-
         .eq('status', 'applying')
-
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
         .select('*');
 
 

@@ -204,4 +204,17 @@ describe('Generic Dropdown Option-Based Classification & Close-Match (Tier 5)', 
     });
     assert.equal(answer, "Master's Degree");
   });
+
+  it('selects closest affirmative agreement option for CFIUS and Applicant Data terms', () => {
+    const liveOptions = [
+      'I have read and understand the terms and conditions above regarding CFIUS and Applicant Data.',
+      'I decline',
+    ];
+    const answer = resolveAnswerFromLiveOptions({
+      liveOptions,
+      labelText: 'Please select from the dropdown menu below.*',
+      profile: mockProfile,
+    });
+    assert.equal(answer, 'I have read and understand the terms and conditions above regarding CFIUS and Applicant Data.');
+  });
 });

@@ -1726,9 +1726,9 @@ const server = http.createServer(async (req, res) => {
         updated_at: nowIso,
       };
       if (distributionId) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).catch(() => { });
+        await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
       } else if (cleanId && jobUrl) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).catch(() => { });
+        await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
       }
 
 
@@ -1762,7 +1762,7 @@ const server = http.createServer(async (req, res) => {
         reviewed_by: 'Career Associate',
         reviewed_at: nowIso,
         updated_at: nowIso,
-      }).eq('id', distributionId).catch(() => { });
+      }).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
@@ -1999,6 +1999,9 @@ export async function recoverInterruptedSubmissionTasks() {
         updated_at: now,
       })
       .eq('status', 'applying')
+      .is('application_submitted_screenshot_url', null)
+      .neq('status', 'submitted')
+      .neq('status', 'completed')
       .select('*');
 
     // Reset submitting workers in worker_status to idle
@@ -2203,23 +2206,25 @@ export async function initOnStartup() {
       const isScanRunning = scanStatus === 'running';
       const isSubmitRunning = submitStatus === 'running';
 
-      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
+      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && !bc?.scan_stop_requested && (
         (bc && bc.is_running !== false && (
           bc.last_action_requested === 'start' ||
           bc.last_action_requested === 'start_scan' ||
           bc.last_action_requested === 'start_pipeline' ||
           bc.last_action_requested === 'start_universal' ||
-          (bc.trigger_requested && (bc.stage === 'scanning' || bc.stage === 'parallel' || bc.stage === 'universal_parallel'))
+          (bc.trigger_requested && (bc.stage === 'scanning' || bc.stage === 'parallel' || bc.stage === 'universal_parallel')) ||
+          (bc.scan_status === 'running' || bc.scan_enabled === true)
         )) ||
-        (scanCtrl && scanCtrl.enabled === true && !scanCtrl.stop_requested)
+        (scanCtrl && (scanCtrl.enabled === true || scanCtrl.status === 'running') && !scanCtrl.stop_requested)
       );
 
-      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && (
+      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && !bc?.submit_stop_requested && (
         (bc && bc.is_running !== false && (
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
           bc.last_action_requested === 'start_universal' ||
-          (bc.trigger_requested && (bc.stage === 'submitting' || bc.stage === 'parallel'))
+          (bc.trigger_requested && (bc.stage === 'submitting' || bc.stage === 'parallel')) ||
+          (bc.submit_status === 'running' || bc.submit_enabled === true)
         )) ||
         (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested)
       );

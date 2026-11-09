@@ -580,7 +580,24 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
       await page.waitForTimeout(150);
       lastOptions = await collectOpenOptions(page);
     }
-    const pick = matchDemographicOption(wanted, lastOptions);
+    let pick = matchDemographicOption(wanted, lastOptions);
+    if (!pick && lastOptions.length > 0) {
+      try {
+        const { resolveAnswerFromLiveOptions } = await import('../workdayQuestionFill.mjs');
+        pick = resolveAnswerFromLiveOptions({
+          liveOptions: lastOptions,
+          labelText: label,
+          profile: field._profile || field.profile || {},
+          preferredAnswer: wanted,
+        });
+      } catch (err) {
+        // Gracefully ignore dynamic option resolution error and fall back to standard option selection
+        if (process.env.DEBUG_DROPDOWNS) console.warn('[WorkdayCustomDropdown] Option match note:', err?.message);
+      }
+    }
+    if (!pick && lastOptions.length > 0 && (field.required || /\*/.test(label) || /please\s*select/i.test(label))) {
+      pick = lastOptions[0];
+    }
     if (!pick) {
       await page.keyboard.press('Escape').catch(() => {});
       return {

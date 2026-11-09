@@ -1,11 +1,11 @@
 # Pre-Push Evaluation Gate Report
 
-- **Date**: 2026-11-08T18:22:52.655Z
+- **Date**: 2026-11-09T22:21:07.237Z
 - **Branch**: `100-percent-tested-production`
 - **Evaluation Mode**: `branch`
 - **Merge Base**: `ef5794bbbc6709e9105cb10d133903dfdf3af427`
-- **Files Checked**: `474`
-- **Duration**: `4577.76s`
+- **Files Checked**: `486`
+- **Duration**: `345.15s`
 - **Overall Status**: **PASSED WITH WARNINGS ⚠️**
 
 ## Evaluation Summary
@@ -20,7 +20,7 @@
 | **imports** | ✅ PASS | All imports valid, extensions present, and case-sensitive |
 | **migrations** | ⚠️ WARN | 6 migration issue(s) detected |
 | **dependencies** | ✅ PASS | Dependencies and lockfile in sync |
-| **smoke-import** | ✅ PASS | 55 module(s) evaluated cleanly on import |
+| **smoke-import** | ✅ PASS | 59 module(s) evaluated cleanly on import |
 | **lint** | ✅ PASS | Project lint checks passed |
 | **tests** | ✅ PASS | Unit test suite passed cleanly |
 | **build** | ✅ PASS | Frontend Vite build compiled successfully |

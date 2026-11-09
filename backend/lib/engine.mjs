@@ -1610,6 +1610,11 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
   if (agreementsChecked > 0) {
     console.log(`    ☑️  Bottom-of-page agreements: ${agreementsChecked} checkbox(es) checked on "${stepName}"`);
   }
+
+  if (/voluntary|eeo|equal|diversity|disclos/i.test(stepName)) {
+    const { fillRaceEthnicityCheckboxGroup } = await import('./workdayQuestionFill.mjs');
+    await fillRaceEthnicityCheckboxGroup(page, profile);
+  }
 }
 
 /**

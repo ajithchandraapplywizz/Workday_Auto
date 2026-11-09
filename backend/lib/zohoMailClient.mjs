@@ -509,7 +509,7 @@ export async function pollZohoWorkdayAuth({
     }
   } catch (directErr) {
     if (directErr.message?.includes('Mailbox not found in users list')) {
-      return { found: false, reason: 'mailbox_not_connected' };
+      return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };
     }
   }
 

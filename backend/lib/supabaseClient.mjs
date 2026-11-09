@@ -646,6 +646,20 @@ export async function upsertSupabaseApplication({
     // In direct submission mode, submissionWorkerPool owns the 3-attempt state machine.
     // Intermediate errors must NEVER overwrite job_distributions with 'failed'.
     if (!isDirectSubmission) {
+      // Guard: NEVER overwrite already submitted applications!
+      if (normalizedStatus !== 'submitted' && normalizedStatus !== 'completed') {
+        try {
+          const exCheck = await request('job_distributions', {
+            query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}&select=status,id`,
+          });
+          const curStatus = (exCheck?.[0]?.status || '').toLowerCase();
+          if (curStatus === 'submitted' || curStatus === 'completed') {
+            console.log(`   🛡️ [upsertSupabaseApplication] Candidate ${applywizzId} already submitted on ${cleanUrl} — preserving submitted status!`);
+            return { success: true, id: exCheck[0].id, table: 'job_distributions' };
+          }
+        } catch {}
+      }
+
       let distStatus;
       if (normalizedStatus === 'submitted') {
         distStatus = 'submitted';
@@ -668,12 +682,14 @@ export async function upsertSupabaseApplication({
       };
       if (company) distPatch.company = company;
       if (roleTitle) distPatch.role_title = roleTitle;
-      if (normalizedStatus === 'submitted' && failureScreenshotUrl) {
-        distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
+      if (normalizedStatus === 'submitted') {
+        if (failureScreenshotUrl) {
+          distPatch.application_submitted_screenshot_url = failureScreenshotUrl;
+        }
       }
       const distRes = await request('job_distributions', {
         method: 'PATCH',
-        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
+        query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}${normalizedStatus !== 'submitted' ? '&status=neq.submitted&status=neq.completed' : ''}`,
         prefer: 'return=representation',
         body: distPatch,
       });
@@ -692,7 +708,7 @@ export async function upsertSupabaseApplication({
       await request('job_distributions', {
         method: 'PATCH',
         query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
-        prefer: 'return=minimal',
+        prefer: 'minimal',
         body: distPatch,
       }).catch(() => { });
     }
@@ -2419,6 +2435,22 @@ export async function saveResolvedAnswers({
     updated_at: new Date().toISOString(),
   };
 
+  // IMMUTABLE PROTECTION: Check if existing row is already submitted
+  try {
+    const existing = await request('job_distributions', {
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(cleanUrl)}&select=status,application_submitted_screenshot_url&limit=1`,
+    });
+    if (existing && existing[0]) {
+      const ex = existing[0];
+      if (ex.status === 'submitted' || ex.status === 'completed' || ex.application_submitted_screenshot_url) {
+        payload.status = 'submitted';
+        if (ex.application_submitted_screenshot_url) {
+          payload.application_submitted_screenshot_url = ex.application_submitted_screenshot_url;
+        }
+      }
+    }
+  } catch { }
+
   try {
     const res = await request('job_distributions', {
       method: 'POST',
@@ -3010,6 +3042,23 @@ export async function recordJobDistributions({
     }
     const dedupedClients = Array.from(uniqueClientMap.values());
 
+    // Fetch any existing records for this job URL to protect submitted applications!
+    let existingDistributions = [];
+    try {
+      existingDistributions = await request('job_distributions', {
+        query: `?job_url=eq.${encode(cleanUrl)}&select=applywizz_id,status,application_submitted_screenshot_url`,
+      }) || [];
+    } catch { }
+
+    const submittedMap = new Map();
+    for (const ex of existingDistributions) {
+      const exAwl = String(ex.applywizz_id || '').trim().toUpperCase();
+      const exStatus = String(ex.status || '').toLowerCase();
+      if (exStatus === 'submitted' || exStatus === 'completed' || Boolean(ex.application_submitted_screenshot_url && !ex.application_submitted_screenshot_url.includes('attempt') && !ex.application_submitted_screenshot_url.includes('failed'))) {
+        submittedMap.set(exAwl, ex);
+      }
+    }
+
     const rows = dedupedClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
@@ -3079,8 +3128,15 @@ export async function recordJobDistributions({
       const clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
       const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : (screenshotUrl || null);
 
+      const rawAwl = String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      const existingSub = submittedMap.get(rawAwl);
+      const finalStatus = existingSub ? 'submitted' : clientStatus;
+      const finalScreenshot = existingSub
+        ? (existingSub.application_submitted_screenshot_url || clientShot)
+        : (clientStatus === 'submitted' ? clientShot : null);
+
       return {
-        applywizz_id: String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase(),
+        applywizz_id: rawAwl,
         job_id: specificJobId ? String(specificJobId).trim() : null,
         job_url: String(specificJobUrl).trim(),
         scanned_job_id: scannedJobRecord?.id || null,
@@ -3093,8 +3149,8 @@ export async function recordJobDistributions({
         unanswered_questions: allUnresolvedFields,
         unanswered_count: clientCountUnanswered,
         is_fully_answered: clientIsFully,
-        application_submitted_screenshot_url: clientStatus === 'submitted' ? clientShot : null,
-        status: clientStatus,
+        application_submitted_screenshot_url: finalScreenshot,
+        status: finalStatus,
         created_at: now,
         updated_at: now,
       };
@@ -3107,6 +3163,10 @@ export async function recordJobDistributions({
         uniqueRowMap.set(r.applywizz_id, r);
       } else {
         const existing = uniqueRowMap.get(r.applywizz_id);
+        if (existing.status === 'submitted') {
+          // Never overwrite a submitted row!
+          continue;
+        }
         if (existing.status !== 'ready_for_review' && r.status === 'ready_for_review') {
           uniqueRowMap.set(r.applywizz_id, r);
         }

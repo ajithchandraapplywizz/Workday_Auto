@@ -269,6 +269,39 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
     if (nearest) return nearest;
   }
 
+  // Live Dropdown Inspection Fallback for Generic / Unanswered Dropdowns
+  if (!answer && (fieldType === 'dropdown' || fieldType === 'select')) {
+    const fieldLoc = page.locator(`[data-wd-error-fix="${descriptor.id}"]`).first();
+    const trigger = fieldLoc.locator('[role="combobox"], button[aria-haspopup="listbox"], [data-automation-id="selectWidget"] button, [data-automation-id="selectOne"] button').first();
+    if (await trigger.isVisible({ timeout: 800 }).catch(() => false)) {
+      await trigger.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(400);
+      const liveOpts = await page.evaluate(() => {
+        const els = Array.from(document.querySelectorAll('[data-automation-id="promptOption"], [role="option"], [data-automation-id="menuItem"]'));
+        return els.map((el) => (el.textContent || '').replace(/\s+/g, ' ').trim()).filter((t) => t && !/^select(\s+one)?$/i.test(t));
+      }).catch(() => []);
+      if (liveOpts.length > 0) {
+        descriptor.options = liveOpts;
+        let smart = null;
+        try {
+          const { resolveAnswerFromLiveOptions } = await import('./workdayQuestionFill.mjs');
+          smart = resolveAnswerFromLiveOptions({
+            liveOptions: liveOpts,
+            labelText: label,
+            profile,
+            preferredAnswer: '',
+          });
+        } catch (err) {
+          // Gracefully ignore dynamic option resolution error and fall back to compliance heuristics
+          if (process.env.DEBUG_DROPDOWNS) console.warn('[WorkdayErrorRepair] Option match note:', err?.message);
+        }
+        if (smart) answer = smart;
+        else if (isComplianceSensitive(label)) answer = liveOpts.find((o) => /asian/i.test(o)) || liveOpts[0];
+        else answer = liveOpts[0];
+      }
+    }
+  }
+
   return answer || null;
 }
 

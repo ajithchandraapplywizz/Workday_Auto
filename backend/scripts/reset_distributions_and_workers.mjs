@@ -9,14 +9,14 @@ async function main() {
   // 1. Reset all non-submitted job_distributions (failed, applying, or with error_message) to clean ready_for_review
   console.log('\n1. Fetching non-submitted job_distributions with errors, leases, or failed/applying statuses...');
   const distRows = await request('job_distributions', {
-    query: '?status=not.in.(submitted,completed,already_applied)&select=id,applywizz_id,job_url,status,error_message,worker_id,worker_leased_at',
+    query: '?status=neq.submitted&status=neq.completed&status=neq.already_applied&application_submitted_screenshot_url=is.null&select=id,applywizz_id,job_url,status,error_message,worker_id,worker_leased_at',
   });
 
   console.log(`   Found ${distRows ? distRows.length : 0} non-submitted job_distribution rows.`);
 
   if (distRows && distRows.length > 0) {
     console.log('   Resetting non-submitted rows to fresh "ready_for_review" (clearing errors, attempt counters, and worker leases)...');
-    const updateRes = await request('job_distributions?status=not.in.(submitted,completed,already_applied)', {
+    const updateRes = await request('job_distributions?status=neq.submitted&status=neq.completed&status=neq.already_applied&application_submitted_screenshot_url=is.null', {
       method: 'PATCH',
       prefer: 'return=representation',
       body: {
@@ -24,12 +24,11 @@ async function main() {
         error_message: null,
         worker_id: null,
         worker_leased_at: null,
-        application_submitted_screenshot_url: null,
         updated_at: new Date().toISOString(),
       },
     });
 
-    console.log(`   ✅ Successfully reset ${Array.isArray(updateRes) ? updateRes.length : distRows.length} job_distributions to fresh "ready_for_review"! (Submitted rows 100% protected)`);
+    console.log(`   ✅ Successfully reset ${Array.isArray(updateRes) ? updateRes.length : distRows.length} job_distributions to fresh "ready_for_review"! (Submitted rows and screenshots 100% protected)`);
   }
 
   // Also clean up failed_jobs table for non-submitted applications so they don't block retries

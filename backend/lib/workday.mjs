@@ -1,1087 +1,1091 @@
-/**
- * workday.mjs — Workday account creation & login
- *
- * Workday requires an account to apply. This module:
- * 1. Detects Workday login page
- * 2. Creates account (or logs in if credentials exist)
- * 3. Fills email + auto-generates password
- * 4. Navigates to the application form
- *
- * Login is email + password only. Mailbox OTP is not connected
- * (Zoho Mail can be wired later if a tenant ever requires a code).
- */
-
-import {
-  discoverApplicationForm,
-  isInNavOrHeader,
-  isSignInFormVisible,
-  clickGatewaySignIn,
-  clickGatewayCreateAccount,
-  prescanGatewayElements,
-  handleAdaptiveGateway,
-  isWorkdayWizardVisible,
-  clickContinueApplicationIfPresent,
-  ensureWorkdayApplicationWizard,
-  extractWorkdayCompanyName,
-  isWorkdayAlreadyApplied,
-} from './discovery.mjs';
-import {
-  resolveWorkdayVerification,
-  isWorkdayVerificationPage,
-  isWorkdayForgotPasswordPage,
-  isWorkdayPasswordResetSetPage,
-  completeWorkdayPasswordResetForm,
-  detectWrongPasswordOrLocked,
-  executeWorkdayForgotPassword,
-} from './workdayVerification.mjs';
-
-export {
-  resolveWorkdayVerification,
-  isWorkdayVerificationPage,
-  isWorkdayForgotPasswordPage,
-  isWorkdayPasswordResetSetPage,
-  completeWorkdayPasswordResetForm,
-  detectWrongPasswordOrLocked,
-  executeWorkdayForgotPassword,
-};
-
-const MAILBOX_NOT_CONNECTED =
-  'Mailbox OTP is not connected (Zoho Mail can be added later). Login is email + password only.';
-
-/**
- * Classify a failed Workday login attempt from visible page text.
- * @param {import('playwright').Page} page
- * @returns {Promise<'needs-verification'|'wrong-password-or-locked'|'locked'|'needs-signup'|'unknown'>}
- */
-async function detectLoginFailureReason(page) {
-  return await page.evaluate(() => {
-    const text = (document.body?.innerText || '').toLowerCase();
-    // 1. Explicit account lockout messages
-    if (
-      text.includes('account has been locked') ||
-      text.includes('account is locked due to') ||
-      text.includes('your account is temporarily locked') ||
-      text.includes('too many failed attempts')
-    ) {
-      return 'locked';
-    }
-    // 2. Explicit email verification screens or unverified account messages
-    if (
-      (text.includes('verification email') && text.includes('sent')) ||
-      text.includes('check your spam folder') ||
-      text.includes('check your email') ||
-      text.includes('account may need verification') ||
-      text.includes('resend account verification') ||
-      text.includes("still can't sign in") ||
-      text.includes('we sent a verification link') ||
-      text.includes('we sent a verification code') ||
-      text.includes('we have sent you a verification') ||
-      text.includes('we have sent a verification') ||
-      text.includes("we've sent a verification") ||
-      text.includes('sent you a verification') ||
-      text.includes('verification link') ||
-      text.includes('need to be verified') ||
-      text.includes('needs to be verified') ||
-      text.includes('need to be activated') ||
-      text.includes('needs to be activated') ||
-      text.includes('activate your account') ||
-      text.includes('account requires email verification') ||
-      text.includes('verify your email')
-    ) {
-      return 'needs-verification';
-    }
-    // 3. Wrong password or account might be locked
-    if (
-      text.includes('invalid user name or password') ||
-      text.includes('invalid username or password') ||
-      text.includes('or your account might be locked') ||
-      text.includes('account might be locked') ||
-      text.includes('wrong password') ||
-      text.includes('incorrect password') ||
-      text.includes('invalid password')
-    ) {
-      return 'wrong-password-or-locked';
-    }
-    // All other login failures -> attempt signup fallback
-    return 'needs-signup';
-  }).catch(() => 'unknown');
-}
-
-/** @returns {Promise<boolean>} */
-async function isStillOnSignInForm(page) {
-  const pwd = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible').catch(() => null);
-  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
-  return Boolean(pwd && !verifyPwd);
-}
-
-/**
- * After successful login, click Apply if back on the JD page.
- * @param {import('playwright').Page} page
- * @param {string} mode
- * @returns {Promise<boolean>}
- */
-async function finishSuccessfulLogin(page, mode, profile = null) {
-  await page.waitForTimeout(3000);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-  // 0. Detect if candidate has already applied to this position on Workday post-login
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ [finishSuccessfulLogin] Post-login check: Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-
-  // 1. Recover immediately if Workday displays transient "Something went wrong"
-  let bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-  if (/something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText)) {
-    console.log('   🔄 Workday post-login transient error detected ("Something went wrong") — refreshing page to recover application form...');
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(4000);
-    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-    if (await isWorkdayAlreadyApplied(page)) {
-      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
-      return 'already_applied';
-    }
-  }
-
-  if (await isWorkdayWizardVisible(page)) {
-    console.log('   Logged in — already on application wizard.');
-    return true;
-  }
-
-  const continued = await clickContinueApplicationIfPresent(page);
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-  if (continued && await isWorkdayWizardVisible(page)) {
-    console.log('   Logged in — resumed draft via Continue Application.');
-    return true;
-  }
-
-  const hasApplyBtn = await page.$([
-    'a[data-automation-id="adventureButton"]',
-    'a[data-automation-id="applyButton"]',
-    'button[data-automation-id="applyButton"]',
-    '[data-automation-id="jobPostingApplyButton"]',
-    'a:has-text("Apply for this job")',
-    'button:has-text("Apply for this job")',
-    'a:has-text("Continue Application")',
-    'button:has-text("Continue Application")',
-  ].join(', ')).catch(() => null);
-
-  if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
-    console.log('   Logged in, on JD page — entering application wizard...');
-    await ensureWorkdayApplicationWizard(page, { mode, profile });
-    if (await isWorkdayAlreadyApplied(page)) {
-      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
-      return 'already_applied';
-    }
-  } else if (!continued) {
-    await clickContinueApplicationIfPresent(page);
-    if (await isWorkdayAlreadyApplied(page)) {
-      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
-      return 'already_applied';
-    }
-  }
-
-  if (await isWorkdayWizardVisible(page)) {
-    console.log('   ✅ Successfully verified on application wizard.');
-    return true;
-  }
-
-  // 2. Final recovery attempt: reload only if genuine transient error or blank page (never destroy active login modal)
-  bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
-  const isOnAuth = await isWorkdayLogin(page);
-  const hasModal = await page.$('[role="dialog"], .modal, [data-automation-id*="modal" i]').catch(() => null);
-  const isTransientError = /something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText);
-
-  if (isTransientError || (!await isWorkdayWizardVisible(page) && !isOnAuth && !hasModal)) {
-    console.log('   🔄 Wizard not confirmed post-login — refreshing page once to trigger hydration...');
-    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(4000);
-    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-    if (await isWorkdayAlreadyApplied(page)) {
-      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
-      return 'already_applied';
-    }
-
-    if (await isWorkdayWizardVisible(page)) {
-      console.log('   ✅ Successfully verified on application wizard after reload.');
-      return true;
-    }
-  }
-
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-
-  const onWizard = await isWorkdayWizardVisible(page);
-  if (onWizard) {
-    console.log('   ✅ Successfully verified on application wizard.');
-    return true;
-  }
-
-  console.log('   ⚠️  Post-login navigation completed but application wizard not confirmed.');
-  return false;
-}
-
-/**
- * Create account on this tenant, then sign in (or continue if already on the form).
- * @param {import('playwright').Page} page
- * @param {{ email: string, password: string, mode?: string }} opts
- * @returns {Promise<boolean>}
- */
-async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin', profile = null }) {
-  const effectivePassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
-  console.log(`   No account on this tenant — registering new account for ${email}...`);
-  const company = extractWorkdayCompanyName(page.url());
-  let createdPassword = await workdayCreateAccount(page, email, effectivePassword);
-
-  await page.waitForTimeout(2000);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-
-  // 1. Check if application wizard is already active
-  if (await isWorkdayWizardVisible(page)) {
-    console.log('   ✅ Successfully entered application wizard post-registration!');
-    return finishSuccessfulLogin(page, mode, profile);
-  }
-
-  // 2. If account already exists on this tenant, trigger automated Forgot Password immediately
-  if (page._accountAlreadyExists) {
-    console.log('   🔐 Account already exists on this tenant — initiating automated Forgot Password recovery via Zoho Mail...');
-    const forgotResult = await executeWorkdayForgotPassword(page, {
-      email,
-      password: effectivePassword,
-      company,
-      timeoutMs: 55000,
-      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-      jobUrl: page.url(),
-      distributionId: profile?._distributionId || '',
-    });
-
-    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
-      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-    }
-
-    if (forgotResult?.success) {
-      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-      await handleAdaptiveGateway(page, 'signin');
-      const postResetLogin = await workdayLogin(page, email, effectivePassword);
-      if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-    }
-  }
-
-  // 3. Check if email verification is requested
-  if (await isWorkdayVerificationPage(page)) {
-    console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader for verification link...');
-    const verified = await resolveWorkdayVerification(page, {
-      email,
-      password: effectivePassword,
-      company,
-      startTime: page._lastRegistrationTime || (Date.now() - 60000),
-      timeoutMs: profile?._isScanOnly ? 15000 : 50000,
-      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-      jobUrl: page.url(),
-      distributionId: profile?._distributionId || '',
-    }).catch(() => null);
-
-    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
-      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-    }
-
-    if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
-      return finishSuccessfulLogin(page, mode, profile);
-    }
-
-    if (verified?.success) {
-      await handleAdaptiveGateway(page, 'signin');
-      const loginAfterVerif = await workdayLogin(page, email, effectivePassword);
-      if (loginAfterVerif === true || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-    }
-
-    // If verification email did not arrive or failed -> failover to Forgot Password!
-    console.log('   🔑 Verification email not received or timed out — failing over to Forgot Password recovery via Zoho Mail...');
-    const forgotResult = await executeWorkdayForgotPassword(page, {
-      email,
-      password: effectivePassword,
-      company,
-      timeoutMs: profile?._isScanOnly ? 15000 : 55000,
-      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-      jobUrl: page.url(),
-      distributionId: profile?._distributionId || '',
-    }).catch(() => null);
-
-    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
-      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-    }
-
-    if (forgotResult?.success) {
-      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-      await handleAdaptiveGateway(page, 'signin');
-      const postResetLogin = await workdayLogin(page, email, effectivePassword);
-      if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-    }
-  }
-
-  // 4. Return to Sign In page and attempt login with registered credentials
-  console.log('   🔁 Navigating to Sign In page to log in with registered credentials...');
-  await handleAdaptiveGateway(page, 'signin');
-  const retryLogin = await workdayLogin(page, email, effectivePassword);
-  if (retryLogin === true || await isWorkdayWizardVisible(page)) {
-    return finishSuccessfulLogin(page, mode, profile);
-  }
-
-  // 5. If login required email verification:
-  if (retryLogin === 'needs-verification' || await isWorkdayVerificationPage(page)) {
-    console.log('   📩 Verification required on Sign In — polling Zoho Mail Reader for verification link...');
-    const verified = await resolveWorkdayVerification(page, {
-      email,
-      password: effectivePassword,
-      company,
-      startTime: Date.now() - 60000,
-      timeoutMs: profile?._isScanOnly ? 15000 : 50000,
-      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-      jobUrl: page.url(),
-      distributionId: profile?._distributionId || '',
-    }).catch(() => null);
-
-    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
-      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-    }
-
-    if (verified?.onWizard || await isWorkdayWizardVisible(page)) {
-      return finishSuccessfulLogin(page, mode, profile);
-    }
-    if (verified?.success) {
-      await handleAdaptiveGateway(page, 'signin');
-      const postVerifLogin = await workdayLogin(page, email, effectivePassword);
-      if (postVerifLogin === true || await isWorkdayWizardVisible(page)) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-    }
-  }
-
-  // 6. If login still fails (wrong password or lockout), trigger automated Forgot Password as final guarantee
-  console.log('   🔑 Login still failing on tenant — triggering automated Forgot Password recovery via Zoho Mail...');
-  const finalForgot = await executeWorkdayForgotPassword(page, {
-    email,
-    password: effectivePassword,
-    company,
-    timeoutMs: 55000,
-  }).catch(() => null);
-
-  if (finalForgot?.reason === 'mailbox_not_connected') {
-    return 'mailbox_not_connected';
-  }
-
-  if (finalForgot?.success) {
-    if (finalForgot.onWizard || await isWorkdayWizardVisible(page)) {
-      return finishSuccessfulLogin(page, mode, profile);
-    }
-    await handleAdaptiveGateway(page, 'signin');
-    const postResetLogin = await workdayLogin(page, email, effectivePassword);
-    if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
-      return finishSuccessfulLogin(page, mode, profile);
-    }
-  }
-
-  if (await isWorkdayWizardVisible(page)) {
-    return finishSuccessfulLogin(page, mode, profile);
-  }
-
-  console.log('   ❌ Auth recovery via Create Account and Forgot Password exhausted.');
-  return false;
-}
-
-// ─── Generate a secure password ─────────────────────────────────────────────
-function generatePassword() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
-  const specials = '!@#$%&*';
-  let pwd = '';
-  for (let i = 0; i < 12; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
-  // Add a special char and digit to satisfy most policies
-  pwd += specials[Math.floor(Math.random() * specials.length)];
-  pwd += Math.floor(Math.random() * 10);
-  return pwd;
-}
-
-// ─── Detect if page is Workday login/gateway ────────────────────────────────
-export async function isWorkdayLogin(page) {
-  const url = page.url();
-  if (!/workday|myworkday/i.test(url)) return false;
-
-  if (await isWorkdayWizardVisible(page)) return false;
-
-  const scan = await prescanGatewayElements(page);
-  if (scan.hasWizardFields) return false;
-  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword) return false;
-
-  // A page is ONLY a login / auth gateway if genuine authentication controls exist:
-  return !!(
-    scan.hasPasswordInput ||
-    scan.hasVerifyPassword ||
-    scan.hasSignInWithEmailBtn ||
-    scan.hasCreateAccountBtn ||
-    scan.hasSignInUnderCreateAccount ||
-    scan.hasSocialSSO ||
-    (scan.hasEmailInput && (scan.hasForgotPasswordBtn || scan.hasResetPasswordBtn))
-  );
-}
-
-// ─── Login to Workday ───────────────────────────────────────────────────────
-/**
- * @returns {Promise<true|'needs-signup'|'locked'|false>}
- */
-export async function workdayLogin(page, email, password) {
-  console.log('   Logging into Workday...');
-
-  // 0. Safety Net: If on Password Reset Form, complete password reset first
-  if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
-    console.log('   🔑 [WorkdayBot] Active Password Reset form detected on login entry — setting new password and submitting form...');
-    await completeWorkdayPasswordResetForm(page, email, password);
-    await page.waitForTimeout(3000);
-    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-    if (await isWorkdayWizardVisible(page)) {
-      console.log('   ✅ [WorkdayBot] Entered application wizard directly after password reset.');
-      return true;
-    }
-  }
-
-  // Adaptively ensure we are on the sign-in form (handles SSO "Sign in with email" and "Sign In" link below Create Account)
-  await handleAdaptiveGateway(page, 'signin');
-
-  // Wait for signin form to appear (email + password inputs)
-  try {
-    await page.waitForSelector('input[data-automation-id="password"], input[type="password"]', { timeout: 8000 });
-  } catch {}
-
-  // 3. Fill visible email
-  const emailInputs = await page.$$([
-    'input[data-automation-id*="email" i]',
-    'input[data-automation-id*="user" i]',
-    'input[type="email"]',
-    'input[name*="email" i]',
-    'input[name*="user" i]',
-    'input[id*="email" i]',
-    'input[id*="user" i]',
-    'input[aria-label*="email" i]',
-    'input[aria-label*="username" i]',
-    'input[placeholder*="email" i]'
-  ].join(', '));
-  let emailFilled = false;
-  for (const inp of emailInputs) {
-    if (await inp.isVisible().catch(() => false)) {
-      await inp.fill(email);
-      await page.waitForTimeout(200);
-      emailFilled = true;
-      break;
-    }
-  }
-
-  // 4. Fill visible password
-  const passwordInputs = await page.$$([
-    'input[data-automation-id*="password" i]:not([data-automation-id*="verify" i])',
-    'input[type="password"]',
-    'input[name*="password" i]:not([name*="verify" i])',
-    'input[id*="password" i]:not([id*="verify" i])'
-  ].join(', '));
-  let passwordFilled = false;
-  for (const inp of passwordInputs) {
-    if (await inp.isVisible().catch(() => false)) {
-      await inp.fill(password);
-      await page.waitForTimeout(200);
-      passwordFilled = true;
-      break;
-    }
-  }
-
-  if (emailFilled && !passwordFilled) {
-    console.log('    📧 Email entered on single-step gateway — advancing to password step...');
-    const advanceBtn = await page.$([
-      'button[data-automation-id="signInSubmitButton"]:visible',
-      'button[data-automation-id*="next" i]:visible',
-      'button[type="submit"]:visible',
-      'button:has-text("Next"):visible',
-      'button:has-text("Continue"):visible',
-      'button:has-text("Sign In"):visible',
-    ].join(', ')).catch(() => null);
-
-    if (advanceBtn && !await isInNavOrHeader(advanceBtn)) {
-      await advanceBtn.click({ force: true }).catch(() => advanceBtn.evaluate(el => el.click()));
-    } else {
-      await page.keyboard.press('Enter');
-    }
-
-    await page.waitForTimeout(2500);
-    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
-
-    const newPasswordInputs = await page.$$('input[data-automation-id="password"], input[type="password"], input[name="password"]');
-    for (const inp of newPasswordInputs) {
-      if (await inp.isVisible().catch(() => false)) {
-        await inp.fill(password);
-        await page.waitForTimeout(200);
-        passwordFilled = true;
-        break;
-      }
-    }
-  }
-
-  if (!emailFilled || !passwordFilled) {
-    console.log('    ⚠️  Could not locate visible email/password inputs on Sign In form.');
-    return false;
-  }
-
-  // Dismiss cookie notice if present
-  try {
-    const cookieBtn = await page.$('button[data-automation-id="legalNoticeAcceptButton"], button:has-text("Accept Cookies"), button:has-text("Accept all"), button:has-text("Accept"), button:has-text("Decline")');
-    if (cookieBtn && await cookieBtn.isVisible().catch(() => false)) {
-      await cookieBtn.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(300);
-    }
-  } catch {}
-
-  // 5. Click visible Sign In submit button with force: true (excluding nav header)
-  const signInButtons = await page.$$([
-    'button[data-automation-id="signInSubmitButton"]',
-    'button[type="submit"]',
-    'button:has-text("Sign In")',
-    'button:has-text("Sign in")',
-    'button:has-text("Log In")',
-    'button:has-text("Log in")',
-  ].join(', '));
-  let clickedSignIn = false;
-  for (const btn of signInButtons) {
-    if (await btn.isVisible().catch(() => false)) {
-      if (await isInNavOrHeader(btn)) continue;
-      const text = (await btn.textContent().catch(() => '')).trim();
-      const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
-      const type = await btn.getAttribute('type').catch(() => '');
-      if (autoId === 'signInSubmitButton' || type === 'submit' || /sign\s*in|log\s*in/i.test(text)) {
-        await btn.scrollIntoViewIfNeeded().catch(() => {});
-        await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
-        clickedSignIn = true;
-        break;
-      }
-    }
-  }
-
-  if (!clickedSignIn) {
-    await page.keyboard.press('Enter');
-  }
-
-  await page.waitForTimeout(4000);
-  try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
-  await page.waitForTimeout(2000);
-
-  if (await isStillOnSignInForm(page)) {
-    // Retry pressing Enter on password field in case button click was intercepted
-    const pwdInput = await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible');
-    if (pwdInput) {
-      await pwdInput.focus().catch(() => {});
-      await page.keyboard.press('Enter').catch(() => {});
-      await page.waitForTimeout(3000);
-      try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
-    }
-  }
-
-  if (await isStillOnSignInForm(page)) {
-    const reason = await detectLoginFailureReason(page);
-    if (reason === 'needs-verification') {
-      console.log('    ⚠️  Workday reports account requires email verification before signing in.');
-      return 'needs-verification';
-    }
-    if (reason === 'locked') {
-      console.log('    Workday reports the account may be locked.');
-      return 'locked';
-    }
-    if (reason === 'wrong-password-or-locked') {
-      console.log('    Workday reports invalid username/password or account might be locked.');
-      return 'wrong-password-or-locked';
-    }
-    if (reason === 'needs-signup') {
-      console.log('    Login failed — account may not exist on this tenant (wrong email/password message).');
-      return 'needs-signup';
-    }
-    // Still on sign-in with no recognized error — treat as missing account for this tenant.
-    console.log('    Still on Sign In form after submit — will try Create Account fallback.');
-    return 'needs-signup';
-  }
-
-  const hasError = await page.$('.error-message, [data-automation-id*="error"]').catch(() => null);
-  if (hasError && await hasError.isVisible().catch(() => false)) {
-    const reason = await detectLoginFailureReason(page);
-    if (reason === 'needs-verification') {
-      console.log('    ⚠️  Workday reports account requires email verification before signing in.');
-      return 'needs-verification';
-    }
-    if (reason === 'locked') return 'locked';
-    if (reason === 'wrong-password-or-locked') return 'wrong-password-or-locked';
-    if (reason === 'needs-signup') return 'needs-signup';
-    return false;
-  }
-
-  console.log('   Workday login successful.');
-  return true;
-}
-
-// ─── Create Workday account ─────────────────────────────────────────────────
-export async function workdayCreateAccount(page, email, givenPassword) {
-  console.log('   Creating Workday account...');
-
-  // 1. If on two-button page, Social SSO, or Sign In tab, click "Create Account" button/link (not nav bar)
-  await clickGatewayCreateAccount(page);
-
-  // 2. Wait explicitly for create account form (verifyPassword input) to appear
-  try {
-    await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 8000 });
-  } catch {}
-
-  const verifyVisible = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
-  if (!verifyVisible) {
-    await clickGatewayCreateAccount(page);
-    try {
-      await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 5000 });
-    } catch {}
-  }
-
-  const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"]');
-  for (const inp of emailInputs) {
-    if (await inp.isVisible().catch(() => false)) {
-      await inp.fill(email);
-      break;
-    }
-  }
-
-  const password = givenPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
-  const pwdInputs = await page.$$('input[data-automation-id="password"], input[type="password"]');
-  for (const inp of pwdInputs) {
-    if (await inp.isVisible().catch(() => false)) {
-      const autoId = (await inp.getAttribute('data-automation-id').catch(() => '') || '').toLowerCase();
-      if (autoId.includes('verify') || autoId.includes('confirm')) continue;
-      await inp.fill(password);
-      break;
-    }
-  }
-
-  const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id="confirmPassword"]:visible, input[name="verifyPassword"]:visible, input[name="confirmPassword"]:visible, input[placeholder*="verify" i]:visible, input[placeholder*="confirm" i]:visible');
-  if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) {
-    await verifyPwdInput.fill(password);
-  }
-
-  // Check all consent/terms checkboxes on Create Account form so submit button is enabled
-  const allCheckboxes = (await page.$$('input[type="checkbox"]')) || [];
-  for (const cb of allCheckboxes) {
-    try {
-      if (await cb.isVisible().catch(() => false)) {
-        const isChecked = await cb.isChecked().catch(() => false);
-        if (!isChecked) {
-          await cb.click({ force: true }).catch(() => cb.evaluate(el => el.click()));
-          await page.waitForTimeout(150);
-        }
-      }
-    } catch {}
-  }
-
-  const submitBtns = (await page.$$([
-    'button[data-automation-id="createAccountSubmitButton"]',
-    '[data-automation-id="createAccountSubmitButton"]',
-    'button:has-text("Create Account")',
-    'button[type="submit"]'
-  ].join(', '))) || [];
-
-  let submitted = false;
-  for (const btn of submitBtns) {
-    if (await btn.isVisible().catch(() => false)) {
-      if (await isInNavOrHeader(btn)) continue;
-      const registrationTime = Date.now();
-      page._lastRegistrationTime = registrationTime - 30000;
-      await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
-      submitted = true;
-      await page.waitForTimeout(4000);
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-      break;
-    }
-  }
-
-  if (!submitted) {
-    console.log('   ❌ Could not submit Create Account form.');
-    return null;
-  }
-
-  // Check if an error banner or message explicitly states the account already exists
-  const alreadyExists = await page.evaluate(() => {
-    const errorEl = document.querySelector('.error-message, [data-automation-id*="error" i], [role="alert"]');
-    if (!errorEl) return false;
-    const text = (errorEl.textContent || '').toLowerCase();
-    return (
-      text.includes('already exists') ||
-      text.includes('already registered') ||
-      text.includes('an account with this email') ||
-      text.includes('user already exists')
-    );
-  }).catch(() => false);
-
-  if (alreadyExists) {
-    console.log('   ℹ️  Account already exists with this email (error alert detected) — switching to Sign In...');
-    page._accountAlreadyExists = true;
-    await clickGatewaySignIn(page);
-    return password;
-  }
-
-  // Check for email verification
-  if (await isWorkdayVerificationPage(page)) {
-    console.log(`   📩 Workday account created for ${email}, tenant requires email verification.`);
-  }
-
-  return password;
-}
-
-// ─── Detect if page currently shows Sign In inputs ──────────────────────────
-export async function isWorkdaySignInPage(page) {
-  const url = page.url();
-  if (!/workday|myworkday/i.test(url)) return false;
-
-  // 1. Check if application form wizard fields or buttons are visible
-  const hasAppFields = await page.$([
-    'button:has-text("Save and Continue")',
-    'button:has-text("Save & Continue")',
-    'button[data-automation-id="bottom-navigation-next-button"]',
-    'input[data-automation-id="legalNameSection_firstName"]',
-    'input[data-automation-id="phone-number"]',
-  ].join(', ')).catch(() => null);
-
-  if (hasAppFields && await hasAppFields.isVisible().catch(() => false)) {
-    return false;
-  }
-
-  // 2. Check for visible sign-in inputs (email/password fields)
-  const pwdInput = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, input[name="password"]:visible').catch(() => null);
-  const emailInput = await page.$('input[data-automation-id="email"]:visible, input[data-automation-id="userName"]:visible, input[type="email"]:visible').catch(() => null);
-  const signInSubmitBtn = await page.$('button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
-  const ssoBtn = await page.$('button[data-automation-id="SignInWithEmailButton"]:visible, button:has-text("Sign in with email"):visible').catch(() => null);
-
-  return !!((pwdInput && emailInput) || (pwdInput && signInSubmitBtn) || ssoBtn);
-}
-
-// ─── Full Workday flow ──────────────────────────────────────────────────────
-export async function handleWorkday(page, { email, password, mode = 'signin', profile = null } = {}) {
-  console.log(`   🔒 [STRICT AUTH] Target candidate email: "${email || 'NONE'}" (mode: ${mode})`);
-  if (!email || !String(email).trim()) {
-    console.error('   ❌ [STRICT AUTH GUARD] handleWorkday called with NO EMAIL. Aborting auth to protect candidate accounts.');
-    return false;
-  }
-
-  if (await isWorkdayWizardVisible(page)) {
-    console.log('   Already on Workday application form wizard — skipping discovery.');
-    return true;
-  }
-
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-
-  if (!await isWorkdayLogin(page)) {
-    const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
-    if (entry.entered) {
-      console.log(`   Entered application wizard (${entry.method}).`);
-    }
-  }
-
-  if (await isWorkdayAlreadyApplied(page)) {
-    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
-    return 'already_applied';
-  }
-
-  if (await isWorkdayWizardVisible(page)) {
-    console.log('   Already authenticated on Workday application form.');
-    return true;
-  }
-
-  if (!await isWorkdayLogin(page)) {
-    await handleAdaptiveGateway(page, mode);
-    if (await isWorkdayAlreadyApplied(page)) {
-      console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
-      return 'already_applied';
-    }
-    if (await isWorkdayWizardVisible(page)) {
-      console.log('   Already authenticated on Workday application form.');
-      return true;
-    }
-    if (!await isWorkdayLogin(page)) {
-      console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
-      return false;
-    }
-  }
-
-  console.log(`   Workday auth mode: "${mode}"`);
-
-  // Mode: "signin" — try login first; on wrong-password / no-account, create account then sign in
-  // Flow: Login → if fails → Create Account (ensures account exists on this tenant) →
-  //        if account already existed (_accountAlreadyExists) → Forgot Password → continue
-  //        if fresh account created → verify + login normally
-  if (mode === 'signin') {
-    const effectivePassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
-    if (email && effectivePassword) {
-      console.log(`   Logging in to Workday as ${email}...`);
-      const loginResult = await workdayLogin(page, email, effectivePassword);
-
-      if (loginResult === true) {
-        return finishSuccessfulLogin(page, mode, profile);
-      }
-
-      if (await isWorkdayAlreadyApplied(page)) {
-        console.log('   ℹ️ Candidate has ALREADY APPLIED to this job post-login attempt.');
-        return 'already_applied';
-      }
-
-      const company = extractWorkdayCompanyName(page.url());
-
-      // Case 1: Workday reports email verification needed
-      if (loginResult === 'needs-verification' || await isWorkdayVerificationPage(page)) {
-        if (await isWorkdayWizardVisible(page)) {
-          console.log('   ✅ Already on application form wizard — skipping verification.');
-          return finishSuccessfulLogin(page, mode, profile);
-        }
-        console.log('   📩 Workday reports account requires email verification. Resolving via Zoho Mail Reader...');
-        const verified = await resolveWorkdayVerification(page, {
-          email,
-          password: effectivePassword,
-          company,
-          startTime: page._lastLoginAttemptTime || (Date.now() - 45000),
-          timeoutMs: 50000,
-          applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-          jobUrl: page.url(),
-          distributionId: profile?._distributionId || '',
-        }).catch((err) => {
-          console.warn(`   ⚠️  [WorkdayBot] Verification failed: ${err.message}`);
-          return null;
-        });
-
-        if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
-          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-        }
-
-        if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
-          console.log('   ✅ Application wizard active — proceeding directly to form fill!');
-          return finishSuccessfulLogin(page, mode, profile);
-        }
-
-        if (verified?.success) {
-          console.log('   ✅ Email verification resolved! Logging in...');
-          await handleAdaptiveGateway(page, 'signin');
-          const relogin = await workdayLogin(page, email, effectivePassword);
-          if (relogin === true || await isWorkdayWizardVisible(page)) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-        }
-
-        // Failover: if verification link was not received or failed, trigger Forgot Password recovery
-        console.log('   🔑 Verification email not received or timed out — failing over to Forgot Password recovery via Zoho Mail...');
-        const forgotResult = await executeWorkdayForgotPassword(page, {
-          email,
-          password: effectivePassword,
-          company,
-          timeoutMs: 55000,
-          applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-          jobUrl: page.url(),
-          distributionId: profile?._distributionId || '',
-        });
-
-        if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
-          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-        }
-
-        if (forgotResult?.success) {
-          if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-          await handleAdaptiveGateway(page, 'signin');
-          const postForgotLogin = await workdayLogin(page, email, effectivePassword);
-          if (postForgotLogin === true || await isWorkdayWizardVisible(page)) {
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-        }
-      }
-
-      // Login did not succeed (Workday returns "Invalid user name or password" for both non-existent accounts and wrong passwords).
-      // Attempt Create Account FIRST: If account is new on this tenant (most common), it registers cleanly.
-      // If account already exists, Workday explicitly notifies us, and fallbackCreateAccountAndLogin automatically triggers Forgot Password!
-      console.log(`   ℹ️  Login failed (result="${loginResult}") — attempting Create Account fallback for this Workday tenant...`);
-      return fallbackCreateAccountAndLogin(page, {
-        email,
-        password: effectivePassword,
-        mode,
-        profile,
-      });
-    }
-    console.log('   ❌ Missing email or password for Workday signin mode.');
-    return false;
-  }
-
-  // Mode: "signup" -> call workdayCreateAccount() then workdayLogin()
-  if (mode === 'signup') {
-    if (email) {
-      console.log(`   Creating new Workday account for ${email}...`);
-      const newPassword = await workdayCreateAccount(page, email, password);
-      if (newPassword) {
-        console.log('   Checking page state after account creation...');
-        await page.waitForTimeout(3000);
-        try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
-        await page.waitForTimeout(2000);
-
-        if (await isWorkdayWizardVisible(page)) {
-          console.log('   ✅ Already on application form wizard after account creation.');
-          return true;
-        }
-
-        const isVerif = await isWorkdayVerificationPage(page);
-        console.log(`   ${isVerif ? '📩 Workday account created, tenant requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
-        const company = extractWorkdayCompanyName(page.url());
-        const verified = await resolveWorkdayVerification(page, {
-          email,
-          company,
-          startTime: page._lastRegistrationTime || (Date.now() - 30000),
-          timeoutMs: isVerif ? 60000 : 35000,
-        }).catch((err) => {
-          console.warn(`   ⚠️  [WorkdayBot] Verification poll note: ${err.message}`);
-          return null;
-        });
-
-        if (verified?.success) {
-          console.log('   ✅ Email verification resolved! Proceeding to application / login...');
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-          if (await isWorkdayWizardVisible(page)) {
-            console.log('   ✅ Already on application form wizard after verification.');
-            return true;
-          }
-
-          await handleAdaptiveGateway(page, 'signin');
-          const loggedIn = await workdayLogin(page, email, newPassword);
-          if (loggedIn === true) {
-            return finishSuccessfulLogin(page, mode);
-          }
-          if (await isWorkdayWizardVisible(page)) {
-            return true;
-          }
-        }
-
-        console.log('   Workday redirected to Sign In / Gateway — logging in with new credentials...');
-        await handleAdaptiveGateway(page, 'signin');
-        const loggedIn = await workdayLogin(page, email, newPassword);
-        if (loggedIn === true) {
-          return finishSuccessfulLogin(page, mode, profile);
-        }
-
-        if (loggedIn === 'needs-verification') {
-          if (await isWorkdayWizardVisible(page)) {
-            console.log('   ✅ Already on application form wizard — skipping verification.');
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-          console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
-          const retryVerified = await resolveWorkdayVerification(page, {
-            email,
-            password: newPassword,
-            company,
-            startTime: page._lastRegistrationTime || (Date.now() - 60000),
-            timeoutMs: 60000,
-            applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-            jobUrl: page.url(),
-            distributionId: profile?._distributionId || '',
-          }).catch(() => null);
-
-          if (retryVerified?.reason === 'mailbox_not_connected' || retryVerified?.reason === 'zoho mail not connected' || retryVerified?.isZohoNotConnected) {
-            return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-          }
-
-          if (retryVerified?.type === 'direct_wizard' || retryVerified?.onWizard || await isWorkdayWizardVisible(page)) {
-            console.log('   ✅ Application wizard active — proceeding directly to form fill!');
-            return finishSuccessfulLogin(page, mode, profile);
-          }
-
-          if (retryVerified?.success) {
-            console.log('   ✅ Email verification completed on retry! Logging in...');
-            await handleAdaptiveGateway(page, 'signin');
-            const retryLogin = await workdayLogin(page, email, newPassword);
-            if (retryLogin === true) {
-              return finishSuccessfulLogin(page, mode, profile);
-            }
-          }
-        }
-
-        // If login failed due to wrong password, mismatched credentials, or account lockout:
-        const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
-        if (isWrongOrLocked) {
-          console.log('   🔐 Account already exists or locked in signup mode — initiating automated Forgot Password recovery via Zoho Mail...');
-          const forgotSuccess = await executeWorkdayForgotPassword(page, {
-            email,
-            password: newPassword,
-            company,
-            timeoutMs: 75000,
-          });
-
-          if (forgotSuccess?.reason === 'mailbox_not_connected') {
-            return 'mailbox_not_connected';
-          }
-
-          if (forgotSuccess?.success) {
-            console.log('   ✅ Forgot Password recovery completed! Verifying application wizard...');
-            await page.waitForTimeout(3000);
-            try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-            if (await isWorkdayWizardVisible(page)) {
-              return true;
-            }
-            await handleAdaptiveGateway(page, 'signin');
-            const postResetLogin = await workdayLogin(page, email, newPassword);
-            if (postResetLogin === true) {
-              return finishSuccessfulLogin(page, mode, profile);
-            }
-            if (await isWorkdayWizardVisible(page)) {
-              return true;
-            }
-          }
-        }
-
-        if (await isWorkdayWizardVisible(page)) {
-          return true;
-        }
-
-        if (await isWorkdayAlreadyApplied(page)) {
-          console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
-          return 'already_applied';
-        }
-
-        console.log('   ❌ Unable to enter application form after account creation.');
-        return false;
-      }
-      console.log('   ❌ Account creation failed in signup mode.');
-      return false;
-    }
-    console.log('   ❌ Missing email for Workday signup mode.');
-    return false;
-  }
-
-  console.log(`   ❌ Unknown mode "${mode}" or missing credentials.`);
-  return false;
-}
+/**
+ * workday.mjs — Workday account creation & login
+ *
+ * Workday requires an account to apply. This module:
+ * 1. Detects Workday login page
+ * 2. Creates account (or logs in if credentials exist)
+ * 3. Fills email + auto-generates password
+ * 4. Navigates to the application form
+ *
+ * Login is email + password only. Mailbox OTP is not connected
+ * (Zoho Mail can be wired later if a tenant ever requires a code).
+ */
+
+import {
+  discoverApplicationForm,
+  isInNavOrHeader,
+  isSignInFormVisible,
+  clickGatewaySignIn,
+  clickGatewayCreateAccount,
+  prescanGatewayElements,
+  handleAdaptiveGateway,
+  isWorkdayWizardVisible,
+  clickContinueApplicationIfPresent,
+  ensureWorkdayApplicationWizard,
+  extractWorkdayCompanyName,
+  isWorkdayAlreadyApplied,
+} from './discovery.mjs';
+import {
+  resolveWorkdayVerification,
+  isWorkdayVerificationPage,
+  isWorkdayForgotPasswordPage,
+  isWorkdayPasswordResetSetPage,
+  completeWorkdayPasswordResetForm,
+  detectWrongPasswordOrLocked,
+  executeWorkdayForgotPassword,
+} from './workdayVerification.mjs';
+
+export {
+  resolveWorkdayVerification,
+  isWorkdayVerificationPage,
+  isWorkdayForgotPasswordPage,
+  isWorkdayPasswordResetSetPage,
+  completeWorkdayPasswordResetForm,
+  detectWrongPasswordOrLocked,
+  executeWorkdayForgotPassword,
+};
+
+const MAILBOX_NOT_CONNECTED =
+  'Mailbox OTP is not connected (Zoho Mail can be added later). Login is email + password only.';
+
+/**
+ * Classify a failed Workday login attempt from visible page text.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<'needs-verification'|'wrong-password-or-locked'|'locked'|'needs-signup'|'unknown'>}
+ */
+async function detectLoginFailureReason(page) {
+  return await page.evaluate(() => {
+    const text = (document.body?.innerText || '').toLowerCase();
+    // 1. Explicit account lockout messages
+    if (
+      text.includes('account has been locked') ||
+      text.includes('account is locked due to') ||
+      text.includes('your account is temporarily locked') ||
+      text.includes('too many failed attempts')
+    ) {
+      return 'locked';
+    }
+    // 2. Explicit email verification screens or unverified account messages
+    if (
+      (text.includes('verification email') && text.includes('sent')) ||
+      text.includes('check your spam folder') ||
+      text.includes('check your email') ||
+      text.includes('account may need verification') ||
+      text.includes('resend account verification') ||
+      text.includes("still can't sign in") ||
+      text.includes('we sent a verification link') ||
+      text.includes('we sent a verification code') ||
+      text.includes('we have sent you a verification') ||
+      text.includes('we have sent a verification') ||
+      text.includes("we've sent a verification") ||
+      text.includes('sent you a verification') ||
+      text.includes('verification link') ||
+      text.includes('need to be verified') ||
+      text.includes('needs to be verified') ||
+      text.includes('need to be activated') ||
+      text.includes('needs to be activated') ||
+      text.includes('activate your account') ||
+      text.includes('account requires email verification') ||
+      text.includes('verify your email')
+    ) {
+      return 'needs-verification';
+    }
+    // 3. Wrong password or account might be locked
+    if (
+      text.includes('invalid user name or password') ||
+      text.includes('invalid username or password') ||
+      text.includes('or your account might be locked') ||
+      text.includes('account might be locked') ||
+      text.includes('wrong password') ||
+      text.includes('incorrect password') ||
+      text.includes('invalid password')
+    ) {
+      return 'wrong-password-or-locked';
+    }
+    // All other login failures -> attempt signup fallback
+    return 'needs-signup';
+  }).catch(() => 'unknown');
+}
+
+/** @returns {Promise<boolean>} */
+async function isStillOnSignInForm(page) {
+  const pwd = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible').catch(() => null);
+  const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
+  return Boolean(pwd && !verifyPwd);
+}
+
+/**
+ * After successful login, click Apply if back on the JD page.
+ * @param {import('playwright').Page} page
+ * @param {string} mode
+ * @returns {Promise<boolean>}
+ */
+async function finishSuccessfulLogin(page, mode, profile = null) {
+  await page.waitForTimeout(3000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  // 0. Detect if candidate has already applied to this position on Workday post-login
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Post-login check: Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
+  // 1. Recover immediately if Workday displays transient "Something went wrong"
+  let bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+  if (/something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText)) {
+    console.log('   🔄 Workday post-login transient error detected ("Something went wrong") — refreshing page to recover application form...');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(4000);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+  }
+
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   Logged in — already on application wizard.');
+    return true;
+  }
+
+  const continued = await clickContinueApplicationIfPresent(page);
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+  if (continued && await isWorkdayWizardVisible(page)) {
+    console.log('   Logged in — resumed draft via Continue Application.');
+    return true;
+  }
+
+  const hasApplyBtn = await page.$([
+    'a[data-automation-id="adventureButton"]',
+    'a[data-automation-id="applyButton"]',
+    'button[data-automation-id="applyButton"]',
+    '[data-automation-id="jobPostingApplyButton"]',
+    'a:has-text("Apply for this job")',
+    'button:has-text("Apply for this job")',
+    'a:has-text("Continue Application")',
+    'button:has-text("Continue Application")',
+  ].join(', ')).catch(() => null);
+
+  if (hasApplyBtn && await hasApplyBtn.isVisible().catch(() => false)) {
+    console.log('   Logged in, on JD page — entering application wizard...');
+    await ensureWorkdayApplicationWizard(page, { mode, profile });
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+  } else if (!continued) {
+    await clickContinueApplicationIfPresent(page);
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+  }
+
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   ✅ Successfully verified on application wizard.');
+    return true;
+  }
+
+  // 2. Final recovery attempt: reload only if genuine transient error or blank page (never destroy active login modal)
+  bodyText = await page.evaluate(() => document.body?.innerText || '').catch(() => '');
+  const isOnAuth = await isWorkdayLogin(page);
+  const hasModal = await page.$('[role="dialog"], .modal, [data-automation-id*="modal" i]').catch(() => null);
+  const isTransientError = /something went wrong|please refresh the page|error code:\s*i\|/i.test(bodyText);
+
+  if (isTransientError || (!await isWorkdayWizardVisible(page) && !isOnAuth && !hasModal)) {
+    console.log('   🔄 Wizard not confirmed post-login — refreshing page once to trigger hydration...');
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    await page.waitForTimeout(4000);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ [finishSuccessfulLogin] Post-reload check: Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   ✅ Successfully verified on application wizard after reload.');
+      return true;
+    }
+  }
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ [finishSuccessfulLogin] Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
+  const onWizard = await isWorkdayWizardVisible(page);
+  if (onWizard) {
+    console.log('   ✅ Successfully verified on application wizard.');
+    return true;
+  }
+
+  console.log('   ⚠️  Post-login navigation completed but application wizard not confirmed.');
+  return false;
+}
+
+/**
+ * Create account on this tenant, then sign in (or continue if already on the form).
+ * @param {import('playwright').Page} page
+ * @param {{ email: string, password: string, mode?: string }} opts
+ * @returns {Promise<boolean>}
+ */
+async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'signin', profile = null }) {
+  const effectivePassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+  console.log(`   No account on this tenant — registering new account for ${email}...`);
+  const company = extractWorkdayCompanyName(page.url());
+  let createdPassword = await workdayCreateAccount(page, email, effectivePassword);
+
+  await page.waitForTimeout(2000);
+  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
+  // 1. Check if application wizard is already active
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   ✅ Successfully entered application wizard post-registration!');
+    return finishSuccessfulLogin(page, mode, profile);
+  }
+
+  // 2. If account already exists on this tenant, trigger automated Forgot Password immediately
+  if (page._accountAlreadyExists) {
+    console.log('   🔐 Account already exists on this tenant — initiating automated Forgot Password recovery via Zoho Mail...');
+    const forgotResult = await executeWorkdayForgotPassword(page, {
+      email,
+      password: effectivePassword,
+      company,
+      timeoutMs: 55000,
+      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+      jobUrl: page.url(),
+      distributionId: profile?._distributionId || '',
+    });
+
+    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
+      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+    }
+
+    if (forgotResult?.success) {
+      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      await handleAdaptiveGateway(page, 'signin');
+      const postResetLogin = await workdayLogin(page, email, effectivePassword);
+      if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+  }
+
+  // 3. Check if email verification is requested
+  if (await isWorkdayVerificationPage(page)) {
+    console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader for verification link...');
+    const verified = await resolveWorkdayVerification(page, {
+      email,
+      password: effectivePassword,
+      company,
+      startTime: page._lastRegistrationTime || (Date.now() - 60000),
+      timeoutMs: profile?._isScanOnly ? 15000 : 50000,
+      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+      jobUrl: page.url(),
+      distributionId: profile?._distributionId || '',
+    }).catch(() => null);
+
+    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
+      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+    }
+
+    if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+
+    if (verified?.success) {
+      await handleAdaptiveGateway(page, 'signin');
+      const loginAfterVerif = await workdayLogin(page, email, effectivePassword);
+      if (loginAfterVerif === true || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+
+    // If verification email did not arrive or failed -> failover to Forgot Password!
+    console.log('   🔑 Verification email not received or timed out — failing over to Forgot Password recovery via Zoho Mail...');
+    const forgotResult = await executeWorkdayForgotPassword(page, {
+      email,
+      password: effectivePassword,
+      company,
+      timeoutMs: profile?._isScanOnly ? 15000 : 55000,
+      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+      jobUrl: page.url(),
+      distributionId: profile?._distributionId || '',
+    }).catch(() => null);
+
+    if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
+      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+    }
+
+    if (forgotResult?.success) {
+      if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+      await handleAdaptiveGateway(page, 'signin');
+      const postResetLogin = await workdayLogin(page, email, effectivePassword);
+      if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+  }
+
+  // 4. Return to Sign In page and attempt login with registered credentials
+  console.log('   🔁 Navigating to Sign In page to log in with registered credentials...');
+  await handleAdaptiveGateway(page, 'signin');
+  const retryLogin = await workdayLogin(page, email, effectivePassword);
+  if (retryLogin === true || await isWorkdayWizardVisible(page)) {
+    return finishSuccessfulLogin(page, mode, profile);
+  }
+
+  // 5. If login required email verification:
+  if (retryLogin === 'needs-verification' || await isWorkdayVerificationPage(page)) {
+    console.log('   📩 Verification required on Sign In — polling Zoho Mail Reader for verification link...');
+    const verified = await resolveWorkdayVerification(page, {
+      email,
+      password: effectivePassword,
+      company,
+      startTime: Date.now() - 60000,
+      timeoutMs: profile?._isScanOnly ? 15000 : 50000,
+      applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+      jobUrl: page.url(),
+      distributionId: profile?._distributionId || '',
+    }).catch(() => null);
+
+    if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
+      return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+    }
+
+    if (verified?.onWizard || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+    if (verified?.success) {
+      await handleAdaptiveGateway(page, 'signin');
+      const postVerifLogin = await workdayLogin(page, email, effectivePassword);
+      if (postVerifLogin === true || await isWorkdayWizardVisible(page)) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+    }
+  }
+
+  // 6. If login still fails (wrong password or lockout), trigger automated Forgot Password as final guarantee
+  console.log('   🔑 Login still failing on tenant — triggering automated Forgot Password recovery via Zoho Mail...');
+  const finalForgot = await executeWorkdayForgotPassword(page, {
+    email,
+    password: effectivePassword,
+    company,
+    timeoutMs: 55000,
+  }).catch(() => null);
+
+  if (finalForgot?.reason === 'mailbox_not_connected') {
+    return 'mailbox_not_connected';
+  }
+
+  if (finalForgot?.success) {
+    if (finalForgot.onWizard || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+    await handleAdaptiveGateway(page, 'signin');
+    const postResetLogin = await workdayLogin(page, email, effectivePassword);
+    if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
+      return finishSuccessfulLogin(page, mode, profile);
+    }
+  }
+
+  if (await isWorkdayWizardVisible(page)) {
+    return finishSuccessfulLogin(page, mode, profile);
+  }
+
+  console.log('   ❌ Auth recovery via Create Account and Forgot Password exhausted.');
+  return false;
+}
+
+// ─── Generate a secure password ─────────────────────────────────────────────
+function generatePassword() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789';
+  const specials = '!@#$%&*';
+  let pwd = '';
+  for (let i = 0; i < 12; i++) pwd += chars[Math.floor(Math.random() * chars.length)];
+  // Add a special char and digit to satisfy most policies
+  pwd += specials[Math.floor(Math.random() * specials.length)];
+  pwd += Math.floor(Math.random() * 10);
+  return pwd;
+}
+
+// ─── Detect if page is Workday login/gateway ────────────────────────────────
+export async function isWorkdayLogin(page) {
+  const url = page.url();
+  if (!/workday|myworkday/i.test(url)) return false;
+
+  if (await isWorkdayWizardVisible(page)) return false;
+
+  const scan = await prescanGatewayElements(page);
+  if (scan.hasWizardFields) return false;
+  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword) return false;
+
+  // A page is ONLY a login / auth gateway if genuine authentication controls exist:
+  return !!(
+    scan.hasPasswordInput ||
+    scan.hasVerifyPassword ||
+    scan.hasSignInWithEmailBtn ||
+    scan.hasCreateAccountBtn ||
+    scan.hasSignInUnderCreateAccount ||
+    scan.hasSocialSSO ||
+    (scan.hasEmailInput && (scan.hasForgotPasswordBtn || scan.hasResetPasswordBtn))
+  );
+}
+
+// ─── Login to Workday ───────────────────────────────────────────────────────
+/**
+ * @returns {Promise<true|'needs-signup'|'locked'|false>}
+ */
+export async function workdayLogin(page, email, password) {
+  console.log('   Logging into Workday...');
+
+  // 0. Safety Net: If on Password Reset Form, complete password reset first
+  if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
+    console.log('   🔑 [WorkdayBot] Active Password Reset form detected on login entry — setting new password and submitting form...');
+    await completeWorkdayPasswordResetForm(page, email, password);
+    await page.waitForTimeout(3000);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   ✅ [WorkdayBot] Entered application wizard directly after password reset.');
+      return true;
+    }
+  }
+
+  // Adaptively ensure we are on the sign-in form (handles SSO "Sign in with email" and "Sign In" link below Create Account)
+  await handleAdaptiveGateway(page, 'signin');
+
+  // Wait for signin form to appear (email + password inputs)
+  try {
+    await page.waitForSelector('input[data-automation-id="password"], input[type="password"]', { timeout: 8000 });
+  } catch {}
+
+  // 3. Fill visible email
+  const emailInputs = await page.$$([
+    'input[data-automation-id*="email" i]',
+    'input[data-automation-id*="user" i]',
+    'input[type="email"]',
+    'input[name*="email" i]',
+    'input[name*="user" i]',
+    'input[id*="email" i]',
+    'input[id*="user" i]',
+    'input[aria-label*="email" i]',
+    'input[aria-label*="username" i]',
+    'input[placeholder*="email" i]'
+  ].join(', '));
+  let emailFilled = false;
+  for (const inp of emailInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      await inp.fill(email);
+      await page.waitForTimeout(200);
+      emailFilled = true;
+      break;
+    }
+  }
+
+  // 4. Fill visible password
+  const passwordInputs = await page.$$([
+    'input[data-automation-id*="password" i]:not([data-automation-id*="verify" i])',
+    'input[type="password"]',
+    'input[name*="password" i]:not([name*="verify" i])',
+    'input[id*="password" i]:not([id*="verify" i])'
+  ].join(', '));
+  let passwordFilled = false;
+  for (const inp of passwordInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      await inp.fill(password);
+      await page.waitForTimeout(200);
+      passwordFilled = true;
+      break;
+    }
+  }
+
+  if (emailFilled && !passwordFilled) {
+    console.log('    📧 Email entered on single-step gateway — advancing to password step...');
+    const advanceBtn = await page.$([
+      'button[data-automation-id="signInSubmitButton"]:visible',
+      'button[data-automation-id*="next" i]:visible',
+      'button[type="submit"]:visible',
+      'button:has-text("Next"):visible',
+      'button:has-text("Continue"):visible',
+      'button:has-text("Sign In"):visible',
+    ].join(', ')).catch(() => null);
+
+    if (advanceBtn && !await isInNavOrHeader(advanceBtn)) {
+      await advanceBtn.click({ force: true }).catch(() => advanceBtn.evaluate(el => el.click()));
+    } else {
+      await page.keyboard.press('Enter');
+    }
+
+    await page.waitForTimeout(2500);
+    try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+
+    const newPasswordInputs = await page.$$('input[data-automation-id="password"], input[type="password"], input[name="password"]');
+    for (const inp of newPasswordInputs) {
+      if (await inp.isVisible().catch(() => false)) {
+        await inp.fill(password);
+        await page.waitForTimeout(200);
+        passwordFilled = true;
+        break;
+      }
+    }
+  }
+
+  if (!emailFilled || !passwordFilled) {
+    console.log('    ⚠️  Could not locate visible email/password inputs on Sign In form.');
+    return false;
+  }
+
+  // Dismiss cookie notice if present
+  try {
+    const cookieBtn = await page.$('button[data-automation-id="legalNoticeAcceptButton"], button:has-text("Accept Cookies"), button:has-text("Accept all"), button:has-text("Accept"), button:has-text("Decline")');
+    if (cookieBtn && await cookieBtn.isVisible().catch(() => false)) {
+      await cookieBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(300);
+    }
+  } catch {}
+
+  // 5. Click visible Sign In submit button with force: true (excluding nav header)
+  const signInButtons = await page.$$([
+    'button[data-automation-id="signInSubmitButton"]',
+    'button[type="submit"]',
+    'button:has-text("Sign In")',
+    'button:has-text("Sign in")',
+    'button:has-text("Log In")',
+    'button:has-text("Log in")',
+  ].join(', '));
+  let clickedSignIn = false;
+  for (const btn of signInButtons) {
+    if (await btn.isVisible().catch(() => false)) {
+      if (await isInNavOrHeader(btn)) continue;
+      const text = (await btn.textContent().catch(() => '')).trim();
+      const autoId = await btn.getAttribute('data-automation-id').catch(() => '');
+      const type = await btn.getAttribute('type').catch(() => '');
+      if (autoId === 'signInSubmitButton' || type === 'submit' || /sign\s*in|log\s*in/i.test(text)) {
+        await btn.scrollIntoViewIfNeeded().catch(() => {});
+        await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        clickedSignIn = true;
+        break;
+      }
+    }
+  }
+
+  if (!clickedSignIn) {
+    await page.keyboard.press('Enter');
+  }
+
+  await page.waitForTimeout(4000);
+  try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+  await page.waitForTimeout(2000);
+
+  if (await isStillOnSignInForm(page)) {
+    // Retry pressing Enter on password field in case button click was intercepted
+    const pwdInput = await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible');
+    if (pwdInput) {
+      await pwdInput.focus().catch(() => {});
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(3000);
+      try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+    }
+  }
+
+  if (await isStillOnSignInForm(page)) {
+    const reason = await detectLoginFailureReason(page);
+    if (reason === 'needs-verification') {
+      console.log('    ⚠️  Workday reports account requires email verification before signing in.');
+      return 'needs-verification';
+    }
+    if (reason === 'locked') {
+      console.log('    Workday reports the account may be locked.');
+      return 'locked';
+    }
+    if (reason === 'wrong-password-or-locked') {
+      console.log('    Workday reports invalid username/password or account might be locked.');
+      return 'wrong-password-or-locked';
+    }
+    if (reason === 'needs-signup') {
+      console.log('    Login failed — account may not exist on this tenant (wrong email/password message).');
+      return 'needs-signup';
+    }
+    // Still on sign-in with no recognized error — treat as missing account for this tenant.
+    console.log('    Still on Sign In form after submit — will try Create Account fallback.');
+    return 'needs-signup';
+  }
+
+  const hasError = await page.$('.error-message, [data-automation-id*="error"]').catch(() => null);
+  if (hasError && await hasError.isVisible().catch(() => false)) {
+    const reason = await detectLoginFailureReason(page);
+    if (reason === 'needs-verification') {
+      console.log('    ⚠️  Workday reports account requires email verification before signing in.');
+      return 'needs-verification';
+    }
+    if (reason === 'locked') return 'locked';
+    if (reason === 'wrong-password-or-locked') return 'wrong-password-or-locked';
+    if (reason === 'needs-signup') return 'needs-signup';
+    return false;
+  }
+
+  console.log('   Workday login successful.');
+  return true;
+}
+
+// ─── Create Workday account ─────────────────────────────────────────────────
+export async function workdayCreateAccount(page, email, givenPassword) {
+  console.log('   Creating Workday account...');
+
+  // 1. If on two-button page, Social SSO, or Sign In tab, click "Create Account" button/link (not nav bar)
+  await clickGatewayCreateAccount(page);
+
+  // 2. Wait explicitly for create account form (verifyPassword input) to appear
+  try {
+    await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 8000 });
+  } catch {}
+
+  const verifyVisible = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
+  if (!verifyVisible) {
+    await clickGatewayCreateAccount(page);
+    try {
+      await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible', { timeout: 5000 });
+    } catch {}
+  }
+
+  const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"]');
+  for (const inp of emailInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      await inp.fill(email);
+      break;
+    }
+  }
+
+  const password = givenPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+  const pwdInputs = await page.$$('input[data-automation-id="password"], input[type="password"]');
+  for (const inp of pwdInputs) {
+    if (await inp.isVisible().catch(() => false)) {
+      const autoId = (await inp.getAttribute('data-automation-id').catch(() => '') || '').toLowerCase();
+      if (autoId.includes('verify') || autoId.includes('confirm')) continue;
+      await inp.fill(password);
+      break;
+    }
+  }
+
+  const verifyPwdInput = await page.$('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id="confirmPassword"]:visible, input[name="verifyPassword"]:visible, input[name="confirmPassword"]:visible, input[placeholder*="verify" i]:visible, input[placeholder*="confirm" i]:visible');
+  if (verifyPwdInput && await verifyPwdInput.isVisible().catch(() => false)) {
+    await verifyPwdInput.fill(password);
+  }
+
+  // Check all consent/terms checkboxes on Create Account form so submit button is enabled
+  const allCheckboxes = (await page.$$('input[type="checkbox"]')) || [];
+  for (const cb of allCheckboxes) {
+    try {
+      if (await cb.isVisible().catch(() => false)) {
+        const isChecked = await cb.isChecked().catch(() => false);
+        if (!isChecked) {
+          await cb.click({ force: true }).catch(() => cb.evaluate(el => el.click()));
+          await page.waitForTimeout(150);
+        }
+      }
+    } catch {}
+  }
+
+  const submitBtns = (await page.$$([
+    'button[data-automation-id="createAccountSubmitButton"]',
+    '[data-automation-id="createAccountSubmitButton"]',
+    'button:has-text("Create Account")',
+    'button[type="submit"]'
+  ].join(', '))) || [];
+
+  let submitted = false;
+  for (const btn of submitBtns) {
+    if (await btn.isVisible().catch(() => false)) {
+      if (await isInNavOrHeader(btn)) continue;
+      const registrationTime = Date.now();
+      page._lastRegistrationTime = registrationTime - 30000;
+      await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+      submitted = true;
+      await page.waitForTimeout(4000);
+      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+      break;
+    }
+  }
+
+  if (!submitted) {
+    console.log('   ❌ Could not submit Create Account form.');
+    return null;
+  }
+
+  // Check if an error banner or message explicitly states the account already exists
+  const alreadyExists = await page.evaluate(() => {
+    const errorEl = document.querySelector('.error-message, [data-automation-id*="error" i], [role="alert"]');
+    if (!errorEl) return false;
+    const text = (errorEl.textContent || '').toLowerCase();
+    return (
+      text.includes('already exists') ||
+      text.includes('already registered') ||
+      text.includes('an account with this email') ||
+      text.includes('user already exists')
+    );
+  }).catch(() => false);
+
+  if (alreadyExists) {
+    console.log('   ℹ️  Account already exists with this email (error alert detected) — switching to Sign In...');
+    page._accountAlreadyExists = true;
+    await clickGatewaySignIn(page);
+    return password;
+  }
+
+  // Check for email verification
+  if (await isWorkdayVerificationPage(page)) {
+    console.log(`   📩 Workday account created for ${email}, tenant requires email verification.`);
+  }
+
+  return password;
+}
+
+// ─── Detect if page currently shows Sign In inputs ──────────────────────────
+export async function isWorkdaySignInPage(page) {
+  const url = page.url();
+  if (!/workday|myworkday/i.test(url)) return false;
+
+  // 1. Check if application form wizard fields or buttons are visible
+  const hasAppFields = await page.$([
+    'button:has-text("Save and Continue")',
+    'button:has-text("Save & Continue")',
+    'button[data-automation-id="bottom-navigation-next-button"]',
+    'input[data-automation-id="legalNameSection_firstName"]',
+    'input[data-automation-id="phone-number"]',
+  ].join(', ')).catch(() => null);
+
+  if (hasAppFields && await hasAppFields.isVisible().catch(() => false)) {
+    return false;
+  }
+
+  // 2. Check for visible sign-in inputs (email/password fields)
+  const pwdInput = await page.$('input[type="password"]:visible, input[data-automation-id="password"]:visible, input[name="password"]:visible').catch(() => null);
+  const emailInput = await page.$('input[data-automation-id="email"]:visible, input[data-automation-id="userName"]:visible, input[type="email"]:visible').catch(() => null);
+  const signInSubmitBtn = await page.$('button[data-automation-id="signInSubmitButton"]:visible').catch(() => null);
+  const ssoBtn = await page.$('button[data-automation-id="SignInWithEmailButton"]:visible, button:has-text("Sign in with email"):visible').catch(() => null);
+
+  return !!((pwdInput && emailInput) || (pwdInput && signInSubmitBtn) || ssoBtn);
+}
+
+// ─── Full Workday flow ──────────────────────────────────────────────────────
+export async function handleWorkday(page, { email, password, mode = 'signin', profile = null } = {}) {
+  console.log(`   🔒 [STRICT AUTH] Target candidate email: "${email || 'NONE'}" (mode: ${mode})`);
+  if (!email || !String(email).trim()) {
+    console.error('   ❌ [STRICT AUTH GUARD] handleWorkday called with NO EMAIL. Aborting auth to protect candidate accounts.');
+    return false;
+  }
+
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   Already on Workday application form wizard — skipping discovery.');
+    return true;
+  }
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
+  if (!await isWorkdayLogin(page)) {
+    const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
+    if (entry.entered) {
+      console.log(`   Entered application wizard (${entry.method}).`);
+    }
+  }
+
+  if (await isWorkdayAlreadyApplied(page)) {
+    console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+    return 'already_applied';
+  }
+
+  if (await isWorkdayWizardVisible(page)) {
+    console.log('   Already authenticated on Workday application form.');
+    return true;
+  }
+
+  if (!await isWorkdayLogin(page)) {
+    await handleAdaptiveGateway(page, mode);
+    if (await isWorkdayAlreadyApplied(page)) {
+      console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+      return 'already_applied';
+    }
+    if (await isWorkdayWizardVisible(page)) {
+      console.log('   Already authenticated on Workday application form.');
+      return true;
+    }
+    if (!await isWorkdayLogin(page)) {
+      console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
+      return false;
+    }
+  }
+
+  console.log(`   Workday auth mode: "${mode}"`);
+
+  // Mode: "signin" — try login first; on wrong-password / no-account, create account then sign in
+  // Flow: Login → if fails → Create Account (ensures account exists on this tenant) →
+  //        if account already existed (_accountAlreadyExists) → Forgot Password → continue
+  //        if fresh account created → verify + login normally
+  if (mode === 'signin') {
+    const effectivePassword = password || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
+    if (email && effectivePassword) {
+      console.log(`   Logging in to Workday as ${email}...`);
+      const loginResult = await workdayLogin(page, email, effectivePassword);
+
+      if (loginResult === true) {
+        return finishSuccessfulLogin(page, mode, profile);
+      }
+
+      if (await isWorkdayAlreadyApplied(page)) {
+        console.log('   ℹ️ Candidate has ALREADY APPLIED to this job post-login attempt.');
+        return 'already_applied';
+      }
+
+      const company = extractWorkdayCompanyName(page.url());
+
+      // Case 1: Workday reports email verification needed
+      if (loginResult === 'needs-verification' || await isWorkdayVerificationPage(page)) {
+        if (await isWorkdayWizardVisible(page)) {
+          console.log('   ✅ Already on application form wizard — skipping verification.');
+          return finishSuccessfulLogin(page, mode, profile);
+        }
+        console.log('   📩 Workday reports account requires email verification. Resolving via Zoho Mail Reader...');
+        const verified = await resolveWorkdayVerification(page, {
+          email,
+          password: effectivePassword,
+          company,
+          startTime: page._lastLoginAttemptTime || (Date.now() - 45000),
+          timeoutMs: 50000,
+          applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+          jobUrl: page.url(),
+          distributionId: profile?._distributionId || '',
+        }).catch((err) => {
+          console.warn(`   ⚠️  [WorkdayBot] Verification failed: ${err.message}`);
+          return null;
+        });
+
+        if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
+          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+        }
+
+        if (verified?.type === 'direct_wizard' || verified?.onWizard || await isWorkdayWizardVisible(page)) {
+          console.log('   ✅ Application wizard active — proceeding directly to form fill!');
+          return finishSuccessfulLogin(page, mode, profile);
+        }
+
+        if (verified?.success) {
+          console.log('   ✅ Email verification resolved! Logging in...');
+          await handleAdaptiveGateway(page, 'signin');
+          const relogin = await workdayLogin(page, email, effectivePassword);
+          if (relogin === true || await isWorkdayWizardVisible(page)) {
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+        }
+
+        // Failover: if verification link was not received or failed, trigger Forgot Password recovery
+        console.log('   🔑 Verification email not received or timed out — failing over to Forgot Password recovery via Zoho Mail...');
+        const forgotResult = await executeWorkdayForgotPassword(page, {
+          email,
+          password: effectivePassword,
+          company,
+          timeoutMs: 55000,
+          applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+          jobUrl: page.url(),
+          distributionId: profile?._distributionId || '',
+        });
+
+        if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
+          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+        }
+
+        if (forgotResult?.success) {
+          if (forgotResult.onWizard || await isWorkdayWizardVisible(page)) {
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+          await handleAdaptiveGateway(page, 'signin');
+          const postForgotLogin = await workdayLogin(page, email, effectivePassword);
+          if (postForgotLogin === true || await isWorkdayWizardVisible(page)) {
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+        }
+      }
+
+      // Login did not succeed (Workday returns "Invalid user name or password" for both non-existent accounts and wrong passwords).
+      // Attempt Create Account FIRST: If account is new on this tenant (most common), it registers cleanly.
+      // If account already exists, Workday explicitly notifies us, and fallbackCreateAccountAndLogin automatically triggers Forgot Password!
+      console.log(`   ℹ️  Login failed (result="${loginResult}") — attempting Create Account fallback for this Workday tenant...`);
+      return fallbackCreateAccountAndLogin(page, {
+        email,
+        password: effectivePassword,
+        mode,
+        profile,
+      });
+    }
+    console.log('   ❌ Missing email or password for Workday signin mode.');
+    return false;
+  }
+
+  // Mode: "signup" -> call workdayCreateAccount() then workdayLogin()
+  if (mode === 'signup') {
+    if (email) {
+      console.log(`   Creating new Workday account for ${email}...`);
+      const newPassword = await workdayCreateAccount(page, email, password);
+      if (newPassword) {
+        console.log('   Checking page state after account creation...');
+        await page.waitForTimeout(3000);
+        try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
+        await page.waitForTimeout(2000);
+
+        if (await isWorkdayWizardVisible(page)) {
+          console.log('   ✅ Already on application form wizard after account creation.');
+          return true;
+        }
+
+        const isVerif = await isWorkdayVerificationPage(page);
+        console.log(`   ${isVerif ? '📩 Workday account created, tenant requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
+        const company = extractWorkdayCompanyName(page.url());
+        const verified = await resolveWorkdayVerification(page, {
+          email,
+          company,
+          startTime: page._lastRegistrationTime || (Date.now() - 30000),
+          timeoutMs: isVerif ? 60000 : 35000,
+        }).catch((err) => {
+          console.warn(`   ⚠️  [WorkdayBot] Verification poll note: ${err.message}`);
+          return null;
+        });
+
+        if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
+          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+        }
+
+        if (verified?.success) {
+          console.log('   ✅ Email verification resolved! Proceeding to application / login...');
+          await page.waitForTimeout(3000);
+          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+          if (await isWorkdayWizardVisible(page)) {
+            console.log('   ✅ Already on application form wizard after verification.');
+            return true;
+          }
+
+          await handleAdaptiveGateway(page, 'signin');
+          const loggedIn = await workdayLogin(page, email, newPassword);
+          if (loggedIn === true) {
+            return finishSuccessfulLogin(page, mode);
+          }
+          if (await isWorkdayWizardVisible(page)) {
+            return true;
+          }
+        }
+
+        console.log('   Workday redirected to Sign In / Gateway — logging in with new credentials...');
+        await handleAdaptiveGateway(page, 'signin');
+        const loggedIn = await workdayLogin(page, email, newPassword);
+        if (loggedIn === true) {
+          return finishSuccessfulLogin(page, mode, profile);
+        }
+
+        if (loggedIn === 'needs-verification') {
+          if (await isWorkdayWizardVisible(page)) {
+            console.log('   ✅ Already on application form wizard — skipping verification.');
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+          console.log('   📩 Workday reports account requires email verification. Polling Zoho Mail Reader...');
+          const retryVerified = await resolveWorkdayVerification(page, {
+            email,
+            password: newPassword,
+            company,
+            startTime: page._lastRegistrationTime || (Date.now() - 60000),
+            timeoutMs: 60000,
+            applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+            jobUrl: page.url(),
+            distributionId: profile?._distributionId || '',
+          }).catch(() => null);
+
+          if (retryVerified?.reason === 'mailbox_not_connected' || retryVerified?.reason === 'zoho mail not connected' || retryVerified?.isZohoNotConnected) {
+            return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+          }
+
+          if (retryVerified?.type === 'direct_wizard' || retryVerified?.onWizard || await isWorkdayWizardVisible(page)) {
+            console.log('   ✅ Application wizard active — proceeding directly to form fill!');
+            return finishSuccessfulLogin(page, mode, profile);
+          }
+
+          if (retryVerified?.success) {
+            console.log('   ✅ Email verification completed on retry! Logging in...');
+            await handleAdaptiveGateway(page, 'signin');
+            const retryLogin = await workdayLogin(page, email, newPassword);
+            if (retryLogin === true) {
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+          }
+        }
+
+        // If login failed due to wrong password, mismatched credentials, or account lockout:
+        const isWrongOrLocked = (loggedIn === 'wrong-password-or-locked' || loggedIn === 'locked' || page._accountAlreadyExists || await detectWrongPasswordOrLocked(page));
+        if (isWrongOrLocked) {
+          console.log('   🔐 Account already exists or locked in signup mode — initiating automated Forgot Password recovery via Zoho Mail...');
+          const forgotSuccess = await executeWorkdayForgotPassword(page, {
+            email,
+            password: newPassword,
+            company,
+            timeoutMs: 75000,
+          });
+
+          if (forgotSuccess?.reason === 'mailbox_not_connected' || forgotSuccess?.reason === 'zoho mail not connected' || forgotSuccess?.isZohoNotConnected) {
+            return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
+          }
+
+          if (forgotSuccess?.success) {
+            console.log('   ✅ Forgot Password recovery completed! Verifying application wizard...');
+            await page.waitForTimeout(3000);
+            try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
+            }
+            await handleAdaptiveGateway(page, 'signin');
+            const postResetLogin = await workdayLogin(page, email, newPassword);
+            if (postResetLogin === true) {
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
+            }
+          }
+        }
+
+        if (await isWorkdayWizardVisible(page)) {
+          return true;
+        }
+
+        if (await isWorkdayAlreadyApplied(page)) {
+          console.log('   ℹ️ Candidate has ALREADY APPLIED to this job.');
+          return 'already_applied';
+        }
+
+        console.log('   ❌ Unable to enter application form after account creation.');
+        return false;
+      }
+      console.log('   ❌ Account creation failed in signup mode.');
+      return false;
+    }
+    console.log('   ❌ Missing email for Workday signup mode.');
+    return false;
+  }
+
+  console.log(`   ❌ Unknown mode "${mode}" or missing credentials.`);
+  return false;
+}
