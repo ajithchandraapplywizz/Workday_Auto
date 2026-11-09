@@ -1368,17 +1368,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         },
       });
 
-      // Also update batch_job_queue status for this candidate / job link
-      try {
-        await supabase.from('batch_job_queue')
-          .update({
-            status: 'submitted',
-            screenshot_path: finalShotUrl,
-            updated_at: now,
-          })
-          .eq('job_url', task.job_url);
-      } catch {}
-
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
       console.log(`\nℹ️ [SUBMISSION RESULT] AWL-ID: ${cleanId} | Status: ALREADY_APPLIED | Company: ${task.company || 'Workday'} | Screenshot: ${finalShotUrl || 'None'}\n`);
@@ -1497,20 +1486,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           },
 
         });
-
-
-
-        await supabase.from('batch_job_queue')
-
-          .update({ status: 'failed', updated_at: now })
-
-          .ilike('applywizz_id', `%${cleanAwl}%`)
-
-          .eq('job_url', task.job_url)
-
-          .catch(() => {});
-
-
 
         if (task.candidateEmail) {
 

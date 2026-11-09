@@ -1281,12 +1281,32 @@ export async function executeWorkerTask({
     const cleanAwl = String(applywizzId || profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
     if (!completionShotUrl) completionShotUrl = profile?._submissionScreenshotUrl || null;
     let detectedStep = null;
+    let onReviewPage = String(profile?._currentStep || '').toLowerCase().includes('review');
+    let isSuccessStatus = (
+      status === 'submitted' ||
+      status === 'already_applied' ||
+      status === 'reached-review' ||
+      status === 'reached_review' ||
+      status === 'ready_for_review' ||
+      (status === 'human-required' && onReviewPage) ||
+      onReviewPage
+    );
     try {
       if (!completionShotUrl) {
         let buf = profile?._submissionScreenshotBuffer || null;
         if (!buf && page && !page.isClosed()) {
           const { detectWorkdayStep } = await import('./stateDetector.mjs');
           detectedStep = await detectWorkdayStep(page).catch(() => null);
+          onReviewPage = String(detectedStep || profile?._currentStep || '').toLowerCase().includes('review');
+          isSuccessStatus = (
+            status === 'submitted' ||
+            status === 'already_applied' ||
+            status === 'reached-review' ||
+            status === 'reached_review' ||
+            status === 'ready_for_review' ||
+            (status === 'human-required' && onReviewPage) ||
+            onReviewPage
+          );
           if (status !== 'submitted' && status !== 'reached-review' && status !== 'reached_review') {
             await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
             await page.waitForTimeout(500).catch(() => {});
@@ -1347,8 +1367,8 @@ export async function executeWorkerTask({
       console.log(`[${cleanAwl}] scanned_completed | Status: ready_for_review`);
     }
 
-    const onReviewPage = String(detectedStep || profile._currentStep || '').toLowerCase().includes('review');
-    const isSuccessStatus = (
+    onReviewPage = String(detectedStep || profile?._currentStep || '').toLowerCase().includes('review');
+    isSuccessStatus = (
       status === 'submitted' ||
       status === 'already_applied' ||
       status === 'reached-review' ||
@@ -1422,7 +1442,7 @@ export async function executeWorkerTask({
         : (status === 'already_applied')
           ? 'already_applied'
           : (status === 'reached-review' || status === 'reached_review' || status === 'ready_for_review' || isSuccessStatus || onReviewPage)
-            ? 'reached_review'
+            ? 'scanned'
             : (status === 'skipped' ? 'skipped' : (shouldRetryMiddleStep ? 'queued' : 'failed'));
       const answersMap = {
         ...(profile._scrapedReviewMap || {}),

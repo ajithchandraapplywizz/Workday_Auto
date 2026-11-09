@@ -43,13 +43,15 @@ export function getSupabase() {
   return _lazySupabase;
 }
 
-const ACTIVE_CLIENTS_API_URL = 'https://applywizz-ca-management.vercel.app/api/active-clients';
-const CLIENT_DETAILS_API_URL = 'https://www.apply-wizz.me/api/get-client-details';
+const ACTIVE_CLIENTS_API_URL = process.env.ACTIVE_CLIENTS_API_URL || 'https://applywizz-ca-management.vercel.app/api/active-clients';
+const CLIENT_DETAILS_API_URL = process.env.CLIENT_DETAILS_API_URL || 'https://www.apply-wizz.me/api/get-client-details';
 
 // In-memory cache for the raw active-clients API response
 let cachedActiveClients = null;
 let cachedActiveClientsExpiresAt = 0;
+let lastApiErrorLoggedAt = 0;
 const CACHE_TTL_MS = 3 * 60 * 1000; // 3 minutes TTL for real-time freshness
+const ERROR_RETRY_BACKOFF_MS = 60 * 1000; // 1 minute backoff on external API failure
 
 /**
  * Normalizes an AWL ID to standard uppercase format (e.g. 'AWL-44789')
@@ -106,10 +108,17 @@ export async function fetchActiveClientsFromApi({ force = false } = {}) {
         return result;
       }
     } else {
-      console.warn(`[ACTIVE-CLIENTS] API returned status ${res.status}: ${res.statusText}`);
+      if (now - lastApiErrorLoggedAt > ERROR_RETRY_BACKOFF_MS) {
+        lastApiErrorLoggedAt = now;
+        const note = res.status === 402 ? ' (Payment/Quota Required on external Vercel deployment; falling back to local database roster)' : '';
+        console.warn(`[ACTIVE-CLIENTS] External active-clients API returned status ${res.status}${note}`);
+      }
     }
   } catch (err) {
-    console.warn('[ACTIVE-CLIENTS] Failed to fetch external active-clients API:', err.message);
+    if (now - lastApiErrorLoggedAt > ERROR_RETRY_BACKOFF_MS) {
+      lastApiErrorLoggedAt = now;
+      console.warn('[ACTIVE-CLIENTS] Failed to fetch external active-clients API:', err.message);
+    }
   }
 
   // Graceful fallback: return existing cache if available

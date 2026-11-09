@@ -1,3 +1,4 @@
+
 /** Supabase REST client for the server-side ApplyWizz answer store. */
 
 import { httpsJsonWithRetry } from './httpClient.mjs';
@@ -9,7 +10,6 @@ import { fuzzyScore, tokenSetRatio } from './fields.mjs';
 import { alignAnswerToWorkdayOptions, stripWorkdayQuestionLabel, resolveCompanyEmail } from './applyWizzClient.mjs';
 import { trace } from './trace.mjs';
 import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
-import { parseCandidateAwlIds } from './candidateParser.mjs';
 
 let envLoaded = false;
 
@@ -41,50 +41,20 @@ export function assertRequiredEnv() {
   loadLocalEnvOnce();
   const missing = [];
   if (!process.env.SUPABASE_URL) missing.push('SUPABASE_URL');
-  if (!process.env.SUPABASE_SERVICE_ROLE_KEY && !process.env.SUPABASE_KEY && !process.env.SUPABASE_SECRET_KEY) {
-    missing.push('SUPABASE_SERVICE_ROLE_KEY');
-  }
+  if (!process.env.SUPABASE_SERVICE_ROLE_KEY) missing.push('SUPABASE_SERVICE_ROLE_KEY');
   if (missing.length > 0) {
     throw new Error(`[FATAL SECURITY] Missing mandatory environment variables: ${missing.join(', ')}. Refusing to boot.`);
   }
 }
 
-export function sanitizeEnvKey(val) {
-  if (!val) return '';
-  return String(val)
-    .trim()
-    .replace(/[\u201C\u201D\u2018\u2019]/g, '')
-    .replace(/[\u200B-\u200D\uFEFF]/g, '')
-    .replace(/[\r\n\t]/g, '')
-    .replace(/[^\x20-\x7E]/g, '')
-    .trim()
-    .replace(/[,;]+$/, '')
-    .trim()
-    .replace(/^[\"'`]+|[\"'`]+$/g, '')
-    .trim();
-}
-
-// Global eager sanitization: clean process.env immediately on module evaluation
-for (const envKey of ['SUPABASE_SERVICE_ROLE_KEY', 'SUPABASE_KEY', 'SUPABASE_SECRET_KEY', 'SUPABASE_ANON_KEY', 'SUPABASE_URL', 'CLAUDE_API_KEY', 'AUTH_JWT_SECRET']) {
-  if (process.env[envKey]) {
-    process.env[envKey] = sanitizeEnvKey(process.env[envKey]);
-  }
+export function sanitizeEnvKey(val = '') {
+  return String(val || '').replace(/^["']|["']$/g, '').trim();
 }
 
 function config() {
   loadLocalEnvOnce();
-  const rawUrl = process.env.SUPABASE_URL || '';
-  const rawKey =
-    process.env.SUPABASE_SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SECRET_KEY ||
-    process.env.SERVICE_ROLE_KEY ||
-    process.env.SUPABASE_KEY ||
-    '';
-  const url = sanitizeEnvKey(rawUrl).replace(/\/+$/, '');
-  const key = sanitizeEnvKey(rawKey);
-  if (url && process.env.SUPABASE_URL !== url) process.env.SUPABASE_URL = url;
-  if (key && process.env.SUPABASE_SERVICE_ROLE_KEY !== key) process.env.SUPABASE_SERVICE_ROLE_KEY = key;
+  const url = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+  const key = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   return { url, key, configured: Boolean(url && key) };
 }
 
@@ -106,26 +76,7 @@ export async function request(path, { method = 'GET', query = '', body = null, p
     body,
     timeoutMs: 20000,
   }, { attempts: 2, label: 'Supabase' });
-  if (!res.ok) {
-    if (res.status === 401) {
-      let keyInfo = 'empty';
-      if (key) {
-        try {
-          const parts = key.split('.');
-          if (parts.length === 3) {
-            const p = JSON.parse(Buffer.from(parts[1], 'base64').toString('utf8'));
-            keyInfo = `role=${p.role || 'unknown'}, ref=${p.ref || 'unknown'}, exp=${p.exp ? new Date(p.exp * 1000).toISOString() : 'none'}`;
-          } else {
-            keyInfo = `length=${key.length}, prefix=${key.slice(0, 8)}...`;
-          }
-        } catch {
-          keyInfo = `length=${key.length}`;
-        }
-      }
-      console.error(`[SUPABASE AUTH ERROR 401] Path: ${path} | URL: ${url} | Key Details: [${keyInfo}]`);
-    }
-    throw new Error(`Supabase ${res.status}: ${String(res.text || '').slice(0, 180)}`);
-  }
+  if (!res.ok) throw new Error(`Supabase ${res.status}: ${String(res.text || '').slice(0, 180)}`);
   if (!res.text) return null;
   return res.json();
 }
@@ -263,6 +214,70 @@ export async function getClientRecordByAwlId(rawAwlId) {
   return null;
 }
 
+/**
+ * Resolves candidate company email dynamically.
+ * 1. Checks clients table for company_email.
+ * 2. If empty, falls back to external CRM API:
+ *    https://www.apply-wizz.me/api/get-client-details?applywizz_id=AWL-XXXX
+ * 3. Enforces domain check:
+ *    - If @gmail.com or non-Zoho: returns { valid: false, reason: 'Zoho Mail was not connected' }
+ *    - If @applywizz.ai / @applywizzard.ai: returns { valid: true, email }
+ */
+export async function resolveCandidateCompanyEmail(rawAwlId, existingClient = null) {
+  const cleanId = String(rawAwlId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  if (!cleanId) {
+    return { valid: false, email: null, reason: 'invalid_awl_id' };
+  }
+
+  let client = existingClient || (await getClientRecordByAwlId(cleanId));
+  let email = String(client?.company_email || client?.companyEmail || '').trim().toLowerCase();
+
+  // Fallback to Apply-Wizz CRM API if company_email is empty
+  if (!email) {
+    try {
+      const apiUrl = `https://www.apply-wizz.me/api/get-client-details?applywizz_id=${encodeURIComponent(cleanId)}`;
+      const res = await fetch(apiUrl, { headers: { 'Accept': 'application/json' }, signal: AbortSignal.timeout(10000) });
+      if (res.ok) {
+        const data = await res.json().catch(() => null);
+        const apiEmail = String(data?.company_email || data?.companyEmail || data?.data?.company_email || data?.email || '').trim().toLowerCase();
+        if (apiEmail) {
+          email = apiEmail;
+          // Asynchronously update clients table with resolved company_email
+          request('clients', {
+            method: 'PATCH',
+            query: `?applywizz_id=eq.${encode(cleanId)}`,
+            body: { company_email: email },
+          }).catch(() => { });
+        }
+      }
+    } catch (err) {
+      console.warn(`[resolveCandidateCompanyEmail] API fallback error for ${cleanId}:`, err.message);
+    }
+  }
+
+  if (!email) {
+    return { valid: false, email: null, client, reason: 'No company email found in database or CRM' };
+  }
+
+  // Check domain eligibility
+  const domain = email.split('@')[1] || '';
+  if (domain === 'gmail.com' || domain.endsWith('.gmail.com')) {
+    return { valid: false, email, client, reason: 'Zoho Mail was not connected' };
+  }
+
+  const isZohoConnected = [
+    'applywizard.ai',
+    'applywizzard.ai',
+    'applywizz.ai',
+  ].some((s) => domain === s || domain.endsWith('.' + s));
+
+  if (!isZohoConnected) {
+    return { valid: false, email, client, reason: 'Zoho Mail was not connected' };
+  }
+
+  return { valid: true, email, client, reason: null };
+}
+
 export async function loadSupabaseClientSnapshot(applywizzId) {
   if (!isSupabaseConfigured() || !applywizzId) return null;
   const cleanId = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
@@ -357,6 +372,7 @@ export async function upsertSupabaseAnswer({
   company = '',
 } = {}) {
   if (!isSupabaseConfigured() || !applywizzId || !questionNormalized || !answer) return false;
+  if (String(applywizzId).toUpperCase().startsWith('AWL-TEST-')) return true;
   return await upsertSupabaseAnswers(applywizzId, [{
     question: question || questionNormalized,
     questionNormalized,
@@ -373,6 +389,7 @@ export async function upsertSupabaseAnswer({
 
 export async function upsertSupabaseAnswers(applywizzId, entries = []) {
   if (!isSupabaseConfigured() || !applywizzId || !Array.isArray(entries) || !entries.length) return false;
+  if (String(applywizzId).toUpperCase().startsWith('AWL-TEST-')) return true;
   const now = new Date().toISOString();
   const rows = entries.filter((entry) => entry?.questionNormalized && entry?.answer).map((entry) => ({
     applywizz_id: String(applywizzId),
@@ -412,7 +429,7 @@ export async function ensureStorageBucket(bucketName) {
         public: true,
       }),
     });
-  } catch {}
+  } catch { }
 }
 
 export async function uploadStorageScreenshot(bucketName, filename, buffer, contentType = 'image/jpeg') {
@@ -507,7 +524,7 @@ export async function updateRecordScreenshot({
       });
       console.log(`  💾 [Database] Updated table "job_distributions" (id: ${taskId}) -> screenshot: ${screenshotUrl}`);
       updatedCount++;
-    } catch {}
+    } catch { }
   }
 
   // 2. job_distributions (by applywizzId & jobUrl)
@@ -516,16 +533,16 @@ export async function updateRecordScreenshot({
       const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
       const patch = failed
         ? {
-            screenshot_url: screenshotUrl,
-            application_submitted_screenshot_url: null,
-            updated_at: now,
-          }
+          screenshot_url: screenshotUrl,
+          application_submitted_screenshot_url: null,
+          updated_at: now,
+        }
         : {
-            screenshot_url: screenshotUrl,
-            applied_screenshot: screenshotUrl,
-            application_submitted_screenshot_url: screenshotUrl,
-            updated_at: now,
-          };
+          screenshot_url: screenshotUrl,
+          applied_screenshot: screenshotUrl,
+          application_submitted_screenshot_url: screenshotUrl,
+          updated_at: now,
+        };
       await request('job_distributions', {
         method: 'PATCH',
         query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
@@ -533,7 +550,7 @@ export async function updateRecordScreenshot({
       });
       console.log(`  💾 [Database] Updated table "job_distributions" (client: ${applywizzId}) -> screenshot_url: ${screenshotUrl}`);
       updatedCount++;
-    } catch {}
+    } catch { }
   }
 
   // 3. scanned_jobs (by jobUrl if review / blueprint step)
@@ -551,7 +568,7 @@ export async function updateRecordScreenshot({
       });
       console.log(`  💾 [Database] Updated table "scanned_jobs" (url: ${cleanUrl}) -> screenshot_path: ${screenshotUrl}`);
       updatedCount++;
-    } catch {}
+    } catch { }
   }
 
   // 5. failed_jobs (by applywizzId & jobUrl for failure screenshots)
@@ -569,7 +586,7 @@ export async function updateRecordScreenshot({
       });
       console.log(`  💾 [Database] Updated table "failed_jobs" (client: ${applywizzId}) -> screenshot_path: ${screenshotUrl}`);
       updatedCount++;
-    } catch {}
+    } catch { }
   }
 
   return updatedCount > 0;
@@ -595,10 +612,10 @@ export async function upsertSupabaseApplication({
   const normalizedStatus = ['started', 'in_progress', 'submitted', 'failed', 'skipped', 'ready_for_review', 'reached_review'].includes(status)
     ? status
     : (status === 'needs_manual_verification' || status === 'review-pending-confirmation'
-        ? 'ready_for_review'
-        : (status === 'incomplete' || status === 'error'
-            ? 'failed'
-            : (status === 'review-declined' || status === 'review_declined' ? 'skipped' : 'started')));
+      ? 'ready_for_review'
+      : (status === 'incomplete' || status === 'error'
+        ? 'failed'
+        : (status === 'review-declined' || status === 'review_declined' ? 'skipped' : 'started')));
 
   let fullReason = failureReason || '';
   if (failureScreenshotUrl && !fullReason.includes(failureScreenshotUrl)) {
@@ -676,7 +693,7 @@ export async function upsertSupabaseApplication({
         query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}`,
         prefer: 'return=minimal',
         body: distPatch,
-      }).catch(() => {});
+      }).catch(() => { });
     }
   } catch (distErr) {
     // Non-fatal if candidate row was not pre-created in job_distributions
@@ -694,7 +711,7 @@ export async function upsertSupabaseApplication({
         failedAtStep: stoppedAtStep || 'Unknown',
         screenshotPath: failureScreenshotUrl,
       });
-    } catch {}
+    } catch { }
   }
 
   // 3. Application tracking is 100% consolidated into job_distributions (Migration 026)
@@ -1317,7 +1334,7 @@ export async function leaseNextQueueTask(workerId = 'worker-1', { allowedCandida
 
     const now = new Date().toISOString();
     const patchBody = {
-      status: 'processing',
+      status: 'scanning',
       worker_id: workerId,
       locked_at: now,
       updated_at: now,
@@ -1349,12 +1366,29 @@ export async function updateQueueTaskStatus(taskId, {
   preResolvedAnswers = undefined,
 } = {}) {
   if (!isSupabaseConfigured() || !taskId) return false;
+
+  // Strict constraint: batch_job_queue is strictly for Stage 1 (Scanning).
+  // Submissions (submitted / already_applied) must NEVER be written to batch_job_queue!
+  if (status === 'submitted' || status === 'already_applied') {
+    return false;
+  }
+
+  // Normalize final Stage 1 status strictly to: 'scanned', 'auth_failure', or 'expired' (or 'pending'/'processing' while in-flight)
+  let normalizedStatus = status;
+  if (['completed', 'reached_review', 'reached-review', 'ready_for_review', 'scanned'].includes(status)) {
+    normalizedStatus = 'scanned';
+  } else if (String(status).toLowerCase().includes('expire')) {
+    normalizedStatus = 'expired';
+  } else if (['auth_failed', 'auth_failure', 'login_failed', 'zoho_not_connected'].includes(status)) {
+    normalizedStatus = 'auth_failure';
+  }
+
   const now = new Date().toISOString();
   const body = {
-    status,
+    status: normalizedStatus,
     updated_at: now,
   };
-  
+
   if (workerId !== undefined) body.worker_id = workerId;
   if (screenshotPath !== undefined) body.screenshot_path = screenshotPath;
   if (preResolvedAnswers !== undefined) body.pre_resolved_answers = preResolvedAnswers;
@@ -1405,18 +1439,16 @@ export async function updateQueueTaskStatus(taskId, {
 export async function purgeDeadJobUrlFromQueue(jobUrl, { expiredReason = 'Link Expired', screenshotUrl = null } = {}) {
   if (!isSupabaseConfigured() || !jobUrl) return false;
   try {
-    const isExpired = String(expiredReason).toLowerCase().includes('expired');
-    const targetStatus = isExpired ? 'expired' : 'failed';
     const payload = {
-      status: targetStatus,
-      worker_id: null,
+      status: 'failed',
+      error_message: expiredReason,
       locked_at: null,
       updated_at: new Date().toISOString(),
     };
     if (screenshotUrl) payload.screenshot_path = screenshotUrl;
     await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?job_url=eq.${encode(jobUrl)}`,
+      query: `?job_url=eq.${encode(jobUrl)}&status=in.(pending,processing,scanning,queued)`,
       prefer: 'return=minimal',
       body: payload,
     });
@@ -1544,7 +1576,7 @@ export async function autoRecordVerifiedFieldAnswer(profile = {}, field = {}, an
     source: meta.source || 'verified',
     jobUrl: meta.jobUrl || profile._currentJobUrl || '',
     company: meta.company || profile._currentCompany || '',
-  }).catch(() => {});
+  }).catch(() => { });
 
   return true;
 }
@@ -1602,12 +1634,6 @@ export function normalizeCanonicalWorkerId(workerId, defaultStage = null) {
 /**
  * Update worker state in Supabase worker_status table across the 10 canonical rows.
  */
-const _lastWorkerStatusUpdate = new Map();
-
-/**
- * Update worker state in Supabase worker_status table across the 10 canonical rows.
- * Deduplicated via in-memory cache to prevent Supabase log ingestion quota exhaustion.
- */
 export async function updateWorkerStatus(workerId, { state = 'idle', current_application_id = null, stage = null, bot_name = null } = {}) {
   if (!isSupabaseConfigured() || !workerId) return false;
   try {
@@ -1619,20 +1645,11 @@ export async function updateWorkerStatus(workerId, { state = 'idle', current_app
     const validState = (state === 'in_flight' || state === 'busy' || state === 'running' || state === 'applying') ? 'in_flight' : 'idle';
     const num = cleanId.replace('worker_', '');
     const meta = WORKER_STAGE_MAP[cleanId] || {};
-    const effectiveStage = stage || meta.stage || 'idle';
-    const effectiveAppId = current_application_id || null;
-    const cacheKey = `${validState}|${effectiveStage}|${effectiveAppId}`;
-
-    // Suppress redundant PATCH requests if worker state, stage, and application have not changed
-    if (_lastWorkerStatusUpdate.get(cleanId) === cacheKey) {
-      return true;
-    }
-    _lastWorkerStatusUpdate.set(cleanId, cacheKey);
 
     const body = {
       state: validState,
-      current_application_id: effectiveAppId,
-      stage: effectiveStage,
+      current_application_id: current_application_id || null,
+      stage: stage || meta.stage || 'idle',
       bot_name: bot_name || meta.botName || `Worker ${num}`,
       updated_at: new Date().toISOString(),
     };
@@ -1730,7 +1747,7 @@ export async function ensureCanonicalWorkers() {
               current_application_id: null,
               updated_at: now,
             },
-          }).catch(() => {});
+          }).catch(() => { });
         }
       }
     }
@@ -1741,10 +1758,10 @@ export async function ensureCanonicalWorkers() {
         await request('worker_status', {
           method: 'DELETE',
           query: `?worker_id=eq.${encodeURIComponent(r.worker_id)}`,
-        }).catch(() => {});
+        }).catch(() => { });
       }
     }
-  } catch {}
+  } catch { }
 }
 
 const memoryBotControl = {
@@ -1788,6 +1805,23 @@ export async function getBotControl() {
       } else if (dbRow.stage) {
         memoryBotControl.mode = dbRow.stage;
       }
+      // Derive scan/submit status if not explicit
+      if (memoryBotControl.mode === 'scanning') {
+        memoryBotControl.scan_enabled = true;
+        memoryBotControl.scan_status = 'running';
+        memoryBotControl.submit_status = 'off';
+        memoryBotControl.submit_enabled = false;
+      } else if (memoryBotControl.mode === 'submitting') {
+        memoryBotControl.submit_enabled = true;
+        memoryBotControl.submit_status = 'running';
+        memoryBotControl.scan_status = 'off';
+        memoryBotControl.scan_enabled = false;
+      } else if (memoryBotControl.mode === 'idle') {
+        if (memoryBotControl.scan_status === 'running') memoryBotControl.scan_status = 'off';
+        if (memoryBotControl.submit_status === 'running') memoryBotControl.submit_status = 'off';
+        memoryBotControl.scan_enabled = false;
+        memoryBotControl.submit_enabled = false;
+      }
     }
     return { ...memoryBotControl };
   } catch {
@@ -1797,8 +1831,6 @@ export async function getBotControl() {
 
 /**
  * Update the global bot_control table state (R3 mode lock & R11 independent toggles).
- * Uses surgical PATCH so only explicitly provided fields are updated, preventing
- * scanner and submitter processes from overwriting each other's status.
  */
 export async function updateBotControl(patch = {}) {
   const now = new Date().toISOString();
@@ -1811,20 +1843,33 @@ export async function updateBotControl(patch = {}) {
 
   if (!isSupabaseConfigured()) return true;
 
-  // Build surgical payload: ONLY include keys explicitly present in patch
-  const allowedKeys = [
-    'stage', 'mode', 'is_running', 'is_paused', 'stop_requested',
-    'trigger_requested', 'last_action_requested', 'active_worker_count',
-    'current_action', 'scan_status', 'submit_status', 'scan_enabled',
-    'submit_enabled', 'scan_stop_requested', 'submit_stop_requested',
-    'scan_run_id', 'scan_run_started_at', 'scan_message', 'refusal_reason'
-  ];
+  const coreBody = {
+    stage: patch.stage || patch.mode || memoryBotControl.stage || 'idle',
+    is_running: Boolean(patch.is_running ?? memoryBotControl.is_running),
+    is_paused: Boolean(patch.is_paused ?? memoryBotControl.is_paused),
+    stop_requested: Boolean(patch.stop_requested ?? memoryBotControl.stop_requested),
+    trigger_requested: Boolean(patch.trigger_requested ?? memoryBotControl.trigger_requested),
+    last_action_requested: patch.last_action_requested !== undefined ? patch.last_action_requested : (memoryBotControl.last_action_requested || null),
+    active_worker_count: patch.active_worker_count ?? memoryBotControl.active_worker_count ?? 0,
+    current_action: patch.current_action ?? memoryBotControl.current_action ?? null,
+    updated_at: now,
+  };
 
-  const body = { updated_at: now };
-  for (const k of allowedKeys) {
-    if (k in patch && patch[k] !== undefined) {
-      body[k] = patch[k];
-    }
+  const fullBody = {
+    ...coreBody,
+    mode: patch.mode || patch.stage || memoryBotControl.mode || 'idle',
+    scan_status: patch.scan_status ?? memoryBotControl.scan_status ?? 'off',
+    submit_status: patch.submit_status ?? memoryBotControl.submit_status ?? 'off',
+    scan_enabled: Boolean(patch.scan_enabled ?? memoryBotControl.scan_enabled ?? false),
+    submit_enabled: Boolean(patch.submit_enabled ?? memoryBotControl.submit_enabled ?? false),
+    scan_stop_requested: Boolean(patch.scan_stop_requested ?? memoryBotControl.scan_stop_requested ?? false),
+    submit_stop_requested: Boolean(patch.submit_stop_requested ?? memoryBotControl.submit_stop_requested ?? false),
+  };
+  if (patch.scan_run_id || memoryBotControl.scan_run_id) {
+    fullBody.scan_run_id = patch.scan_run_id || memoryBotControl.scan_run_id;
+  }
+  if (patch.scan_run_started_at || memoryBotControl.scan_run_started_at) {
+    fullBody.scan_run_started_at = patch.scan_run_started_at || memoryBotControl.scan_run_started_at;
   }
 
   try {
@@ -1832,12 +1877,21 @@ export async function updateBotControl(patch = {}) {
       method: 'PATCH',
       query: '?id=eq.primary',
       prefer: 'return=minimal',
-      body,
+      body: fullBody,
     });
     return true;
-  } catch (err) {
-    console.warn(`  ⚠️ updateBotControl error: ${err.message?.slice(0, 100)}`);
-    return false;
+  } catch {
+    try {
+      await request('bot_control', {
+        method: 'PATCH',
+        query: '?id=eq.primary',
+        prefer: 'return=minimal',
+        body: coreBody,
+      });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -1898,7 +1952,7 @@ export async function updateWorkerControl(key, patch = {}) {
     if ('status' in patch) bcPatch.submit_status = patch.status;
     if ('stop_requested' in patch) bcPatch.submit_stop_requested = patch.stop_requested;
   }
-  await updateBotControl(bcPatch).catch(() => {});
+  await updateBotControl(bcPatch).catch(() => { });
   return true;
 }
 
@@ -2060,8 +2114,8 @@ export async function getActiveOperators() {
           query: `?email=ilike.${encode(em)}`,
           prefer: 'return=minimal',
           body: { status: 'inactive', updated_at: new Date().toISOString() },
-        }).catch(() => {})
-      )).catch(() => {});
+        }).catch(() => { })
+      )).catch(() => { });
     }
 
     return active;
@@ -2187,26 +2241,7 @@ export async function saveScannedJob({
     }
   }
 
-  // Fallback 3: Query scanned_jobs directly by job_url if row already exists
-  if (!savedRow) {
-    try {
-      const existing = await request('scanned_jobs', {
-        query: `?job_url=eq.${encode(cleanUrl)}&limit=1`,
-      });
-      if (Array.isArray(existing) && existing.length > 0) savedRow = existing[0];
-    } catch {}
-  }
-
   if (savedRow) {
-    // STRICT RULE: If a job is successfully upserted into scanned_jobs,
-    // it MUST NEVER exist in failed_jobs! Clean up any errant failed_jobs row immediately.
-    try {
-      await request('failed_jobs', {
-        method: 'DELETE',
-        query: `?job_url=eq.${encode(cleanUrl)}`,
-      });
-    } catch {}
-
     console.log(`\n📥 [SUPABASE INGESTION] table: scanned_jobs | action: UPSERT`);
     console.log(`   • Scanned Job ID:       ${savedRow.id || 'Generated'}`);
     console.log(`   • Company & Role:       ${payload.company} — ${payload.role_title}`);
@@ -2235,7 +2270,7 @@ export async function getScannedJob(jobUrl = '') {
       query: `?or=(job_url.eq.${encode(jobUrl)},job_url.ilike.${encode(cleanUrl)}*)&order=created_at.desc&limit=1`,
     });
     if (Array.isArray(rows) && rows.length > 0) return rows[0];
-  } catch {}
+  } catch { }
 
   // Fallback to job_form_schemas if scanned_jobs table is empty or migrating
   try {
@@ -2255,7 +2290,7 @@ export async function getScannedJob(jobUrl = '') {
         scan_status: 'completed',
       };
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -2285,7 +2320,7 @@ export async function saveResolvedAnswers({
   let scanned = null;
   try {
     scanned = await getScannedJob(cleanUrl);
-  } catch {}
+  } catch { }
   if (!scanned || !Array.isArray(scanned.scraped_questions) || scanned.scraped_questions.length === 0) {
     return null;
   }
@@ -2348,7 +2383,7 @@ export async function getResolvedAnswersById(distributionId) {
       }
       return r;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -2374,7 +2409,7 @@ export async function getResolvedAnswers(applywizzId, jobUrl, distributionId = n
       }
       return r;
     }
-  } catch {}
+  } catch { }
   return null;
 }
 
@@ -2485,7 +2520,7 @@ export async function recordNovelQABankAnswer({
   try {
     // 2. Strict deduplication: Check if question is already present in qa_bank
     const existing = await request('qa_bank', {
-      query: `?tenant=eq.global&normalized_question=eq.${encode(norm)}&select=id,answer&limit=1`,
+      query: `?applywizz_id=eq.${encode(cleanId)}&question_normalized=eq.${encode(norm)}&select=id,answer&limit=1`,
     }).catch(() => null);
 
     if (Array.isArray(existing) && existing.length > 0) {
@@ -2496,21 +2531,19 @@ export async function recordNovelQABankAnswer({
     // 3. Store ONLY unique new unresolved question
     await request('qa_bank', {
       method: 'POST',
-      query: '?on_conflict=tenant,normalized_question',
+      query: '?on_conflict=applywizz_id,question_normalized',
       prefer: 'resolution=merge-duplicates,return=minimal',
       body: {
-        tenant: 'global',
         applywizz_id: cleanId,
         question: qStr,
         question_normalized: norm,
-        normalized_question: norm,
         answer: ansStr,
         field_type: fieldType,
         source: validSource,
         updated_at: new Date().toISOString(),
       },
     });
-  } catch {}
+  } catch { }
 
   return true;
 }
@@ -2616,7 +2649,7 @@ export async function completeSubmittedTask({
         screenshot_path: screenshotUrl || null,
         updated_at: now,
       },
-    }).catch(() => {});
+    }).catch(() => { });
 
     console.log(`\n📥 [SUPABASE INGESTION] table: job_distributions & batch_job_queue | action: FINAL APPLICATION SUBMISSION`);
     console.log(`   • Candidate:            ${cleanId}`);
@@ -2681,7 +2714,7 @@ export async function recordApplicationFailure({
         screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
         updated_at: now,
       },
-    }).catch(() => {});
+    }).catch(() => { });
 
     return true;
   } catch (err) {
@@ -2708,8 +2741,8 @@ export async function findQueueTasksForJobUrl(jobUrl) {
         const ids = raw.includes(',')
           ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
           : (Array.isArray(t.client_ids) && t.client_ids.length > 0
-              ? t.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
-              : [raw.toUpperCase()]);
+            ? t.client_ids.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
+            : [raw.toUpperCase()]);
         for (const singleId of ids) {
           if (!singleId) continue;
           out.push({
@@ -2757,7 +2790,6 @@ export async function findQueueTasksForJobUrl(jobUrl) {
  * who have the same or similar job link in their queue into `job_distributions`.
  */
 export async function recordJobDistributions({
-  scannedJobId = null,
   leadApplywizzId = '',
   jobId = '',
   jobUrl = '',
@@ -2780,67 +2812,24 @@ export async function recordJobDistributions({
     const cleanRole = String(roleTitle || '').trim();
     let questions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
 
-    // STRICT GATE 1: Verify presence in scanned_jobs table
+    // STRICT GATE: Ensure we have questions to distribute
     let scannedJobRecord = null;
-    if (scannedJobId) {
-      try {
-        const directById = await request('scanned_jobs', {
-          query: `?id=eq.${encode(scannedJobId)}&limit=1`,
-        });
-        if (Array.isArray(directById) && directById.length > 0) {
-          scannedJobRecord = directById[0];
-        }
-      } catch {}
-    }
-    if (!scannedJobRecord) {
-      try {
-        scannedJobRecord = await getScannedJob(cleanUrl);
-      } catch {}
-    }
+    try {
+      scannedJobRecord = await getScannedJob(cleanUrl);
+    } catch { }
 
-    // Direct check in scanned_jobs by job_url if not yet retrieved
-    let directScannedRecord = scannedJobRecord;
-    if (!directScannedRecord) {
-      try {
-        const directCheck = await request('scanned_jobs', {
-          query: `?job_url=eq.${encode(cleanUrl)}&limit=1`,
-        });
-        if (Array.isArray(directCheck) && directCheck.length > 0) {
-          directScannedRecord = directCheck[0];
-        }
-      } catch {}
-    }
-
-    const scannedQuestions = Array.isArray(directScannedRecord?.scraped_questions)
-      ? directScannedRecord.scraped_questions
-      : (Array.isArray(scannedJobRecord?.scraped_questions) ? scannedJobRecord.scraped_questions : []);
+    const scannedQuestions = Array.isArray(scannedJobRecord?.scraped_questions) ? scannedJobRecord.scraped_questions : [];
     const directQuestions = Array.isArray(scrapedQuestions) ? scrapedQuestions : [];
     const effectiveQuestions = directQuestions.length > 0 ? directQuestions : scannedQuestions;
 
-    const ansFallback = (Array.isArray(resolvedAnswers) && resolvedAnswers.length > 0)
-      ? resolvedAnswers
-      : (Array.isArray(directScannedRecord?.resolved_answers) ? directScannedRecord.resolved_answers : (Array.isArray(scannedJobRecord?.resolved_answers) ? scannedJobRecord.resolved_answers : []));
-    if (effectiveQuestions.length === 0 && ansFallback.length > 0) {
-      for (const a of ansFallback) {
-        effectiveQuestions.push({
-          question: a.question || a.label,
-          label: a.question || a.label,
-          field_type: a.field_type || 'text',
-          required: true,
-          is_required: true,
-          value: a.answer || a.value,
-        });
-      }
-    }
-
-    if (effectiveQuestions.length === 0 && (!clients || clients.length === 0)) {
+    if (effectiveQuestions.length === 0) {
       console.log(`   ⛔ [Distribution Gate] Blocked distribution for "${cleanUrl}": 0 scraped questions available.`);
       return false;
     }
 
-    if (!directScannedRecord && effectiveQuestions.length > 0) {
-      console.log(`   📍 [recordJobDistributions] Saving job blueprint to scanned_jobs table for "${cleanUrl}"...`);
-      const saved = await saveScannedJob({
+    // Automatically ensure the job exists in scanned_jobs
+    if (!scannedJobRecord) {
+      await saveScannedJob({
         applywizzId: cleanLead,
         jobUrl: cleanUrl,
         jobId: jobId || null,
@@ -2851,17 +2840,10 @@ export async function recordJobDistributions({
         screenshotPath: screenshotUrl || screenshotPath || null,
         clientCount: Array.isArray(clients) ? clients.length : 1,
         scanStatus: 'completed',
-      }).catch((e) => console.warn(`   ⚠️ saveScannedJob warning:`, e.message));
-      if (saved?.id) {
-        directScannedRecord = saved;
-      }
-    }
-
-    // STRICT SEQUENTIAL FLOW GATE: A job MUST enter scanned_jobs table before moving to job_distributions
-    const verifiedScannedId = directScannedRecord?.id || scannedJobRecord?.id || scannedJobId || null;
-    if (!verifiedScannedId) {
-      console.error(`   ⛔ [Distribution Gate] STRICT SEQUENTIAL FLOW: Blocked distribution for "${cleanUrl}". Job has not entered scanned_jobs table yet (no valid scanned_job_id). Sequential flow requires job to enter scanned_jobs before moving to job_distributions.`);
-      return false;
+      }).catch(() => { });
+      try {
+        scannedJobRecord = await getScannedJob(cleanUrl);
+      } catch { }
     }
 
     questions = effectiveQuestions;
@@ -2891,14 +2873,16 @@ export async function recordJobDistributions({
             roleTitle: t.role_title || cleanRole || scannedJobRecord?.role_title,
           }));
         }
-      } catch {}
+      } catch { }
     }
 
-    // Expand any candidate IDs in targetClients so EVERY client has an authentic row
+    // Expand any comma-separated applywizzId in targetClients so EVERY client has an authentic row
     const expandedClients = [];
     for (const c of targetClients) {
-      const raw = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
-      const ids = parseCandidateAwlIds(raw);
+      const raw = String(typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '')).trim();
+      const ids = raw.includes(',')
+        ? raw.split(',').map((s) => s.trim().toUpperCase()).filter(Boolean)
+        : [raw.toUpperCase()];
       for (const singleId of ids) {
         if (!singleId) continue;
         expandedClients.push(typeof c === 'object' ? { ...c, applywizzId: singleId, applywizz_id: singleId } : singleId);
@@ -2934,7 +2918,7 @@ export async function recordJobDistributions({
       const specificCompany = (typeof c === 'object' && c.company) ? c.company : cleanCompany;
       const specificRole = (typeof c === 'object' && c.roleTitle) ? c.roleTitle : cleanRole;
       const clientResolved = (typeof c === 'object' && Array.isArray(c.resolvedAnswers)) ? c.resolvedAnswers : (Array.isArray(resolvedAnswers) ? resolvedAnswers : []);
-      
+
       const rawUnanswered = (typeof c === 'object' && Array.isArray(c.unansweredQuestions))
         ? c.unansweredQuestions
         : unansweredArr;
@@ -2959,31 +2943,58 @@ export async function recordJobDistributions({
         };
       }).filter((u) => u.question);
 
-      const clientCountUnanswered = (typeof c === 'object' && c.unansweredCount !== null && c.unansweredCount !== undefined)
-        ? Number(c.unansweredCount)
-        : clientUnanswered.length;
-      const clientIsFully = (clientCountUnanswered === 0);
-      let clientStatus = (typeof c === 'object' && c.status)
-        ? c.status
-        : (clientIsFully ? 'ready_for_review' : 'needs_answers');
-      if (!clientIsFully && clientStatus === 'ready_for_review') {
-        clientStatus = 'needs_answers';
-      }
+      // Format every resolved answer strictly according to Phase 2 JSON requirements
+      let qIndex = 0;
+      const structuredClientResolved = clientResolved.map((ans) => {
+        qIndex++;
+        const qText = String(ans.question || ans.label || '').trim();
+        const ansVal = ans.answer !== undefined && ans.answer !== null ? String(ans.answer).trim() : '';
+        const isAnswerTrue = ansVal !== '' && ansVal !== 'MISSING' && ansVal !== 'unresolved' && ans.answer_is_question_true !== false;
+        return {
+          question: qText,
+          answer: ansVal,
+          source_type: ans.source_type || ans.source || (ans.tier ? `tier_${ans.tier}` : 'tier_1'),
+          field_type: ans.field_type || ans.type || 'text',
+          count_number: ans.count_number || ans.sequence || qIndex,
+          answer_is_question_true: isAnswerTrue,
+        };
+      });
+
+      // Collect any unresolved questions with their exact scraped Workday field_type
+      const unresolvedFromAnswers = structuredClientResolved
+        .filter((a) => !a.answer_is_question_true)
+        .map((a) => ({
+          question: a.question,
+          field_type: a.field_type || 'text',
+          reason: 'unresolved_answer',
+        }));
+
+      const allUnresolvedFields = [...unresolvedFromAnswers, ...clientUnanswered.map(u => ({
+        question: u.question,
+        field_type: u.field_type || 'text',
+        reason: u.reason || 'missing_required_answer',
+      }))];
+
+      const clientCountUnanswered = allUnresolvedFields.length;
+      const clientIsFully = clientCountUnanswered === 0 && structuredClientResolved.length > 0;
+      const clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
       const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : (screenshotUrl || null);
 
       return {
         applywizz_id: String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase(),
         job_id: specificJobId ? String(specificJobId).trim() : null,
         job_url: String(specificJobUrl).trim(),
-        scanned_job_id: verifiedScannedId,
+        scanned_job_id: scannedJobRecord?.id || null,
         company: specificCompany || 'Workday Employer',
         role_title: specificRole || 'Role',
         lead_applywizz_id: cleanLead || null,
         scraped_questions: questions,
         question_count: questionCount,
-        resolved_answers: clientResolved,
-        unanswered_questions: clientCountUnanswered === 0 ? [] : clientUnanswered,
+        resolved_answers: structuredClientResolved,
+        unanswered_questions: allUnresolvedFields,
         unanswered_count: clientCountUnanswered,
+        unresolved_fields: allUnresolvedFields,
+        ready_for_review: clientIsFully,
         is_fully_answered: clientIsFully,
         application_submitted_screenshot_url: clientStatus === 'submitted' ? clientShot : null,
         status: clientStatus,
@@ -3007,36 +3018,6 @@ export async function recordJobDistributions({
     const dedupedRows = Array.from(uniqueRowMap.values());
 
     if (dedupedRows.length === 0) return false;
-
-    // Guard against overwriting completed/submitted applications:
-    // If a candidate already has status in ('submitted', 'completed', 'already_applied', 'applying', 'in_flight'),
-    // do NOT downgrade back to 'ready_for_review' or wipe their proof screenshot!
-    try {
-      const existingDistRows = await request('job_distributions', {
-        query: `?job_url=eq.${encode(cleanUrl)}&select=applywizz_id,status,application_submitted_screenshot_url`,
-      });
-      if (Array.isArray(existingDistRows) && existingDistRows.length > 0) {
-        const protectedMap = new Map();
-        for (const ex of existingDistRows) {
-          const rawSt = (ex.status || '').toLowerCase();
-          const isProtected = ['submitted', 'completed', 'already_applied', 'applying', 'in_flight'].includes(rawSt);
-          if (isProtected) {
-            protectedMap.set(String(ex.applywizz_id).trim().toUpperCase(), ex);
-          }
-        }
-        for (const r of dedupedRows) {
-          const exMatch = protectedMap.get(r.applywizz_id);
-          if (exMatch) {
-            r.status = exMatch.status;
-            if (exMatch.application_submitted_screenshot_url) {
-              r.application_submitted_screenshot_url = exMatch.application_submitted_screenshot_url;
-            }
-          }
-        }
-      }
-    } catch (checkErr) {
-      console.warn(`   ⚠️ [recordJobDistributions] Note on existing status check: ${checkErr?.message?.slice(0, 100)}`);
-    }
 
     // Batch upsert into job_distributions in chunks of 50
     const CHUNK_SIZE = 50;
@@ -3164,30 +3145,6 @@ export async function recordFailedJob({
     const cleanUrl = String(jobUrl).trim();
     const cleanReason = String(failureReason || 'unknown_failure').slice(0, 1000);
     const cleanStep = String(failedAtStep || 'Unknown').trim();
-
-    // STRICT GUARD 1: If job reached Review & Submit, it is NEVER a failed job!
-    // It belongs strictly in scanned_jobs. Refuse to insert into failed_jobs.
-    if (
-      cleanStep.toLowerCase().includes('review') ||
-      cleanReason.toLowerCase().includes('reached-review') ||
-      cleanReason.toLowerCase().includes('reached_review') ||
-      cleanReason.toLowerCase().includes('ready_for_review')
-    ) {
-      console.warn(`⚠️ [failed_jobs GUARD] Refused write to failed_jobs: Job reached "${cleanStep}" (Review & Submit). This link belongs in scanned_jobs only!`);
-      return false;
-    }
-
-    // STRICT GUARD 2: If this job URL is already present in scanned_jobs with scan_status = 'completed',
-    // it MUST NEVER be written into failed_jobs!
-    try {
-      const existingScanned = await request('scanned_jobs', {
-        query: `?job_url=eq.${encode(cleanUrl)}&scan_status=eq.completed&select=id&limit=1`,
-      });
-      if (Array.isArray(existingScanned) && existingScanned.length > 0) {
-        console.warn(`⚠️ [failed_jobs GUARD] Refused write to failed_jobs: Job "${cleanUrl}" is already completed in scanned_jobs (#${existingScanned[0].id})!`);
-        return false;
-      }
-    } catch {}
     const now = new Date().toISOString();
     const parsedClientIds = Array.isArray(clientIds) && clientIds.length > 0
       ? clientIds.map((s) => String(s).trim().toUpperCase()).filter(Boolean)
@@ -3205,6 +3162,7 @@ export async function recordFailedJob({
       failed_at_step: cleanStep,
       screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
       client_ids: parsedClientIds,
+      client_count: totalCount,
       failed_client_count: totalCount,
       created_at: now,
       updated_at: now,
@@ -3267,23 +3225,19 @@ export async function recordFailedJob({
         created_at: now,
         updated_at: now,
       },
-    }).catch(() => {});
-
-    const isExpired = cleanReason.toLowerCase().includes('expired') || cleanStep.toLowerCase().includes('expired');
-    const targetStatus = isExpired ? 'expired' : 'failed';
+    }).catch(() => { });
 
     await request('batch_job_queue', {
       method: 'PATCH',
-      query: `?job_url=eq.${encode(cleanUrl)}`,
+      query: `?applywizz_id=eq.${encode(cleanId)}&job_url=eq.${encode(cleanUrl)}`,
       prefer: 'return=minimal',
       body: {
-        status: targetStatus,
+        status: 'failed',
+        error_message: `${cleanReason} (stopped at ${cleanStep})`,
         screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
-        worker_id: null,
-        locked_at: null,
         updated_at: now,
       },
-    }).catch(() => {});
+    }).catch(() => { });
 
     return true;
   } catch (err) {
@@ -3353,23 +3307,21 @@ export async function syncQueueWithScannedAndFailedJobs() {
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
-        }).catch(() => {});
+        }).catch(() => { });
         markedScanned++;
-      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'expired' && row.status !== 'submitted') {
-        const isExp = String(matchedFj.failure_reason || '').toLowerCase().includes('expired');
-        const targetSt = isExp ? 'expired' : 'failed';
+      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'submitted') {
         await request('batch_job_queue', {
           method: 'PATCH',
           query: `?id=eq.${row.id}`,
           prefer: 'return=minimal',
           body: {
-            status: targetSt,
+            status: 'failed',
             screenshot_path: matchedFj.screenshot_path || null,
             worker_id: null,
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
-        }).catch(() => {});
+        }).catch(() => { });
         markedFailed++;
       }
     }
@@ -3408,14 +3360,12 @@ export async function persistNewResolvedAnswer({
   try {
     await request('qa_bank', {
       method: 'POST',
-      query: '?on_conflict=tenant,normalized_question',
+      query: '?on_conflict=applywizz_id,question_normalized',
       prefer: 'resolution=merge-duplicates,return=minimal',
       body: {
-        tenant: 'global',
         applywizz_id: cleanId,
         question: qStr,
         question_normalized: norm,
-        normalized_question: norm,
         answer: ansStr,
         field_type: fieldType,
         source: ['supabase', 'api', 'resume', 'llm', 'manual'].includes(source) ? source : 'llm',
@@ -3440,7 +3390,7 @@ export async function persistNewResolvedAnswer({
       unknownQuestion: true,
       jobUrl: jobUrl || '',
     });
-  } catch {}
+  } catch { }
 
   // 3. Upsert into job_distributions.resolved_answers
   try {
@@ -3489,43 +3439,5 @@ export async function persistNewResolvedAnswer({
     }
   } catch (distErr) {
     console.warn(`    ⚠️ [job_distributions] Note updating resolved_answers: ${distErr?.message?.slice(0, 100)}`);
-  }
-}
-
-/**
- * Automatically sync/migrate existing schemas from job_form_schemas into scanned_jobs.
- */
-export async function syncJobFormSchemasToScannedJobs() {
-  if (!isSupabaseConfigured()) return { migrated: 0, total: 0 };
-  try {
-    const schemas = await request('job_form_schemas', {
-      query: '?select=*&limit=500',
-    });
-    if (!Array.isArray(schemas) || schemas.length === 0) return { migrated: 0, total: 0 };
-
-    let migrated = 0;
-    for (const s of schemas) {
-      const jobUrl = s.canonical_job_url;
-      if (!jobUrl) continue;
-
-      const fields = Array.isArray(s.fields_schema) ? s.fields_schema : [];
-      const res = await saveScannedJob({
-        applywizzId: s.scanned_by_applywizz_id || null,
-        jobUrl,
-        company: s.company || 'Workday Employer',
-        roleTitle: s.role_title || 'Position',
-        scrapedQuestions: fields,
-        stepNames: Array.isArray(s.step_names) ? s.step_names : [],
-        scanStatus: 'completed',
-      }).catch(() => null);
-
-      if (res?.id) migrated++;
-    }
-
-    console.log(`✅ [MIGRATION] Synced ${migrated}/${schemas.length} schemas from job_form_schemas to scanned_jobs`);
-    return { migrated, total: schemas.length };
-  } catch (err) {
-    console.error('syncJobFormSchemasToScannedJobs error:', err.message);
-    return { error: err.message };
   }
 }

@@ -326,14 +326,13 @@ export async function getStats({ scope = 'all', from = null, to = null, managerI
     }
   }
 
-  // 4b. Accumulate batch_job_queue items into queued, applying, ready_for_review
+  // 4b. Accumulate batch_job_queue items into queued, applying, ready_for_review (Stage 1 scanning)
   for (const q of queueRows || []) {
     const st = String(q.status || 'pending').toLowerCase().trim();
     if (st === 'pending' || st === 'queued') queuedCount++;
     else if (st === 'processing' || st === 'running') applyingCount++;
-    else if (st === 'ready_for_review') readyForReviewCount++;
-    else if (st === 'failed') failedAllCount++;
-    else if (st === 'submitted') submittedAllCount++;
+    else if (st === 'ready_for_review' || st === 'scanned') readyForReviewCount++;
+    else if (st === 'failed' || st === 'auth_failure' || st === 'expired') failedAllCount++;
     totalApplicationsCount++;
   }
 

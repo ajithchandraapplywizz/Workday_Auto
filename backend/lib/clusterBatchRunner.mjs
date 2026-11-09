@@ -469,7 +469,8 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
   try {
     const isComposite = taskIds.some((id) => String(id).includes(':::'));
     const isExpired = String(reason).toLowerCase().includes('expired');
-    const targetStatus = isExpired ? 'expired' : 'failed';
+    const isAuthFail = /auth|login|password|credential|zoho/i.test(String(reason));
+    const targetStatus = isExpired ? 'expired' : (isAuthFail ? 'auth_failure' : 'failed');
     if (isComposite) {
       const urls = Array.from(new Set(taskIds.map((cid) => {
         const [, ...rest] = String(cid).split(':::');
@@ -881,14 +882,14 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
             console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
           }
         } else {
-          console.log(`ℹ️ [${workerId}] Link reached Review step ("${leadFailStep}"). Marking queue as reached_review.`);
+          console.log(`ℹ️ [${workerId}] Link reached Review step ("${leadFailStep}"). Marking batch_job_queue as scanned.`);
           for (const tId of allTaskIds) {
             await queueDbRequest('batch_job_queue', {
               method: 'PATCH',
               query: `?id=eq.${encodeURIComponent(tId)}`,
               prefer: 'return=minimal',
               body: {
-                status: 'reached_review',
+                status: 'scanned',
                 screenshot_path: leadProofShot || null,
                 worker_id: null,
                 locked_at: null,
@@ -1506,7 +1507,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           body: {
             scanned_job_id: scannedJobId,
             screenshot_path: reviewShotUrl || null,
-            status: 'reached_review',
+            status: 'scanned',
             job_id: blueprintTask?.job_id || cluster.reqId || null,
             error_message: null,
             worker_id: null,
@@ -1525,7 +1526,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         body: {
           scanned_job_id: scannedJobId,
           screenshot_path: reviewShotUrl || null,
-          status: 'reached_review',
+          status: 'scanned',
           job_id: blueprintTask?.job_id || cluster.reqId || null,
           error_message: null,
           worker_id: null,
