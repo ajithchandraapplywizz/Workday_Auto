@@ -1,12 +1,38 @@
 import { exec } from 'node:child_process';
 
+export const LEAN_CHROMIUM_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-software-rasterizer',
+  '--no-zygote',
+  '--renderer-process-limit=1',
+  '--js-flags=--max-old-space-size=384',
+  '--disable-extensions',
+  '--disable-default-apps',
+  '--mute-audio',
+  '--autoplay-policy=user-gesture-required',
+  '--no-first-run',
+  '--disable-background-networking',
+  '--disable-background-timer-throttling',
+  '--disable-backgrounding-occluded-windows',
+  '--disable-breakpad',
+  '--disable-component-update',
+  '--disable-infobars',
+  '--window-size=1280,900',
+  '--disk-cache-size=33554432',
+  '--media-cache-size=1',
+];
+
 /**
  * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID limit exhaustion.
  */
 export function cleanupOrphanChromeProcesses() {
   if (process.platform === 'linux') {
     try {
-      exec('pkill -f "chrome-headless-shell.*--user-data-dir=/tmp/playwright" || true', () => {});
+      exec('pkill -9 -f "(chrome-headless-shell|chromium).*(user-data-dir|playwright)" || true', () => {});
+      exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* || true', () => {});
     } catch {}
   }
 }
@@ -35,7 +61,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = MAX_CON
   if (isGlobalStopRequested()) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: global stop is active`);
   }
-  const effectiveMax = Math.max(1, Number(process.env.MAX_ACTIVE_BROWSERS) || Number(maxSlots) || 4);
+  const effectiveMax = Math.max(1, Number(process.env.MAX_ACTIVE_BROWSERS) || Number(maxSlots) || MAX_CONCURRENT_BROWSERS);
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
     return true;

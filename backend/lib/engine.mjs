@@ -44,7 +44,7 @@ import {
 import { runStepDomPrep } from './stepDomPrep.mjs';
 import { rapidAdvanceOnce, RAPID, waitForWizardProgress } from './workdayRapidAdvance.mjs';
 import { recordClientApplication, tryUsePreviousApplication } from './applicationHistory.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, registerActiveBrowser, unregisterActiveBrowser, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
 import {
   fillSourceFieldAuto,
   getReferralSourceDisplay,
@@ -3323,15 +3323,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
   const browser = existingBrowser || await chromium.launch({
     headless: Boolean(headless),
     channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-infobars',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--window-size=1280,900',
-    ],
+    args: LEAN_CHROMIUM_ARGS,
   });
   if (ownBrowser) registerActiveBrowser(browser, { role: isScanOnly ? 'scan' : 'submit' });
   const context = existingContext || (existingBrowser ? await browser.newContext() : await browser.newContext({

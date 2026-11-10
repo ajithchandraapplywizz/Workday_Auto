@@ -19,7 +19,7 @@ import { resolve } from 'path';
 import { discoverApplicationForm, detectATS, isWorkdayWizardVisible, isWorkdayJobPageMissing, isWorkdayAlreadyApplied } from './discovery.mjs';
 import { handleWorkday } from './workday.mjs';
 import { normalizeLabel } from './qaStore.mjs';
-import { registerActiveBrowser, unregisterActiveBrowser } from './browserLifecycle.mjs';
+import { registerActiveBrowser, unregisterActiveBrowser, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
 
 // ─── Submit button patterns ────────────────────────────────────────────────
 const SUBMIT_PATTERNS = [
@@ -436,15 +436,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
   const browser = existingBrowser || await chromium.launch({
     headless: Boolean(headless),
     channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-infobars',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--window-size=1280,900',
-    ],
+    args: LEAN_CHROMIUM_ARGS,
   });
   if (ownBrowser) {
     registerActiveBrowser(browser, { role: 'scan' });

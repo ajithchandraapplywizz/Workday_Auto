@@ -13,6 +13,7 @@
  */
 
 import { chromium as standardChromium } from 'playwright';
+import { setupResourceBlocker } from './resourceBlocker.mjs';
 
 let chromium = standardChromium;
 let stealth = null;
@@ -20,6 +21,7 @@ let stealth = null;
 /**
  * Normalizes and hardens Chromium launch flags for headless container environments (Docker, Railway, Linux).
  * Prevents SIGTRAP crashes caused by SwiftShader, PartitionAlloc, missing GPU, and restricted shared memory.
+ * Optimized for minimal RAM, CPU, and network consumption.
  */
 function prepareLaunchOptions(baseOptions = {}) {
   const isHeadless = baseOptions.headless !== false;
@@ -32,6 +34,22 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disable-software-rasterizer',
     '--disable-infobars',
     '--window-size=1280,900',
+    // ── Low Memory & CPU Efficiency Optimizations ──
+    '--js-flags=--max-old-space-size=384',      // Constrain V8 heap to 384MB (avoids unbounded multi-gigabyte bloat)
+    '--disable-extensions',                     // Disable extensions
+    '--disable-default-apps',                   // Disable default apps
+    '--mute-audio',                             // Mute audio completely
+    '--autoplay-policy=user-gesture-required',  // Stop autoplaying video backgrounds on career sites
+    '--disable-background-networking',          // Disable background network telemetry & update checks
+    '--disable-background-timer-throttling',    // Prevent excessive timer drift
+    '--disable-backgrounding-occluded-windows', // Do not render occluded windows
+    '--disable-breakpad',                       // Disable crash reporter memory overhead
+    '--disable-component-update',               // Disable background component updates
+    '--disable-domain-reliability',             // Disable domain reliability reporting
+    '--disable-sync',                           // Disable sync
+    '--disable-translate',                      // Disable Google Translate overhead
+    '--disk-cache-size=33554432',               // Cap disk cache to 32MB
+    '--media-cache-size=1',                     // Disable media cache
   ];
 
   const incomingArgs = Array.isArray(baseOptions.args) ? baseOptions.args : [];
@@ -68,6 +86,33 @@ function prepareLaunchOptions(baseOptions = {}) {
 }
 
 /**
+ * Wraps browser instance to ensure all new contexts have resource blocking attached,
+ * slashing network egress, bandwidth costs, and memory consumption.
+ */
+function wrapBrowserInstance(browser) {
+  if (!browser || browser._hasResourceBlockerWrapped) return browser;
+  browser._hasResourceBlockerWrapped = true;
+
+  const origNewContext = browser.newContext.bind(browser);
+  browser.newContext = async function (...args) {
+    const context = await origNewContext(...args);
+    await setupResourceBlocker(context);
+    return context;
+  };
+
+  const origNewPage = browser.newPage?.bind(browser);
+  if (origNewPage) {
+    browser.newPage = async function (...args) {
+      const page = await origNewPage(...args);
+      await setupResourceBlocker(page);
+      return page;
+    };
+  }
+
+  return browser;
+}
+
+/**
  * Creates a multi-tier resilient launch wrapper around any Playwright Chromium launcher.
  */
 function createResilientLauncher(extraLauncher = null) {
@@ -81,16 +126,18 @@ function createResilientLauncher(extraLauncher = null) {
     // Tier 1: Stealth launcher with full Chromium channel ("new headless" - avoids chrome-headless-shell SIGTRAP)
     if (origExtraLaunch) {
       try {
-        return await origExtraLaunch({
+        const browser = await origExtraLaunch({
           ...prepared,
           channel: preferredChannel,
         });
+        return wrapBrowserInstance(browser);
       } catch (err1) {
         console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}). Retrying stealth without channel...`);
         // Tier 2: Stealth launcher with default headless shell
         try {
           const { channel: _, ...withoutChannel } = prepared;
-          return await origExtraLaunch(withoutChannel);
+          const browser = await origExtraLaunch(withoutChannel);
+          return wrapBrowserInstance(browser);
         } catch (err2) {
           console.warn(`[STEALTH] Stealth launch failed (${err2?.message}), falling back to standard Chromium.`);
         }
@@ -99,10 +146,11 @@ function createResilientLauncher(extraLauncher = null) {
 
     // Tier 3: Standard Chromium with full Chromium channel ("new headless")
     try {
-      return await origStandardLaunch({
+      const browser = await origStandardLaunch({
         ...prepared,
         channel: preferredChannel,
       });
+      return wrapBrowserInstance(browser);
     } catch (err3) {
       console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}). Retrying standard without channel...`);
     }
@@ -110,7 +158,8 @@ function createResilientLauncher(extraLauncher = null) {
     // Tier 4: Standard Chromium with default binary and hardened container args
     try {
       const { channel: _, ...withoutChannel } = prepared;
-      return await origStandardLaunch(withoutChannel);
+      const browser = await origStandardLaunch(withoutChannel);
+      return wrapBrowserInstance(browser);
     } catch (err4) {
       console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}). Attempting minimal safe container launch...`);
     }
@@ -127,7 +176,7 @@ function createResilientLauncher(extraLauncher = null) {
         ],
       });
       console.log('[BROWSER] Minimal emergency Chromium instance launched successfully.');
-      return browser;
+      return wrapBrowserInstance(browser);
     } catch (finalErr) {
       console.error('[BROWSER] Critical: All Chromium launch tiers failed:', finalErr?.message);
       throw finalErr;

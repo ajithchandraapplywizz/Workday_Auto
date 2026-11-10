@@ -21,6 +21,7 @@ COPY . .
 RUN cp -rf /app/backend/scripts/* /app/scripts/ && ln -sfn /app/backend/lib /app/lib
 
 ENV NODE_ENV=production
+ENV NODE_OPTIONS="--max-old-space-size=512"
 ENV PORT=8080
 EXPOSE 8080
 

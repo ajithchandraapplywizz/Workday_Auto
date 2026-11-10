@@ -87,18 +87,17 @@ export async function resolveInstanceSubmissionWorkerIds() {
 
 
   // Multi-replica Railway automatic pair allocation across strictly 8 max cluster workers:
-
   const candidatePairs = [
-
     ['submitting_worker_1', 'submitting_worker_2'],
-
     ['submitting_worker_3', 'submitting_worker_4'],
-
     ['submitting_worker_5', 'submitting_worker_6'],
-
     ['submitting_worker_7', 'submitting_worker_8'],
-
   ];
+
+  const replicaIndex = Number(process.env.RAILWAY_REPLICA_INDEX ?? process.env.REPLICA_INDEX);
+  if (!Number.isNaN(replicaIndex) && candidatePairs[replicaIndex]) {
+    return candidatePairs[replicaIndex];
+  }
 
 
 
@@ -1892,10 +1891,34 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
     const errMsg = err?.message || 'Execution error';
-
     const failedStep = 'Execution Exception';
 
+    const isHostResourceError = Boolean(
+      /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|browserType\.launch|Target page, context or browser has been closed|Failed to launch|ENOMEM|EACCES/i.test(errMsg)
+    );
 
+    if (isHostResourceError) {
+      console.warn(`\n⚠️ [STAGE 3: SUBMITTER] [${workerId}] Host resource limitation caught in outer handler (${errMsg}). Preserving task #${task.distribution_id || task.id} cleanly in ready_for_review WITHOUT burning attempts.`);
+      try {
+        const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
+        cleanupOrphanChromeProcesses();
+      } catch {}
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id || task.id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
+        workerId,
+        patch: {
+          status: 'ready_for_review',
+          worker_id: null,
+          worker_leased_at: null,
+          error_message: 'Host process limit reached (EAGAIN) — standing by for resources',
+          updated_at: now,
+        },
+      });
+      await new Promise((r) => setTimeout(r, 5000));
+      return { status: 'resource_cooldown', error: errMsg };
+    }
 
     const isFatalNonRetryable = (
 
