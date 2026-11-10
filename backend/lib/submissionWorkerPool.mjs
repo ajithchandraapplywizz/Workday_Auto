@@ -167,19 +167,15 @@ export async function resolveInstanceSubmissionWorkerIds() {
  */
 
 export function getSubmissionAttemptCount(errorMessage) {
-
   const msg = String(errorMessage || '');
-
-  const match = msg.match(/\[Attempt\s*(\d+)\s*\/\s*(\d+)[^\]]*\]/i);
-
-  if (match) {
-
-    return parseInt(match[1], 10);
-
+  if (/stopped by user/i.test(msg)) {
+    return 0;
   }
-
+  const match = msg.match(/\[Attempt\s*(\d+)\s*\/\s*(\d+)[^\]]*\]/i);
+  if (match) {
+    return parseInt(match[1], 10);
+  }
   return 0;
-
 }
 
 
@@ -548,7 +544,7 @@ export async function claimNextTask(workerId) {
   try {
 
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
-    // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt)
+    // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt, OR was stopped by user)
     let { data: candidates, error: candErr } = await supabase
       .from('job_distributions')
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
@@ -556,7 +552,7 @@ export async function claimNextTask(workerId) {
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed')
-      .or('error_message.is.null,error_message.not.ilike.%[Attempt%')
+      .or('error_message.is.null,error_message.not.ilike.%[Attempt%,error_message.ilike.%Stopped by user%')
       .order('created_at', { ascending: true })
       .limit(10);
 
@@ -594,6 +590,20 @@ export async function claimNextTask(workerId) {
         .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates2 || [];
+    }
+
+    // 4. Fallback for any unsubmitted ready_for_review applications (e.g. tasks reset to ready_for_review)
+    if (!candidates || candidates.length === 0) {
+      const { data: retryCandidates3 } = await supabase
+        .from('job_distributions')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
+        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
+        .order('updated_at', { ascending: true })
+        .limit(10);
+      candidates = retryCandidates3 || [];
     }
 
     if (!candidates || candidates.length === 0) return null;
@@ -1353,10 +1363,33 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       });
 
     } else {
-
       const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
-
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
+
+      const isUserStop = Boolean(
+        result?.status === 'stopped' ||
+        /stopped by user|stop requested/i.test(rawErrMsg) ||
+        isGlobalStopRequested() ||
+        isSubmitStopRequested()
+      );
+
+      if (isUserStop) {
+        console.log(`🛑 [STAGE 3: SUBMITTER] [${workerId}] Application #${task.distribution_id || task.id} halted by user stop signal — preserving cleanly in ready_for_review without burning attempts.`);
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            worker_leased_at: null,
+            error_message: 'Stopped by user',
+            updated_at: now,
+          },
+        });
+        return { status: 'stopped', reason: 'Stopped by user' };
+      }
 
 
 

@@ -82,12 +82,12 @@ export async function isWorkerPoolStopRequested(workerId = '') {
   try {
     const { getBotControl } = await import('./supabaseClient.mjs');
     const bc = await getBotControl().catch(() => null);
-    if (bc?.stop_requested) return true;
+    if (bc?.stop_requested || bc?.last_action_requested === 'stop' || bc?.last_action_requested === 'stop_all' || bc?.last_action_requested === 'stop_pipeline') return true;
     const w = String(workerId).toLowerCase();
     if (w.startsWith('submitting')) {
-      if (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping' || bc?.submit_status === 'off') return true;
-    } else {
-      if (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping' || bc?.scan_status === 'off') return true;
+      if (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping') return true;
+    } else if (w.startsWith('scanning') || w.startsWith('resolving')) {
+      if (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping') return true;
     }
   } catch {}
   return false;

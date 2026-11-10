@@ -19,6 +19,12 @@ test('getSubmissionAttemptCount correctly parses progressive attempt numbers', (
 
   // Attempt 3 failures (final failure)
   assert.equal(getSubmissionAttemptCount('[Attempt 3/3 Failed at "Review & Submit"]: Submit button not clickable'), 3);
+
+  // User stop errors: NEVER count as failed attempts (must return 0)
+  assert.equal(getSubmissionAttemptCount('Stopped by user'), 0);
+  assert.equal(getSubmissionAttemptCount('Stop requested by user'), 0);
+  assert.equal(getSubmissionAttemptCount('[Attempt 3/3 Failed at "Unknown Step"]: Stopped by user'), 0);
+  assert.equal(getSubmissionAttemptCount('[Attempt 1/3] Halted at "Step 1": Stopped by user'), 0);
 });
 
 test('Progressive 3-attempt state transitions: Attempts 1 & 2 stay ready_for_review, Attempt 3 marks failed, screenshots captured across all attempts', () => {
@@ -113,4 +119,20 @@ test('Clean patch sanitizer ensures completed_at is stripped and mapped to updat
   assert.equal(cleanPatch.updated_at, '2026-11-03T10:00:00.000Z', 'completed_at must be safely remapped to updated_at');
   assert.equal(cleanPatch.status, 'failed');
   assert.equal(cleanPatch.application_submitted_screenshot_url, 'https://test.png');
+});
+
+test('Stopped by user errors evaluate to attempt 0 and are never treated as exhausted attempts', () => {
+  const stoppedMsg = '[Attempt 3/3 Failed at "Unknown Step"]: Stopped by user';
+  const attempts = getSubmissionAttemptCount(stoppedMsg);
+  assert.equal(attempts, 0, 'Stopped by user must evaluate to attempt 0');
+
+  // Verify user stop evaluation helper
+  const isUserStop = (errMsg, status) => Boolean(
+    status === 'stopped' ||
+    /stopped by user|stop requested/i.test(errMsg)
+  );
+
+  assert.equal(isUserStop(stoppedMsg, 'ready_for_review'), true);
+  assert.equal(isUserStop('Stopped by user', 'stopped'), true);
+  assert.equal(isUserStop('Some actual workday error', 'failed'), false);
 });

@@ -294,10 +294,10 @@ async function syncBotControlState(patch = {}) {
   // Guard against idle service overwriting active opposite service
   if (!isPoolRunning && !patch.is_running) {
     const bc = await getBotControl().catch(() => null);
-    if (SERVICE_ROLE === 'scanner' && (bc?.stage === 'submitting' || bc?.last_action_requested?.includes('submit')) && bc?.is_running) {
+    if (SERVICE_ROLE === 'scanner' && (bc?.stage === 'submitting' || bc?.stage === 'parallel' || bc?.last_action_requested?.includes('submit')) && bc?.is_running) {
       return;
     }
-    if (SERVICE_ROLE === 'submitter' && (bc?.stage === 'scanning' || bc?.stage === 'resolving' || bc?.last_action_requested?.includes('scan')) && bc?.is_running) {
+    if (SERVICE_ROLE === 'submitter' && (bc?.stage === 'scanning' || bc?.stage === 'resolving' || bc?.stage === 'parallel' || bc?.last_action_requested?.includes('scan')) && bc?.is_running) {
       return;
     }
   }
@@ -318,17 +318,19 @@ async function syncBotControlState(patch = {}) {
 
 
 
-  await updateBotControl({
+  const updatePayload = {
     stage: sanitizedPatch.stage || currentStage,
-    is_running: sanitizedPatch.is_running !== undefined ? sanitizedPatch.is_running : isPoolRunning,
-    is_paused: sanitizedPatch.is_paused !== undefined ? sanitizedPatch.is_paused : isPoolPaused,
-    stop_requested: sanitizedPatch.stop_requested !== undefined ? sanitizedPatch.stop_requested : isGlobalStopRequested(),
-    trigger_requested: sanitizedPatch.trigger_requested !== undefined ? sanitizedPatch.trigger_requested : false,
-    last_action_requested: sanitizedPatch.last_action_requested !== undefined ? sanitizedPatch.last_action_requested : null,
     current_action: sanitizedPatch.current_action || (isPoolRunning ? `Running ${currentStage}...` : 'Idle'),
     active_worker_count: sanitizedPatch.active_worker_count !== undefined ? sanitizedPatch.active_worker_count : (isPoolRunning ? (currentStage === 'submitting' ? Math.max(activeSubmittingWorkers.size, 1) : WORKER_COUNT) : 0),
     ...sanitizedPatch,
-  }).catch(() => { });
+  };
+  if (sanitizedPatch.is_running !== undefined) updatePayload.is_running = sanitizedPatch.is_running;
+  if (sanitizedPatch.is_paused !== undefined) updatePayload.is_paused = sanitizedPatch.is_paused;
+  if (sanitizedPatch.stop_requested !== undefined) updatePayload.stop_requested = sanitizedPatch.stop_requested;
+  if (sanitizedPatch.trigger_requested !== undefined) updatePayload.trigger_requested = sanitizedPatch.trigger_requested;
+  if (sanitizedPatch.last_action_requested !== undefined) updatePayload.last_action_requested = sanitizedPatch.last_action_requested;
+
+  await updateBotControl(updatePayload).catch(() => { });
 }
 
 /**
@@ -529,7 +531,7 @@ export async function stopAutonomousPool() {
     stage: 'idle',
     is_running: false,
     is_paused: false,
-    stop_requested: true,
+    stop_requested: false,
     scan_status: 'off',
     scan_enabled: false,
     scan_stop_requested: false,
@@ -633,6 +635,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
   setSubmitStop(false);
   const { setWorkerPoolStop } = await import('../lib/workerPool.mjs');
   setWorkerPoolStop(false);
+  await updateWorkerControl('submit', { enabled: true, status: 'running', stop_requested: false }).catch(() => { });
 
   const {
     SUBMISSION_WORKER_IDS,
@@ -672,6 +675,8 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
     submit_enabled: true,
     submit_status: 'running',
     submit_stop_requested: false,
+    stop_requested: false,
+    last_action_requested: null,
     is_running: true,
     current_action: isParallel
       ? `Universal Parallel Pipeline: Scanning & Submissions (${tasksCount} ready) running concurrently across workers`
@@ -810,8 +815,16 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     return { success: false, refused: true, reason: canScan.reason };
   }
 
-  currentMode = 'scanning';
-  currentStage = 'scanning';
+  const bcState = await getBotControl().catch(() => null);
+  const isParallel = Boolean(
+    bcState?.stage === 'parallel' ||
+    bcState?.mode === 'parallel' ||
+    bcState?.last_action_requested === 'start_universal' ||
+    submitStatus === 'running'
+  );
+
+  currentMode = isParallel ? 'parallel' : 'scanning';
+  currentStage = isParallel ? 'parallel' : 'scanning';
   scanStatus = 'running';
   scanStopRequested = false;
   isPoolRunning = true;
@@ -827,8 +840,8 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
   await syncBotControlState({
     scan_run_id: scanRunId,
     scan_run_started_at: scanRunStartedAt,
-    mode: 'scanning',
-    stage: 'scanning',
+    mode: currentMode,
+    stage: currentStage,
     scan_enabled: true,
     scan_status: 'running',
     scan_stop_requested: false,
@@ -841,8 +854,8 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
 
     while (scanStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isScanStopRequested() && !isPoolPaused) {
       await syncBotControlState({
-        mode: 'scanning',
-        stage: 'scanning',
+        mode: currentMode,
+        stage: currentStage,
         scan_enabled: true,
         scan_status: 'running',
         scan_stop_requested: false,
@@ -1051,6 +1064,11 @@ const server = http.createServer(async (req, res) => {
 
   if ((pathname === '/api/bot/universal' || pathname === '/api/bot/start-all') && req.method === 'POST') {
     console.log(`\n⚡ [DAEMON WEBHOOK (${SERVICE_ROLE.toUpperCase()})] Direct universal trigger requested on ${pathname}! Launching all stages concurrently.`);
+    setGlobalStop(false);
+    setScanStop(false);
+    setSubmitStop(false);
+    setClusterStop(false);
+    isPoolPaused = false;
     if (SERVICE_ROLE === 'main') {
       await syncBotControlState({
         last_action_requested: 'start_universal',
@@ -1515,6 +1533,11 @@ const server = http.createServer(async (req, res) => {
     if (!authUser) return;
 
     console.log(`\n⚡ [DAEMON WEBHOOK (${SERVICE_ROLE.toUpperCase()})] Universal Trigger requested! Launching all stages concurrently.`);
+    setGlobalStop(false);
+    setScanStop(false);
+    setSubmitStop(false);
+    setClusterStop(false);
+    isPoolPaused = false;
 
     if (SERVICE_ROLE === 'main') {
       await syncBotControlState({
@@ -2155,18 +2178,40 @@ export async function initOnStartup() {
       const isScanActive = scanStatus === 'running' || (isPoolRunning && (currentStage === 'scanning' || currentStage === 'parallel'));
       const isSubmitActive = submitStatus === 'running' || (isPoolRunning && (currentStage === 'submitting' || currentStage === 'parallel')) || activeSubmittingWorkers.size > 0;
 
-      // 1. Primary Stop Signal from Supabase (scoped strictly by explicit user action)
-      const hasScanStopSignal = Boolean(
+      // 1. Primary Stop & Start Signal Detection from Supabase
+      const isStartSignal = Boolean(
+        bc?.last_action_requested === 'start_universal' ||
+        bc?.last_action_requested === 'start_submit' ||
+        bc?.last_action_requested === 'start_scan' ||
+        bc?.last_action_requested === 'start' ||
+        bc?.last_action_requested === 'start_pipeline' ||
+        bc?.last_action_requested === 'submit_approved' ||
+        (bc?.trigger_requested && bc?.is_running)
+      );
+
+      // If user triggered any start, clear in-memory stop state immediately to accept the command
+      if (isStartSignal) {
+        if (isGlobalStopRequested() || isScanStopRequested() || isSubmitStopRequested() || isPoolPaused) {
+          console.log(`\n⚡ [DAEMON (${SERVICE_ROLE.toUpperCase()})] Fresh start signal detected ("${bc?.last_action_requested}") — clearing in-memory stop flags.`);
+          setGlobalStop(false);
+          setScanStop(false);
+          setSubmitStop(false);
+          setClusterStop(false);
+          isPoolPaused = false;
+        }
+      }
+
+      const hasScanStopSignal = !isStartSignal && Boolean(
         bc?.scan_stop_requested ||
         bc?.last_action_requested === 'stop_scan' ||
         scanCtrl?.stop_requested
       );
-      const hasSubmitStopSignal = Boolean(
+      const hasSubmitStopSignal = !isStartSignal && Boolean(
         bc?.submit_stop_requested ||
         bc?.last_action_requested === 'stop_submit' ||
         submitCtrl?.stop_requested
       );
-      const hasGlobalStopSignal = Boolean(
+      const hasGlobalStopSignal = !isStartSignal && Boolean(
         bc?.stop_requested ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_all' ||
@@ -2179,6 +2224,12 @@ export async function initOnStartup() {
           await stopAutonomousPool();
           if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
           if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
+          await syncBotControlState({
+            scan_stop_requested: false,
+            submit_stop_requested: false,
+            last_action_requested: null,
+            stop_requested: false,
+          }).catch(() => { });
         }
         return;
       }
@@ -2188,6 +2239,11 @@ export async function initOnStartup() {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping scanning workers...`);
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
+        await syncBotControlState({
+          scan_stop_requested: false,
+          last_action_requested: null,
+          stop_requested: false,
+        }).catch(() => { });
         handledScanStop = true;
       }
 
@@ -2196,6 +2252,11 @@ export async function initOnStartup() {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping submission workers...`);
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
+        await syncBotControlState({
+          submit_stop_requested: false,
+          last_action_requested: null,
+          stop_requested: false,
+        }).catch(() => { });
         handledSubmitStop = true;
       }
 
@@ -2206,8 +2267,10 @@ export async function initOnStartup() {
       const isScanRunning = scanStatus === 'running';
       const isSubmitRunning = submitStatus === 'running';
 
-      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && !bc?.scan_stop_requested && (
-        (bc && bc.is_running !== false && (
+      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && (
+        isStartSignal || (!bc?.stop_requested && !bc?.scan_stop_requested)
+      ) && (
+        (bc && (bc.is_running !== false || isStartSignal) && (
           bc.last_action_requested === 'start' ||
           bc.last_action_requested === 'start_scan' ||
           bc.last_action_requested === 'start_pipeline' ||
@@ -2218,8 +2281,10 @@ export async function initOnStartup() {
         (scanCtrl && (scanCtrl.enabled === true || scanCtrl.status === 'running') && !scanCtrl.stop_requested)
       );
 
-      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && !bc?.stop_requested && !bc?.submit_stop_requested && (
-        (bc && bc.is_running !== false && (
+      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && (
+        isStartSignal || (!bc?.stop_requested && !bc?.submit_stop_requested)
+      ) && (
+        (bc && (bc.is_running !== false || isStartSignal) && (
           bc.last_action_requested === 'submit_approved' ||
           bc.last_action_requested === 'start_submit' ||
           bc.last_action_requested === 'start_universal' ||

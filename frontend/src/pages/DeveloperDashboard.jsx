@@ -216,14 +216,42 @@ export default function DeveloperDashboard() {
         }
       });
 
+    // High-frequency polling across devices (1.8s) so toggle state syncs instantly
     const interval = setInterval(() => {
-      if (typeof document !== 'undefined' && document.hidden) return;
       syncStatusRef.current?.();
-    }, 3500);
+    }, 1800);
+
+    // Immediate multi-device & multi-tab fallback listeners
+    const handleStorage = (e) => {
+      if (e.key === 'workday_bot_status' && e.newValue) {
+        try {
+          const parsed = JSON.parse(e.newValue);
+          setBotStatus(parsed);
+        } catch {}
+      }
+    };
+    const handleWindowFocusOrVisible = () => {
+      if (isMounted) syncStatusRef.current?.();
+    };
+
+    if (typeof window !== 'undefined') {
+      window.addEventListener('storage', handleStorage);
+      window.addEventListener('focus', handleWindowFocusOrVisible);
+    }
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleWindowFocusOrVisible);
+    }
 
     return () => {
       isMounted = false;
       clearInterval(interval);
+      if (typeof window !== 'undefined') {
+        window.removeEventListener('storage', handleStorage);
+        window.removeEventListener('focus', handleWindowFocusOrVisible);
+      }
+      if (typeof document !== 'undefined') {
+        document.removeEventListener('visibilitychange', handleWindowFocusOrVisible);
+      }
       if (channel && supabase?.removeChannel) {
         supabase.removeChannel(channel).catch(() => {});
       }
