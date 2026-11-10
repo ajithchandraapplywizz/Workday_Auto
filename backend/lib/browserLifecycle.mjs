@@ -1,3 +1,16 @@
+import { exec } from 'node:child_process';
+
+/**
+ * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID limit exhaustion.
+ */
+export function cleanupOrphanChromeProcesses() {
+  if (process.platform === 'linux') {
+    try {
+      exec('pkill -f "chrome-headless-shell.*--user-data-dir=/tmp/playwright" || true', () => {});
+    } catch {}
+  }
+}
+
 /**
  * browserLifecycle.mjs — Global Playwright Browser Registry & Instant Abort Controller
  *

@@ -67,11 +67,17 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
     }
   }
 
-  // Fallback to standard viewport screenshot (not fullPage) to capture the visible confirmation dialog
+  // For failures/errors, mandatorily capture fullPage to show the entire form & validation errors
+  const isFailureLabel = /fail|error|blocked|exception|timeout|stuck|missing/i.test(safeLabel);
   if (!buf) {
-    buf = await page.screenshot({ fullPage: false, type: 'png' }).catch(async () => {
-      return await page.screenshot({ type: 'png' }).catch(() => null);
-    });
+    if (isFailureLabel) {
+      buf = await page.screenshot({ fullPage: true, type: 'png', timeout: 10000 })
+        .catch(() => page.screenshot({ fullPage: false, type: 'png' }).catch(() => null));
+    } else {
+      buf = await page.screenshot({ fullPage: false, type: 'png' }).catch(async () => {
+        return await page.screenshot({ type: 'png' }).catch(() => null);
+      });
+    }
   }
 
   if (!buf) {

@@ -24,7 +24,7 @@ import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClien
 import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot, cleanupOrphanChromeProcesses } from './browserLifecycle.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -438,19 +438,34 @@ export async function executeWorkerTask({
   // 5. Launch isolated Playwright browser context (matching cluster concurrency)
   await acquireBrowserSlot(workerId, Number(process.env.MAX_ACTIVE_BROWSERS) || 4);
   appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
-  const browser = await chromium.launch({
-    headless: Boolean(headless),
-    channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-infobars',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--disable-software-rasterizer',
-      '--window-size=1280,900',
-    ],
-  });
+  let browser = null;
+  for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
+    try {
+      browser = await chromium.launch({
+        headless: Boolean(headless),
+        channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-infobars',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--disable-software-rasterizer',
+          '--window-size=1280,900',
+        ],
+      });
+      break;
+    } catch (launchErr) {
+      const isEagain = /EAGAIN|spawn.*EAGAIN|Failed to launch/i.test(launchErr?.message || '');
+      console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
+      cleanupOrphanChromeProcesses();
+      if (launchAttempt < 3) {
+        await new Promise((r) => setTimeout(r, isEagain ? 3000 : 1000));
+      } else {
+        throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
+      }
+    }
+  }
   registerActiveBrowser(browser, {
     role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
     workerId,

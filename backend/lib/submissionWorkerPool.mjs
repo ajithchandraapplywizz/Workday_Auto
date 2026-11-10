@@ -1391,6 +1391,33 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         return { status: 'stopped', reason: 'Stopped by user' };
       }
 
+      const isHostResourceError = Boolean(
+        /spawn.*EAGAIN|browserType\.launch|Failed to launch|HOST_RESOURCE_EXHAUSTION|ENOMEM|EACCES/i.test(rawErrMsg)
+      );
+
+      if (isHostResourceError) {
+        console.warn(`\n⚠️ [STAGE 3: SUBMITTER] [${workerId}] Host resource limitation detected (${rawErrMsg}). Preserving task #${task.distribution_id || task.id} in ready_for_review WITHOUT burning attempt count.`);
+        try {
+          const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
+          cleanupOrphanChromeProcesses();
+        } catch {}
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            worker_leased_at: null,
+            error_message: 'Host process limit reached (EAGAIN) — standing by for resources',
+            updated_at: now,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5000));
+        return { status: 'resource_cooldown', error: rawErrMsg };
+      }
+
 
 
       const isZohoNotConnected = Boolean(

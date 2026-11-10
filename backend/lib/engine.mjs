@@ -2802,7 +2802,10 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
   }
-  await takeScreenshot(page, `failed-at-${stoppedTitle.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`, profile).catch(() => {});
+  const haltShot = await takeScreenshot(page, `failed-at-${stoppedTitle.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`, profile).catch(() => null);
+  if (haltShot) {
+    profile._submissionScreenshotUrl = haltShot;
+  }
   await recordClientApplication(profile, {
     url: profile._canonicalJobUrl || plan?.url || page.url(),
     company: profile._company || plan?.company || '',
