@@ -66,8 +66,8 @@ async function ingest() {
   let scannedId = matchedSj?.id || null;
   let screenshotPath = matchedSj?.screenshot_path || null;
 
-  if (eq?.status === 'already_reached_review' || eq?.status === 'reached_review' || matchedSj) {
-    initialStatus = 'already_reached_review';
+  if (eq?.status === 'already_scanned' || eq?.status === 'already_reached_review' || eq?.status === 'reached_review' || matchedSj) {
+    initialStatus = 'already_scanned';
     scannedId = matchedSj?.id || eq?.scanned_job_id || null;
     screenshotPath = matchedSj?.screenshot_path || eq?.screenshot_path || null;
   } else if (eq?.status === 'already_expired' || eq?.status === 'expired' || isExp) {

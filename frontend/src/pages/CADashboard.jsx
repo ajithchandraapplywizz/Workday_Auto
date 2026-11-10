@@ -395,7 +395,7 @@ export default function CADashboard() {
 
           const sj = scannedMap.get(u) || scannedMap.get((dj.job_url || '').trim().toLowerCase());
           const st = (dj.status || '').toLowerCase();
-          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'already_applied', 'needs_answers', 'failed'].includes(st);
+          const isAllowedStatus = ['ready_for_review', 'ready_to_review', 'already_scanned', 'review_and_submit', 'distributed', 'applying', 'in_flight', 'submitted', 'completed', 'already_applied', 'needs_answers', 'failed'].includes(st);
           if (!isAllowedStatus) continue;
 
             const rawProof = dj.application_submitted_screenshot_url
@@ -534,7 +534,7 @@ export default function CADashboard() {
         // 2. Reflect latest active task progress
         const task = queueRes.data?.[0];
         if (task) {
-          if (task.status === 'reached_review' || task.status === 'pre_resolved') {
+          if (task.status === 'reached_review' || task.status === 'already_scanned' || task.status === 'pre_resolved') {
             setApplyStep(3);
           } else if (task.status === 'submitted') {
             setApplyStep(4);

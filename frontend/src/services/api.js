@@ -889,9 +889,22 @@ export async function fetchApplicationsDynamic({
       query = query.eq('applywizz_id', applywizzId);
     }
 
+    let bounds = null;
+    let isToday = true;
+    let startMs = 0;
+    let endMs = Infinity;
+
     if (dateStr && timeframe) {
-      const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.submitted`);
+      bounds = getISTDateBounds(dateStr, timeframe);
+      isToday = !dateStr || bounds.startDateStr === formatLocalDate(new Date());
+      startMs = new Date(bounds.startIso).getTime();
+      endMs = new Date(bounds.endIso).getTime();
+
+      if (isToday) {
+        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+      } else {
+        query = query.or(`and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+      }
     }
 
     const { data, error } = await query;
@@ -907,7 +920,7 @@ export async function fetchApplicationsDynamic({
       let normalizedStatus = rawSt;
       if (rawSt === 'submitted' || rawSt === 'completed') {
         normalizedStatus = 'submitted';
-      } else if (['ready_for_review', 'ready_to_review', 'distributed', 'review_and_submit'].includes(rawSt)) {
+      } else if (['ready_for_review', 'ready_to_review', 'already_scanned', 'distributed', 'review_and_submit'].includes(rawSt)) {
         normalizedStatus = 'ready_for_review';
       } else if (['queued', 'queued_for_submission', 'pending', 'approved_for_submission'].includes(rawSt)) {
         normalizedStatus = 'queued';
@@ -952,6 +965,18 @@ export async function fetchApplicationsDynamic({
       return true;
     });
 
+    // Filter strictly by day bounds so yesterday stays in yesterday, today stays in today
+    if (bounds) {
+      list = list.filter((item) => {
+        const ts = new Date(item.updated_at || item.created_at).getTime();
+        const isInDay = ts >= startMs && ts <= endMs;
+        if (item.status === 'submitted' || item.status === 'completed' || item.status === 'already_applied' || item.status === 'failed') {
+          return isInDay;
+        }
+        return isToday || isInDay;
+      });
+    }
+
     return { success: true, applications: list };
   } catch (err) {
     console.error('Failed to fetch dynamic applications:', err);
@@ -972,9 +997,23 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     if (caEmail && caEmail !== 'All') {
       query = query.or(`ca_id.eq.${caEmail},ca_email.eq.${caEmail}`);
     }
+
+    let bounds = null;
+    let isToday = true;
+    let startMs = 0;
+    let endMs = Infinity;
+
     if (dateStr && timeframe) {
-      const bounds = getISTDateBounds(dateStr, timeframe);
-      query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.eq.applying,status.eq.submitted`);
+      bounds = getISTDateBounds(dateStr, timeframe);
+      isToday = !dateStr || bounds.startDateStr === formatLocalDate(new Date());
+      startMs = new Date(bounds.startIso).getTime();
+      endMs = new Date(bounds.endIso).getTime();
+
+      if (isToday) {
+        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+      } else {
+        query = query.or(`and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+      }
     }
 
     const { data: apps, error: appsErr } = await query;
@@ -982,35 +1021,47 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       console.error('Error fetching job_distributions KPIs:', appsErr);
     }
     const allApps = apps || [];
-    const now = Date.now();
 
-    // 1. Submitted: status in ('submitted', 'completed', 'already_applied')
+    const matchesDay = (a) => {
+      if (!bounds) return true;
+      const ts = new Date(a.updated_at || a.created_at).getTime();
+      return ts >= startMs && ts <= endMs;
+    };
+
+    // 1. Submitted: strictly matching the day's time bounds
     const submitted = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      return st === 'submitted' || st === 'completed' || st === 'already_applied';
+      const isSub = st === 'submitted' || st === 'completed' || st === 'already_applied';
+      return isSub && matchesDay(a);
     }).length;
 
-    // Authentic submitted strictly without already_applied
+    // Authentic submitted strictly without already_applied, strictly matching day bounds
     const submittedOnly = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      return st === 'submitted' || st === 'completed';
+      const isSub = st === 'submitted' || st === 'completed';
+      return isSub && matchesDay(a);
     }).length;
 
-    // 2. Applying: strictly direct sync to database status ('applying', 'in_flight', 'in_progress', 'started')
+    // 2. Applying: strictly direct sync to database status
     const applying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      return ['in_progress', 'started', 'applying', 'in_flight'].includes(st);
+      const isApp = ['in_progress', 'started', 'applying', 'in_flight'].includes(st);
+      return isApp && (isToday || matchesDay(a));
     }).length;
 
-    // 3. Failed: strictly status === 'failed' in job_distributions
-    const failed = allApps.filter((a) => (a.status || '').toLowerCase() === 'failed').length;
+    // 3. Failed: strictly status === 'failed' within the day's bounds
+    const failed = allApps.filter((a) => {
+      const st = (a.status || '').toLowerCase();
+      return st === 'failed' && matchesDay(a);
+    }).length;
 
     // 4. Queued: ready_to_review / ready_for_review / queued / distributed / pending / etc.
     const queued = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      return [
+      const isQ = [
         'ready_to_review',
         'ready_for_review',
+        'already_scanned',
         'review_and_submit',
         'queued',
         'queued_for_submission',
@@ -1019,6 +1070,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
         'approved_for_submission',
         'needs_answers'
       ].includes(st);
+      return isQ && (isToday || matchesDay(a));
     }).length;
 
     const skipped = allApps.filter((a) => (a.status || '').toLowerCase() === 'skipped').length;

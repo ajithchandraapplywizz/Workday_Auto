@@ -282,6 +282,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
       row.status === 'pre_resolved' ||
       row.status === 'reached_review' ||
       row.status === 'already_reached_review' ||
+      row.status === 'already_scanned' ||
       row.status === 'failed' ||
       row.status === 'already_expired' ||
       row.status === 'expired'
@@ -1691,10 +1692,26 @@ export async function runClusterBatchRunner({
 
         // Prevent duplicate scan if already completed in scanned_jobs
         const checkScanned = await queueDbRequest('scanned_jobs', {
-          query: `?job_url=eq.${encodeURIComponent(cluster.jobUrl)}&select=id,scan_status&limit=1`,
+          query: `?job_url=eq.${encodeURIComponent(cluster.jobUrl)}&select=id,scan_status,screenshot_path&limit=1`,
         }).catch(() => null);
         if (checkScanned?.[0]?.scan_status === 'completed') {
-          console.log(`⚡ [${workerId}] Skipping "${cluster.jobUrl}" — already scanned & completed.`);
+          console.log(`⚡ [${workerId}] Link "${cluster.jobUrl}" is already completed in scanned_jobs (ID: ${checkScanned[0].id}). Updating batch_job_queue status to "already_scanned".`);
+          const urlsToClaim = Array.from(cluster.rawUrls?.size ? cluster.rawUrls : [cluster.jobUrl]);
+          for (const u of urlsToClaim) {
+            await queueDbRequest('batch_job_queue', {
+              method: 'PATCH',
+              query: `?job_url=eq.${encodeURIComponent(u)}&status=in.(pending,queued,processing)`,
+              prefer: 'return=minimal',
+              body: {
+                status: 'already_scanned',
+                scanned_job_id: checkScanned[0].id,
+                screenshot_path: checkScanned[0].screenshot_path || null,
+                worker_id: null,
+                locked_at: null,
+                updated_at: new Date().toISOString(),
+              },
+            }).catch(() => null);
+          }
           continue;
         }
 

@@ -438,6 +438,7 @@ export default function DeveloperDashboard() {
       const s = statusFilter.toLowerCase();
       if (s === 'submitted') return st === 'submitted' || st === 'completed';
       if (s === 'applying' || s === 'in_progress') return ['applying', 'in_flight', 'in_progress', 'started'].includes(st);
+      if (s === 'ready_for_review') return ['ready_for_review', 'ready_to_review', 'already_scanned', 'review_and_submit', 'distributed'].includes(st);
       return st === s;
     });
   }, [applications, statusFilter]);
@@ -2397,6 +2398,7 @@ export default function DeveloperDashboard() {
             >
               <option value="All">All Statuses</option>
               <option value="queued">Queued</option>
+              <option value="already_scanned">Already Scanned</option>
               <option value="applying">Applying (In Progress)</option>
               <option value="ready_for_review">Ready For Review</option>
               <option value="submitted">Submitted</option>
@@ -2514,6 +2516,22 @@ export default function DeveloperDashboard() {
                                 }}
                               >
                                 ⚠️ LINK EXPIRED
+                              </span>
+                            );
+                          }
+                          if (run.status?.toLowerCase() === 'already_scanned') {
+                            return (
+                              <span
+                                className="video-status-tag"
+                                style={{
+                                  background: 'rgba(59, 130, 246, 0.18)',
+                                  color: '#60a5fa',
+                                  border: '1px solid rgba(59, 130, 246, 0.4)',
+                                  fontWeight: 'bold',
+                                  letterSpacing: '0.5px'
+                                }}
+                              >
+                                ⚡ ALREADY SCANNED
                               </span>
                             );
                           }

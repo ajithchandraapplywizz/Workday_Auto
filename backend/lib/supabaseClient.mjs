@@ -1279,11 +1279,12 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
     let screenshot_path = null;
 
     if (
+      existingQueueRow?.status === 'already_scanned' ||
       existingQueueRow?.status === 'already_reached_review' ||
       existingQueueRow?.status === 'reached_review' ||
       matchedSj
     ) {
-      status = 'already_reached_review';
+      status = 'already_scanned';
       scanned_job_id = matchedSj?.id || existingQueueRow?.scanned_job_id || null;
       screenshot_path = matchedSj?.screenshot_path || existingQueueRow?.screenshot_path || null;
     } else if (
@@ -3446,7 +3447,7 @@ export async function syncQueueWithScannedAndFailedJobs() {
       const matchedSj = scannedMap.get(normKey);
       const matchedFj = failedMap.get(normKey);
 
-      if (matchedSj && row.status !== 'reached_review' && row.status !== 'already_reached_review' && row.status !== 'submitted') {
+      if (matchedSj && row.status !== 'reached_review' && row.status !== 'already_reached_review' && row.status !== 'already_scanned' && row.status !== 'submitted') {
         // Ensure distribution exists in job_distributions so jobs never get stranded
         try {
           const distCheck = await request('job_distributions', {
@@ -3470,7 +3471,7 @@ export async function syncQueueWithScannedAndFailedJobs() {
           query: `?id=eq.${row.id}`,
           prefer: 'return=minimal',
           body: {
-            status: 'already_reached_review',
+            status: 'already_scanned',
             scanned_job_id: matchedSj.id || null,
             screenshot_path: matchedSj.screenshot_path || null,
             worker_id: null,

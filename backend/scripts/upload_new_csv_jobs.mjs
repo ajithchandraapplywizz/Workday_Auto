@@ -138,11 +138,12 @@ async function upload() {
     let screenshotPath = matchedSj?.screenshot_path || null;
 
     if (
+      existing?.status === 'already_scanned' ||
       existing?.status === 'already_reached_review' ||
       existing?.status === 'reached_review' ||
       matchedSj
     ) {
-      initialStatus = 'already_reached_review';
+      initialStatus = 'already_scanned';
       scannedId = matchedSj?.id || existing?.scanned_job_id || null;
       screenshotPath = matchedSj?.screenshot_path || existing?.screenshot_path || null;
     } else if (
