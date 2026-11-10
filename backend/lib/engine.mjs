@@ -2195,29 +2195,8 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     return 'skipped';
   }
 
-  // Final pass: ensure all agreements and terms on Review page are checked
-  await acknowledgeAllPageAgreements(page, profile, 'Review').catch(() => {});
-  await page.evaluate(() => {
-    const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]:not(:checked):not(:disabled)'));
-    for (const cb of checkboxes) {
-      const parent = cb.closest('label, [data-automation-id*="formField"], div') || cb.parentElement;
-      const parentText = (parent?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
-      const isReq = cb.required || cb.getAttribute('aria-required') === 'true' || parentText.includes('*');
-      const isAgree = /agree|accept|terms|certify|acknowledge|consent|privacy|statement|understand|confirm|declaration/.test(parentText);
-      const isDemographic = /asian|black|african|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish|decline|prefer\s*not/.test(parentText);
-      if (!isDemographic && isAgree) {
-        cb.scrollIntoView({ block: 'center', behavior: 'instant' });
-        cb.click();
-        cb.dispatchEvent(new Event('input', { bubbles: true }));
-        cb.dispatchEvent(new Event('change', { bubbles: true }));
-        if (!cb.checked) {
-          cb.checked = true;
-          cb.dispatchEvent(new Event('change', { bubbles: true }));
-        }
-      }
-    }
-  }).catch(() => {});
-  await page.waitForTimeout(500);
+  // Final pass: ensure all agreements and terms on Review page are checked and signature filled
+  await ensureReviewAgreementsAndSignatures(page, profile);
 
   console.log('🚀 Clicking final "Submit" button...');
   profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
@@ -2296,6 +2275,20 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       }
     }
 
+    // Follow-up retry if Submit button is still visible and enabled on Review page
+    if (!confirmationFound && !isAlreadyApplied && !checkState.needsVerification && (Date.now() - confirmStart > 6000)) {
+      const stillSubmit = await page.$('button[data-automation-id="pageFooterSubmitButton"], button[data-automation-id="submitButton"], button:has-text("Submit application"), button:has-text("Submit Application"), button:has-text("Submit")').catch(() => null);
+      if (stillSubmit && await stillSubmit.isVisible().catch(() => false)) {
+        const isDis = await stillSubmit.isDisabled().catch(() => false);
+        if (!isDis) {
+          console.log('  🔄 Submit button still visible after 6s — re-ensuring agreements & executing follow-up click...');
+          await ensureReviewAgreementsAndSignatures(page, profile).catch(() => {});
+          await stillSubmit.click({ force: true }).catch(() => stillSubmit.evaluate(el => el.click()));
+          await page.waitForTimeout(2000);
+        }
+      }
+    }
+
     await page.waitForTimeout(400);
   }
 
@@ -2325,6 +2318,9 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   console.log('❌ Workday submission confirmation was not detected on page within 25 seconds.');
   const failShot = await takeScreenshot(page, 'failed-submit-confirmation-missing', profile).catch(() => null);
+  if (failShot) {
+    profile._submissionScreenshotUrl = failShot;
+  }
   await recordClientApplication(profile, { url: canonicalJobUrl, status: 'failed', failureReason: 'submission_confirmation_missing', screenshotUrl: failShot }).catch(() => {});
   await cleanupClientResume(profile);
   return 'failed';
@@ -3140,6 +3136,111 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
   return 'done';
 }
 
+// ─── Review Agreements & Electronic Signature Helper ────────────────────────
+/**
+ * Ensures all consent checkboxes are checked, terms are scrolled through, and electronic
+ * signature inputs are filled with the candidate's legal name on the Review & Submit step.
+ * @param {import('playwright').Page} page
+ * @param {object} profile
+ */
+export async function ensureReviewAgreementsAndSignatures(page, profile) {
+  try {
+    // 1. Scroll through the page and down to the bottom to trigger any scroll-bound listeners
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight / 2);
+    }).catch(() => {});
+    await page.waitForTimeout(300);
+    await page.evaluate(() => {
+      window.scrollTo(0, document.body.scrollHeight);
+    }).catch(() => {});
+    await page.waitForTimeout(400);
+
+    // 2. Candidate legal name for signature / acknowledgment inputs
+    const candidateLegalName = (
+      profile?.personal?.full_name ||
+      `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim() ||
+      profile?.name ||
+      'Applicant'
+    ).trim();
+
+    // 3. Fill electronic signature / terms inputs if present
+    const sigSelectors = [
+      'input[data-automation-id*="signature" i]',
+      'input[id*="signature" i]',
+      'input[name*="signature" i]',
+      'input[aria-label*="signature" i]',
+      'input[placeholder*="signature" i]',
+      'input[data-automation-id*="legalName" i]',
+      'input[aria-label*="legal name" i]',
+    ];
+    for (const sel of sigSelectors) {
+      try {
+        const sigInputs = await page.$$(sel);
+        for (const input of sigInputs) {
+          const isVis = await input.isVisible().catch(() => false);
+          if (!isVis) continue;
+          const val = await input.inputValue().catch(() => '');
+          if (!val || val.trim().length === 0) {
+            console.log(`  ✍️ [Review] Filling electronic signature with candidate name: "${candidateLegalName}"`);
+            await input.scrollIntoViewIfNeeded().catch(() => {});
+            await input.click({ force: true }).catch(() => {});
+            await input.fill(candidateLegalName);
+            await input.dispatchEvent('input');
+            await input.dispatchEvent('change');
+            await page.waitForTimeout(200);
+          }
+        }
+      } catch {}
+    }
+
+    // 4. Fill electronic signature date if requested
+    const dateSelectors = [
+      'input[data-automation-id*="signatureDate" i]',
+      'input[id*="signatureDate" i]',
+      'input[aria-label*="signature date" i]',
+      'input[data-automation-id*="agreementDate" i]',
+    ];
+    const todayFormatted = new Intl.DateTimeFormat('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' }).format(new Date());
+    for (const sel of dateSelectors) {
+      try {
+        const dInputs = await page.$$(sel);
+        for (const input of dInputs) {
+          const isVis = await input.isVisible().catch(() => false);
+          if (!isVis) continue;
+          const val = await input.inputValue().catch(() => '');
+          if (!val) {
+            await input.fill(todayFormatted).catch(() => {});
+            await input.dispatchEvent('change').catch(() => {});
+          }
+        }
+      } catch {}
+    }
+
+    // 5. Check all consent / terms / certification checkboxes
+    await page.evaluate(() => {
+      const checkboxes = Array.from(document.querySelectorAll('input[type="checkbox"]:not(:checked):not(:disabled)'));
+      for (const cb of checkboxes) {
+        const parent = cb.closest('label, [data-automation-id*="formField"], div') || cb.parentElement;
+        const parentText = (parent?.textContent || cb.getAttribute('aria-label') || '').toLowerCase();
+        const isDemographic = /asian|black|african|hispanic|latino|white|caucasian|native\s*hawaiian|pacific\s*islander|two\s*or\s*more|american\s*indian|alaska\s*native|i\s*do\s*not\s*wish|decline|prefer\s*not/.test(parentText);
+        if (!isDemographic) {
+          cb.scrollIntoView({ block: 'center', behavior: 'instant' });
+          cb.click();
+          cb.dispatchEvent(new Event('input', { bubbles: true }));
+          cb.dispatchEvent(new Event('change', { bubbles: true }));
+          if (!cb.checked) {
+            cb.checked = true;
+            cb.dispatchEvent(new Event('change', { bubbles: true }));
+          }
+        }
+      }
+    }).catch(() => {});
+    await page.waitForTimeout(300);
+  } catch (err) {
+    console.warn(`  ⚠️ ensureReviewAgreementsAndSignatures warning: ${err.message}`);
+  }
+}
+
 // ─── Submit button finder ───────────────────────────────────────────────────
 /**
  * Click the final Submit button. Submission is never automatic: the caller must
@@ -3149,25 +3250,25 @@ export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode =
  * @param {{allowSubmit?: boolean}} [options]
  * @returns {Promise<boolean>}
  */
-async function clickSubmitButton(page, { allowSubmit = false } = {}) {
+export async function clickSubmitButton(page, { allowSubmit = false } = {}) {
   if (!allowSubmit) {
     console.log('  🛑 Submit blocked — no operator confirmation for this run. Nothing was submitted.');
     return false;
   }
   const submitSelectors = [
-    'button[data-automation-id="pageFooterNextButton"]',
     'button[data-automation-id="pageFooterSubmitButton"]',
     'button[data-automation-id="submitButton"]',
     'button[data-automation-id="submit-button"]',
-    'button[data-automation-id="bottom-navigation-next-button"]',
-    'button[data-automation-id="page-footer-next-button"]',
     'button:has-text("Submit application")',
     'button:has-text("Submit Application")',
+    'button:has-text("Submit")',
+    'button[type="submit"]',
+    'input[type="submit"]',
+    'button[data-automation-id="pageFooterNextButton"]',
+    'button[data-automation-id="bottom-navigation-next-button"]',
+    'button[data-automation-id="page-footer-next-button"]',
     'button:has-text("Review and Submit")',
     'button:has-text("Review & Submit")',
-    'input[type="submit"]',
-    'button[type="submit"]',
-    'button:has-text("Submit")',
     'button:has-text("Apply Now")',
     'button:has-text("Send Application")',
     'button:has-text("Complete Application")',
@@ -3180,6 +3281,15 @@ async function clickSubmitButton(page, { allowSubmit = false } = {}) {
       if (btn) {
         const visible = await btn.isVisible().catch(() => false);
         if (!visible) continue;
+
+        let isDisabled = await btn.isDisabled().catch(() => false);
+        const ariaDisabled = await btn.getAttribute('aria-disabled').catch(() => null);
+        if (isDisabled || ariaDisabled === 'true') {
+          console.log(`  ⏳ Submit button found ("${sel}") but currently disabled. Waiting for enable state...`);
+          await btn.waitForElementState('enabled', { timeout: 3500 }).catch(() => {});
+          isDisabled = await btn.isDisabled().catch(() => false);
+        }
+
         const text = await btn.textContent().catch(() => '');
         console.log(`  🚀 Clicking Submit: "${text.trim()}"...`);
         await btn.scrollIntoViewIfNeeded().catch(() => {});

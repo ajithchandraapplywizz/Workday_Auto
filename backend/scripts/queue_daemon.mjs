@@ -264,8 +264,6 @@ console.log = function (...args) {
 };
 
 console.error = function (...args) {
-  const text = args.map((a) => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' ');
-  if (isNoisyLog(text)) return;
   origErr.apply(console, args);
   routeLogEntry('error', args);
 };
@@ -471,8 +469,9 @@ export async function stopSubmitPool() {
           worker_leased_at: null,
           updated_at: nowIso,
         })
-        .eq('status', 'applying');
-      console.log(`[DAEMON] All in-flight applying tasks safely rolled back to ready_for_review on job_distributions.`);
+        .eq('status', 'applying')
+        .in('worker_id', workerIds);
+      console.log(`[DAEMON] In-flight applying tasks for local workers (${workerIds.join(', ')}) safely rolled back to ready_for_review on job_distributions.`);
     } catch (rbErr) {
       console.warn(`[DAEMON] Note on submission rollback:`, rbErr.message);
     }
@@ -688,59 +687,65 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
 
   const runDedicatedWorkerLoop = async (workerId) => {
     while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
-      const claimedTask = await claimNextTask(workerId);
-      if (!claimedTask) {
-        // Continuous standby: wait 3s before re-checking for unlocked or newly ready applications
-        await new Promise((r) => setTimeout(r, 3000));
-        continue;
-      }
-
-      activeSubmittingWorkers.add(workerId);
-      console.log(`\n🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
-
       try {
-        const res = await processClaimedTask({
-          task: claimedTask,
-          workerId,
-          headless: HEADLESS,
-        });
-
-        const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
-        console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
-        console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
-        submissionCycleResults.push({
-          job_url: claimedTask.job_url,
-          applywizz_id: claimedTask.applywizz_id,
-          company: claimedTask.company,
-          status: res?.status || 'submitted',
-          reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
-          screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
-        });
-        totalSubmissionsCompleted++;
-        if (submissionCycleResults.length >= 10) {
-          const cycleIdx = Math.floor(totalSubmissionsCompleted / 10);
-          print10SubmissionMilestoneReport({
-            cycleIndex: cycleIdx,
-            cycleStartNum: totalSubmissionsCompleted - 9,
-            cycleEndNum: totalSubmissionsCompleted,
-            items: [...submissionCycleResults],
-          });
-          submissionCycleResults = [];
+        const claimedTask = await claimNextTask(workerId);
+        if (!claimedTask) {
+          // Continuous standby: wait 3s before re-checking for unlocked or newly ready applications
+          await new Promise((r) => setTimeout(r, 3000));
+          continue;
         }
-      } catch (err) {
-        console.error(`❌ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} error on task #${claimedTask.id}:`, err?.message || err);
-      } finally {
-        activeSubmittingWorkers.delete(workerId);
-        await updateWorkerStatus(workerId, {
-          state: 'idle',
-          stage: 'submitting',
-          current_application_id: null,
-        }).catch(() => { });
-      }
 
-      // ⚡ IMMEDIATE PICKUP: Immediately pick next job in queue right after previous filling & screenshot!
-      console.log(`⚡ [${workerId}] Completed application & saved proof screenshot. Immediately picking next application...`);
-      await new Promise((r) => setTimeout(r, 20));
+        activeSubmittingWorkers.add(workerId);
+        console.log(`\n🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+
+        try {
+          const res = await processClaimedTask({
+            task: claimedTask,
+            workerId,
+            headless: HEADLESS,
+          });
+
+          const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
+          const errDetail = res?.error || res?.reason || res?.failureReason || '';
+          console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'}${errDetail ? ` | Reason: ${errDetail}` : ''} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
+          console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
+          submissionCycleResults.push({
+            job_url: claimedTask.job_url,
+            applywizz_id: claimedTask.applywizz_id,
+            company: claimedTask.company,
+            status: res?.status || 'submitted',
+            reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
+            screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
+          });
+          totalSubmissionsCompleted++;
+          if (submissionCycleResults.length >= 10) {
+            const cycleIdx = Math.floor(totalSubmissionsCompleted / 10);
+            print10SubmissionMilestoneReport({
+              cycleIndex: cycleIdx,
+              cycleStartNum: totalSubmissionsCompleted - 9,
+              cycleEndNum: totalSubmissionsCompleted,
+              items: [...submissionCycleResults],
+            });
+            submissionCycleResults = [];
+          }
+        } catch (err) {
+          console.error(`❌ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} error on task #${claimedTask.id}:`, err?.message || err);
+        } finally {
+          activeSubmittingWorkers.delete(workerId);
+          await updateWorkerStatus(workerId, {
+            state: 'idle',
+            stage: 'submitting',
+            current_application_id: null,
+          }).catch(() => { });
+        }
+
+        // ⚡ IMMEDIATE PICKUP: Immediately pick next job in queue right after previous filling & screenshot!
+        console.log(`⚡ [${workerId}] Completed application & saved proof screenshot. Immediately picking next application...`);
+        await new Promise((r) => setTimeout(r, 20));
+      } catch (outerLoopErr) {
+        console.error(`⚠️ [${workerId}] Top-level worker loop error (auto-recovering in 3s):`, outerLoopErr?.message || outerLoopErr);
+        await new Promise((r) => setTimeout(r, 3000));
+      }
     }
   };
 
@@ -1929,7 +1934,8 @@ export async function dispatchQueuedSubmissions() {
         })
           .then((res) => {
             const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
-        console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
+        const errDetail = res?.error || res?.reason || res?.failureReason || '';
+        console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'}${errDetail ? ` | Reason: ${errDetail}` : ''} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
         console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
             submissionCycleResults.push({
               job_url: claimedTask.job_url,
@@ -2022,6 +2028,7 @@ export async function recoverInterruptedSubmissionTasks() {
         updated_at: now,
       })
       .eq('status', 'applying')
+      .in('worker_id', submitWorkers)
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed')

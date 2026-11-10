@@ -524,14 +524,35 @@ export async function resolveWorkdayVerification(page, {
     return { success: true, type: 'direct_wizard', onWizard: true };
   }
 
+  // STRICT REQUIREMENT: Only verify if Workday is ACTUALLY presenting an email verification challenge!
+  // If verification is NOT needed, continue directly without querying Zoho or failing.
+  const isChallenged = await isWorkdayVerificationPage(page);
+  if (!isChallenged) {
+    console.log('   ℹ️ [WorkdayBot] No email verification challenge detected on page. Proceeding directly with application flow without querying Zoho.');
+    return { success: true, type: 'no_verification_needed' };
+  }
+
   const cleanEmail = String(email || '').trim().toLowerCase();
   const cleanAwlId = String(applywizzId || '').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
   const zohoReason = `zoho mail not connected (AWL-ID: ${cleanAwlId || 'N/A'}, mail: ${cleanEmail})`;
 
-  // FIRST CHECK CONNECTION STATUS: If not connected in Zoho Mail Reader, immediately fail and update tables!
+  // FIRST CHECK CONNECTION STATUS: If verification is required AND candidate mailbox is NOT connected in Zoho,
+  // capture failure screenshot, stream to Supabase Storage, and immediately mark failed.
   const isConnected = await isZohoMailboxConnected(cleanEmail);
   if (!isConnected) {
-    console.log(`   ❌ [WorkdayBot] Candidate ${cleanEmail} mailbox is NOT CONNECTED in Zoho Mail Reader! Immediately marking failed in batch_job_queue and job_distributions.`);
+    console.log(`   ❌ [WorkdayBot] Verification required but candidate ${cleanEmail} mailbox is NOT CONNECTED in Zoho Mail Reader! Capturing proof screenshot and marking failed.`);
+    let shotUrl = null;
+    try {
+      const { takeScreenshot } = await import('./reporter.mjs');
+      shotUrl = await takeScreenshot(page, 'failed-zoho-mail-not-connected', {
+        _applyWizzId: cleanAwlId,
+        applywizz_id: cleanAwlId,
+        taskId,
+        jobUrl,
+        _company: company,
+      }).catch(() => null);
+    } catch {}
+
     const now = new Date().toISOString();
     try {
       const { updateClientZohoStatus, updateQueueTaskStatus, request } = await import('./supabaseClient.mjs');
@@ -539,7 +560,11 @@ export async function resolveWorkdayVerification(page, {
         await updateClientZohoStatus(cleanEmail, { status: 'not_connected', connected: false }).catch(() => {});
       }
       if (taskId) {
-        await updateQueueTaskStatus(taskId, { status: 'failed', errorMessage: zohoReason }).catch(() => {});
+        await updateQueueTaskStatus(taskId, {
+          status: 'failed',
+          errorMessage: zohoReason,
+          screenshotUrl: shotUrl,
+        }).catch(() => {});
       }
       if (distributionId) {
         await request('job_distributions', {
@@ -548,6 +573,7 @@ export async function resolveWorkdayVerification(page, {
           body: {
             status: 'failed',
             error_message: zohoReason,
+            application_submitted_screenshot_url: shotUrl,
             updated_at: now,
           },
         }).catch(() => {});
@@ -558,6 +584,7 @@ export async function resolveWorkdayVerification(page, {
           body: {
             status: 'failed',
             error_message: zohoReason,
+            application_submitted_screenshot_url: shotUrl,
             updated_at: now,
           },
         }).catch(() => {});
@@ -568,6 +595,8 @@ export async function resolveWorkdayVerification(page, {
           query: `?applywizz_id=ilike.*${encodeURIComponent(cleanAwlId)}*&job_url=eq.${encodeURIComponent(jobUrl)}`,
           body: {
             status: 'failed',
+            error_message: zohoReason,
+            screenshot_url: shotUrl,
             updated_at: now,
           },
         }).catch(() => {});
@@ -582,6 +611,7 @@ export async function resolveWorkdayVerification(page, {
       status: 'zoho_not_connected',
       isZohoNotConnected: true,
       error: zohoReason,
+      screenshotUrl: shotUrl,
     };
   }
 

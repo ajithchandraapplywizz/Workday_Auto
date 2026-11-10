@@ -490,6 +490,39 @@ export function getISTDateBounds(dateStr, timeframe = 'day') {
 }
 
 /**
+ * Extracts authentic submission or activity timestamp from an application row.
+ * Prioritizes timestamp embedded in proof screenshot URL, then worker_leased_at,
+ * then updated_at / created_at.
+ */
+export function getApplicationEffectiveTimestamp(item) {
+  if (!item) return 0;
+  const shotUrl = item.application_submitted_screenshot_url || item.screenshot_url || item.applied_screenshot || item.screenshot_path || '';
+  if (shotUrl && typeof shotUrl === 'string') {
+    // 1. Matches ISO timestamp like 2026-11-10T08-32-57-314Z or 2026-11-10T08:32:57.314Z
+    const isoMatch = shotUrl.match(/(\d{4}-\d{2}-\d{2})T(\d{2})[-:](\d{2})[-:](\d{2})(?:[-.](\d+))?Z?/i);
+    if (isoMatch) {
+      const [_, ymd, hh, mm, ss, ms] = isoMatch;
+      const isoStr = `${ymd}T${hh}:${mm}:${ss}${ms ? '.' + ms.slice(0, 3) : ''}Z`;
+      const t = new Date(isoStr).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    // 2. Matches epoch ms like 1773030491871
+    const msMatch = shotUrl.match(/_(\d{13})\./);
+    if (msMatch) {
+      const t = Number(msMatch[1]);
+      if (!isNaN(t) && t > 0) return t;
+    }
+  }
+  if (item.worker_leased_at) {
+    const t = new Date(item.worker_leased_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+  const fallback = item.updated_at || item.created_at;
+  const t = new Date(fallback).getTime();
+  return isNaN(t) ? 0 : t;
+}
+
+/**
  * 13. Supabase: Fetch Operational Managers (Balaji & Ramakrishna)
  */
 export async function fetchManagers() {
@@ -951,7 +984,10 @@ export async function fetchApplicationsDynamic({
         stopped_at_step: dt.stopped_at_step || null,
         manager_id: dt.manager_id || null,
         ca_id: dt.ca_id || dt.ca_email || null,
-        updated_at: dt.updated_at || dt.created_at,
+        updated_at: (() => {
+          const effTs = getApplicationEffectiveTimestamp(dt);
+          return effTs ? new Date(effTs).toISOString() : (dt.updated_at || dt.created_at);
+        })(),
         created_at: dt.created_at,
       };
     });
@@ -968,7 +1004,7 @@ export async function fetchApplicationsDynamic({
     // Filter strictly by day bounds so yesterday stays in yesterday, today stays in today
     if (bounds) {
       list = list.filter((item) => {
-        const ts = new Date(item.updated_at || item.created_at).getTime();
+        const ts = getApplicationEffectiveTimestamp(item);
         const isInDay = ts >= startMs && ts <= endMs;
         if (item.status === 'submitted' || item.status === 'completed' || item.status === 'already_applied' || item.status === 'failed') {
           return isInDay;
@@ -989,7 +1025,7 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let query = supabase.from('job_distributions').select('id, status, application_submitted_screenshot_url, created_at, updated_at');
+    let query = supabase.from('job_distributions').select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at');
 
     if (managerId && managerId !== 'All') {
       query = query.eq('manager_id', managerId);
@@ -1024,7 +1060,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 
     const matchesDay = (a) => {
       if (!bounds) return true;
-      const ts = new Date(a.updated_at || a.created_at).getTime();
+      const ts = getApplicationEffectiveTimestamp(a);
       return ts >= startMs && ts <= endMs;
     };
 
@@ -2439,9 +2475,13 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
     }
 
     const bounds = getISTDateBounds(dateStr || new Date(), 'day');
+    const startMs = new Date(bounds.startIso).getTime();
+    const endMs = new Date(bounds.endIso).getTime();
+    const isToday = !dateStr || bounds.startDateStr === formatLocalDate(new Date());
+
     const [queueRes, appsRes, workerRes] = await Promise.all([
-      supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
-      supabase.from('job_distributions').select('*').in('applywizz_id', clientIds).gte('created_at', bounds.startIso).lte('created_at', bounds.endIso),
+      supabase.from('batch_job_queue').select('*').in('applywizz_id', clientIds),
+      supabase.from('job_distributions').select('*').in('applywizz_id', clientIds),
       supabase.from('worker_status').select('*'),
     ]);
 
@@ -2474,6 +2514,12 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
     let totalSubmitted = 0;
     let totalFailed = 0;
 
+    const matchesDay = (j) => {
+      if (!bounds) return true;
+      const ts = getApplicationEffectiveTimestamp(j);
+      return ts >= startMs && ts <= endMs;
+    };
+
     const clientStats = assignedClients.map((client) => {
       const cid = String(client.id).trim().toUpperCase();
       const clientQueue = queueTasks.filter((q) => String(q.applywizz_id).trim().toUpperCase() === cid);
@@ -2495,15 +2541,35 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       const isClientActiveInFlight = Boolean(activeWorker && activeClientId === cid);
       const inFlightCount = isClientActiveInFlight ? 1 : 0;
 
-      const readyCount = allJobs.filter((j) => ['ready_for_review', 'reached_review'].includes((j.status || '').toLowerCase())).length;
+      const readyCount = allJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return ['ready_for_review', 'reached_review', 'already_scanned'].includes(s) && (isToday || matchesDay(j));
+      }).length;
+
       const submittedCount = allJobs.filter((j) => {
         const s = (j.status || '').toLowerCase();
-        const hasProof = Boolean(j.screenshot_url || j.screenshot_path || j.failure_screenshot_url);
-        return (s === 'submitted' || s === 'completed') && hasProof;
+        const hasProof = Boolean(
+          j.application_submitted_screenshot_url ||
+          j.screenshot_url ||
+          j.screenshot_path ||
+          j.failure_screenshot_url ||
+          j.applied_screenshot
+        );
+        return (s === 'submitted' || s === 'completed') && hasProof && matchesDay(j);
       }).length;
-      const failedCount = allJobs.filter((j) => (j.status || '').toLowerCase() === 'failed').length;
+
+      const failedCount = allJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return s === 'failed' && matchesDay(j);
+      }).length;
+
       // All other jobs are in queue
-      const queuedCount = Math.max(0, allJobs.length - (inFlightCount + readyCount + submittedCount + failedCount));
+      const queuedCount = isToday
+        ? Math.max(0, allJobs.length - (inFlightCount + readyCount + submittedCount + failedCount))
+        : allJobs.filter((j) => {
+            const s = (j.status || '').toLowerCase();
+            return ['queued', 'pending', 'approved_for_submission'].includes(s) && matchesDay(j);
+          }).length;
 
       totalQueued += queuedCount;
       totalInFlight += inFlightCount;

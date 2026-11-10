@@ -11,6 +11,7 @@ import { alignAnswerToWorkdayOptions, stripWorkdayQuestionLabel, resolveCompanyE
 import { trace } from './trace.mjs';
 import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
 import { parseCandidateAwlIds } from './candidateParser.mjs';
+import { createClient } from '@supabase/supabase-js';
 
 let envLoaded = false;
 
@@ -62,6 +63,13 @@ function config() {
 export function isSupabaseConfigured() {
   return config().configured;
 }
+
+loadLocalEnvOnce();
+export const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY)
+  ? createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  : null;
 
 export async function request(path, { method = 'GET', query = '', body = null, prefer = '' } = {}) {
   const { url, key } = config();
@@ -514,10 +522,12 @@ export async function updateRecordScreenshot({
   // 1. job_distributions (by taskId / distribution id)
   if (taskId) {
     try {
-      const patch = {
-        application_submitted_screenshot_url: screenshotUrl,
-        updated_at: now,
-      };
+      const patch = failed
+        ? { updated_at: now }
+        : {
+          application_submitted_screenshot_url: screenshotUrl,
+          updated_at: now,
+        };
       await request('job_distributions', {
         method: 'PATCH',
         query: `?id=eq.${encode(taskId)}`,
@@ -533,14 +543,8 @@ export async function updateRecordScreenshot({
     try {
       const cleanUrl = String(jobUrl).trim().replace(/\/+$/, '');
       const patch = failed
-        ? {
-          screenshot_url: screenshotUrl,
-          application_submitted_screenshot_url: null,
-          updated_at: now,
-        }
+        ? { updated_at: now }
         : {
-          screenshot_url: screenshotUrl,
-          applied_screenshot: screenshotUrl,
           application_submitted_screenshot_url: screenshotUrl,
           updated_at: now,
         };
@@ -2559,7 +2563,12 @@ export function isEligibleForQaBank(question = '', answer = '') {
     q.includes('current value is') ||
     q.includes('terms and conditions') ||
     q.includes('click here') ||
-    q.includes('select one')
+    q.includes('select one') ||
+    q.includes('language selector') ||
+    q.includes('selector button') ||
+    q.includes('candidate home') ||
+    q.includes('search for jobs') ||
+    q.includes('back to job posting')
   ) {
     return false;
   }

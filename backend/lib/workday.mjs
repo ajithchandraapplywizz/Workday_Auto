@@ -954,40 +954,47 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
         }
 
         const isVerif = await isWorkdayVerificationPage(page);
-        console.log(`   ${isVerif ? '📩 Workday account created, tenant requires email verification.' : '⏳ Newly registered Workday account — polling Zoho Mail Reader for verification link/OTP...'}`);
-        const company = extractWorkdayCompanyName(page.url());
-        const verified = await resolveWorkdayVerification(page, {
-          email,
-          company,
-          startTime: page._lastRegistrationTime || (Date.now() - 30000),
-          timeoutMs: isVerif ? 60000 : 35000,
-        }).catch((err) => {
-          console.warn(`   ⚠️  [WorkdayBot] Verification poll note: ${err.message}`);
-          return null;
-        });
+        if (isVerif) {
+          console.log('   📩 Workday account created, tenant requires email verification.');
+          const company = extractWorkdayCompanyName(page.url());
+          const verified = await resolveWorkdayVerification(page, {
+            email,
+            company,
+            startTime: page._lastRegistrationTime || (Date.now() - 30000),
+            timeoutMs: 60000,
+            applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+            jobUrl: page.url(),
+            distributionId: profile?._distributionId || '',
+          }).catch((err) => {
+            console.warn(`   ⚠️  [WorkdayBot] Verification poll note: ${err.message}`);
+            return null;
+          });
 
-        if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
-          return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
-        }
-
-        if (verified?.success) {
-          console.log('   ✅ Email verification resolved! Proceeding to application / login...');
-          await page.waitForTimeout(3000);
-          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-
-          if (await isWorkdayWizardVisible(page)) {
-            console.log('   ✅ Already on application form wizard after verification.');
-            return true;
+          if (verified?.reason === 'mailbox_not_connected' || verified?.reason === 'zoho mail not connected' || verified?.isZohoNotConnected) {
+            return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
           }
 
-          await handleAdaptiveGateway(page, 'signin');
-          const loggedIn = await workdayLogin(page, email, newPassword);
-          if (loggedIn === true) {
-            return finishSuccessfulLogin(page, mode);
+          if (verified?.success) {
+            console.log('   ✅ Email verification resolved! Proceeding to application / login...');
+            await page.waitForTimeout(3000);
+            try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+
+            if (await isWorkdayWizardVisible(page)) {
+              console.log('   ✅ Already on application form wizard after verification.');
+              return true;
+            }
+
+            await handleAdaptiveGateway(page, 'signin');
+            const loggedIn = await workdayLogin(page, email, newPassword);
+            if (loggedIn === true) {
+              return finishSuccessfulLogin(page, mode, profile);
+            }
+            if (await isWorkdayWizardVisible(page)) {
+              return true;
+            }
           }
-          if (await isWorkdayWizardVisible(page)) {
-            return true;
-          }
+        } else {
+          console.log('   ℹ️ No email verification required by Workday after account creation. Proceeding directly with application.');
         }
 
         console.log('   Workday redirected to Sign In / Gateway — logging in with new credentials...');

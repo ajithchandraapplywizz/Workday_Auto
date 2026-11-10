@@ -75,6 +75,26 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     const rawLabel = item.question || item.label || '';
     if (!rawLabel || typeof rawLabel !== 'string') continue;
 
+    // Reject non-question UI/DOM navigation artifacts (buttons, menus, search bars)
+    const lowerLabel = rawLabel.toLowerCase().trim();
+    if (
+      lowerLabel.includes('language selector') ||
+      lowerLabel.includes('selector button') ||
+      lowerLabel.includes('utilitymenubutton') ||
+      lowerLabel.includes('menubutton') ||
+      lowerLabel.includes('search for jobs') ||
+      lowerLabel.includes('candidate home') ||
+      lowerLabel.includes('sign out') ||
+      lowerLabel.includes('sign in') ||
+      lowerLabel.includes('back to job posting') ||
+      lowerLabel.includes('terms and conditions') ||
+      lowerLabel.includes('click here') ||
+      lowerLabel === 'close' ||
+      lowerLabel === 'button'
+    ) {
+      continue;
+    }
+
     const normKey = normalizeQuestionKey(rawLabel);
     if (!normKey) continue;
 
@@ -141,13 +161,13 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     }
   }
 
-  // 1. Persist to Supabase qa_bank table via UPSERT (deduplicated by tenant + normalized_question)
+  // 1. Persist to Supabase qa_bank table via UPSERT (deduplicated by applywizz_id + question_normalized)
   if (isSupabaseConfigured() && dbRows.length > 0) {
     const dedupedDbRows = Array.from(
       dbRows.reduce((map, r) => {
-        const tenantKey = String(r.tenant || 'global').trim().toLowerCase();
-        const normKey = String(r.normalized_question || r.question_normalized || '').trim().toLowerCase();
-        const k = `${tenantKey}:${normKey}`;
+        const awlKey = String(r.applywizz_id || 'AWL-1568').trim().toUpperCase();
+        const normKey = String(r.question_normalized || r.normalized_question || '').trim().toLowerCase();
+        const k = `${awlKey}:${normKey}`;
         if (!map.has(k)) map.set(k, r);
         return map;
       }, new Map()).values()
@@ -156,25 +176,35 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
     try {
       await request('qa_bank', {
         method: 'POST',
-        query: '?on_conflict=tenant,normalized_question',
+        query: '?on_conflict=applywizz_id,question_normalized',
         prefer: 'resolution=merge-duplicates,return=minimal',
         body: dedupedDbRows,
       });
       console.log(`🏦 [qa_bank] Persisted ${dedupedDbRows.length} questions to Supabase qa_bank table.`);
     } catch (dbErr) {
-      // Row-by-row fallback to ensure individual items are persisted even if one collides
+      // Row-by-row fallback with dual-constraint support (applywizz_id,question_normalized & tenant,normalized_question)
       let individualSuccess = 0;
       for (const row of dedupedDbRows) {
         try {
           await request('qa_bank', {
             method: 'POST',
-            query: '?on_conflict=tenant,normalized_question',
+            query: '?on_conflict=applywizz_id,question_normalized',
             prefer: 'resolution=merge-duplicates,return=minimal',
             body: row,
           });
           individualSuccess++;
         } catch {
-          // ignore individual conflict
+          try {
+            await request('qa_bank', {
+              method: 'POST',
+              query: '?on_conflict=tenant,normalized_question',
+              prefer: 'resolution=merge-duplicates,return=minimal',
+              body: row,
+            });
+            individualSuccess++;
+          } catch {
+            // ignore individual conflict
+          }
         }
       }
       if (individualSuccess > 0) {

@@ -2,8 +2,8 @@ title: Workday Auto Master Question & Answer Reference Bank
 description: Consolidated, deduplicated form questions, types, and sample
   answers captured by Blueprint Workers
 version: 1.0.0
-last_updated: 2026-11-06T05:53:25.772Z
-total_unique_questions: 159
+last_updated: 2026-11-10T20:53:35.247Z
+total_unique_questions: 160
 questions:
   are you legally authorized to work in the united states:
     question: Are you legally authorized to work in the United States?
@@ -2316,3 +2316,18 @@ questions:
     first_seen_role: Software Engineer (Glenview, IL)
     mock_client_id: AWL-6307
     created_at: 2026-11-06T05:53:25.772Z
+  will you now or in the future require sponsorship for employment visa status:
+    question: Will you now or in the future require sponsorship for employment visa
+      status?
+    field_type: radio
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: manual
+    tenant: tmx
+    first_seen_company: TMX Group
+    first_seen_role: Developer
+    mock_client_id: AWL-1568
+    created_at: 2026-11-10T20:53:35.247Z

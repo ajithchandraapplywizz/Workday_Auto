@@ -297,7 +297,13 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
   // Overall counts for this CA in this period (Strictly verified submissions with screenshot proof from our Workday database)
   const totals = useMemo(() => {
-    const hasProof = (a) => Boolean(a.screenshot_url || a.screenshot_path || a.failure_screenshot_url);
+    const hasProof = (a) => Boolean(
+      a.application_submitted_screenshot_url ||
+      a.screenshot_url ||
+      a.screenshot_path ||
+      a.failure_screenshot_url ||
+      a.applied_screenshot
+    );
     const currentTotal = applications.length;
     const currentSubmitted = applications.filter((a) => (a.status === 'submitted' || a.status === 'completed') && hasProof(a)).length;
     const currentFailed = applications.filter((a) => a.status === 'failed').length;

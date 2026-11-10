@@ -20,7 +20,7 @@ import { loadLocalEnvOnce, updateWorkerStatus, getWorkerControls } from './supab
 
 import { createClient } from '@supabase/supabase-js';
 
-import { getWorkerContext, isGlobalStopRequested } from './browserLifecycle.mjs';
+import { getWorkerContext, isGlobalStopRequested, isSubmitStopRequested } from './browserLifecycle.mjs';
 
 
 
@@ -337,7 +337,7 @@ export async function updateJobDistributionWithCheck({
       }
 
       if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
-        query = query.neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        query = query.neq('status', 'submitted').neq('status', 'completed');
       }
 
       const { data, error } = await query.select('*');
@@ -371,7 +371,7 @@ export async function updateJobDistributionWithCheck({
             .eq('job_url', jobUrl);
 
           if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
-            fbQuery = fbQuery.neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+            fbQuery = fbQuery.neq('status', 'submitted').neq('status', 'completed');
           }
 
           const { data: fbData, error: fbErr } = await fbQuery.select('*');
@@ -689,41 +689,33 @@ export async function claimNextTask(workerId) {
  */
 
 export async function sendTaskHeartbeat(taskId, workerId) {
-
   if (!taskId || !workerId) return false;
-
   const now = new Date().toISOString();
-
   try {
-
-    const { error } = await supabase
-
-      .from('job_distributions')
-
-      .update({
-
-        worker_leased_at: now,
-
+    const { updateWorkerStatus } = await import('./supabaseClient.mjs');
+    const workerNum = String(workerId).replace(/\D+/g, '') || '1';
+    await Promise.allSettled([
+      supabase
+        .from('job_distributions')
+        .update({
+          worker_leased_at: now,
+          updated_at: now,
+        })
+        .eq('id', taskId)
+        .eq('worker_id', workerId)
+        .eq('status', 'applying'),
+      updateWorkerStatus(workerId, {
+        state: 'in_flight',
+        stage: 'submitting',
+        current_application_id: taskId,
+        bot_name: `Submitting Worker ${workerNum}`,
         updated_at: now,
-
-      })
-
-      .eq('id', taskId)
-
-      .eq('worker_id', workerId)
-
-      .eq('status', 'applying');
-
-
-
-    return !error;
-
+      }),
+    ]);
+    return true;
   } catch {
-
     return false;
-
   }
-
 }
 
 
@@ -841,21 +833,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
   // Update worker_status table
-
-  const workerNum = String(workerId).replace('worker_', '');
-
+  const workerNum = String(workerId).replace(/\D+/g, '') || '1';
   await updateWorkerStatus(workerId, {
-
     state: 'in_flight',
-
     stage: 'submitting',
-
     current_application_id: task.id,
-
-    bot_name: `Worker ${workerNum}`,
-
+    bot_name: `Submitting Worker ${workerNum}`,
     updated_at: new Date().toISOString(),
-
   }).catch(() => { });
 
 
@@ -1630,9 +1614,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
             worker_leased_at: null,
 
-            error_message: retryMsg,
+            error_message: finalShotUrl ? `${retryMsg} [diagnostic_screenshot: ${finalShotUrl}]` : retryMsg,
 
-            application_submitted_screenshot_url: finalShotUrl,
+            application_submitted_screenshot_url: null,
 
             updated_at: now,
 
@@ -1657,31 +1641,20 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       } else {
 
         // Attempt 3: STRICT 3RD ATTEMPT FAILURE POLICY
-
-        let finalShotUrl = result?.screenshotUrl || result?.failureScreenshotUrl || result?.reviewScreenshotUrl || null;
+        if (!finalShotUrl) finalShotUrl = result?.screenshotUrl || result?.failureScreenshotUrl || result?.reviewScreenshotUrl || null;
 
         if (!finalShotUrl) {
-
           try {
-
             const ctx = getWorkerContext(workerId);
-
             if (ctx?.page && !ctx.page.isClosed()) {
-
               const buf = await ctx.page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
                 .catch(() => ctx.page.screenshot({ type: 'png', timeout: 5000 }).catch(() => null));
-
               if (buf) {
-
                 const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-
                 const cleanCompany = String(task.company || '').replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
-
                 const compPrefix = cleanCompany ? `${cleanId}_${cleanCompany}` : cleanId;
-
                 const timestamp = Date.now();
-
-                const shotPath = `${compPrefix}_${task.id}_failed_${timestamp}.png`;
+                const shotPath = `${compPrefix}_${task.id}_attempt3_failed_${timestamp}.png`;
 
                 const { error: upErr } = await supabase.storage
 
@@ -1802,31 +1775,24 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
+    const prevResult = result;
+    const existingShotUrl = prevResult?.screenshotUrl || prevResult?.failureScreenshotUrl || prevResult?.reviewScreenshotUrl || null;
+
     result = {
-
       status: 'failed',
-
       error: err?.message || 'Execution error',
-
       stoppedAtStep: 'Execution Exception',
-
+      screenshotUrl: existingShotUrl,
     };
 
     const now = new Date().toISOString();
 
-
-
     const previousFailedAttempts = getSubmissionAttemptCount(task.error_message);
-
     const currentAttempt = previousFailedAttempts + 1;
-
     const isFinalAttempt = currentAttempt >= 3;
 
-
-
-    let errShotUrl = null;
-
-    let errShotPath = null;
+    let errShotUrl = existingShotUrl || null;
+    let errShotPath = prevResult?.screenshotPath || null;
 
 
 
@@ -1866,7 +1832,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
               .getPublicUrl(errShotPath);
 
-            errShotUrl = urlData?.publicUrl || null;
+            errShotUrl = urlData?.publicUrl || errShotUrl;
 
             console.log(`[${workerId}] Attempt ${currentAttempt} exception screenshot uploaded: ${errShotPath}`);
 
@@ -1920,12 +1886,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       return { status: 'resource_cooldown', error: errMsg };
     }
 
-    const isFatalNonRetryable = (
-
-      /mailbox_not_connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
-
-      /strict auth guard/i.test(errMsg)
-
+    const isFatalNonRetryable = Boolean(
+      /mailbox_not_connected|zoho.*not.*connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
+      /strict auth guard/i.test(errMsg) ||
+      prevResult?.isZohoNotConnected ||
+      prevResult?.status === 'zoho_not_connected' ||
+      /zoho.*not.*connected|mailbox.*not.*connected/i.test(String(prevResult?.error || prevResult?.reason || ''))
     );
 
 
@@ -1956,9 +1922,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           worker_leased_at: null,
 
-          error_message: retryMsg,
+          error_message: errShotUrl ? `${retryMsg} [diagnostic_screenshot: ${errShotUrl}]` : retryMsg,
 
-          application_submitted_screenshot_url: errShotUrl,
+          application_submitted_screenshot_url: null,
 
           updated_at: now,
 
@@ -2064,20 +2030,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     // Release worker back to idle
 
-    const workerNum = String(workerId).replace('worker_', '');
-
+    const workerNum = String(workerId).replace(/\D+/g, '') || '1';
     await updateWorkerStatus(workerId, {
-
       state: 'idle',
-
       stage: 'submitting',
-
       current_application_id: null,
-
-      bot_name: `Worker ${workerNum}`,
-
+      bot_name: `Submitting Worker ${workerNum}`,
       updated_at: new Date().toISOString(),
-
     }).catch(() => { });
 
   }
