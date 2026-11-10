@@ -1167,9 +1167,9 @@ export async function executeWorkerTask({
       await writeFile(planOut, JSON.stringify(plan, null, 2));
     } catch {}
 
-    profile._isScanOnly = isScanTask;
-    profile._isClusterBlueprint = Boolean(options.isClusterBlueprint || task.isClusterBlueprint);
-    profile._stage = isScanTask ? 'scanning' : (directSubmit ? 'submitting' : 'resolving');
+    profile._isScanOnly = directSubmit ? false : isScanTask;
+    profile._isClusterBlueprint = directSubmit ? false : Boolean(options.isClusterBlueprint || task.isClusterBlueprint);
+    profile._stage = directSubmit ? 'submitting' : (isScanTask ? 'scanning' : 'resolving');
 
       // Step D: Fill & Submit
       appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
@@ -1182,11 +1182,11 @@ export async function executeWorkerTask({
         workdayEmail,
         workdayPassword,
         mode: 'signin',
-        confirmSubmit: isScanTask ? false : effectiveConfirmSubmit,
-        dryRun: isScanTask ? true : dryRun,
+        confirmSubmit: directSubmit ? true : (isScanTask ? false : effectiveConfirmSubmit),
+        dryRun: directSubmit ? false : (isScanTask ? true : dryRun),
         isBatch: true,
-        isScanOnly: isScanTask,
-        isClusterBlueprint: Boolean(options.isClusterBlueprint || task.isClusterBlueprint),
+        isScanOnly: directSubmit ? false : isScanTask,
+        isClusterBlueprint: directSubmit ? false : Boolean(options.isClusterBlueprint || task.isClusterBlueprint),
       });
     }
 

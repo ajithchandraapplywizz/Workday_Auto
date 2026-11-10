@@ -2015,7 +2015,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   console.log('\n📋 Review step — parsing DOM before submit.');
   profile?._onLog?.(5, 'Step 5: Review & Submit — parsing DOM and scraping questions before submit...');
 
-  const isScanOrBlueprint = Boolean(
+  const isScanOrBlueprint = (!confirmSubmit) && Boolean(
     profile?._isScanOnly ||
     profile?._isClusterBlueprint ||
     profile?._stage === 'scanning' ||
@@ -2440,8 +2440,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
         const { getBotControl } = await import('./supabaseClient.mjs');
         const bc = await getBotControl().catch(() => null);
         if (bc?.stop_requested) isStop = true;
-        else if (isScanOperation && (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping' || bc?.scan_status === 'off')) isStop = true;
-        else if (!isScanOperation && (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping' || bc?.submit_status === 'off')) isStop = true;
+        else if (isScanOperation && (bc?.scan_stop_requested || bc?.last_action_requested === 'stop_scan' || bc?.scan_status === 'stopping')) isStop = true;
+        else if (!isScanOperation && (bc?.submit_stop_requested || bc?.last_action_requested === 'stop_submit' || bc?.submit_status === 'stopping')) isStop = true;
       } catch {}
     }
     if (isStop) {
