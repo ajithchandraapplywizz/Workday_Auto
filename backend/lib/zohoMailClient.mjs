@@ -111,16 +111,23 @@ export async function isZohoMailboxConnected(email) {
   if (!email) return false;
   const clean = String(email).trim().toLowerCase();
   try {
-    const user = await getZohoUser(clean);
-    if (user) {
+    const users = await listZohoUsers();
+    if (Array.isArray(users)) {
+      const user = users.find((u) => u.email?.toLowerCase() === clean);
+      if (!user) {
+        // Candidate email is not registered or listed in Zoho Mail Reader
+        return false;
+      }
       if (user.connected === false || user.status === 'not_connected' || user.status === 'disconnected') {
         return false;
       }
       if (user.connected === true || user.status === 'active') {
         return true;
       }
+      return false;
     }
-    const probe = await getZohoInbox(clean, { limit: 1 });
+    // Fallback only if users list failed to fetch
+    const probe = await getZohoInbox(clean, { limit: 1, silent: true });
     return Boolean(probe && probe.accountId);
   } catch {
     return false;
@@ -154,14 +161,16 @@ export async function ensureZohoAdminLogin() {
  * Endpoint 2: Get candidate inbox messages.
  * GET https://zoho-mail-reader.onrender.com/api/zoho/ui/inbox?email={CANDIDATE_EMAIL}&limit={LIMIT}&start={START}
  */
-export async function getZohoInbox(email, { limit = 5, start = 1 } = {}) {
+export async function getZohoInbox(email, { limit = 5, start = 1, silent = false } = {}) {
   if (!email) return null;
   const clean = String(email).trim().toLowerCase();
   try {
     const url = `${BASE_UI_URL}/inbox?email=${encodeURIComponent(clean)}&limit=${limit}&start=${start}`;
     return await getJson(url, 1);
   } catch (err) {
-    console.warn(`  ⚠️ [ZohoMail] Failed to get inbox for ${clean}: ${err.message}`);
+    if (!silent && err.status !== 400 && err.status !== 404) {
+      console.warn(`  ⚠️ [ZohoMail] Failed to get inbox for ${clean}: ${err.message}`);
+    }
     return null;
   }
 }
@@ -275,9 +284,16 @@ export async function getVerificationLink({
   const effectiveCutoff = triggerTime ? (Number(triggerTime) - 15000) : (Date.now() - 300000);
 
   // Step 1: Check mailbox connection status in Zoho
-  const users = await getJson(`${BASE_UI_URL}/users`, 1).catch(() => null);
-  const usersStr = JSON.stringify(users || {}).toLowerCase();
-  if (users && !usersStr.includes(email.toLowerCase())) {
+  const users = await listZohoUsers();
+  if (Array.isArray(users)) {
+    const user = users.find((u) => u.email?.toLowerCase() === email.toLowerCase());
+    if (!user) {
+      throw new Error(`Mailbox not found in users list: ${email}`);
+    }
+    if (user.connected === false || user.status === 'not_connected' || user.status === 'disconnected') {
+      throw new Error(`Mailbox is disconnected in Zoho: ${email}`);
+    }
+  } else {
     const probe = await getJson(`${BASE_UI_URL}/inbox?email=${enc}&limit=1`, 0).catch(() => null);
     if (!probe?.accountId) {
       throw new Error(`Mailbox not found in users list: ${email}`);
@@ -474,16 +490,21 @@ export async function pollZohoWorkdayAuth({
   console.log(`   📧 [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail}${company ? ` (${company})` : ''}${tenant ? ` [tenant: ${tenant}]` : ''} (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
 
   // Fast check: verify user in users list
-  const user = await getZohoUser(cleanEmail);
-  if (user) {
+  const users = await listZohoUsers();
+  if (Array.isArray(users)) {
+    const user = users.find((u) => u.email?.toLowerCase() === cleanEmail);
+    if (!user) {
+      console.log(`   ❌ [ZohoMail] Candidate ${cleanEmail} is NOT listed in Zoho Mail Reader (mailbox not connected)!`);
+      return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };
+    }
     console.log(`   ✓ [ZohoMail] Candidate account verified in Zoho: ${cleanEmail} (Connected: ${user.connected})`);
     if (user.connected === false || user.status === 'not_connected' || user.status === 'disconnected') {
       console.log(`   ❌ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
       return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };
     }
   } else {
-    // If not found in users array, verify with a direct probe
-    const probeInbox = await getZohoInbox(cleanEmail, { limit: 1 });
+    // Fallback only if users list failed to fetch
+    const probeInbox = await getZohoInbox(cleanEmail, { limit: 1, silent: true });
     if (!probeInbox?.accountId) {
       console.log(`   ❌ [ZohoMail] Candidate ${cleanEmail} is not connected in Zoho Mail Reader!`);
       return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };

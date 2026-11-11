@@ -3324,7 +3324,6 @@ export async function recordFailedJob({
       failed_at_step: cleanStep,
       screenshot_path: screenshotPath ? String(screenshotPath).trim() : null,
       client_ids: parsedClientIds,
-      client_count: totalCount,
       failed_client_count: totalCount,
       created_at: now,
       updated_at: now,
@@ -3344,7 +3343,6 @@ export async function recordFailedJob({
       // Fallback without new columns if migration 045 is pending
       delete payload.client_ids;
       delete payload.failed_client_count;
-      delete payload.client_count;
       try {
         await request('failed_jobs', {
           method: 'POST',
