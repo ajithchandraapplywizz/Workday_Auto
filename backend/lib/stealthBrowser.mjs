@@ -44,6 +44,8 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disable-background-timer-throttling',    // Prevent excessive timer drift
     '--disable-backgrounding-occluded-windows', // Do not render occluded windows
     '--disable-breakpad',                       // Disable crash reporter memory overhead
+    '--disable-crash-reporter',                 // Disable crash reporter process
+    '--no-crashpad',                            // Completely disable Crashpad handler (prevents spawn_subprocess EAGAIN 11)
     '--disable-component-update',               // Disable background component updates
     '--disable-domain-reliability',             // Disable domain reliability reporting
     '--disable-sync',                           // Disable sync

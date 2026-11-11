@@ -2016,6 +2016,7 @@ export async function executeWorkerTask({
       }
     } catch {}
     try { releaseBrowserSlot(workerId); } catch {}
+    try { cleanupOrphanChromeProcesses(); } catch {}
   }
 }
 

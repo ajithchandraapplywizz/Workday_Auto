@@ -85,25 +85,16 @@ export default function Header({ activeTab, onTabChange, operatorView, onOperato
             </div>
           )}
 
-          {/* Date Picker: Hidden for CA/Operator and Manager, locked to Yesterday's work history data */}
-          {(user?.role === 'ca' || user?.role === 'operator' || user?.role === 'manager') ? (
-            <div className="control-date-box" title="Candidate and team work data locked to yesterday's work history data">
-              <span className="control-label-micro">WORK DATA DATE</span>
-              <span style={{ fontSize: '0.78rem', fontWeight: 800, color: '#38bdf8', padding: '2px 6px', letterSpacing: '0.02em' }}>
-                {getPreviousWorkdayDateStr()} (Yesterday)
-              </span>
-            </div>
-          ) : (
-            <div className="control-date-box">
-              <span className="control-label-micro">DATE</span>
-              <input
-                type="date"
-                value={date}
-                onChange={(e) => setDate(e.target.value)}
-                className="header-date-input"
-              />
-            </div>
-          )}
+          {/* Date Picker: Interactive for all roles to filter day-wise stats and applications */}
+          <div className="control-date-box" title="Select date to filter work data and stats">
+            <span className="control-label-micro">DATE</span>
+            <input
+              type="date"
+              value={date}
+              onChange={(e) => setDate(e.target.value)}
+              className="header-date-input"
+            />
+          </div>
 
           {/* Timeframe Stats: Only day data enabled for CA/Operator and Manager (no week or month) */}
           <div className="control-stats-box">

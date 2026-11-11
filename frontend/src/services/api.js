@@ -496,9 +496,15 @@ export function getISTDateBounds(dateStr, timeframe = 'day') {
  */
 export function getApplicationEffectiveTimestamp(item) {
   if (!item) return 0;
+  // 1. Strict Priority: worker_leased_at from job_distributions (e.g. 2026-11-10 00:03:38.998+00)
+  if (item.worker_leased_at) {
+    const t = new Date(item.worker_leased_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+  // 2. Timestamp from screenshot URL if present
   const shotUrl = item.application_submitted_screenshot_url || item.screenshot_url || item.applied_screenshot || item.screenshot_path || '';
   if (shotUrl && typeof shotUrl === 'string') {
-    // 1. Matches ISO timestamp like 2026-11-10T08-32-57-314Z or 2026-11-10T08:32:57.314Z
+    // Matches ISO timestamp like 2026-11-10T08-32-57-314Z or 2026-11-10T08:32:57.314Z
     const isoMatch = shotUrl.match(/(\d{4}-\d{2}-\d{2})T(\d{2})[-:](\d{2})[-:](\d{2})(?:[-.](\d+))?Z?/i);
     if (isoMatch) {
       const [_, ymd, hh, mm, ss, ms] = isoMatch;
@@ -506,17 +512,14 @@ export function getApplicationEffectiveTimestamp(item) {
       const t = new Date(isoStr).getTime();
       if (!isNaN(t) && t > 0) return t;
     }
-    // 2. Matches epoch ms like 1773030491871
+    // Matches epoch ms like 1773030491871
     const msMatch = shotUrl.match(/_(\d{13})\./);
     if (msMatch) {
       const t = Number(msMatch[1]);
       if (!isNaN(t) && t > 0) return t;
     }
   }
-  if (item.worker_leased_at) {
-    const t = new Date(item.worker_leased_at).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
+  // 3. Fallback to updated_at or created_at
   const fallback = item.updated_at || item.created_at;
   const t = new Date(fallback).getTime();
   return isNaN(t) ? 0 : t;
@@ -934,9 +937,9 @@ export async function fetchApplicationsDynamic({
       endMs = new Date(bounds.endIso).getTime();
 
       if (isToday) {
-        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
       } else {
-        query = query.or(`and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
       }
     }
 
@@ -1046,9 +1049,9 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       endMs = new Date(bounds.endIso).getTime();
 
       if (isToday) {
-        query = query.or(`created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
       } else {
-        query = query.or(`and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
       }
     }
 
@@ -1078,12 +1081,24 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return isSub && matchesDay(a);
     }).length;
 
-    // 2. Applying: strictly direct sync to database status
-    const applying = allApps.filter((a) => {
+    // 2. Applying: sync from database status and active worker status across all services (up to 4 workers)
+    const dbApplying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
       const isApp = ['in_progress', 'started', 'applying', 'in_flight'].includes(st);
       return isApp && (isToday || matchesDay(a));
     }).length;
+
+    let workerApplying = 0;
+    try {
+      const { data: wsData } = await supabase.from('worker_status').select('state, updated_at, worker_id, stage');
+      const now = Date.now();
+      workerApplying = (wsData || []).filter((w) => {
+        const last = new Date(w.updated_at || 0).getTime();
+        return last && (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying' || w.state === 'busy') && (w.stage === 'submitting' || w.worker_id?.includes('submit'));
+      }).length;
+    } catch {}
+
+    const applying = Math.max(dbApplying, workerApplying);
 
     // 3. Failed: strictly status === 'failed' within the day's bounds
     const failed = allApps.filter((a) => {
@@ -1899,13 +1914,22 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
       const submittedCountMap = new Map();
       const now = Date.now();
 
-      // In 1-worker setup, determine if Worker-1 is actively executing
+      // Support multi-worker setup across both services (up to 4+ concurrent submitting workers)
       const liveWorkers = (workerRes.data || []).filter((w) => {
         const lastUpdate = new Date(w.updated_at || 0).getTime();
-        return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+        return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying' || w.state === 'busy' || w.state === 'running');
       });
-      const activeWorker = liveWorkers[0] || null;
-      let activeCandidateId = null;
+
+      const activeCandidateIds = new Set();
+      for (const w of liveWorkers) {
+        const activeAppId = w.current_application_id || w.current_job_id;
+        if (activeAppId) {
+          const found = (distRes.data || []).find((d) => d.id === activeAppId);
+          if (found?.applywizz_id) {
+            activeCandidateIds.add(String(found.applywizz_id).trim().toUpperCase());
+          }
+        }
+      }
 
       (distRes.data || []).forEach((d) => {
         const cid = (d.applywizz_id || '').trim().toUpperCase();
@@ -1915,12 +1939,12 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
           const key = (d.job_url || d.id || '').toLowerCase().trim();
           if (key) candidateJobsSet.get(cid).add(key);
 
-          if ((rawStatus === 'submitted' || rawStatus === 'completed') && Boolean(d.application_submitted_screenshot_url)) {
+          if ((rawStatus === 'submitted' || rawStatus === 'completed') && Boolean(d.application_submitted_screenshot_url || d.applied_screenshot)) {
             submittedCountMap.set(cid, (submittedCountMap.get(cid) || 0) + 1);
           }
 
-          if (activeWorker && !activeCandidateId && (rawStatus === 'applying' || rawStatus === 'in_flight')) {
-            activeCandidateId = cid;
+          if (rawStatus === 'applying' || rawStatus === 'in_flight') {
+            activeCandidateIds.add(cid);
           }
         }
       });
@@ -1930,7 +1954,7 @@ export async function fetchAssignedClientsForCA({ caEmail, atDate }) {
         cand.jobs_applied = candidateJobsSet.get(cid)?.size || 0;
         cand.emails_submitted = submittedCountMap.get(cid) || 0;
         cand.zoho_status = 'connected';
-        if (activeCandidateId && cid === activeCandidateId) {
+        if (activeCandidateIds.has(cid)) {
           cand.status = '⚡ Bot Filling';
         } else if (cand.emails_submitted >= 10) {
           cand.status = 'Completed';
@@ -2489,22 +2513,22 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
     const applications = appsRes.data || [];
     const now = Date.now();
 
-    // In 1-worker setup, at most ONE job across ALL assigned clients can be in_flight
+    // Support multi-worker setup across both services (up to 4+ concurrent workers: submitting_worker_1..4)
     const liveWorkers = (workerRes.data || []).filter((w) => {
       const lastUpdate = new Date(w.updated_at || 0).getTime();
-      return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying');
+      return lastUpdate && (now - lastUpdate < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying' || w.state === 'busy' || w.state === 'running');
     });
-    const activeWorker = liveWorkers[0] || null;
-    let activeClientId = null;
-    let activeJobUrl = null;
 
-    if (activeWorker) {
-      const activeAppId = activeWorker.current_application_id || activeWorker.current_job_id;
+    const activeClientCounts = new Map();
+    for (const w of liveWorkers) {
+      const activeAppId = w.current_application_id || w.current_job_id;
       if (activeAppId) {
         const foundApp = applications.find((a) => a.id === activeAppId);
         const foundQueue = queueTasks.find((q) => q.id === activeAppId);
-        activeClientId = (foundApp?.applywizz_id || foundQueue?.applywizz_id || '').trim().toUpperCase() || null;
-        activeJobUrl = (foundApp?.job_url || foundQueue?.job_url || '').split('?')[0].trim().toLowerCase() || null;
+        const cid = (foundApp?.applywizz_id || foundQueue?.applywizz_id || '').trim().toUpperCase();
+        if (cid) {
+          activeClientCounts.set(cid, (activeClientCounts.get(cid) || 0) + 1);
+        }
       }
     }
 
@@ -2538,8 +2562,12 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
       }
 
       const allJobs = Array.from(jobUrlMap.values());
-      const isClientActiveInFlight = Boolean(activeWorker && activeClientId === cid);
-      const inFlightCount = isClientActiveInFlight ? 1 : 0;
+      const dbInFlightJobs = allJobs.filter((j) => {
+        const s = (j.status || '').toLowerCase();
+        return ['applying', 'in_flight', 'in_progress', 'started'].includes(s);
+      });
+      const inFlightFromWorkers = activeClientCounts.get(cid) || 0;
+      const inFlightCount = Math.max(dbInFlightJobs.length, inFlightFromWorkers);
 
       const readyCount = allJobs.filter((j) => {
         const s = (j.status || '').toLowerCase();
@@ -3393,18 +3421,32 @@ export function isPersonalInfoField(label = '') {
 /**
  * Fetch all allocated applications for a given client from job_distributions and batch_job_queue
  */
-export async function fetchClientApplications(applywizzId) {
+export async function fetchClientApplications(applywizzId, { dateStr = '', timeframe = 'day' } = {}) {
   if (!applywizzId) return { success: true, applications: [] };
   try {
     const cleanId = String(applywizzId).trim().toUpperCase();
 
     // 1. Fetch strictly from job_distributions (scanned, pre-resolved, ready_for_review, applying, submitted)
-    const { data: distData, error: distErr } = await supabase
+    let query = supabase
       .from('job_distributions')
       .select('*')
       .eq('applywizz_id', cleanId)
       .order('created_at', { ascending: false });
 
+    const bounds = dateStr ? getISTDateBounds(dateStr, timeframe || 'day') : null;
+    const isToday = !dateStr || (bounds && bounds.startDateStr === formatLocalDate(new Date()));
+    const startMs = bounds ? new Date(bounds.startIso).getTime() : 0;
+    const endMs = bounds ? new Date(bounds.endIso).getTime() : Infinity;
+
+    if (bounds) {
+      if (isToday) {
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+      } else {
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+      }
+    }
+
+    const { data: distData, error: distErr } = await query;
     if (distErr) throw distErr;
 
     const jobMap = new Map();
@@ -3429,6 +3471,24 @@ export async function fetchClientApplications(applywizzId) {
           ? (d.application_submitted_screenshot_url || d.applied_screenshot || null)
           : null;
 
+        const effectiveTs = getApplicationEffectiveTimestamp(d);
+        const matchesDate = !bounds || (effectiveTs >= startMs && effectiveTs <= endMs);
+
+        // Day-wise filtering:
+        // - If submitted / failed: MUST match the selected date bounds!
+        // - If applying / in_flight: include if currently today or matches date
+        // - If ready_for_review / queued: include if matches date or (isToday && no date filter)
+        if (bounds) {
+          if (isSubmitted || rawStatus === 'failed') {
+            if (!matchesDate) continue;
+          } else if (rawStatus === 'applying' || rawStatus === 'in_flight') {
+            if (!isToday && !matchesDate) continue;
+          } else {
+            // ready_for_review / queued
+            if (!isToday && !matchesDate) continue;
+          }
+        }
+
         jobMap.set(key, {
           id: d.id,
           distributionId: d.id,
@@ -3446,8 +3506,10 @@ export async function fetchClientApplications(applywizzId) {
           is_fully_answered: d.is_fully_answered ?? (unansCount === 0),
           screenshot_url: proofShot,
           application_submitted_screenshot_url: proofShot,
+          worker_leased_at: d.worker_leased_at,
           created_at: d.created_at,
           updated_at: d.updated_at,
+          effective_date: effectiveTs ? new Date(effectiveTs).toISOString() : d.updated_at,
           source: 'job_distributions',
         });
       }

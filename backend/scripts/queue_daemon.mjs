@@ -432,6 +432,10 @@ export async function stopScanPool() {
   }
 
   console.log(`✅ [DAEMON] Scan stop complete. Scan progress safely halted. submission_tasks untouched.`);
+  try {
+    const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+    deepCleanWhenZeroActiveInstances({ force: submitStatus !== 'running' });
+  } catch {}
   return { success: true, message: 'Scan & Resolve stopped. Workers safely idling. submission_tasks untouched.' };
 }
 
@@ -502,6 +506,10 @@ export async function stopSubmitPool() {
   }
 
   console.log(`✅ [DAEMON] Submit stop complete. Submissions halted. Scan & Resolve progress untouched.`);
+  try {
+    const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+    deepCleanWhenZeroActiveInstances({ force: scanStatus !== 'running' });
+  } catch {}
   return { success: true, message: 'Submissions halted. Scan & Resolve progress untouched.' };
 }
 
@@ -690,6 +698,13 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
       try {
         const claimedTask = await claimNextTask(workerId);
         if (!claimedTask) {
+          activeSubmittingWorkers.delete(workerId);
+          if (activeSubmittingWorkers.size === 0) {
+            try {
+              const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+              deepCleanWhenZeroActiveInstances();
+            } catch {}
+          }
           // Continuous standby: wait 3s before re-checking for unlocked or newly ready applications
           await new Promise((r) => setTimeout(r, 3000));
           continue;

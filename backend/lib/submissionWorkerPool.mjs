@@ -1616,7 +1616,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
             error_message: finalShotUrl ? `${retryMsg} [diagnostic_screenshot: ${finalShotUrl}]` : retryMsg,
 
-            application_submitted_screenshot_url: null,
+            application_submitted_screenshot_url: finalShotUrl || undefined,
 
             updated_at: now,
 
@@ -1924,7 +1924,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           error_message: errShotUrl ? `${retryMsg} [diagnostic_screenshot: ${errShotUrl}]` : retryMsg,
 
-          application_submitted_screenshot_url: null,
+          application_submitted_screenshot_url: errShotUrl || undefined,
 
           updated_at: now,
 

@@ -18,6 +18,8 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-background-timer-throttling',
   '--disable-backgrounding-occluded-windows',
   '--disable-breakpad',
+  '--disable-crash-reporter',
+  '--no-crashpad',
   '--disable-component-update',
   '--disable-infobars',
   '--window-size=1280,900',
@@ -31,10 +33,59 @@ export const LEAN_CHROMIUM_ARGS = [
 export function cleanupOrphanChromeProcesses() {
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "(chrome-headless-shell|chromium).*(user-data-dir|playwright)" || true', () => {});
-      exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* || true', () => {});
+      exec('pkill -9 -f "(chrome|chromium|crashpad_handler).*(user-data-dir|playwright|crashpad)" || pkill -9 -f "crashpad_handler" || true', () => {});
+      exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* /tmp/core.* || true', () => {});
     } catch {}
   }
+}
+
+let lastDeepCleanTime = 0;
+
+/**
+ * Deep cache and process purge executed strictly when ZERO active instances (browsers/tasks) are running.
+ * Cleans orphan Linux processes, Playwright temp directories, Chromium profile caches, and triggers V8 GC.
+ */
+export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
+  const activeCount = activeBrowsers.size;
+  const slotCount = activeSlots.size;
+  const contextCount = activeWorkerContexts.size;
+
+  // STRICT GUARD: Never clean if ANY browser or worker context is currently active
+  if (!force && (activeCount > 0 || slotCount > 0 || contextCount > 0)) {
+    return false;
+  }
+
+  const now = Date.now();
+  // Throttle to at most once every 10 seconds unless forced
+  if (!force && now - lastDeepCleanTime < 10000) {
+    return false;
+  }
+  lastDeepCleanTime = now;
+
+  console.log(`\n🧹 [DEEP PURGE] Zero active instances running (browsers: ${activeCount}, slots: ${slotCount}) — executing deep system cache & process wipe...`);
+
+  if (process.platform === 'linux') {
+    try {
+      // 1. Force kill all detached or zombie Chromium, Chrome, and crashpad processes
+      exec('pkill -9 -f "chrome.*(playwright|user-data-dir|crashpad)" || pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || true', () => {});
+
+      // 2. Wipe all temporary Playwright browser profiles, core dumps, and crashpad caches from /tmp and /dev/shm
+      exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* /tmp/core.* /tmp/.org.chromium.Chromium.* /tmp/.com.google.Chrome.* /dev/shm/.org.chromium.* || true', () => {});
+    } catch (e) {
+      console.warn(`⚠️ [DEEP PURGE] Linux process/disk clean notice: ${e.message}`);
+    }
+  }
+
+  // 3. Force V8 Garbage Collection to free RAM back to host OS if exposed
+  if (typeof global.gc === 'function') {
+    try {
+      global.gc();
+      console.log('   🗑️ V8 heap garbage collection executed.');
+    } catch {}
+  }
+
+  console.log('✅ [DEEP PURGE] Zero-instance system wipe complete. Memory and process table fully reset.\n');
+  return true;
 }
 
 /**
@@ -150,6 +201,9 @@ export function unregisterActiveBrowser(browser, workerId = null) {
   if (workerId) {
     releaseBrowserSlot(workerId);
   }
+  if (activeBrowsers.size === 0 && activeSlots.size === 0) {
+    deepCleanWhenZeroActiveInstances();
+  }
 }
 
 export function getActiveBrowserCount() {
@@ -192,6 +246,7 @@ export async function abortScanBrowsers() {
   }
   await Promise.allSettled(closePromises);
   console.log(`✅ [LIFECYCLE] Scanning browser instances closed.`);
+  if (activeBrowsers.size === 0) deepCleanWhenZeroActiveInstances({ force: true });
 }
 
 /**
@@ -212,6 +267,7 @@ export async function abortSubmitBrowsers() {
   }
   await Promise.allSettled(closePromises);
   console.log(`✅ [LIFECYCLE] Submission browser instances closed.`);
+  if (activeBrowsers.size === 0) deepCleanWhenZeroActiveInstances({ force: true });
 }
 
 /**
@@ -239,4 +295,5 @@ export async function abortAllActiveBrowsers() {
   }
   await Promise.allSettled(closePromises);
   console.log(`✅ [LIFECYCLE] All browser instances closed cleanly.`);
+  deepCleanWhenZeroActiveInstances({ force: true });
 }

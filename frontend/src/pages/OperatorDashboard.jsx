@@ -99,17 +99,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
     }
   };
 
-  // Load candidate directory assigned to this CA on the active date (strictly yesterday / previous workday)
+  // Load candidate directory assigned to this CA on the active date
   const loadAssignedClients = async (overrideDate) => {
     setLoading(true);
-    const targetDate = overrideDate || getPreviousWorkdayDateStr();
+    const targetDate = overrideDate || date || getPreviousWorkdayDateStr();
     try {
       const res = await fetchAssignedClientsForCA({
         caEmail: sessionCaEmail,
         atDate: targetDate,
       });
 
-      // Keep activeWorkDate strictly locked to yesterday / previous workday
+      // Synchronize activeWorkDate with selected date
       setActiveWorkDate(targetDate);
       setIsFallbackDate(Boolean(res.isFallback));
 
@@ -124,7 +124,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
         }));
         setCandidates(mapped);
         if (mapped.length > 0) {
-          handleSelectCandidate(mapped[0]);
+          handleSelectCandidate(mapped[0], targetDate);
         }
       } else {
         setCandidates([]);
@@ -140,7 +140,7 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   };
 
   useEffect(() => {
-    loadAssignedClients();
+    loadAssignedClients(date);
   }, [sessionCaEmail, date]);
 
   // On-demand live synchronization with CA portal
@@ -170,16 +170,17 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
   };
 
   // Handle selecting a candidate
-  const handleSelectCandidate = async (candidate) => {
+  const handleSelectCandidate = async (candidate, targetDateOverride) => {
     setSelectedCandidate(candidate);
     setLoadingDetails(true);
     setTraceLogs([]);
     setSelectedApp(null);
+    const effectiveDate = targetDateOverride || activeWorkDate || date;
 
     try {
       const [details, appsRes] = await Promise.all([
         fetchClientDetails(candidate.id),
-        fetchClientApplications(candidate.id),
+        fetchClientApplications(candidate.id, { dateStr: effectiveDate, timeframe }),
       ]);
 
       if (details.success && details.client) {
@@ -229,7 +230,10 @@ export default function OperatorDashboard({ operatorView = 'dashboard' }) {
 
     const refreshActiveCandidateApps = async () => {
       try {
-        const appsRes = await fetchClientApplications(selectedCandidate.id);
+        const appsRes = await fetchClientApplications(selectedCandidate.id, {
+          dateStr: activeWorkDate || date,
+          timeframe,
+        });
         if (!isMounted) return;
         if (appsRes.success && appsRes.applications) {
           setApplications(appsRes.applications);
