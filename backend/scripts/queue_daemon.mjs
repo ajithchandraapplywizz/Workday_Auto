@@ -665,7 +665,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
   const submitWorkers = (resolvedIds && resolvedIds.length > 0) ? resolvedIds : (SUBMISSION_WORKER_IDS || []);
   const maxConcurrency = submitWorkers.length;
 
-  console.log(`\n🚀 [DAEMON] Checking for ready applications to submit across ${maxConcurrency} parallel workers (${submitWorkers.join(', ')})...`);
+  console.log(`🚀 [DAEMON] Checking for ready applications to submit across ${maxConcurrency} parallel workers (${submitWorkers.join(', ')})...`);
 
   // 1. Recover any interrupted tasks from previous daemon lifecycle
   await recoverInterruptedSubmissionTasks().catch(() => { });
@@ -696,7 +696,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
     active_worker_count: maxConcurrency + (isParallel ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0),
   });
 
-  console.log(`\n🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
+  console.log(`🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
 
   const runDedicatedWorkerLoop = async (workerId) => {
     while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
@@ -725,18 +725,22 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
         }
 
         activeSubmittingWorkers.add(workerId);
-        console.log(`\n🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
+        console.log(`🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
 
+        let res = null;
         try {
-          const res = await processClaimedTask({
+          res = await processClaimedTask({
             task: claimedTask,
             workerId,
             headless: HEADLESS,
           });
 
-          const shotUrl = res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null;
+          const isSubmittedOrApplied = res?.status === 'submitted' || res?.status === 'completed' || res?.status === 'already_applied';
+          const shotUrl = isSubmittedOrApplied
+            ? (res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null)
+            : (res?.screenshotUrl || res?.failureScreenshotUrl || null);
           const errDetail = res?.error || res?.reason || res?.failureReason || '';
-          console.log(`\n📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'}${errDetail ? ` | Reason: ${errDetail}` : ''} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
+          console.log(`📋 [SUBMITTER DISPATCH] AWL-ID: ${claimedTask.applywizz_id} | Status: ${res?.status || 'done'}${errDetail ? ` | Reason: ${errDetail}` : ''} | Company: ${claimedTask.company || 'Workday'} | Screenshot: ${shotUrl || 'None'}`);
           console.log(`✅ [${maxConcurrency}-WORKER DISPATCHER] ${workerId} finished task #${claimedTask.id} with status: ${res?.status || 'done'}`);
           submissionCycleResults.push({
             job_url: claimedTask.job_url,
@@ -744,7 +748,7 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
             company: claimedTask.company,
             status: res?.status || 'submitted',
             reason: res?.error || res?.failureReason || (res?.status === 'submitted' ? 'Application Submitted' : 'Submission error'),
-            screenshotUrl: res?.screenshotUrl || res?.application_submitted_screenshot_url || claimedTask.application_submitted_screenshot_url || null,
+            screenshotUrl: shotUrl,
           });
           totalSubmissionsCompleted++;
           if (submissionCycleResults.length >= 10) {

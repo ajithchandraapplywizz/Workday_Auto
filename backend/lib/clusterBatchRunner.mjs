@@ -1692,20 +1692,10 @@ export async function runClusterBatchRunner({
     if (await isClusterStopRequested()) return;
 
     const concurrency = Math.min(maxWorkers, clusters.length);
-    console.log(`\n${'═'.repeat(78)}`);
     console.log(`🚀 [${phaseTitle}] Launching strictly ${concurrency} Parallel Scanning Workers on ${clusters.length} link(s)...`);
-    console.log(`${'═'.repeat(78)}\n`);
-
-    console.log(` Job #    │ Job URL (Strict URL Identification)                                            │ Clients │ Attempt`);
-    console.log(`──────────┼────────────────────────────────────────────────────────────────────────────────┼─────────┼────────`);
     clusters.forEach((c, idx) => {
-      const jobLabel = `Job #${idx + 1}`.padEnd(8, ' ');
-      const urlDisplay = (c.jobUrl || '').slice(0, 78).padEnd(78, ' ');
-      const count = String(c.clientCount).padStart(7, ' ');
-      const att = String(c.attemptCount || 0).padStart(7, ' ');
-      console.log(` ${jobLabel} │ ${urlDisplay} │ ${count} │ ${att}`);
+      console.log(`   Job #${idx + 1}: ${c.jobUrl} | Clients: ${c.clientCount} | Attempt: ${c.attemptCount || 0}`);
     });
-    console.log(`──────────┴────────────────────────────────────────────────────────────────────────────────┴─────────┴────────\n`);
 
     let clusterIndex = 0;
 
@@ -1986,22 +1976,5 @@ export async function runClusterBatchRunner({
   const totalSuccess = clusterResults.reduce((acc, r) => acc + (r.succeeded || 0), 0);
   const totalFailed = clusterResults.reduce((acc, r) => acc + (r.failed || 0), 0);
 
-  console.log(`\n${'═'.repeat(78)}`);
-  console.log(`🏁 ALL ${clusterResults.length} CLUSTERS COMPLETED IN ${elapsedSec}s (HEADED MODE)`);
-  console.log(`${'═'.repeat(78)}`);
-  console.log(` Worker   │ Company                  │ Processed │ Succeeded │ Failed │ Q&A Scraped`);
-  console.log(`──────────┼──────────────────────────┼───────────┼───────────┼────────┼────────────`);
-  clusterResults.forEach((r) => {
-    const w = (r.workerId || '').padEnd(8, ' ');
-    const comp = (r.company || '').slice(0, 24).padEnd(24, ' ');
-    const proc = String(r.total || 0).padStart(9, ' ');
-    const succ = String(r.succeeded || 0).padStart(9, ' ');
-    const fail = String(r.failed || 0).padStart(6, ' ');
-    const qa = String(r.scrapedQaCount || 0).padStart(10, ' ');
-    console.log(` ${w} │ ${comp} │ ${proc} │ ${succ} │ ${fail} │ ${qa}`);
-  });
-  console.log(`──────────┴──────────────────────────┴───────────┴───────────┴────────┴────────────`);
-  console.log(` TOTALS:    Processed: ${totalProcessed} | Succeeded: ${totalSuccess} | Failed: ${totalFailed}`);
-  console.log(` Screenshots saved to Supabase 'screenshot_path' for every application.`);
-  console.log(`${'═'.repeat(78)}\n`);
+  console.log(`🏁 ALL ${clusterResults.length} CLUSTERS COMPLETED IN ${elapsedSec}s | Processed: ${totalProcessed} | Succeeded: ${totalSuccess} | Failed: ${totalFailed}`);
 }

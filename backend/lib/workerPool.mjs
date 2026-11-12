@@ -631,12 +631,7 @@ export async function executeWorkerTask({
         stoppedAtStep: 'Job Discovery / Already Applied',
       }).catch(() => {});
 
-      console.log(`\n${'═'.repeat(90)}`);
-      console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-      console.log(`   • Status: ALREADY_APPLIED`);
-      console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-      console.log(`${'═'.repeat(90)}\n`);
+      console.log(`ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED @ ${company || 'Workday'} | Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
 
       return {
         status: 'already_applied',
@@ -710,12 +705,7 @@ export async function executeWorkerTask({
             stoppedAtStep: 'Job Discovery / Already Applied',
           }).catch(() => {});
 
-          console.log(`\n${'═'.repeat(90)}`);
-          console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-          console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-          console.log(`   • Status: ALREADY_APPLIED`);
-          console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-          console.log(`${'═'.repeat(90)}\n`);
+          console.log(`ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED @ ${company || 'Workday'} | Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
 
           return { status: 'already_applied', reason: 'already_applied', screenshotUrl: alreadyShotUrl, stoppedAtStep: 'Job Discovery / Already Applied' };
         }
@@ -900,13 +890,7 @@ export async function executeWorkerTask({
           stoppedAtStep: 'Job Discovery / Already Applied',
         }).catch(() => {});
 
-        console.log(`\n${'═'.repeat(90)}`);
-        console.log(`ℹ️ [${workerId}] This application was ALREADY APPLIED with screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-        console.log(`   • Candidate: ${applywizzId} @ ${company || 'Workday'}`);
-        console.log(`   • Status: ALREADY_APPLIED`);
-        console.log(`   • Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
-        console.log(`   • Table: job_distributions #${distId || 'N/A'} -> 'already_applied'`);
-        console.log(`${'═'.repeat(90)}\n`);
+        console.log(`ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED @ ${company || 'Workday'} | Proof Screenshot: ${alreadyShotUrl || 'Uploaded to Supabase Storage'}`);
 
         return {
           status: 'already_applied',
@@ -2041,9 +2025,7 @@ export async function runWorkerPool(tasks = [], {
   defaultPassword = '',
 } = {}) {
   const total = tasks.length;
-  console.log(`\n${'═'.repeat(70)}`);
   console.log(`⚡ ${concurrency}-WORKER BATCH CONTROLLER: Running ${total} tasks with ${concurrency} parallel workers`);
-  console.log(`${'═'.repeat(70)}\n`);
 
   const results = [];
   let currentIndex = 0;
@@ -2088,23 +2070,14 @@ export async function runWorkerPool(tasks = [], {
   await Promise.all(workerPromises);
 
   // Print Summary
-  console.log(`\n${'═'.repeat(70)}`);
   console.log(`📊 ${concurrency}-WORKER EXECUTION SUMMARY`);
-  console.log(`${'═'.repeat(70)}`);
   const submitted = results.filter((r) => r.status === 'submitted').length;
   const reachedReview = results.filter((r) => r.status === 'reached-review').length;
   const cacheHits = results.filter((r) => r.cacheHit).length;
   const failed = results.filter((r) => ['error', 'auth_failed', 'invalid_url', 'profile_load_failed', 'auth_missing'].includes(r.status)).length;
   const incomplete = results.length - (submitted + reachedReview + failed);
 
-  console.log(`  Total Tasks Processed: ${results.length}`);
-  console.log(`  ✅ Submitted:            ${submitted}`);
-  console.log(`  🎯 Reached Review:       ${reachedReview}`);
-  console.log(`  ⚡ Form Cache Hits:      ${cacheHits} (instant pre-resolved repeat links)`);
-  console.log(`  🔍 Unique Form Scans:    ${results.length - cacheHits} (harvested to Supabase)`);
-  console.log(`  ❌ Failed:               ${failed}`);
-  if (incomplete > 0) console.log(`  ⚠️  Incomplete:           ${incomplete}`);
-  console.log(`${'═'.repeat(70)}\n`);
+  console.log(`  Total Tasks Processed: ${results.length} | ✅ Submitted: ${submitted} | 🎯 Reached Review: ${reachedReview} | ⚡ Cache Hits: ${cacheHits} | ❌ Failed: ${failed}${incomplete > 0 ? ` | ⚠️ Incomplete: ${incomplete}` : ''}`);
 
   return results;
 }
@@ -2168,13 +2141,7 @@ export async function runQueueWorkerPool({
   const allTasks = await fetchPendingTasksForActiveCAs(allowedCandidateIds);
   const pendingCount = allTasks.length;
 
-  console.log(`\n${'═'.repeat(70)}`);
-  console.log(`⚡ ${concurrency}-WORKER LINK-CLUSTERED FAIR-SHARE QUEUE CONTROLLER`);
-  console.log(`   Mode: ${headless ? 'Headless (background)' : 'Headful (visible browser windows)'}`);
-  console.log(`   Active CA Filter: ${activeCaOnly || caEmails ? 'ENABLED' : 'ALL PENDING'}`);
-  console.log(`   Auto-Submit: ${confirmSubmit && !dryRun ? 'ENABLED' : 'DISABLED (Review / Dry-Run)'}`);
-  console.log(`   Total Pending Tasks: ${pendingCount}`);
-  console.log(`${'═'.repeat(70)}\n`);
+  console.log(`⚡ ${concurrency}-WORKER LINK-CLUSTERED FAIR-SHARE QUEUE CONTROLLER | Mode: ${headless ? 'Headless' : 'Headed'} | Pending Tasks: ${pendingCount}`);
 
   if (pendingCount === 0) {
     console.log('🛑 [WORKER POOL] STOPPED: 0 pending tasks found. Bot will NOT trigger.');
@@ -2430,9 +2397,7 @@ export async function runQueueWorkerPool({
   }
 
   // ── 9. Summary ──────────────────────────────────────────────────────
-  console.log(`\n${'═'.repeat(70)}`);
   console.log(`📊 ${concurrency}-WORKER LINK-CLUSTERED FAIR-SHARE SUMMARY`);
-  console.log(`${'═'.repeat(70)}`);
   const submitted = results.filter((r) => r.status === 'submitted').length;
   const reachedReview = results.filter((r) => r.status === 'reached_review' || r.status === 'reached-review').length;
   const cacheHits = results.filter((r) => r.cacheHit).length;
@@ -2440,14 +2405,7 @@ export async function runQueueWorkerPool({
   const cacheFills = results.filter((r) => !r.isBlueprint && r.cacheHit).length;
   const failed = results.filter((r) => ['error', 'auth_failed', 'invalid_url', 'profile_load_failed', 'auth_missing'].includes(r.status)).length;
 
-  console.log(`  Total Tasks Processed: ${results.length}`);
-  console.log(`  ✅ Submitted:            ${submitted}`);
-  console.log(`  🎯 Reached Review:       ${reachedReview}`);
-  console.log(`  🔍 Blueprint Scans:      ${blueprints} (unique URLs scanned & cached)`);
-  console.log(`  ⚡ Cache-Fill Hits:      ${cacheFills} (instant fills from blueprint cache)`);
-  console.log(`  ❌ Failed:               ${failed}`);
-  console.log(`  🏆 Cache Efficiency:     ${results.length > 0 ? Math.round((cacheHits / results.length) * 100) : 0}%`);
-  console.log(`${'═'.repeat(70)}\n`);
+  console.log(`  Processed: ${results.length} | ✅ Submitted: ${submitted} | 🎯 Reached Review: ${reachedReview} | 🔍 Blueprints: ${blueprints} | ⚡ Cache-Fills: ${cacheFills} | ❌ Failed: ${failed} | 🏆 Cache Eff: ${results.length > 0 ? Math.round((cacheHits / results.length) * 100) : 0}%`);
 
   return results;
 }
@@ -2478,13 +2436,7 @@ export async function executeSingleTargetedSubmission({
   const cleanUrl = String(jobUrl || '').trim();
   const now = new Date().toISOString();
 
-  console.log(`\n${'═'.repeat(70)}`);
-  console.log(`🎯 [TARGETED SUBMISSION TRIGGERED]`);
-  console.log(`   • Worker:        ${workerId}`);
-  console.log(`   • Candidate:     ${cleanId}`);
-  console.log(`   • Job URL:       ${cleanUrl}`);
-  console.log(`   • Distribution:  ${distributionId || 'Lookup by AWL + URL'}`);
-  console.log(`${'═'.repeat(70)}\n`);
+  console.log(`🎯 [TARGETED SUBMISSION TRIGGERED] Worker: ${workerId} | Candidate: ${cleanId} | URL: ${cleanUrl} | Dist: ${distributionId || 'Lookup'}`);
 
   // 1. Fetch task details from job_distributions
   const { createClient } = await import('@supabase/supabase-js');

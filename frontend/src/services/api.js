@@ -477,17 +477,24 @@ export async function checkAllApiHealth() {
 /**
  * 12. IST Date & Timeframe bounds calculator (Fixes IST/UTC timezone boundary)
 /**
- * Format Date to YYYY-MM-DD using local time (completely immune to UTC shifts)
+ * Format Date to YYYY-MM-DD using IST (Asia/Kolkata) timezone
  */
 export function formatLocalDate(d) {
   if (!d) return '';
   if (typeof d === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
-  const dateObj = d instanceof Date ? d : new Date(d);
-  if (isNaN(dateObj.getTime())) return '';
-  const year = dateObj.getFullYear();
-  const month = String(dateObj.getMonth() + 1).padStart(2, '0');
-  const day = String(dateObj.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
+  try {
+    const dateObj = d instanceof Date ? d : new Date(d);
+    if (isNaN(dateObj.getTime())) return '';
+    const formatter = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit' });
+    return formatter.format(dateObj);
+  } catch {
+    const dateObj = d instanceof Date ? d : new Date(d);
+    if (isNaN(dateObj.getTime())) return '';
+    const year = dateObj.getFullYear();
+    const month = String(dateObj.getMonth() + 1).padStart(2, '0');
+    const day = String(dateObj.getDate()).padStart(2, '0');
+    return `${year}-${month}-${day}`;
+  }
 }
 
 export function parseLocalDate(dateStr) {
@@ -501,68 +508,88 @@ export function parseLocalDate(dateStr) {
 }
 
 /**
- * 12. Calendar Date Bounds (Aligned strictly to UTC calendar days matching database timestamps)
+ * 12. Calendar Date Bounds (Aligned strictly to IST timezone matching Indian Standard Time UTC+05:30)
  */
 export function getISTDateBounds(dateStr, timeframe = 'day') {
   let cleanStr = typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim())
     ? dateStr.trim()
     : formatLocalDate(dateStr || new Date());
 
-  if (!cleanStr) cleanStr = new Date().toISOString().slice(0, 10);
+  if (!cleanStr) cleanStr = formatLocalDate(new Date());
   const [year, month, day] = cleanStr.split('-').map(Number);
+  const istOffsetMs = 5.5 * 60 * 60 * 1000;
 
-  let startIso, endIso, startDateStr, endDateStr;
+  let startUtcMs = 0;
+  let endUtcMs = 0;
 
-  if (timeframe === 'day') {
-    startIso = `${cleanStr}T00:00:00.000Z`;
-    endIso = `${cleanStr}T23:59:59.999Z`;
-    startDateStr = cleanStr;
-    endDateStr = cleanStr;
-  } else if (timeframe === 'week') {
-    const d = new Date(Date.UTC(year, month - 1, day));
-    const dayOfWeek = d.getUTCDay();
-    const diff = d.getUTCDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
-    const start = new Date(Date.UTC(year, month - 1, diff, 0, 0, 0, 0));
-    const end = new Date(Date.UTC(year, month - 1, diff + 6, 23, 59, 59, 999));
-    startIso = start.toISOString();
-    endIso = end.toISOString();
-    startDateStr = startIso.slice(0, 10);
-    endDateStr = endIso.slice(0, 10);
-  } else if (timeframe === 'month') {
-    const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
-    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
-    startIso = start.toISOString();
-    endIso = end.toISOString();
-    startDateStr = startIso.slice(0, 10);
-    endDateStr = endIso.slice(0, 10);
+  const r = String(timeframe || 'day').toLowerCase();
+  if (r === 'week') {
+    const targetUtc = Date.UTC(year, month - 1, day);
+    const dayOfWeek = new Date(targetUtc).getUTCDay();
+    const diffToMonday = (dayOfWeek + 6) % 7;
+    const mondayUtc = targetUtc - diffToMonday * 86400 * 1000;
+    startUtcMs = mondayUtc - istOffsetMs;
+    endUtcMs = startUtcMs + 7 * 86400 * 1000 - 1;
+  } else if (r === 'month') {
+    const startOfMonthUtc = Date.UTC(year, month - 1, 1);
+    startUtcMs = startOfMonthUtc - istOffsetMs;
+    const nextMonthUtc = Date.UTC(month === 12 ? year + 1 : year, month === 12 ? 0 : month, 1);
+    endUtcMs = nextMonthUtc - istOffsetMs - 1;
   } else {
-    startIso = `${cleanStr}T00:00:00.000Z`;
-    endIso = `${cleanStr}T23:59:59.999Z`;
-    startDateStr = cleanStr;
-    endDateStr = cleanStr;
+    // 'day'
+    const dayStartUtc = Date.UTC(year, month - 1, day);
+    startUtcMs = dayStartUtc - istOffsetMs;
+    endUtcMs = startUtcMs + 86400 * 1000 - 1;
   }
 
+  const startIso = new Date(startUtcMs).toISOString();
+  const endIso = new Date(endUtcMs).toISOString();
+
   return {
+    timeframe: r,
+    date: cleanStr,
+    startDateStr: cleanStr,
+    endDateStr: cleanStr,
     startIso,
     endIso,
-    startDateStr,
-    endDateStr,
+    startUtcMs,
+    endUtcMs,
   };
 }
 
 /**
  * Extracts authentic submission or activity timestamp from an application row.
- * Prioritizes timestamp embedded in proof screenshot URL, then worker_leased_at,
- * then updated_at / created_at.
+ * For submitted/completed applications: updated_at (moment of submission) or worker_leased_at.
+ * For in-flight/pending: worker_leased_at, then updated_at / created_at.
  */
 export function getApplicationEffectiveTimestamp(item) {
   if (!item) return 0;
-  // 1. Strict Priority: worker_leased_at from job_distributions (e.g. 2026-11-10 00:03:38.998+00)
-  if (item.worker_leased_at) {
-    const t = new Date(item.worker_leased_at).getTime();
-    if (!isNaN(t) && t > 0) return t;
+  const st = String(item.status || '').toLowerCase();
+  const isSubmitted = st === 'submitted' || st === 'completed';
+
+  // For submitted applications, priority is the moment of submission (updated_at or worker_leased_at)
+  if (isSubmitted) {
+    if (item.updated_at) {
+      const t = new Date(item.updated_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    if (item.worker_leased_at) {
+      const t = new Date(item.worker_leased_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+  } else {
+    // For leased / in-flight applications
+    if (item.worker_leased_at) {
+      const t = new Date(item.worker_leased_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    if (item.updated_at) {
+      const t = new Date(item.updated_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
   }
-  // 2. Timestamp from screenshot URL if present
+
+  // Fallback: timestamp from screenshot URL if present
   const shotUrl = item.application_submitted_screenshot_url || item.screenshot_url || item.applied_screenshot || item.screenshot_path || '';
   if (shotUrl && typeof shotUrl === 'string') {
     // Matches ISO timestamp like 2026-11-10T08-32-57-314Z or 2026-11-10T08:32:57.314Z
@@ -580,8 +607,9 @@ export function getApplicationEffectiveTimestamp(item) {
       if (!isNaN(t) && t > 0) return t;
     }
   }
-  // 3. Fallback to updated_at or created_at
-  const fallback = item.updated_at || item.created_at;
+
+  // Fallback to created_at
+  const fallback = item.created_at;
   const t = new Date(fallback).getTime();
   return isNaN(t) ? 0 : t;
 }
@@ -1055,6 +1083,7 @@ export async function fetchApplicationsDynamic({
           const effTs = getApplicationEffectiveTimestamp(dt);
           return effTs ? new Date(effTs).toISOString() : (dt.updated_at || dt.created_at);
         })(),
+        worker_leased_at: dt.worker_leased_at || null,
         created_at: dt.created_at,
       };
     });
@@ -1083,8 +1112,10 @@ export async function fetchApplicationsDynamic({
     // Filter strictly by day bounds: Submitted and failed stats are strictly for that selected day, while pending/ready_for_review tasks remain viewable
     if (bounds) {
       list = list.filter((item) => {
-        const ts = getApplicationEffectiveTimestamp(item);
-        const isInDay = ts >= startMs && ts <= endMs;
+        const updMs = item.updated_at ? new Date(item.updated_at).getTime() : 0;
+        const leaseMs = item.worker_leased_at ? new Date(item.worker_leased_at).getTime() : 0;
+        const effTs = getApplicationEffectiveTimestamp(item);
+        const isInDay = (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
         if (item.status === 'submitted' || item.status === 'completed' || item.status === 'already_applied' || item.status === 'failed') {
           return isInDay;
         }
@@ -1145,8 +1176,10 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 
     const matchesDay = (a) => {
       if (!bounds) return true;
-      const ts = getApplicationEffectiveTimestamp(a);
-      return ts >= startMs && ts <= endMs;
+      const updMs = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      const leaseMs = a.worker_leased_at ? new Date(a.worker_leased_at).getTime() : 0;
+      const effTs = getApplicationEffectiveTimestamp(a);
+      return (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
     };
 
     // 1. Submitted: strictly matching the day's time bounds
@@ -2626,8 +2659,10 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 
     const matchesDay = (j) => {
       if (!bounds) return true;
-      const ts = getApplicationEffectiveTimestamp(j);
-      return ts >= startMs && ts <= endMs;
+      const updMs = j.updated_at ? new Date(j.updated_at).getTime() : 0;
+      const leaseMs = j.worker_leased_at ? new Date(j.worker_leased_at).getTime() : 0;
+      const effTs = getApplicationEffectiveTimestamp(j);
+      return (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
     };
 
     const clientStats = assignedClients.map((client) => {
@@ -3561,7 +3596,9 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
           : null;
 
         const effectiveTs = getApplicationEffectiveTimestamp(d);
-        const matchesDate = !bounds || (effectiveTs >= startMs && effectiveTs <= endMs);
+        const updMs = d.updated_at ? new Date(d.updated_at).getTime() : 0;
+        const leaseMs = d.worker_leased_at ? new Date(d.worker_leased_at).getTime() : 0;
+        const matchesDate = !bounds || ((effectiveTs >= startMs && effectiveTs <= endMs) || (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs));
 
         // Day-wise filtering:
         // - If submitted / failed: MUST match the selected date bounds!

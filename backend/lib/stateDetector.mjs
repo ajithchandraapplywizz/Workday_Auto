@@ -111,30 +111,37 @@ export async function detectWorkdayStep(page) {
     const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"], legend'));
     for (const h of headings) {
       const text = (h.textContent || '').trim();
-      if (/^(create\s*account|sign\s*in|create\s*account\s*\/\s*sign\s*in)$/i.test(text)) return 'Unknown';
-      if (/^my\s*information$/i.test(text)) return 'My Information';
-      if (/^my\s*experience$/i.test(text)) return 'My Experience';
-      if (/^application\s*questions/i.test(text)) return 'Application Questions';
-      if (/^(voluntary\s*disclosures?|equal\s*employment|eeo|diversity)/i.test(text)) return 'Voluntary Disclosures';
-      if (/^(self[- ]?identif|disability|cc-?305)/i.test(text)) return 'Self Identify';
+      if (/create\s*account|sign\s*in/i.test(text)) return 'Unknown';
+      if (/\bmy\s*information\b/i.test(text)) return 'My Information';
+      if (/\bmy\s*experience\b/i.test(text)) return 'My Experience';
+      if (/\bapplication\s*questions\b/i.test(text)) return 'Application Questions';
+      if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
+      if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
       if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
     }
 
     // 3. Direct Review & Submit page detection (must precede bodyText because Review contains full text of all previous steps)
-    const hasSubmitButton = Boolean(
-      document.querySelector('button[data-automation-id*="submit" i], [data-automation-id="pageFooterSubmitButton"], button[type="submit"]') ||
-      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test(b.textContent || ''))
+    const hasGenuineSubmitButton = Boolean(
+      document.querySelector('[data-automation-id="pageFooterSubmitButton"]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()))
     );
-    if (hasSubmitButton && (/review/i.test(document.title) || /review\s*(?:and|&)\s*submit/i.test(document.body?.innerText || ''))) {
+    if (hasGenuineSubmitButton && (/review/i.test(document.title) || /review\s*(?:and|&)\s*submit/i.test(document.body?.innerText || ''))) {
       return 'Review';
     }
 
     const bodyText = document.body?.innerText || '';
-    if (hasSubmitButton || (/Review/i.test(bodyText) && /Review/i.test(document.title))) {
+    if (hasGenuineSubmitButton && (/Review/i.test(bodyText) && /Review/i.test(document.title))) {
       return 'Review';
     }
 
-    if (/How Did You Hear About Us/i.test(bodyText) || /Country\s*\/\s*Territory\s*Phone\s*Code/i.test(bodyText) || Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"]'))) {
+    if (
+      /How Did You Hear About Us/i.test(bodyText) ||
+      /Country\s*(?:\/|and)?\s*Territory\s*Phone\s*Code/i.test(bodyText) ||
+      /Country\s*Phone\s*Code/i.test(bodyText) ||
+      /Legal\s*Name/i.test(bodyText) ||
+      /Phone\s*Device\s*Type/i.test(bodyText) ||
+      Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"], input[data-automation-id*="firstName" i], input[data-automation-id="phone-number"]'))
+    ) {
       return 'My Information';
     }
     if (/Work Experience/i.test(bodyText) && (/Resume\/CV|Education|Skills/i.test(bodyText))) return 'My Experience';
@@ -157,10 +164,10 @@ export async function isWorkdayReviewPage(page) {
       return true;
     }
 
-    // 2. Submit button presence
+    // 2. Submit button presence (strictly genuine submit button, never 'Save and Continue' or generic submit type)
     const hasSubmitButton = Boolean(
-      document.querySelector('button[data-automation-id*="submit" i], [data-automation-id="pageFooterSubmitButton"], button[type="submit"]') ||
-      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test(b.textContent || ''))
+      document.querySelector('[data-automation-id="pageFooterSubmitButton"]') ||
+      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()))
     );
 
     // 3. Review heading or title

@@ -1411,21 +1411,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
         const zohoErr = `zoho mail not connected (AWL-ID: ${cleanAwl}, mail: ${task.candidateEmail || ''})`;
 
-        console.log(`\n${'═'.repeat(90)}`);
-
-        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] ZOHO MAILBOX NOT CONNECTED — MARKING FAILED IMMEDIATELY`);
-
-        console.log(`   • Candidate: ${task.applywizz_id} (${task.candidateEmail || 'no email'})`);
-
-        console.log(`   • Status: FAILED (No retries)`);
-
-        console.log(`   • Reason: ${zohoErr}`);
-
-        console.log(`   • Updating job_distributions #${task.distribution_id || task.id} -> 'failed'`);
-
-        console.log(`   • Updating batch_job_queue for candidate -> 'failed'`);
-
-        console.log(`${'═'.repeat(90)}\n`);
+        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] Zoho mail not connected for ${task.applywizz_id} (${task.candidateEmail || 'no email'}) — marked failed (no retries). Reason: ${zohoErr}`);
 
 
 
@@ -1544,25 +1530,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
         const retryMsg = `[Attempt ${currentAttempt}/3] Halted at "${failedStep}": ${rawErrMsg}`;
 
-        console.log(`\n${'═'.repeat(90)}`);
-
-        console.log(`🔄 [STAGE 3: SUBMITTER] [${workerId}] SUBMISSION ATTEMPT ${currentAttempt}/3 FAILED — REVERTING TO READY_FOR_REVIEW`);
-
-        console.log(`   • Candidate: ${task.applywizz_id} @ ${task.company || 'Workday'}`);
-
-        console.log(`   • Attempt: ${currentAttempt} of 3 (Will retry up to 3 attempts before marking failed)`);
-
-        console.log(`   • Status: Reverting strictly to ready_for_review (DO NOT MARK FAILED)`);
-
-        console.log(`   • Halted At Step: ${failedStep}`);
-
-        console.log(`   • Reason: ${rawErrMsg}`);
-
-        console.log(`   • Screenshot Updated: ${finalShotUrl || 'None'}`);
-
-        console.log(`   • Table: job_distributions #${task.distribution_id || task.id} -> 'ready_for_review'`);
-
-        console.log(`${'═'.repeat(90)}\n`);
+        console.log(`🔄 [STAGE 3: SUBMITTER] [${workerId}] Attempt ${currentAttempt}/3 failed for ${task.applywizz_id} @ ${task.company || 'Workday'} (step: ${failedStep}). Reverted to ready_for_review. Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'None'}`);
 
 
 

@@ -783,7 +783,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   console.log('  🎯 [Field 2/4] Resolving Previous Worker / Employed Before radio group (default: "No")...');
   try {
-    const prevWorkerRegex = /previously\s*(been\s*)?employed|previously\s*worked|prior\s*(to\s*this\s*)?(employment|worker|experience)|employed.*in\s*the\s*past|current\s*or\s*former\s*employee|affiliate.*employee|candidateIsPreviousWorker/i;
+    const prevWorkerRegex = /previously\s*(been\s*)?employed|previously\s*worked|prior\s*(to\s*this\s*)?(employment|worker|experience)|employed.*in\s*the\s*past|current\s*or\s*former\s*employee|former\s*.*employee|former\s*.*worker|affiliate.*employee|candidateIsPreviousWorker/i;
     const previousWorkerGroup = page.getByRole('group', { name: prevWorkerRegex })
       .or(page.getByRole('radiogroup', { name: prevWorkerRegex }))
       .or(page.locator('fieldset').filter({ hasText: prevWorkerRegex }))
@@ -2009,12 +2009,7 @@ async function confirmSubmitInTerminal(autoConfirm, dryRun = false) {
   try {
     rl = readline.createInterface({ input, output });
     process.stdin.resume();
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log('READY TO SUBMIT — Review is on screen');
-    console.log('   [Y] Yes  — submit this application');
-    console.log('   [N] No   — do not submit (stop batch here)');
-    console.log('   [S] Skip — do not submit, continue to the next URL');
-    console.log(`${'═'.repeat(60)}`);
+    console.log('READY TO SUBMIT — Review is on screen: [Y] Yes, [N] No, [S] Skip');
     while (true) {
       const answer = await rl.question('\n> Submit? [Y/N/S]: ');
       const choice = answer.trim().toLowerCase();
@@ -2047,14 +2042,7 @@ export async function promptStuckStepDecision({ stepName = '', company = '' } = 
   const rl = readline.createInterface({ input, output });
   try {
     process.stdin.resume();
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log('⚠️  APPLICATION INCOMPLETE — could not advance wizard step');
-    if (company) console.log(`   Company: ${company}`);
-    if (stepName) console.log(`   Stuck on: ${stepName}`);
-    console.log('\n   Fill missing required fields in the browser (or answer prompts above).');
-    console.log('   [R] or Enter — Retry fill + advance on this application');
-    console.log('   [Q] Quit — stop batch here (will NOT open next URL)');
-    console.log(`${'═'.repeat(60)}`);
+    console.log(`⚠️ APPLICATION INCOMPLETE — could not advance wizard step${company ? ` (${company})` : ''}${stepName ? ` [step: ${stepName}]` : ''} | [R] Retry, [Q] Quit`);
     const answer = await rl.question('\n> Your choice [R/q]: ');
     const choice = answer.trim().toLowerCase();
     if (choice === 'q' || choice === 'quit' || choice === 'stop') return 'quit';
@@ -2068,15 +2056,7 @@ export async function promptScanReviewDecision({ company = '', url = '' } = {}) 
   const rl = readline.createInterface({ input, output });
   try {
     process.stdin.resume();
-    console.log(`\n${'═'.repeat(60)}`);
-    console.log('⏸️  SCAN PAUSED — Review step (browser left open for you)');
-    if (company) console.log(`   Company: ${company}`);
-    if (url) console.log(`   URL: ${url}`);
-    console.log('\n   Check the application in the browser, then choose:');
-    console.log('   [Y] or Enter — Next URL (do NOT submit, continue batch)');
-    console.log('   [S] Submit — submit this application, then continue batch');
-    console.log('   [Q] Quit — stop batch scan here');
-    console.log(`${'═'.repeat(60)}`);
+    console.log(`⏸️ SCAN PAUSED — Review step${company ? ` (${company})` : ''} | [Y] Next URL, [S] Submit, [Q] Quit`);
     const answer = await rl.question('\n> Your choice [Y/s/q]: ');
     const choice = answer.trim().toLowerCase();
     if (choice === 'q' || choice === 'quit' || choice === 'stop') return 'stop';
@@ -2410,12 +2390,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
 export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false, dryRun = false, workdayEmail = '', workdayPassword = '', mode = 'signin' } = {}) {
-  console.log(`\n${'═'.repeat(60)}`);
-  console.log(`STARTING WORKDAY WIZARD LOOP (script-only Playwright)`);
-  console.log(`  Policy: REQUIRED fields only — no optional / unimportant clicks`);
-  console.log(`  Allowed: scripted fills + Save and Continue / Next / Submit`);
-  console.log(`  Blocked: Certifications Add, bare Add, Help/Share, optional questions`);
-  console.log(`${'═'.repeat(60)}`);
+  console.log('STARTING WORKDAY WIZARD LOOP (script-only Playwright, required fields only)');
 
   // Fresh session markers for THIS job URL — never reuse prior page fingerprints/skips.
   resetPerApplicationSessionState(profile);
@@ -3641,10 +3616,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         await recordResult(url, plan, status, fieldResults);
       } catch { /* non-critical */ }
 
-      console.log(`\n${'─'.repeat(60)}`);
-      console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status}`);
-      console.log(`   Screenshots: In-Memory Buffer -> Cloud Storage (Supabase)`);
-      console.log(`${'─'.repeat(60)}`);
+      console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
 
       // Determine hold time before browser close based on outcome:
       // — quick close for skipped/declined/blocked/reached-review
@@ -4048,10 +4020,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       await recordResult(url, plan, status, fieldResults);
     } catch { /* non-critical */ }
 
-    console.log(`\n${'─'.repeat(60)}`);
-    console.log(`🏁 Result: ${status}`);
-    console.log(`   Screenshots: In-Memory Buffer -> Cloud Storage (Supabase)`);
-    console.log(`${'─'.repeat(60)}`);
+    console.log(`🏁 Result: ${status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
 
     console.log(`\n   — Closing browser...`);
     try {
