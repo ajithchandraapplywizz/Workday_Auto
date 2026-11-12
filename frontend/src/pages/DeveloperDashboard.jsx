@@ -2519,7 +2519,7 @@ export default function DeveloperDashboard() {
                               </span>
                             );
                           }
-                          if (run.status?.toLowerCase() === 'already_scanned') {
+                          if (run.status?.toLowerCase() === 'already_scanned' || run.status?.toLowerCase() === 'scanned') {
                             return (
                               <span
                                 className="video-status-tag"
@@ -2531,7 +2531,7 @@ export default function DeveloperDashboard() {
                                   letterSpacing: '0.5px'
                                 }}
                               >
-                                ⚡ ALREADY SCANNED
+                                ⚡ SCANNED
                               </span>
                             );
                           }
@@ -2546,7 +2546,7 @@ export default function DeveloperDashboard() {
                         {(() => {
                           const shot = extractFailureScreenshot(run);
                           if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
-                          const isSuccess = ['submitted', 'reached_review', 'completed'].includes(run.status?.toLowerCase());
+                          const isSuccess = ['submitted', 'reached_review', 'completed', 'already_scanned', 'scanned'].includes(run.status?.toLowerCase());
                           return (
                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                               <button

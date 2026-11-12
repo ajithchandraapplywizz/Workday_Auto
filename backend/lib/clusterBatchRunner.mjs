@@ -246,6 +246,29 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
 
   if (!Array.isArray(rows)) return [];
 
+  // ── STRICT POLICY: ONLY PROCESS RECENTLY UPLOADED LINKS (AVOID OLDER LINKS) ──
+  // Do not touch older links from previous batches in batch_job_queue.
+  // If the user deleted ready_for_review of older tasks, respect that decision
+  // and do NOT re-scan, re-distribute, or re-resolve them.
+  let recentUrls = null;
+  let recentUrlSet = null;
+  let recentCanonicalKeys = new Set();
+  try {
+    const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
+    const recentRes = await getRecentBatchJobUrls();
+    if (recentRes?.urls && recentRes.urls.length > 0) {
+      recentUrls = recentRes.urls;
+      recentUrlSet = recentRes.urlSet;
+      for (const u of recentUrls) {
+        const { canonicalKey, cleanUrl } = canonicalizeWorkdayUrl(u);
+        if (canonicalKey) recentCanonicalKeys.add(canonicalKey);
+        if (cleanUrl) recentUrlSet.add(cleanUrl);
+      }
+    }
+  } catch (batchErr) {
+    console.warn(`[fetchQueueClusters] Note on recent batch check: ${batchErr.message}`);
+  }
+
   // Fetch completed scanned_jobs to strictly prevent re-scanning already completed links in the current run (R10)
   const completedScannedUrls = new Set();
   let activeScanRunId = scanRunId;
@@ -283,6 +306,7 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
       row.status === 'reached_review' ||
       row.status === 'already_reached_review' ||
       row.status === 'already_scanned' ||
+      row.status === 'scanned' ||
       row.status === 'failed' ||
       row.status === 'already_expired' ||
       row.status === 'expired'
@@ -296,6 +320,14 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
     }
 
     const { canonicalKey, cleanUrl, tenant, reqId } = canonicalizeWorkdayUrl(rawUrl);
+
+    // Strictly skip older links: Only process links that belong to the most recently uploaded batch!
+    if (recentUrlSet && recentUrlSet.size > 0) {
+      const isRecent = recentUrlSet.has(rawUrl) || (cleanUrl && recentUrlSet.has(cleanUrl)) || (canonicalKey && recentCanonicalKeys.has(canonicalKey));
+      if (!isRecent) {
+        continue;
+      }
+    }
 
     // Skip links that are already scanned and completed in scanned_jobs!
     if (completedScannedUrls.has(canonicalKey)) continue;
@@ -473,7 +505,7 @@ export async function resetClusterTasksToPending(taskIds = []) {
   }
 }
 
-export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired on Workday') {
+export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired on Workday', screenshotUrl = null) {
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
     const isComposite = taskIds.some((id) => String(id).includes(':::'));
@@ -492,6 +524,7 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
           prefer: 'return=minimal',
           body: {
             status: targetStatus,
+            screenshot_path: screenshotUrl || null,
             locked_at: null,
             updated_at: new Date().toISOString(),
           },
@@ -505,6 +538,7 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
         prefer: 'return=minimal',
         body: {
           status: targetStatus,
+          screenshot_path: screenshotUrl || null,
           locked_at: null,
           updated_at: new Date().toISOString(),
         },
@@ -828,8 +862,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       };
     } else {
       // Non-expired failure: Check retry policy (MAX_ATTEMPTS = 3)
-      const MAX_ATTEMPTS = 10;
-      if (currentAttempts < 9) {
+      const MAX_ATTEMPTS = 3;
+      if (currentAttempts < 2) {
         const nextAttempt = currentAttempts + 1;
         // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
         console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
@@ -893,7 +927,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
 
           if (allTaskIds.length > 0) {
-            await failClusterTasksByIds(allTaskIds, leadFailReason);
+            await failClusterTasksByIds(allTaskIds, leadFailReason, leadProofShot);
             console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
           }
         } else {
@@ -1518,9 +1552,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           body: {
             scanned_job_id: scannedJobId,
             screenshot_path: reviewShotUrl || null,
-            status: 'scanned',
+            status: 'already_scanned',
             job_id: blueprintTask?.job_id || cluster.reqId || null,
-            error_message: null,
             worker_id: null,
             locked_at: null,
             updated_at: new Date().toISOString(),
@@ -1537,9 +1570,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         body: {
           scanned_job_id: scannedJobId,
           screenshot_path: reviewShotUrl || null,
-          status: 'scanned',
+          status: 'already_scanned',
           job_id: blueprintTask?.job_id || cluster.reqId || null,
-          error_message: null,
           worker_id: null,
           locked_at: null,
           updated_at: new Date().toISOString(),

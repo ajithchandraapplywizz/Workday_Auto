@@ -47,9 +47,38 @@ export async function runResolvingWorkerPool(options = {}) {
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   });
 
-  const scannedJobs = (scannedRes.ok && scannedRes.json()) || [];
+  let scannedJobs = (scannedRes.ok && scannedRes.json()) || [];
   if (!Array.isArray(scannedJobs) || scannedJobs.length === 0) {
 // [SILENCED]     console.log(`[STAGE 2] No scanned jobs with questions waiting for resolution.`);
+    return { success: true, processedCount: 0 };
+  }
+
+  // Strictly filter scanned jobs to only those belonging to the current active batch
+  try {
+    const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
+    const { urls: activeBatchUrls } = await getRecentBatchJobUrls({ windowMinutes: 180 }).catch(() => ({ urls: [] }));
+    if (activeBatchUrls && activeBatchUrls.length > 0) {
+      const normSet = new Set(activeBatchUrls.map((u) => {
+        try {
+          const p = new URL(u);
+          return (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
+        } catch {
+          return String(u || '').toLowerCase().trim();
+        }
+      }));
+      scannedJobs = scannedJobs.filter((j) => {
+        try {
+          const p = new URL(j.job_url);
+          const k = (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
+          return normSet.has(k);
+        } catch {
+          return normSet.has(String(j.job_url || '').toLowerCase().trim());
+        }
+      });
+    }
+  } catch {}
+
+  if (scannedJobs.length === 0) {
     return { success: true, processedCount: 0 };
   }
 
@@ -76,11 +105,14 @@ export async function runResolvingWorkerPool(options = {}) {
     } catch {}
   }
 
-  // Fallback: check batch_job_queue unique applywizz_ids if still under 20
+  // Fallback: check batch_job_queue unique applywizz_ids from recent batch if still under 20
   if (activeCandidateIds.length < 20) {
     try {
+      const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
+      const { batchStart } = await getRecentBatchJobUrls().catch(() => ({ batchStart: null }));
+      const bqFilter = batchStart ? `?created_at=gte.${encodeURIComponent(batchStart)}&select=applywizz_id&limit=2000` : `?select=applywizz_id&limit=2000`;
       const bqRes = await httpsJsonWithRetry({
-        url: `${url}/rest/v1/batch_job_queue?select=applywizz_id&limit=2000`,
+        url: `${url}/rest/v1/batch_job_queue${bqFilter}`,
         headers: { apikey: key, Authorization: `Bearer ${key}` },
       });
       if (bqRes.ok) {

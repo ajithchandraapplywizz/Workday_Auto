@@ -25,16 +25,21 @@ export const LEAN_CHROMIUM_ARGS = [
   '--window-size=1280,900',
   '--disk-cache-size=33554432',
   '--media-cache-size=1',
+  '--in-process-gpu',
+  '--num-raster-threads=1',
+  '--disable-features=AudioServiceOutOfProcess,OptimizationHints,Translate,PaintHolding,DialMediaRouteProvider',
+  '--disable-threaded-animation',
+  '--disable-threaded-scrolling',
 ];
 
 /**
- * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID limit exhaustion.
+ * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID / pthread_create limit exhaustion.
  */
 export function cleanupOrphanChromeProcesses() {
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "(chrome|chromium|crashpad_handler).*(user-data-dir|playwright|crashpad)" || pkill -9 -f "crashpad_handler" || true', () => {});
-      exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* /tmp/core.* || true', () => {});
+      exec('pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || pkill -9 -f "crashpad_handler" || true', () => {});
+      exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
     } catch {}
   }
 }

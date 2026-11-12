@@ -1334,6 +1334,49 @@ export async function ingestCsvToBatchQueue(items = [], { chunkSize = 250 } = {}
   return { inserted: totalInserted };
 }
 
+/**
+ * Retrieves the canonical list of recently uploaded job URLs from batch_job_queue.
+ * Strictly identifies the most recent upload batch (by maximum created_at) and
+ * returns only URLs uploaded in that batch window (default 120 minutes), avoiding older links.
+ * 
+ * @param {Object} [options]
+ * @param {number} [options.windowMinutes=120]
+ * @returns {Promise<{ urls: string[], urlSet: Set<string>, latestBatchTime: string|null, batchStart: string|null }>}
+ */
+export async function getRecentBatchJobUrls({ windowMinutes = 120 } = {}) {
+  if (!isSupabaseConfigured()) return { urls: [], urlSet: new Set(), latestBatchTime: null, batchStart: null };
+  try {
+    const latestRows = await request('batch_job_queue', {
+      query: '?select=created_at&order=created_at.desc&limit=1',
+    }).catch(() => []);
+
+    const latestRow = latestRows?.[0];
+    if (!latestRow?.created_at) {
+      return { urls: [], urlSet: new Set(), latestBatchTime: null, batchStart: null };
+    }
+
+    const latestMs = new Date(latestRow.created_at).getTime();
+    const batchStart = new Date(latestMs - windowMinutes * 60 * 1000).toISOString();
+
+    const batchRows = await request('batch_job_queue', {
+      query: `?select=job_url,created_at&created_at=gte.${encodeURIComponent(batchStart)}&limit=5000`,
+    }).catch(() => []);
+
+    const urls = Array.from(new Set((batchRows || []).map((r) => r.job_url?.trim()).filter(Boolean)));
+    const urlSet = new Set(urls);
+
+    return {
+      urls,
+      urlSet,
+      latestBatchTime: latestRow.created_at,
+      batchStart,
+    };
+  } catch (err) {
+    console.warn(`[getRecentBatchJobUrls] Error: ${err.message}`);
+    return { urls: [], urlSet: new Set(), latestBatchTime: null, batchStart: null };
+  }
+}
+
 export async function getActiveCaCandidateIds({ caEmails = null } = {}) {
   if (!isSupabaseConfigured()) return { activeEmails: [], candidateIds: [], clientToCaMap: {} };
   try {
@@ -3453,25 +3496,7 @@ export async function syncQueueWithScannedAndFailedJobs() {
       const matchedSj = scannedMap.get(normKey);
       const matchedFj = failedMap.get(normKey);
 
-      if (matchedSj && row.status !== 'reached_review' && row.status !== 'already_reached_review' && row.status !== 'already_scanned' && row.status !== 'submitted') {
-        // Ensure distribution exists in job_distributions so jobs never get stranded
-        try {
-          const distCheck = await request('job_distributions', {
-            query: `?job_url=eq.${encode(row.job_url)}&select=id&limit=1`,
-          });
-          if (!Array.isArray(distCheck) || distCheck.length === 0) {
-            await recordJobDistributions({
-              jobUrl: row.job_url,
-              company: row.company,
-              roleTitle: row.role_title,
-              scrapedQuestions: matchedSj.scraped_questions || [],
-              screenshotUrl: matchedSj.screenshot_path || null,
-              status: 'distributed',
-              leadApplywizzId: parseCandidateAwlIds(row.applywizz_id)[0] || null,
-            }).catch(() => {});
-          }
-        } catch {}
-
+      if (matchedSj && row.status !== 'reached_review' && row.status !== 'already_reached_review' && row.status !== 'already_scanned' && row.status !== 'scanned' && row.status !== 'submitted') {
         await request('batch_job_queue', {
           method: 'PATCH',
           query: `?id=eq.${row.id}`,

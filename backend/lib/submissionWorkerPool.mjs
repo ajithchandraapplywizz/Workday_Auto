@@ -38,121 +38,70 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
 
 
 
+const envWorkerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
+
 export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds && PIPELINE_CONFIG.submitWorkerIds.length > 0)
-
   ? PIPELINE_CONFIG.submitWorkerIds
-
-  : Array.from({ length: PIPELINE_CONFIG.workersCount || 2 }, (_, i) => `submitting_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
-
-
+  : Array.from({ length: envWorkerCount }, (_, i) => `submitting_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
 
 /**
-
- * Dynamically resolves the active 2-worker slot pair for this container instance.
-
- * - If SUBMISSION_WORKER_IDS or SUBMIT_WORKER_IDS is set, uses it directly.
-
- * - If WORKER_OFFSET is set, uses it directly.
-
- * - In multi-replica Railway deployments where replicas share identical env vars,
-
- *   pairs of workers ([1,2], [3,4], [5,6], [7,8]) are automatically assigned without collision.
-
+ * Dynamically resolves the active worker slots for this container instance.
+ * Strictly respects WORKER_COUNT from env.
  */
-
 export async function resolveInstanceSubmissionWorkerIds() {
-
   if (process.env.SUBMISSION_WORKER_IDS) {
-
     return process.env.SUBMISSION_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
-
   }
-
   if (process.env.SUBMIT_WORKER_IDS) {
-
     return process.env.SUBMIT_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
-
   }
 
-
-
+  const workerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
   const baseOffset = Number(process.env.WORKER_OFFSET);
-
   if (!Number.isNaN(baseOffset) && process.env.WORKER_OFFSET !== undefined) {
-
-    return Array.from({ length: PIPELINE_CONFIG.workersCount || 2 }, (_, i) => `submitting_worker_${i + 1 + baseOffset}`);
-
+    return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + baseOffset}`);
   }
-
-
-
-  // Multi-replica Railway automatic pair allocation across strictly 8 max cluster workers:
-  const candidatePairs = [
-    ['submitting_worker_1', 'submitting_worker_2'],
-    ['submitting_worker_3', 'submitting_worker_4'],
-    ['submitting_worker_5', 'submitting_worker_6'],
-    ['submitting_worker_7', 'submitting_worker_8'],
-  ];
 
   const replicaIndex = Number(process.env.RAILWAY_REPLICA_INDEX ?? process.env.REPLICA_INDEX);
-  if (!Number.isNaN(replicaIndex) && candidatePairs[replicaIndex]) {
-    return candidatePairs[replicaIndex];
+  const effectiveOffset = !Number.isNaN(replicaIndex) ? replicaIndex * workerCount : 0;
+  if (!Number.isNaN(replicaIndex)) {
+    return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + effectiveOffset}`);
   }
 
-
+  // Multi-replica Railway automatic allocation of size workerCount across max cluster workers:
+  const candidateGroups = [];
+  for (let offset = 0; offset < 8; offset += workerCount) {
+    candidateGroups.push(
+      Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + offset}`)
+    );
+  }
 
   if (!supabase) {
-
-    return SUBMISSION_WORKER_IDS;
-
+    return candidateGroups[0] || SUBMISSION_WORKER_IDS;
   }
 
-
-
   try {
-
     const activeCutoff = new Date(Date.now() - 60 * 1000).toISOString();
-
     const { data: activeWorkers } = await supabase
-
       .from('worker_status')
-
       .select('worker_id, state, updated_at')
-
-      .in('worker_id', candidatePairs.flat())
-
+      .in('worker_id', candidateGroups.flat())
       .gt('updated_at', activeCutoff);
 
-
-
     const activeSet = new Set(
-
       (activeWorkers || [])
-
         .filter((w) => w.state === 'in_flight' || w.state === 'busy')
-
         .map((w) => w.worker_id)
-
     );
 
-
-
-    for (const pair of candidatePairs) {
-
-      if (!pair.some((id) => activeSet.has(id))) {
-
-        return pair;
-
+    for (const group of candidateGroups) {
+      if (!group.some((id) => activeSet.has(id))) {
+        return group;
       }
-
     }
-
   } catch { }
 
-
-
-  return SUBMISSION_WORKER_IDS;
-
+  return candidateGroups[0] || SUBMISSION_WORKER_IDS;
 }
 
 
@@ -484,74 +433,74 @@ export async function claimNextTask(workerId) {
 
   const now = new Date().toISOString();
 
-  const MAX_CLUSTER_CONCURRENCY = 8;
-
-  const maxConcurrent = Math.min(
-
-    MAX_CLUSTER_CONCURRENCY,
-
-    Number(process.env.CLUSTER_CONCURRENCY) ||
-
+  // Strictly respect worker count from env
+  const envWorkerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || 2;
+  const totalServices = Number(process.env.TOTAL_SERVICES) || 1;
+  const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
     Number(process.env.GLOBAL_WORKER_COUNT) ||
-
     Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
+    (envWorkerCount * totalServices);
 
-    MAX_CLUSTER_CONCURRENCY
-
-  );
-
-
-
-  // Cluster Concurrency Guard: Strictly at most 8 rows can be 'applying' across all services and replicas
-
+  // Cluster Concurrency Guard: Strictly at most maxConcurrent rows can be 'applying' across all services and replicas
   try {
-
     // Check raw total count of rows currently in 'applying' state across the entire database
-
     const { count: rawApplyingCount } = await supabase
-
       .from('job_distributions')
-
       .select('*', { count: 'exact', head: true })
-
       .eq('status', 'applying');
 
-
-
     if (typeof rawApplyingCount === 'number' && rawApplyingCount >= maxConcurrent) {
-
       // Proactively reap any stale / expired leases right now
-
       const reaped = await reapExpiredLeases(3).catch(() => []);
-
       const remainingApplying = rawApplyingCount - (reaped?.length || 0);
-
       if (remainingApplying >= maxConcurrent) {
-
         return null;
-
       }
-
     }
-
   } catch { }
 
 
 
   // 1. Direct atomic CAS on job_distributions (Candidate picking strictly from job_distributions without pre-sync)
-
   try {
+    // Fetch active batch URLs from batch_job_queue to strictly guarantee submitter ONLY picks recently uploaded links
+    let activeBatchUrls = null;
+    try {
+      const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
+      const { urls } = await getRecentBatchJobUrls({ windowMinutes: 120 });
+      if (urls && urls.length > 0) {
+        activeBatchUrls = urls;
+      }
+    } catch (batchErr) {
+      console.warn(`[${workerId}] Note on recent batch query: ${batchErr.message}`);
+    }
+
+    // STRICT GUARD: If no recently uploaded batch links found, DO NOT touch older links! Return null.
+    if (!activeBatchUrls || activeBatchUrls.length === 0) {
+      console.log(`[${workerId}] ℹ️ No recently uploaded batch links found in batch_job_queue. Strictly skipping older tasks.`);
+      return null;
+    }
 
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
     // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt, OR was stopped by user)
-    let { data: candidates, error: candErr } = await supabase
+    // Exclude tasks in resource cooldown to prevent tight re-claim loops during EAGAIN
+    let candQuery = supabase
       .from('job_distributions')
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
       .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed')
-      .or('error_message.is.null,error_message.not.ilike.%[Attempt%,error_message.ilike.%Stopped by user%')
+      .neq('status', 'archived')
+      .not('error_message', 'ilike', '%Resource Cooldown%')
+      .not('error_message', 'ilike', '%Host process limit%')
+      .or('error_message.is.null,error_message.not.ilike.%[Attempt%,error_message.ilike.%Stopped by user%');
+
+    if (activeBatchUrls && activeBatchUrls.length > 0) {
+      candQuery = candQuery.in('job_url', activeBatchUrls);
+    }
+
+    let { data: candidates, error: candErr } = await candQuery
       .order('created_at', { ascending: true })
       .limit(10);
 
@@ -561,15 +510,22 @@ export async function claimNextTask(workerId) {
 
     // 2. Only after all 0th attempt applications have finished processing, claim deferred Attempt 1 retries
     if (!candidates || candidates.length === 0) {
-      const { data: retryCandidates } = await supabase
+      let retryQuery1 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
+        .neq('status', 'archived')
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
-        .lte('updated_at', retryCooldownCutoff)
+        .lte('updated_at', retryCooldownCutoff);
+
+      if (activeBatchUrls && activeBatchUrls.length > 0) {
+        retryQuery1 = retryQuery1.in('job_url', activeBatchUrls);
+      }
+
+      const { data: retryCandidates } = await retryQuery1
         .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates || [];
@@ -577,15 +533,22 @@ export async function claimNextTask(workerId) {
 
     // 3. Only after all Attempt 1 retries have finished processing, claim deferred Attempt 2 retries
     if (!candidates || candidates.length === 0) {
-      const { data: retryCandidates2 } = await supabase
+      let retryQuery2 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
+        .neq('status', 'archived')
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
-        .lte('updated_at', retryCooldownCutoff)
+        .lte('updated_at', retryCooldownCutoff);
+
+      if (activeBatchUrls && activeBatchUrls.length > 0) {
+        retryQuery2 = retryQuery2.in('job_url', activeBatchUrls);
+      }
+
+      const { data: retryCandidates2 } = await retryQuery2
         .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates2 || [];
@@ -593,13 +556,20 @@ export async function claimNextTask(workerId) {
 
     // 4. Fallback for any unsubmitted ready_for_review applications (e.g. tasks reset to ready_for_review)
     if (!candidates || candidates.length === 0) {
-      const { data: retryCandidates3 } = await supabase
+      let retryQuery3 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
+        .neq('status', 'archived');
+
+      if (activeBatchUrls && activeBatchUrls.length > 0) {
+        retryQuery3 = retryQuery3.in('job_url', activeBatchUrls);
+      }
+
+      const { data: retryCandidates3 } = await retryQuery3
         .order('updated_at', { ascending: true })
         .limit(10);
       candidates = retryCandidates3 || [];
@@ -1393,11 +1363,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             status: 'ready_for_review',
             worker_id: null,
             worker_leased_at: null,
-            error_message: 'Host process limit reached (EAGAIN) — standing by for resources',
+            error_message: '[Resource Cooldown] Host process limit reached (EAGAIN) — standing by for resources',
             updated_at: now,
           },
         });
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 10000));
         return { status: 'resource_cooldown', error: rawErrMsg };
       }
 
@@ -1878,11 +1848,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           status: 'ready_for_review',
           worker_id: null,
           worker_leased_at: null,
-          error_message: 'Host process limit reached (EAGAIN) — standing by for resources',
+          error_message: '[Resource Cooldown] Host process limit reached (EAGAIN) — standing by for resources',
           updated_at: now,
         },
       });
-      await new Promise((r) => setTimeout(r, 5000));
+      await new Promise((r) => setTimeout(r, 10000));
       return { status: 'resource_cooldown', error: errMsg };
     }
 

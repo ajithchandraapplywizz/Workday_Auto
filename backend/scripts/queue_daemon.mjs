@@ -339,13 +339,18 @@ async function syncBotControlState(patch = {}) {
 export async function checkStage1Completion() {
   let pendingBatchCount = 0;
   try {
-    const { count, error: bqErr } = await supabase
-      .from('batch_job_queue')
-      .select('*', { count: 'exact', head: true })
-      .in('status', ['pending', 'processing']);
+    const { getRecentBatchJobUrls } = await import('../lib/supabaseClient.mjs');
+    const { urls: recentUrls } = await getRecentBatchJobUrls({ windowMinutes: 120 });
+    if (recentUrls && recentUrls.length > 0) {
+      const { count, error: bqErr } = await supabase
+        .from('batch_job_queue')
+        .select('*', { count: 'exact', head: true })
+        .in('job_url', recentUrls)
+        .in('status', ['pending', 'processing']);
 
-    if (!bqErr && typeof count === 'number') {
-      pendingBatchCount = count;
+      if (!bqErr && typeof count === 'number') {
+        pendingBatchCount = count;
+      }
     }
   } catch { }
 
@@ -696,6 +701,15 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
   const runDedicatedWorkerLoop = async (workerId) => {
     while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
       try {
+        // Verify authoritative DB bot_control state before claiming to guarantee instant stop across devices
+        try {
+          const bcCheck = await getBotControl().catch(() => null);
+          if (bcCheck && (bcCheck.stop_requested || bcCheck.submit_stop_requested || bcCheck.is_running === false || bcCheck.submit_status === 'off')) {
+            console.log(`🛑 [SUBMISSION WORKER] ${workerId} detected stop signal in bot_control. Halting submission worker loop immediately.`);
+            break;
+          }
+        } catch {}
+
         const claimedTask = await claimNextTask(workerId);
         if (!claimedTask) {
           activeSubmittingWorkers.delete(workerId);
@@ -752,6 +766,17 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
             stage: 'submitting',
             current_application_id: null,
           }).catch(() => { });
+        }
+
+        // If host resource exhaustion occurred, back off and clean up instead of immediate 20ms pickup
+        if (res?.status === 'resource_cooldown') {
+          console.warn(`⏳ [${workerId}] Host resource limitation detected (EAGAIN/pthread_create). Backing off for 15s to allow system threads and memory to recover...`);
+          try {
+            const { cleanupOrphanChromeProcesses } = await import('../lib/browserLifecycle.mjs');
+            cleanupOrphanChromeProcesses();
+          } catch {}
+          await new Promise((r) => setTimeout(r, 15000));
+          continue;
         }
 
         // ⚡ IMMEDIATE PICKUP: Immediately pick next job in queue right after previous filling & screenshot!
@@ -902,22 +927,32 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
       }
 
       // ── STRICT TERMINATION CHECK: Stop scanner_resolver service when all work is finished ──
-      // Check remaining pending items in batch_job_queue
-      const { data: pendingJobs } = await supabase
-        .from('batch_job_queue')
-        .select('id')
-        .in('status', ['pending', 'queued', 'processing'])
-        .limit(1);
+      // Check remaining pending items in batch_job_queue strictly for recent batch
+      const { getRecentBatchJobUrls: getRecentDaemonUrls } = await import('../lib/supabaseClient.mjs');
+      const { urls: recentDaemonUrls } = await getRecentDaemonUrls({ windowMinutes: 120 }).catch(() => ({ urls: [] }));
 
-      // Check remaining unresolved candidate applications in job_distributions
-      const { data: pendingDistributions } = await supabase
-        .from('job_distributions')
-        .select('id')
-        .in('status', ['pending', 'queued', 'resolving'])
-        .limit(1);
+      let hasPendingQueue = false;
+      if (recentDaemonUrls && recentDaemonUrls.length > 0) {
+        const { data: pendingJobs } = await supabase
+          .from('batch_job_queue')
+          .select('id')
+          .in('job_url', recentDaemonUrls)
+          .in('status', ['pending', 'queued', 'processing'])
+          .limit(1);
+        hasPendingQueue = Array.isArray(pendingJobs) && pendingJobs.length > 0;
+      }
 
-      const hasPendingQueue = Array.isArray(pendingJobs) && pendingJobs.length > 0;
-      const hasPendingDist = Array.isArray(pendingDistributions) && pendingDistributions.length > 0;
+      // Check remaining unresolved candidate applications in job_distributions strictly for recent batch
+      let hasPendingDist = false;
+      if (recentDaemonUrls && recentDaemonUrls.length > 0) {
+        const { data: pendingDistributions } = await supabase
+          .from('job_distributions')
+          .select('id')
+          .in('job_url', recentDaemonUrls)
+          .in('status', ['pending', 'queued', 'resolving'])
+          .limit(1);
+        hasPendingDist = Array.isArray(pendingDistributions) && pendingDistributions.length > 0;
+      }
 
       if (!hasPendingQueue && !hasPendingDist) {
         console.log(`\n✅ [DAEMON] [SCANNER & RESOLVER COMPLETE] All batch_job_queue links finalized (scanned/expired/failed) and all job_distributions reached ready_for_review.`);
@@ -2231,13 +2266,15 @@ export async function initOnStartup() {
       const hasSubmitStopSignal = !isStartSignal && Boolean(
         bc?.submit_stop_requested ||
         bc?.last_action_requested === 'stop_submit' ||
-        submitCtrl?.stop_requested
+        submitCtrl?.stop_requested ||
+        (bc && bc.submit_status === 'off' && submitStatus === 'running')
       );
       const hasGlobalStopSignal = !isStartSignal && Boolean(
         bc?.stop_requested ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_all' ||
-        bc?.last_action_requested === 'stop_pipeline'
+        bc?.last_action_requested === 'stop_pipeline' ||
+        (bc && bc.is_running === false && bc.scan_status === 'off' && bc.submit_status === 'off')
       );
 
       if (hasGlobalStopSignal) {
@@ -2246,11 +2283,13 @@ export async function initOnStartup() {
           await stopAutonomousPool();
           if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
           if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
+          // Note: Leave bc.stop_requested and bc.last_action_requested intact in Supabase so ALL replicas and dashboard see the stop!
           await syncBotControlState({
-            scan_stop_requested: false,
-            submit_stop_requested: false,
-            last_action_requested: null,
-            stop_requested: false,
+            is_running: false,
+            stage: 'idle',
+            mode: 'idle',
+            active_worker_count: 0,
+            current_action: 'Idle (Stopped by user)',
           }).catch(() => { });
         }
         return;
@@ -2262,9 +2301,8 @@ export async function initOnStartup() {
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
         await syncBotControlState({
-          scan_stop_requested: false,
-          last_action_requested: null,
-          stop_requested: false,
+          scan_status: 'off',
+          scan_enabled: false,
         }).catch(() => { });
         handledScanStop = true;
       }
@@ -2275,9 +2313,8 @@ export async function initOnStartup() {
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
         await syncBotControlState({
-          submit_stop_requested: false,
-          last_action_requested: null,
-          stop_requested: false,
+          submit_status: 'off',
+          submit_enabled: false,
         }).catch(() => { });
         handledSubmitStop = true;
       }

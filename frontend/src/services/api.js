@@ -241,16 +241,60 @@ export async function saveClientQuestion({ applywizzId, questionRaw, answer, fie
 }
 
 /**
+ * Helper to fetch active/recently uploaded job URLs from the latest batch in batch_job_queue.
+ * Strictly isolates recently uploaded links and ignores older links from previous upload batches.
+ */
+export async function getActiveRecentBatchJobUrls({ windowMinutes = 120 } = {}) {
+  try {
+    const { data: latestQueueRow } = await supabase
+      .from('batch_job_queue')
+      .select('created_at')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (latestQueueRow?.created_at) {
+      const latestMs = new Date(latestQueueRow.created_at).getTime();
+      const batchStart = new Date(latestMs - windowMinutes * 60 * 1000).toISOString();
+      const { data: batchQueueRows } = await supabase
+        .from('batch_job_queue')
+        .select('job_url')
+        .gte('created_at', batchStart);
+
+      if (batchQueueRows && batchQueueRows.length > 0) {
+        return Array.from(new Set(batchQueueRows.map((r) => r.job_url?.trim()).filter(Boolean)));
+      }
+    }
+  } catch (err) {
+    console.warn('[getActiveRecentBatchJobUrls] Note:', err?.message);
+  }
+  return [];
+}
+
+/**
  * 8. Supabase: Fetch batch queue
  */
 export async function fetchBatchQueue() {
   try {
-    const { data, error } = await supabase
+    // 1. Fetch active URLs strictly from most recent batch in batch_job_queue
+    const activeBatchUrls = await getActiveRecentBatchJobUrls();
+
+    let query = supabase
       .from('job_distributions')
       .select('id, applywizz_id, job_url, company, role_title, status, created_at, updated_at')
       .in('status', ['ready_to_review', 'ready_for_review', 'review_and_submit', 'queued', 'queued_for_submission', 'distributed', 'pending', 'approved_for_submission', 'needs_answers'])
+      .neq('status', 'archived');
+
+    if (activeBatchUrls && activeBatchUrls.length > 0) {
+      query = query.in('job_url', activeBatchUrls);
+    } else {
+      return { success: true, queue: [] };
+    }
+
+    const { data, error } = await query
       .order('created_at', { ascending: false })
-      .limit(100);
+      .limit(500);
+
     if (error) throw error;
     return { success: true, queue: data || [] };
   } catch (err) {
@@ -954,7 +998,7 @@ export async function fetchApplicationsDynamic({
       endMs = new Date(bounds.endIso).getTime();
 
       if (isToday) {
-        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
         query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
       }
@@ -965,6 +1009,9 @@ export async function fetchApplicationsDynamic({
       console.error('Error fetching applications from job_distributions:', error);
     }
     const rawApps = data || [];
+
+    // Fetch active URLs strictly from most recent batch in batch_job_queue to avoid older links
+    const activeBatchUrls = await getActiveRecentBatchJobUrls().catch(() => []);
 
     let list = rawApps.map((dt) => {
       const proofShot = dt.application_submitted_screenshot_url || dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
@@ -1021,6 +1068,18 @@ export async function fetchApplicationsDynamic({
       return true;
     });
 
+    // Filter out older unsubmitted/review links: Only show ready_for_review / queued items for recently uploaded batch!
+    if (activeBatchUrls && activeBatchUrls.length > 0) {
+      list = list.filter((item) => {
+        // Submitted or failed items are historical records for the date filter
+        if (item.status === 'submitted' || item.status === 'failed' || item.status === 'already_applied') {
+          return true;
+        }
+        // Unsubmitted / ready_for_review / queued items must belong strictly to recently uploaded batch
+        return activeBatchUrls.includes(item.job_url?.trim());
+      });
+    }
+
     // Filter strictly by day bounds so yesterday stays in yesterday, today stays in today
     if (bounds) {
       list = list.filter((item) => {
@@ -1045,7 +1104,9 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let query = supabase.from('job_distributions').select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at');
+    let query = supabase.from('job_distributions')
+      .select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at')
+      .neq('status', 'archived');
 
     if (managerId && managerId !== 'All') {
       query = query.eq('manager_id', managerId);
@@ -1066,7 +1127,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       endMs = new Date(bounds.endIso).getTime();
 
       if (isToday) {
-        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
         query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
       }
@@ -1077,6 +1138,9 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       console.error('Error fetching job_distributions KPIs:', appsErr);
     }
     const allApps = apps || [];
+
+    // Fetch active URLs strictly from most recent batch in batch_job_queue
+    const activeBatchUrls = await getActiveRecentBatchJobUrls().catch(() => []);
 
     const matchesDay = (a) => {
       if (!bounds) return true;
@@ -1138,7 +1202,8 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
         'approved_for_submission',
         'needs_answers'
       ].includes(st);
-      return isQ && (isToday || matchesDay(a));
+      const isRecentBatch = !activeBatchUrls?.length || activeBatchUrls.includes(a.job_url?.trim());
+      return isQ && isRecentBatch && (isToday || matchesDay(a));
     }).length;
 
     const skipped = allApps.filter((a) => (a.status || '').toLowerCase() === 'skipped').length;
@@ -1304,6 +1369,9 @@ export function getBackendBaseUrls() {
     add(import.meta.env.VITE_API_URL);
     add(import.meta.env.VITE_BACKEND_URL_2);
   }
+  // Fallback to active Railway production services (Scanner & Submitter) so mobile/remote clients connect automatically
+  add('https://scannerresolver-production.up.railway.app');
+  add('https://submitting-production.up.railway.app');
   return urls;
 }
 
@@ -3333,11 +3401,11 @@ export async function fetchBotDaemonStatus() {
 
     const hasActiveScanWorkers = workers.some((w) =>
       (w.stage === 'scanning' || w.stage === 'resolving' || w.worker_id?.includes('scan') || w.worker_id?.includes('resolv')) &&
-      (w.state === 'in_flight' || w.state === 'busy')
+      (w.state === 'in_flight' || w.state === 'busy' || w.state === 'running')
     );
     const hasActiveSubmitWorkers = workers.some((w) =>
       (w.stage === 'submitting' || w.worker_id?.includes('submit')) &&
-      (w.state === 'in_flight' || w.state === 'busy')
+      (w.state === 'in_flight' || w.state === 'busy' || w.state === 'running')
     );
 
     // Explicit user stop requests
@@ -3363,7 +3431,7 @@ export async function fetchBotDaemonStatus() {
 
     const isClusterAuthoritativelyStopped = Boolean(
       isGlobalStopped ||
-      (botControl && (botControl.is_running === false || botControl.stage === 'idle'))
+      (botControl && botControl.is_running === false && botControl.scan_status !== 'running' && botControl.submit_status !== 'running')
     );
 
     const isScanning = !isClusterAuthoritativelyStopped && !isScanExplicitlyStopped && Boolean(
@@ -3457,7 +3525,7 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
 
     if (bounds) {
       if (isToday) {
-        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,pending)`);
+        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
         query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
       }
@@ -3465,6 +3533,9 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
 
     const { data: distData, error: distErr } = await query;
     if (distErr) throw distErr;
+
+    // Fetch active URLs strictly from most recent batch in batch_job_queue
+    const activeBatchUrls = await getActiveRecentBatchJobUrls().catch(() => []);
 
     const jobMap = new Map();
 
@@ -3501,7 +3572,8 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
           } else if (rawStatus === 'applying' || rawStatus === 'in_flight') {
             if (!isToday && !matchesDate) continue;
           } else {
-            // ready_for_review / queued
+            // ready_for_review / queued - strictly filter to recent batch
+            if (activeBatchUrls && activeBatchUrls.length > 0 && !activeBatchUrls.includes(d.job_url?.trim())) continue;
             if (!isToday && !matchesDate) continue;
           }
         }

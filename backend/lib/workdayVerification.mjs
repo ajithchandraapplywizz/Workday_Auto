@@ -800,19 +800,34 @@ export async function resolveWorkdayVerification(page, {
  * Automatically triggers the Workday Forgot Password workflow:
  * 1. Locates and clicks "Forgot your password?" on the Sign In form
  * 2. Enters candidate's email into the reset form (avoiding honeypot 'beecatcher')
- * 3. Clicks "Reset Password" submit button
- * 4. Polls Zoho Mail API for the verification/reset link
- * 5. Opens the reset link in the browser session and sets the new password
- * 
+ * 3. Hits "Reset Password" submit button (strictly up to 2 times)
+ * 4. Polls Zoho Mail API for the verification/reset link (45s per hit)
+ * 5. If Zoho is not connected, closes browser and returns status 'zoho_not_connected' (reason: 'zoho mail not connected')
+ * 6. If reset link does not arrive after 2 hits, closes browser and marks status 'failed' with error_message 'link timed out'
+ * 7. If link arrives, completes password reset form and enters application wizard
+ *
  * @param {import('playwright').Page} page
  * @param {Object} options
  * @param {string} options.email
  * @param {string} options.password
  * @param {string} [options.company]
- * @param {number} [options.timeoutMs=75000]
- * @returns {Promise<{ success: boolean, url?: string, reason?: string }>}
+ * @param {number} [options.timeoutMs=45000]
+ * @param {string} [options.applywizzId]
+ * @param {string} [options.jobUrl]
+ * @param {string} [options.distributionId]
+ * @param {string} [options.taskId]
+ * @returns {Promise<{ success: boolean, url?: string, reason?: string, status?: string }>}
  */
-export async function executeWorkdayForgotPassword(page, { email, password, company, timeoutMs = 55000 }) {
+export async function executeWorkdayForgotPassword(page, {
+  email,
+  password,
+  company,
+  timeoutMs = 45000,
+  applywizzId = '',
+  jobUrl = '',
+  distributionId = '',
+  taskId = '',
+} = {}) {
   console.log(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
 
   // 1. Locate and click "Forgot your password?" link/button
@@ -828,83 +843,185 @@ export async function executeWorkdayForgotPassword(page, { email, password, comp
     'button[aria-label*="forgot" i]',
   ].join(', ')).catch(() => null);
 
-  if (!forgotBtn || !(await forgotBtn.isVisible().catch(() => false))) {
-    console.log('   ⚠️  [WorkdayBot] Could not locate visible "Forgot your password?" link on page.');
-    return { success: false, reason: 'forgot_link_not_found' };
+  if (forgotBtn && (await forgotBtn.isVisible().catch(() => false))) {
+    console.log('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
+    await forgotBtn.click({ force: true }).catch(() => forgotBtn.evaluate(el => el.click()));
+    await page.waitForTimeout(600).catch(() => {});
+    try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+  } else {
+    const isAlreadyOnForgot = typeof isWorkdayForgotPasswordPage === 'function' ? await isWorkdayForgotPasswordPage(page).catch(() => false) : false;
+    if (!isAlreadyOnForgot) {
+      console.log('   ⚠️  [WorkdayBot] Could not locate visible "Forgot your password?" link on page.');
+      return { success: false, reason: 'forgot_link_not_found' };
+    }
   }
-
-  console.log('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
-  await forgotBtn.click({ force: true }).catch(() => forgotBtn.evaluate(el => el.click()));
-  await page.waitForTimeout(600);
-  try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
 
   // 2. Wait for Forgot Password form (email input and Reset Password button)
   try {
     await page.waitForSelector('button[data-automation-id="resetPasswordButton"]:visible, input[data-automation-id="email"]:visible', { timeout: 8000 });
   } catch {}
 
-  // 3. Fill client email (explicitly ignoring honeypot 'beecatcher')
-  const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"], input[type="text"]');
-  let emailFilled = false;
-  for (const inp of emailInputs) {
-    if (await inp.isVisible().catch(() => false)) {
-      const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
-      const name = await inp.getAttribute('name').catch(() => '');
-      if (autoId === 'beecatcher' || name === 'website') continue;
-      await inp.fill(email);
-      await page.waitForTimeout(200);
-      emailFilled = true;
+  const fillClientEmail = async () => {
+    const emailInputs = await page.$$('input[data-automation-id="email"], input[type="email"], input[name="email"], input[type="text"]');
+    for (const inp of emailInputs) {
+      if (await inp.isVisible().catch(() => false)) {
+        const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
+        const name = await inp.getAttribute('name').catch(() => '');
+        if (autoId === 'beecatcher' || name === 'website') continue;
+        await inp.fill(email);
+        await page.waitForTimeout(200).catch(() => {});
+        return true;
+      }
+    }
+    return false;
+  };
+
+  const getResetSubmitButton = async () => {
+    return await page.$([
+      'button[data-automation-id="resetPasswordButton"]',
+      'button:has-text("Reset Password")',
+      'button:has-text("Send verification link")',
+      'button:has-text("Send")',
+      'button:has-text("Resend")',
+      'button[type="submit"]:visible',
+    ].join(', ')).catch(() => null);
+  };
+
+  const MAX_FORGOT_HITS = 2;
+  const hitTimeoutMs = Math.min(timeoutMs || 45000, 45000);
+  const effectiveCompany = company || (page && typeof page.url === 'function' ? extractWorkdayCompanyName(page.url()) : '');
+  let verifResult = null;
+
+  for (let hit = 1; hit <= MAX_FORGOT_HITS; hit++) {
+    console.log(`   📩 [WorkdayBot] Forgot Password Hit ${hit}/${MAX_FORGOT_HITS}: Entering email and submitting reset form...`);
+
+    const emailFilled = await fillClientEmail();
+    if (!emailFilled && hit === 1) {
+      console.log('   ⚠️  [WorkdayBot] Could not locate email input on Forgot Password form.');
+      return { success: false, reason: 'email_input_not_found' };
+    }
+
+    const submitBtn = await getResetSubmitButton();
+    if (!submitBtn || !(await submitBtn.isVisible().catch(() => false))) {
+      if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
+        break;
+      }
+      if (hit === 1) {
+        console.log('   ⚠️  [WorkdayBot] Could not locate "Reset Password" submit button.');
+        return { success: false, reason: 'submit_button_not_found' };
+      }
+    } else {
+      console.log(`   📩 [WorkdayBot] Submitting client email for password reset instructions (Hit ${hit}/${MAX_FORGOT_HITS})...`);
+      await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
+      await page.waitForTimeout(600).catch(() => {});
+      try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+    }
+
+    const requestTime = Date.now() - 30000;
+    console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader for reset email link (Hit ${hit}/${MAX_FORGOT_HITS}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
+
+    verifResult = await resolveWorkdayVerification(page, {
+      email,
+      password,
+      company: effectiveCompany,
+      startTime: requestTime,
+      timeoutMs: hitTimeoutMs,
+      applywizzId,
+      jobUrl,
+      distributionId,
+      taskId,
+    }).catch((err) => {
+      console.warn(`   ⚠️  [WorkdayBot] Verification poll error: ${err.message}`);
+      return null;
+    });
+
+    // If Zoho mailbox is not connected, stop immediately and close browser
+    if (verifResult?.isZohoNotConnected || verifResult?.reason === 'zoho mail not connected' || verifResult?.reason === 'mailbox_not_connected') {
+      console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is NOT CONNECTED in Zoho Mail Reader — closing browser and returning zoho_not_connected.`);
+      if (page && typeof page.context === 'function') {
+        const browser = page.context()?.browser();
+        if (browser) await browser.close().catch(() => {});
+        else if (typeof page.close === 'function') await page.close().catch(() => {});
+      }
+      return {
+        success: false,
+        status: 'zoho_not_connected',
+        reason: 'zoho mail not connected',
+        isZohoNotConnected: true,
+        error: verifResult?.error || `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${email})`,
+      };
+    }
+
+    if (verifResult?.success) {
+      console.log(`   ✅ [WorkdayBot] Password reset link retrieved and processed successfully on Hit ${hit}!`);
       break;
+    }
+
+    if (hit < MAX_FORGOT_HITS) {
+      console.log(`   ⚠️ [WorkdayBot] Password reset link did not arrive after Hit 1. Retrying Hit 2 of ${MAX_FORGOT_HITS}...`);
+      await page.waitForTimeout(2000).catch(() => {});
     }
   }
 
-  if (!emailFilled) {
-    console.log('   ⚠️  [WorkdayBot] Could not locate email input on Forgot Password form.');
-    return { success: false, reason: 'email_input_not_found' };
-  }
-
-  // 4. Click "Reset Password" submit button
-  const submitBtn = await page.$([
-    'button[data-automation-id="resetPasswordButton"]',
-    'button:has-text("Reset Password")',
-    'button:has-text("Send verification link")',
-    'button:has-text("Send")',
-    'button[type="submit"]:visible',
-  ].join(', ')).catch(() => null);
-
-  if (!submitBtn || !(await submitBtn.isVisible().catch(() => false))) {
-    console.log('   ⚠️  [WorkdayBot] Could not locate "Reset Password" submit button.');
-    return { success: false, reason: 'submit_button_not_found' };
-  }
-
-  const requestTime = Date.now() - 30000;
-  console.log('   📩 [WorkdayBot] Submitting client email for password reset instructions...');
-  await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-  await page.waitForTimeout(600);
-  try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
-
-  // 5. Poll Zoho Mail Reader for the reset link
-  console.log('   ⏳ [WorkdayBot] Polling Zoho Mail Reader for password reset email link...');
-  const effectiveCompany = company || (page ? extractWorkdayCompanyName(page.url()) : '');
-  const verifResult = await resolveWorkdayVerification(page, {
-    email,
-    password,
-    company: effectiveCompany,
-    startTime: requestTime,
-    timeoutMs,
-  }).catch((err) => {
-    console.warn(`   ⚠️  [WorkdayBot] Verification poll error: ${err.message}`);
-    return null;
-  });
-
+  // If reset link was not retrieved after strictly 2 hits
   if (!verifResult?.success) {
-    console.log('   ❌ [WorkdayBot] Failed to retrieve password reset link from Zoho Mail Reader.');
+    console.log(`   ❌ [WorkdayBot] Forgot Password reset link was not received in Zoho Mail after strictly ${MAX_FORGOT_HITS} hits — link timed out.`);
+
+    // Close browser as explicitly instructed
+    if (page && typeof page.context === 'function') {
+      const browser = page.context()?.browser();
+      if (browser) await browser.close().catch(() => {});
+      else if (typeof page.close === 'function') await page.close().catch(() => {});
+    }
+
+    const timeoutReason = 'link timed out';
+
+    // Update database status: 'failed', error_message: 'link timed out'
+    try {
+      const { request } = await import('./supabaseClient.mjs');
+      const now = new Date().toISOString();
+      const cleanAwlId = String(applywizzId || '').replace(/[^a-zA-Z0-9_-]/g, '').trim().toUpperCase();
+      if (distributionId) {
+        await request('job_distributions', {
+          method: 'PATCH',
+          query: `?id=eq.${encodeURIComponent(distributionId)}`,
+          body: {
+            status: 'failed',
+            error_message: timeoutReason,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      } else if (cleanAwlId && jobUrl) {
+        await request('job_distributions', {
+          method: 'PATCH',
+          query: `?applywizz_id=eq.${encodeURIComponent(cleanAwlId)}&job_url=eq.${encodeURIComponent(jobUrl)}`,
+          body: {
+            status: 'failed',
+            error_message: timeoutReason,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      }
+      if (cleanAwlId && jobUrl) {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query: `?applywizz_id=ilike.*${encodeURIComponent(cleanAwlId)}*&job_url=eq.${encodeURIComponent(jobUrl)}`,
+          body: {
+            status: 'failed',
+            error_message: timeoutReason,
+            updated_at: now,
+          },
+        }).catch(() => {});
+      }
+    } catch (dbErr) {
+      console.warn(`   ⚠️ [WorkdayBot] Error updating link timeout status in database: ${dbErr.message}`);
+    }
+
     return {
       success: false,
-      reason: verifResult?.reason || 'timeout',
-      status: verifResult?.status || (verifResult?.isZohoNotConnected ? 'zoho_not_connected' : 'failed'),
-      isZohoNotConnected: Boolean(verifResult?.isZohoNotConnected),
-      error: verifResult?.error,
+      reason: timeoutReason,
+      status: 'failed',
+      error: timeoutReason,
     };
   }
 

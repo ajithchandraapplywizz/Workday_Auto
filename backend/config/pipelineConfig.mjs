@@ -7,7 +7,7 @@
  * - Submitting: submitting_worker_1, submitting_worker_2
  */
 
-export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || 2;
+export const WORKER_COUNT = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || 2;
 export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
 
 // Dynamic worker counts per stage across all services (default: 2 services * WORKER_COUNT)
