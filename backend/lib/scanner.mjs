@@ -474,7 +474,21 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
         const hasExpired = /(?:doesn'?t|does not) exist|expired|not found|\b(?:error\s*)?404\b|closed|filled|no longer available/i.test(t);
         return hasApply || hasWizard || hasExpired || t.length > 150;
       }, { timeout: 20000 }).catch(() => {});
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000).catch(() => {});
+    }
+
+    if (!page || (typeof page.isClosed === 'function' && page.isClosed())) {
+      console.log(`   ❌ [Scanner] Page closed during initial navigation (dead/expired target): ${url}`);
+      return {
+        url,
+        original_url: url,
+        jobMissing: true,
+        jobExpired: true,
+        reason: 'job_expired_or_not_found',
+        field_count: 0,
+        fields: [],
+        submit_buttons: [],
+      };
     }
 
     if (await isWorkdayAlreadyApplied(page)) {
@@ -551,7 +565,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
       if (await isWorkdayWizardVisible(page)) {
         console.log('   Already on Workday application form wizard — skipping authentication.');
         try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
-        await page.waitForTimeout(600);
+        await page.waitForTimeout(600).catch(() => {});
         try {
           await page.waitForSelector('input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
         } catch {}
@@ -606,7 +620,7 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
         }
 
         try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
-        await page.waitForTimeout(600);
+        await page.waitForTimeout(600).catch(() => {});
         try {
           await page.waitForSelector('input:not([type="hidden"]), select, textarea, [data-automation-id*="form"], [data-automation-id*="page"], [data-automation-id*="Section"], button[data-automation-id="pageFooterNextButton"]', { timeout: 15000 });
         } catch {}
@@ -677,10 +691,10 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
     });
 
     if (!keepOpen) {
-      await context.close();
+      await context.close().catch(() => {});
       if (ownBrowser) {
         unregisterActiveBrowser(browser);
-        await browser.close();
+        await browser.close().catch(() => {});
       }
     }
     return scan;
@@ -688,11 +702,25 @@ export async function scanForm(url, { formsDir, browser: existingBrowser, contex
   } catch (err) {
     console.error(`❌ Scan failed: ${err.message}`);
     if (!keepOpen) {
-      await context.close();
+      await context.close().catch(() => {});
       if (ownBrowser) {
         unregisterActiveBrowser(browser);
-        await browser.close();
+        await browser.close().catch(() => {});
       }
+    }
+
+    if (err?.message?.includes('Target page, context or browser has been closed') || page?.isClosed?.()) {
+      console.warn(`   ⚠️ [Scanner] Target page/browser closed during scan — treating as dead/expired URL: ${url}`);
+      return {
+        url,
+        original_url: url,
+        jobMissing: true,
+        jobExpired: true,
+        reason: 'job_expired_or_not_found',
+        field_count: 0,
+        fields: [],
+        submit_buttons: [],
+      };
     }
     throw err;
   }

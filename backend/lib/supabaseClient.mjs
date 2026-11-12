@@ -1536,8 +1536,7 @@ export async function purgeDeadJobUrlFromQueue(jobUrl, { expiredReason = 'Link E
   if (!isSupabaseConfigured() || !jobUrl) return false;
   try {
     const payload = {
-      status: 'failed',
-      error_message: expiredReason,
+      status: 'expired',
       locked_at: null,
       updated_at: new Date().toISOString(),
     };

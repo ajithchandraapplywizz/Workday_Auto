@@ -457,35 +457,52 @@ export function parseLocalDate(dateStr) {
 }
 
 /**
- * 12. Local Calendar & IST Date Bounds
+ * 12. Calendar Date Bounds (Aligned strictly to UTC calendar days matching database timestamps)
  */
 export function getISTDateBounds(dateStr, timeframe = 'day') {
-  const baseDate = parseLocalDate(dateStr);
-  let start = new Date(baseDate);
-  let end = new Date(baseDate);
+  let cleanStr = typeof dateStr === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(dateStr.trim())
+    ? dateStr.trim()
+    : formatLocalDate(dateStr || new Date());
+
+  if (!cleanStr) cleanStr = new Date().toISOString().slice(0, 10);
+  const [year, month, day] = cleanStr.split('-').map(Number);
+
+  let startIso, endIso, startDateStr, endDateStr;
 
   if (timeframe === 'day') {
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    startIso = `${cleanStr}T00:00:00.000Z`;
+    endIso = `${cleanStr}T23:59:59.999Z`;
+    startDateStr = cleanStr;
+    endDateStr = cleanStr;
   } else if (timeframe === 'week') {
-    const dayOfWeek = start.getDay();
-    const diff = start.getDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
-    start.setDate(diff);
-    start.setHours(0, 0, 0, 0);
-    end = new Date(start);
-    end.setDate(start.getDate() + 6);
-    end.setHours(23, 59, 59, 999);
+    const d = new Date(Date.UTC(year, month - 1, day));
+    const dayOfWeek = d.getUTCDay();
+    const diff = d.getUTCDate() - dayOfWeek + (dayOfWeek === 0 ? -6 : 1);
+    const start = new Date(Date.UTC(year, month - 1, diff, 0, 0, 0, 0));
+    const end = new Date(Date.UTC(year, month - 1, diff + 6, 23, 59, 59, 999));
+    startIso = start.toISOString();
+    endIso = end.toISOString();
+    startDateStr = startIso.slice(0, 10);
+    endDateStr = endIso.slice(0, 10);
   } else if (timeframe === 'month') {
-    start.setDate(1);
-    start.setHours(0, 0, 0, 0);
-    end = new Date(start.getFullYear(), start.getMonth() + 1, 0, 23, 59, 59, 999);
+    const start = new Date(Date.UTC(year, month - 1, 1, 0, 0, 0, 0));
+    const end = new Date(Date.UTC(year, month, 0, 23, 59, 59, 999));
+    startIso = start.toISOString();
+    endIso = end.toISOString();
+    startDateStr = startIso.slice(0, 10);
+    endDateStr = endIso.slice(0, 10);
+  } else {
+    startIso = `${cleanStr}T00:00:00.000Z`;
+    endIso = `${cleanStr}T23:59:59.999Z`;
+    startDateStr = cleanStr;
+    endDateStr = cleanStr;
   }
 
   return {
-    startIso: start.toISOString(),
-    endIso: end.toISOString(),
-    startDateStr: formatLocalDate(start),
-    endDateStr: formatLocalDate(end),
+    startIso,
+    endIso,
+    startDateStr,
+    endDateStr,
   };
 }
 

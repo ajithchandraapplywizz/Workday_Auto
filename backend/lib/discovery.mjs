@@ -210,7 +210,7 @@ export async function getWorkdayAuthErrorMessage(page) {
  * @returns {Promise<boolean>}
  */
 export async function isWorkdayJobPageMissing(page) {
-  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return true;
   return await page.evaluate(() => {
     // 1. If an Apply or Continue Application button is visible in the DOM, it is 100% NOT missing/expired
     const hasApply = Boolean(
@@ -241,7 +241,7 @@ export async function isWorkdayJobPageMissing(page) {
       || /page not found/i.test(text)
       || /\b(?:error\s*)?404\b/i.test(text);
     const hasFilledOrExpired = /this job (?:posting )?(?:has (?:been )?)?(?:filled|closed|expired|removed|inactive)/i.test(text)
-      || /job (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
+      || /(?:job|position|requisition) (?:you(?:'re| are) looking for )?(?:is )?no longer (?:available|open)/i.test(text)
       || /position (?:has been )?filled/i.test(text)
       || /no longer accepting applications/i.test(text)
       || /posting has expired/i.test(text)
@@ -512,7 +512,7 @@ export async function clickContinueApplicationIfPresent(page) {
         if (!/continue\s*application/i.test(text) && !/continueApplication/i.test(sel)) continue;
         console.log(`   Found draft resume control: "${text || 'Continue Application'}" — clicking...`);
         await el.click({ force: true }).catch(() => el.evaluate((node) => node.click()));
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2000).catch(() => {});
         try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
         return true;
       }
@@ -541,7 +541,7 @@ export async function clickContinueApplicationIfPresent(page) {
 
   if (viaDom) {
     console.log(`   Found draft resume control via DOM: "${viaDom}" — clicked`);
-    await page.waitForTimeout(2000);
+    await page.waitForTimeout(2000).catch(() => {});
     try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
     return true;
   }
@@ -550,12 +550,12 @@ export async function clickContinueApplicationIfPresent(page) {
   if (await manageBtn.isVisible({ timeout: 1200 }).catch(() => false)) {
     if (!(await isInNavOrHeader(manageBtn).catch(() => false))) {
       await manageBtn.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(800);
+      await page.waitForTimeout(800).catch(() => {});
       const menuItem = page.locator('[role="menuitem"], li, a, button').filter({ hasText: /^Continue Application$/i }).first();
       if (await menuItem.isVisible({ timeout: 2000 }).catch(() => false)) {
         console.log('   Opening Manage menu → Continue Application...');
         await menuItem.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2000).catch(() => {});
         try { await page.waitForLoadState('domcontentloaded', { timeout: 15000 }); } catch {}
         return true;
       }
@@ -577,7 +577,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
   const continued = await clickContinueApplicationIfPresent(page);
   if (continued) {
     try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-    await page.waitForTimeout(1000);
+    await page.waitForTimeout(1000).catch(() => {});
     if (await isWorkdayWizardVisible(page)) {
       return { entered: true, method: 'continue-application' };
     }
@@ -585,7 +585,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
 
   await discoverApplicationForm(page, page.url(), { mode, profile, applywizzId });
   try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(1000).catch(() => {});
 
   if (await isWorkdayWizardVisible(page)) {
     return { entered: true, method: continued ? 'continue-then-apply' : 'apply-button' };
@@ -600,7 +600,7 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
   if (!await isWorkdayWizardVisible(page)) {
     console.log('   🔄 [ensureWorkdayApplicationWizard] Wizard fields not displaying — refreshing page to trigger Workday client hydration...');
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-    await page.waitForTimeout(3000);
+    await page.waitForTimeout(3000).catch(() => {});
     if (await isWorkdayWizardVisible(page)) {
       return { entered: true, method: 'post-refresh-wizard' };
     }
@@ -780,7 +780,7 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
       'button:has-text("Save & Continue")',
     ].join(', '), { timeout: 8000 });
   } catch {}
-  await page.waitForTimeout(800);
+  await page.waitForTimeout(800).catch(() => {});
 
   const scan = await prescanGatewayElements(page);
   console.log('   Pre-scan elements:', JSON.stringify(scan));
@@ -804,7 +804,7 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
       if (await btn.isVisible().catch(() => false)) {
         if (await isInNavOrHeader(btn)) continue;
         await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(2000).catch(() => {});
         break;
       }
     }
@@ -878,7 +878,7 @@ export async function clickGatewaySignIn(page) {
 
     console.log('   Clicking gateway "Sign In" link (below Create Account, not nav bar)...');
     await el.click({ force: true }).catch(() => el.evaluate(e => e.click()));
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1500).catch(() => {});
     return true;
   }
 
@@ -898,7 +898,7 @@ export async function clickGatewayCreateAccount(page) {
   if (ssoBtn) {
     console.log('   Clicking "Sign in with email" before switching to Create Account...');
     await ssoBtn.click({ force: true }).catch(() => ssoBtn.evaluate(e => e.click()));
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1500).catch(() => {});
   }
 
   const buttons = await page.$$([
@@ -925,7 +925,7 @@ export async function clickGatewayCreateAccount(page) {
     console.log('   Clicking gateway "Create Account" button (not nav bar)...');
     await btn.scrollIntoViewIfNeeded().catch(() => {});
     await btn.click({ force: true }).catch(() => btn.evaluate(e => e.click()));
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1500).catch(() => {});
     return true;
   }
 
@@ -1030,7 +1030,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
     }, { timeout: 30000 }).catch(() => null);
 
     // Settle time for React / Workday hydration
-    await page.waitForTimeout(1500);
+    await page.waitForTimeout(1500).catch(() => {});
 
     // Check if page is already applied or truly expired AFTER waiting up to 30s
     const pageCheck = await page.evaluate(() => {
@@ -1108,7 +1108,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       if (cookieBtn && await cookieBtn.isVisible().catch(() => false)) {
         console.log('   Dismissing cookie banner...');
         await cookieBtn.click().catch(() => {});
-        await page.waitForTimeout(500);
+        await page.waitForTimeout(500).catch(() => {});
       }
     } catch {}
 
@@ -1122,7 +1122,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
     const continued = await clickContinueApplicationIfPresent(page);
     if (continued) {
       try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000).catch(() => {});
       if (await isWorkdayWizardVisible(page)) {
         console.log('   Resumed draft application via Continue Application.');
         return page.url();
@@ -1162,7 +1162,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         return s && s.offsetParent !== null;
       }).catch(() => false);
       if (hasSpinner) {
-        await page.waitForTimeout(800);
+        await page.waitForTimeout(800).catch(() => {});
         continue;
       }
 
@@ -1198,7 +1198,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         }
       } catch {}
 
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000).catch(() => {});
     }
 
     if (applyBtn) {
@@ -1235,7 +1235,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       }
 
       await applyBtn.click({ force: true }).catch(() => applyBtn.evaluate(el => el.click()));
-      await page.waitForTimeout(2000);
+      await page.waitForTimeout(2000).catch(() => {});
 
       // Always choose "Apply Manually" to ensure all form fields are freshly scanned and populated
       const manualApplySelectors = [
@@ -1268,18 +1268,18 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
                 console.log(`   Selecting Workday apply option: "${optText || 'Apply Manually'}"...`);
                 await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
                 optionClicked = true;
-                await page.waitForTimeout(1500);
+                await page.waitForTimeout(1500).catch(() => {});
                 break;
               }
             } catch {}
           }
           if (optionClicked) break;
-          await page.waitForTimeout(600);
+          await page.waitForTimeout(600).catch(() => {});
         }
       }
 
       // 3. Post-Apply Gateway Handling with adaptive element pre-scan (fail-fast 4s networkidle)
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000).catch(() => {});
       try { await page.waitForLoadState('domcontentloaded', { timeout: 10000 }); } catch {}
       try { await page.waitForLoadState('networkidle', { timeout: 4000 }); } catch {}
 
@@ -1292,7 +1292,7 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
       }
 
       await handleAdaptiveGateway(page, mode);
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(1000).catch(() => {});
       return page.url();
     }
 

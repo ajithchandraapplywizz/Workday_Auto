@@ -574,7 +574,7 @@ export async function executeWorkerTask({
               Array.from(document.querySelectorAll('button, a, div, h1, h2, h3, p')).find(e => /^\s*applied\s*$/i.test(e.textContent || '') || /already applied|application submitted/i.test(e.textContent || ''));
             if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
           }).catch(() => {});
-          await page.waitForTimeout(300);
+          await page.waitForTimeout(300).catch(() => {});
           const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
           if (buf) {
             alreadyShotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
@@ -725,7 +725,7 @@ export async function executeWorkerTask({
               const match = headings.find(h => /(?:doesn'?t|does not) exist|expired|closed|filled|404/i.test(h.textContent || ''));
               if (match) match.scrollIntoView({ behavior: 'instant', block: 'center' });
             }).catch(() => {});
-            await page.waitForTimeout(300);
+            await page.waitForTimeout(300).catch(() => {});
             const buf = await page.screenshot({ type: 'jpeg', quality: 75 }).catch(() => null);
             if (buf) {
               expiredShotUrl = await uploadStorageScreenshot('failed-applications', `${applywizzId}_${Date.now()}_job_expired.jpg`, buf);
@@ -807,7 +807,7 @@ export async function executeWorkerTask({
           console.log(`   🔎 [${workerId}] Page still displays Apply button — clicking Apply to enter application wizard...`);
           const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
           await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile });
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(1500).catch(() => {});
           wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
         }
       }
@@ -825,7 +825,7 @@ export async function executeWorkerTask({
             scan.reason = 'zoho mail not connected';
             scan.isZohoNotConnected = true;
           }
-          await page.waitForTimeout(1500);
+          await page.waitForTimeout(1500).catch(() => {});
           if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
             console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
             scan.alreadyApplied = true;
@@ -847,7 +847,7 @@ export async function executeWorkerTask({
                 Array.from(document.querySelectorAll('button, a, div, h1, h2, h3, p')).find(e => /^\s*applied\s*$/i.test(e.textContent || '') || /already applied|application submitted/i.test(e.textContent || ''));
               if (el) el.scrollIntoView({ behavior: 'instant', block: 'center' });
             }).catch(() => {});
-            await page.waitForTimeout(300);
+            await page.waitForTimeout(300).catch(() => {});
             const buf = await page.screenshot({ type: 'jpeg', quality: 85 }).catch(() => null);
             if (buf) {
               alreadyShotUrl = await uploadStorageScreenshot('submitted-applications', `${applywizzId}_${Date.now()}_already_applied.jpg`, buf);
@@ -911,7 +911,7 @@ export async function executeWorkerTask({
         try {
           await page.waitForSelector('[data-automation-id="loadingSpinner"], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i]', { state: 'detached', timeout: 10000 });
         } catch {}
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(1000).catch(() => {});
         wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
       }
 
@@ -919,7 +919,7 @@ export async function executeWorkerTask({
       if (!wizardNow) {
         console.log(`   🔄 [${workerId}] Fields/wizard not displaying post-login — refreshing page to trigger Workday client hydration...`);
         await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(3000).catch(() => {});
         wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
 
         // If redirected to home page (e.g. /External or tenant landing without /job/), navigate to exact canonical jobUrl
@@ -928,10 +928,10 @@ export async function executeWorkerTask({
           if (!currentUrl.includes('/job/') && jobUrl.includes('/job/')) {
             console.log(`   🔄 [${workerId}] Landed on home page (${currentUrl}) instead of job page — re-navigating to canonical job URL: ${jobUrl}...`);
             await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
-            await page.waitForTimeout(3000);
+            await page.waitForTimeout(3000).catch(() => {});
             const { ensureWorkdayApplicationWizard } = await import('./discovery.mjs');
             await ensureWorkdayApplicationWizard(page, { mode: 'signin', profile }).catch(() => {});
-            await page.waitForTimeout(2000);
+            await page.waitForTimeout(2000).catch(() => {});
             wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
           }
         }
@@ -1043,7 +1043,7 @@ export async function executeWorkerTask({
                 if (err) err.scrollIntoView({ behavior: 'instant', block: 'center' });
                 else window.scrollTo(0, 0);
               }).catch(() => {});
-              await page.waitForTimeout(400);
+              await page.waitForTimeout(400).catch(() => {});
               const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 8000 })
                 .catch(() => page.screenshot({ type: 'jpeg', quality: 90, timeout: 5000 }).catch(() => null));
               if (buf) {
