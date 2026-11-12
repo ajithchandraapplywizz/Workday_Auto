@@ -23,8 +23,44 @@ export function AuthProvider({ children }) {
     }
   });
 
-  // Default to yesterday's date for CA work history allotment
-  const [date, setDate] = useState(getYesterdayDateStr());
+  // Default to dynamic today's date for Developer & Admin dashboards and general metrics
+  const [date, setDateState] = useState(() => getTodayDateStr());
+  const isCustomDateSelectedRef = React.useRef(false);
+
+  const setDate = useCallback((newDate, isManual = true) => {
+    if (isManual) {
+      isCustomDateSelectedRef.current = (newDate !== getTodayDateStr());
+    }
+    setDateState(newDate);
+  }, []);
+
+  // Dynamic midnight date rollover: automatically advances to new day unless user explicitly pinned a past date
+  useEffect(() => {
+    const handleDynamicDateRollover = () => {
+      const todayStr = getTodayDateStr();
+      if (!isCustomDateSelectedRef.current) {
+        setDateState((prev) => (prev !== todayStr ? todayStr : prev));
+      }
+    };
+
+    // Check every 30 seconds for midnight rollover
+    const timer = setInterval(handleDynamicDateRollover, 30000);
+
+    // Also verify when user returns to foreground
+    const handleVisibility = () => {
+      if (typeof document !== 'undefined' && !document.hidden) {
+        handleDynamicDateRollover();
+      }
+    };
+    document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleVisibility);
+
+    return () => {
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleVisibility);
+    };
+  }, []);
   const [timeframe, setTimeframe] = useState('day');
   const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
 
@@ -384,6 +420,10 @@ export function AuthProvider({ children }) {
       user?.role === 'dev' ||
       user?.email === 'ajithchandranimmala@applywizz.ai';
     if (!isDev) return;
+    if (['dev', 'admin'].includes(newRole)) {
+      isCustomDateSelectedRef.current = false;
+      setDateState(getTodayDateStr());
+    }
     setUser((prev) => ({
       ...prev,
       baseRole: 'dev',

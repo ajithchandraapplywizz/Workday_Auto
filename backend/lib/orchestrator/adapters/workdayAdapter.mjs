@@ -52,11 +52,11 @@ export const workdayAdapter = {
       && profile?._workdaySkillsFilled === true
       && /type\s*to\s*add\s*skills|enter\s+a\s*skill\s*below/i.test(label)) return false;
 
-    // My Information fields are handled by handleStep1MyInformation — skip in orchestrator
-    // to prevent stall-break on fields that are already filled by the dedicated handler.
-    if (stepName === 'My Information' && profile?._step1SourceFilled) {
-      const myInfoHandled = /how did you hear about us|phone\s*(number|device\s*type)?|country\s*(\/\s*territory\s*)?phone\s*code|city|state\s*\/\s*(region|province)|address\s*line|postal\s*code|country\s*\(address|^country$/i.test(label);
-      if (myInfoHandled) return false;
+    // Only skip "how did you hear about us" in orchestrator if already set by dedicated handler.
+    // Mandatory fields on My Information (legal name, address, phone, previous worker) MUST be filled
+    // if still empty in DOM!
+    if (stepName === 'My Information' && /how did you hear about us/i.test(label) && profile?._step1SourceFilled) {
+      return false;
     }
 
     const raw = fieldForFilter(field);

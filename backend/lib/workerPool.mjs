@@ -181,8 +181,18 @@ export function indexResolvedAnswers(profile, rawAnswersList) {
     if (/^phone\b/i.test(cleanQ) && !profile.personal.phone) {
       profile.personal.phone = strVal;
     }
-    if (/^address\s*(line\s*1)?/i.test(cleanQ) && !profile.personal.address_line_1) {
-      profile.personal.address_line_1 = strVal;
+    if (/^address\s*(line\s*1)?/i.test(cleanQ)) {
+      if (!profile.personal.address_line_1) profile.personal.address_line_1 = strVal;
+      if (!profile.personal.address_line1) profile.personal.address_line1 = strVal;
+    }
+    if (/^city\b/i.test(cleanQ) && !profile.personal.city) {
+      profile.personal.city = strVal;
+    }
+    if (/^state\b/i.test(cleanQ) && !profile.personal.state) {
+      profile.personal.state = strVal;
+    }
+    if (/^(postal|zip)\s*code/i.test(cleanQ) && !profile.personal.postal_code) {
+      profile.personal.postal_code = strVal;
     }
 
     // Hydrate profile.experience facts from pre-resolved answers

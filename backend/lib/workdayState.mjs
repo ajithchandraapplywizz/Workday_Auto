@@ -15,6 +15,13 @@ export function resolveStateValue(profile = {}, tenant = '') {
   const fromTenantPersonal = profile?.personal?.state
     || profile?.personal?.State
     || profile?.personal?.province
+    || profile?._supabaseQa?.['State*']
+    || profile?._supabaseQa?.['State California']
+    || profile?._supabaseQa?.['State']
+    || profile?._supabaseQa?.['state']
+    || profile?._resolvedAnswersMap?.get?.('state*')?.answer
+    || profile?._resolvedAnswersMap?.get?.('state')?.answer
+    || (profile?.personal?.location ? (profile.personal.location.split(',')[1] || '').trim() : '')
     || profile?.qa_answers?.state
     || profile?.qa_answers?.['state / province']
     || profile?.qa_answers?.province;
@@ -161,9 +168,13 @@ export async function fillStateFromDom(page, profile = {}) {
       } else {
         // data-automation fallbacks
         const locators = [
+          page.locator('[data-automation-id="addressSection_countryRegion"]'),
           page.locator('[data-automation-id="address--countryRegion"]'),
           page.locator('#address--countryRegion'),
+          page.locator('button[data-automation-id*="countryRegion" i]').first(),
+          page.locator('button[id*="countryRegion" i]').first(),
           page.locator('[data-automation-id*="countryRegion" i]').first(),
+          page.locator('[data-automation-id*="formField"]').filter({ hasText: /^state/i }).locator('button, [role="button"], [role="combobox"]').first(),
         ];
         for (const loc of locators) {
           if (!(await loc.isVisible({ timeout: 500 }).catch(() => false))) continue;

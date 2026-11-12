@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { getTodayDateStr } from '../utils/dateUtils';
 import {
   fetchApplicationsDynamic,
   fetchDynamicKPIMetrics,
@@ -23,7 +24,15 @@ import {
 } from '../services/api';
 
 export default function DeveloperDashboard() {
-  const { date, timeframe } = useAuth();
+  const { date, setDate, timeframe } = useAuth();
+
+  // Guarantee Developer Dashboard dynamically synchronizes to current today's date
+  useEffect(() => {
+    const todayStr = getTodayDateStr();
+    if (setDate && (!date || date !== todayStr)) {
+      setDate(todayStr, false);
+    }
+  }, []);
 
   const [activeTab, setActiveTab] = useState(() => {
     try {

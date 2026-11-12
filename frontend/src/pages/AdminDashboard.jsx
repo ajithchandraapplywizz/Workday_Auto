@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useAuth } from '../context/AuthContext';
+import { getTodayDateStr } from '../utils/dateUtils';
 import {
   fetchCAEmails,
   fetchOperators,
@@ -15,7 +16,15 @@ import OperatorDetailsPage from './OperatorDetailsPage';
 import ApplicationSlideDrawer from '../components/ApplicationSlideDrawer';
 
 export default function AdminDashboard() {
-  const { date, timeframe } = useAuth();
+  const { date, setDate, timeframe } = useAuth();
+
+  // Guarantee Admin Dashboard dynamically synchronizes to current today's date
+  useEffect(() => {
+    const todayStr = getTodayDateStr();
+    if (setDate && (!date || date !== todayStr)) {
+      setDate(todayStr, false);
+    }
+  }, []);
 
   const [activeTab, setActiveTab] = useState('Overview');
   const [operatorSearch, setOperatorSearch] = useState('');

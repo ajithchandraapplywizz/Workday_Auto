@@ -1000,7 +1000,7 @@ export async function fetchApplicationsDynamic({
       if (isToday) {
         query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
-        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso}),status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       }
     }
 
@@ -1080,7 +1080,7 @@ export async function fetchApplicationsDynamic({
       });
     }
 
-    // Filter strictly by day bounds so yesterday stays in yesterday, today stays in today
+    // Filter strictly by day bounds: Submitted and failed stats are strictly for that selected day, while pending/ready_for_review tasks remain viewable
     if (bounds) {
       list = list.filter((item) => {
         const ts = getApplicationEffectiveTimestamp(item);
@@ -1088,7 +1088,8 @@ export async function fetchApplicationsDynamic({
         if (item.status === 'submitted' || item.status === 'completed' || item.status === 'already_applied' || item.status === 'failed') {
           return isInDay;
         }
-        return isToday || isInDay;
+        // Pending ready_for_review applications must always be viewable for submission regardless of exact generation hour
+        return true;
       });
     }
 
@@ -1105,7 +1106,7 @@ export async function fetchApplicationsDynamic({
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
     let query = supabase.from('job_distributions')
-      .select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at')
+      .select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at, job_url')
       .neq('status', 'archived');
 
     if (managerId && managerId !== 'All') {
@@ -1129,7 +1130,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       if (isToday) {
         query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
-        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso}),status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       }
     }
 
@@ -1203,7 +1204,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
         'needs_answers'
       ].includes(st);
       const isRecentBatch = !activeBatchUrls?.length || activeBatchUrls.includes(a.job_url?.trim());
-      return isQ && isRecentBatch && (isToday || matchesDay(a));
+      return isQ && isRecentBatch;
     }).length;
 
     const skipped = allApps.filter((a) => (a.status || '').toLowerCase() === 'skipped').length;
@@ -3527,7 +3528,7 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
       if (isToday) {
         query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       } else {
-        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso})`);
+        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso}),status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
       }
     }
 

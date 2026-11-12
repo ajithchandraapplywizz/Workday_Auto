@@ -15,6 +15,12 @@ export function resolveCityValue(profile = {}) {
   const raw = String(
     profile?.personal?.city
     || profile?.personal?.City
+    || profile?._supabaseQa?.['City*']
+    || profile?._supabaseQa?.['City']
+    || profile?._supabaseQa?.['city']
+    || profile?._resolvedAnswersMap?.get?.('city*')?.answer
+    || profile?._resolvedAnswersMap?.get?.('city')?.answer
+    || (profile?.personal?.location ? profile.personal.location.split(',')[0].trim() : '')
     || profile?.qa_answers?.city
     || profile?.qa_answers?.['address city']
     || ''
