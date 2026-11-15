@@ -2791,9 +2791,23 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
       for (const loc of candidates) {
         const input = loc.first();
         if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+          const isPhoneInput = await input.evaluate((el) => {
+            const blob = `${el.id || ''} ${el.name || ''} ${el.getAttribute('data-automation-id') || ''} ${el.type || ''}`.toLowerCase();
+            return blob.includes('phone') || el.type === 'tel';
+          }).catch(() => false);
+          if (isPhoneInput) {
+            const digits = String(fillValue).replace(/\D/g, '').slice(-10);
+            if (digits.length < 7) {
+              console.log(`    🚫 Skipping non-digit value "${fillValue}" for phone input`);
+              continue;
+            }
+            fillValue = digits; // STRICT DIGITS ONLY for phone
+          }
           await input.scrollIntoViewIfNeeded().catch(() => {});
           await input.click({ force: true }).catch(() => {});
           await input.fill(String(fillValue));
+          await input.dispatchEvent('input').catch(() => {});
+          await input.dispatchEvent('change').catch(() => {});
           await input.press('Enter').catch(() => {});
           await input.press('Tab').catch(() => {});
           const actual = (await input.inputValue().catch(() => '') || '').trim();
@@ -2809,8 +2823,10 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
           if (!box) return false;
           const input = box.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
           if (!input) return false;
+          const isTel = input.type === 'tel' || /phone/i.test(`${input.id || ''} ${input.name || ''} ${input.getAttribute('data-automation-id') || ''}`);
+          const finalVal = isTel ? String(value).replace(/\D/g, '').slice(-10) : value;
           input.focus();
-          input.value = value;
+          input.value = finalVal;
           input.dispatchEvent(new Event('input', { bubbles: true }));
           input.dispatchEvent(new Event('change', { bubbles: true }));
           input.dispatchEvent(new Event('blur', { bubbles: true }));

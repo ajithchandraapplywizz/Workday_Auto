@@ -179,8 +179,11 @@ export function indexResolvedAnswers(profile, rawAnswersList) {
     if (/^email\b/i.test(cleanQ) && !profile.personal.email) {
       profile.personal.email = strVal;
     }
-    if (/^phone\b/i.test(cleanQ) && !profile.personal.phone) {
-      profile.personal.phone = strVal;
+    if (/^(phone|mobile|cell)\b/i.test(cleanQ) && !profile.personal.phone) {
+      const digits = strVal.replace(/\D/g, '');
+      if (digits.length >= 7) {
+        profile.personal.phone = strVal;
+      }
     }
     if (/^address\s*(line\s*1)?/i.test(cleanQ)) {
       if (!profile.personal.address_line_1) profile.personal.address_line_1 = strVal;
@@ -381,17 +384,19 @@ export async function executeWorkerTask({
   const workdayEmail = String(candidateDbClient.company_email).trim().toLowerCase();
 
   // Enforce candidate's company_email on all profile contact fields
+  profile._dbClient = candidateDbClient;
   profile.personal = profile.personal || {};
   profile.personal.email = workdayEmail;
   profile.personal.company_email = workdayEmail;
   profile.email = workdayEmail;
   if (candidateDbClient.first_name) profile.personal.first_name = candidateDbClient.first_name;
   if (candidateDbClient.last_name) profile.personal.last_name = candidateDbClient.last_name;
-  if (candidateDbClient.mobile_number && candidateDbClient.mobile_number !== '+') {
-    profile.personal.phone = candidateDbClient.mobile_number;
-  }
-  if (!profile.personal.phone && candidateDbClient?.phone) {
-    profile.personal.phone = candidateDbClient.phone;
+  const rawCandidateMobile = candidateDbClient.mobile_number || candidateDbClient.phone || '';
+  const cleanCandidateDigits = String(rawCandidateMobile).replace(/\D/g, '').slice(-10);
+  if (cleanCandidateDigits.length >= 7) {
+    profile.personal.phone = cleanCandidateDigits;
+    profile.personal.mobile_number = cleanCandidateDigits;
+    profile.phone = cleanCandidateDigits;
   }
   if (candidateDbClient.client_name) {
     profile.name = candidateDbClient.client_name;

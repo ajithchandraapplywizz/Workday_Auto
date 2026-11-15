@@ -25,6 +25,12 @@ export function isInvalidSourceAnswer(value) {
   const v = String(value || '').trim().toLowerCase();
   if (!v) return true;
   if (isForbiddenSourceOption(v)) return true;
+  // Reject date strings (e.g. 01/10/1927, 1990-05-20)
+  if (/^\d{1,4}[-/.]\d{1,2}[-/.]\d{2,4}$|^\d{1,2}[-/.]\d{1,2}[-/.]\d{2,4}$/.test(v)) return true;
+  // Reject pure numbers or timestamps
+  if (/^\d+$/.test(v.replace(/[\s\-_/.]/g, ''))) return true;
+  // Reject emails
+  if (/@/.test(v)) return true;
   return /\+?\d{1,4}|phone|country|mobile|territory|device\s*type|india\s*\(|united states\s*\(/i.test(v);
 }
 
@@ -36,7 +42,7 @@ export function isInvalidSourceAnswer(value) {
 export function isForbiddenSourceOption(text = '') {
   const t = String(text || '').trim();
   if (!t) return false;
-  return /company\s*(?:website|mail|referral|site|page|portal)|(?:employee|internal|worker|colleague|staff|friend)\s*referral|referral\s*from\s*(?:company|employee|worker)|current\s*employee|existing\s*employee|internal\s*candidate/i.test(t);
+  return /company\s*(?:website|mail|email|referral|site|page|portal)|(?:employee|internal|worker|colleague|staff|friend)\s*referral|referral\s*from\s*(?:company|employee|worker)|current\s*employee|existing\s*employee|internal\s*candidate/i.test(t);
 }
 
 /** Dropdown option text that belongs to country/phone code lists, not referral source. */
@@ -940,18 +946,8 @@ export async function fillSourceFieldAuto(page, profile = {}) {
   }
 
   let display = '';
-  // Referral source is intentionally not a client fact. Pick a valid live
-  // dropdown path first so stale profile/YAML values cannot be submitted.
-  console.log('    🎲 Source fallback: picking a live dropdown option...');
-  const randomResult = await tryPickAnyHierarchicalSource(page, trigger);
-  display = await getReferralSourceDisplay(page);
-  if (randomResult?.success && isReferralSourceFullySelected(display)) {
-    const selected = randomResult.selected || display;
-    console.log(`    ✅ Source pick-any: "${selected}"`);
-    return { success: true, selected, domOptions: [] };
-  }
 
-  // 1) Hierarchical + flat attempts from workdayDefaults.mjs
+  // 1) Hierarchical + flat attempts from workdayDefaults.mjs (LinkedIn, Indeed, Job Boards)
   let result = await fillHowDidYouHearFromDom(page, profile);
   display = await getReferralSourceDisplay(page);
   if (result.success && isReferralSourceFullySelected(display)) {
@@ -1026,7 +1022,11 @@ async function tryPickAnyHierarchicalSource(page, trigger) {
   const topLevelKeys = new Set(topLevel.map(normalizeKey));
   const parents = topLevel
     .filter((o) => !isSkippableOption(o))
-    .sort(() => Math.random() - 0.5);
+    .sort((a, b) => {
+      const aScore = /job|career|online|internet|social|media|website/i.test(a) ? 1 : 0;
+      const bScore = /job|career|online|internet|social|media|website/i.test(b) ? 1 : 0;
+      return bScore - aScore;
+    });
   if (parents.length === 0) return { success: false };
 
   for (const parent of parents) {

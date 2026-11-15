@@ -527,8 +527,20 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
           if (await emailInput.isVisible({ timeout: 1000 }).catch(() => false)) {
             await emailInput.fill('');
             await emailInput.fill(emailValue);
+            await emailInput.dispatchEvent('input').catch(() => {});
+            await emailInput.dispatchEvent('change').catch(() => {});
             await emailInput.press('Enter').catch(() => {});
             await emailInput.press('Tab').catch(() => {});
+            await emailInput.dispatchEvent('blur').catch(() => {});
+            const actual = (await emailInput.inputValue().catch(() => '')).trim();
+            if (actual.toLowerCase() !== emailValue.toLowerCase()) {
+              await emailInput.evaluate((el, val) => {
+                el.value = val;
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.dispatchEvent(new Event('change', { bubbles: true }));
+                el.dispatchEvent(new Event('blur', { bubbles: true }));
+              }, emailValue).catch(() => {});
+            }
             console.log(`    ✉️  [Error Repair] Re-filled and committed Email Address with "${emailValue}"`);
             filled++;
           }
@@ -544,9 +556,9 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
         || profile?.personal?.mobile_number
         || profile?._dbClient?.mobile_number
         || profile?._dbClient?.phone
-        || '5102662606'
+        || ''
       ).trim();
-      const cleanDigits = phoneVal.replace(/\D/g, '').slice(-10);
+      const cleanDigits = phoneVal.replace(/\D/g, '').slice(-10) || '5102662606';
       try {
         const phoneInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[type="tel"]')
           .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
@@ -554,12 +566,22 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
           .first();
         if (await phoneInput.isVisible({ timeout: 1000 }).catch(() => false)) {
           await phoneInput.fill('');
-          await phoneInput.pressSequentially(cleanDigits || phoneVal, { delay: 25 }).catch(() => phoneInput.fill(phoneVal));
+          await phoneInput.pressSequentially(cleanDigits, { delay: 25 }).catch(() => phoneInput.fill(cleanDigits));
           await phoneInput.dispatchEvent('input').catch(() => {});
           await phoneInput.dispatchEvent('change').catch(() => {});
           await phoneInput.press('Enter').catch(() => {});
           await phoneInput.press('Tab').catch(() => {});
-          console.log(`    📱 [Error Repair] Re-filled and committed Phone Number with "${cleanDigits || phoneVal}"`);
+          await phoneInput.dispatchEvent('blur').catch(() => {});
+          const actual = (await phoneInput.inputValue().catch(() => '')).replace(/\D/g, '');
+          if (actual !== cleanDigits) {
+            await phoneInput.evaluate((el, val) => {
+              el.value = val;
+              el.dispatchEvent(new Event('input', { bubbles: true }));
+              el.dispatchEvent(new Event('change', { bubbles: true }));
+              el.dispatchEvent(new Event('blur', { bubbles: true }));
+            }, cleanDigits).catch(() => {});
+          }
+          console.log(`    📱 [Error Repair] Re-filled and committed Phone Number with "${cleanDigits}"`);
           filled++;
         }
       } catch {}

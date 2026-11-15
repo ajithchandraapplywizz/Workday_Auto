@@ -1686,6 +1686,31 @@ export async function runClusterBatchRunner({
 
   setClusterStop(false);
 
+  // Step 1: Dynamically synchronize batch_job_queue with completed scanned_jobs and failed_jobs
+  const { syncQueueWithScannedAndFailedJobs } = await import('./supabaseClient.mjs');
+  await syncQueueWithScannedAndFailedJobs().catch(() => {});
+
+  // Pre-check: If 0 pending unscanned links exist, remain strictly idle without launching workers or logging banners
+  const freshClustersPreCheck = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId, attemptPhase: 'fresh', targetUrl });
+  let retryClustersPreCheck = [];
+  if (freshClustersPreCheck.length === 0) {
+    retryClustersPreCheck = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId, attemptPhase: 'retry', targetUrl });
+  }
+
+  if (freshClustersPreCheck.length === 0 && retryClustersPreCheck.length === 0) {
+    console.log(`ℹ️ [CLUSTER] 0 pending unscanned links in batch_job_queue. Scanning workers remaining idle.`);
+    const workerLimit = Number(workers) || 2;
+    for (let slot = 1; slot <= workerLimit; slot++) {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
+        state: 'idle',
+        stage: 'scanning',
+        bot_name: `Scanning Worker ${slot}`,
+        current_application_id: null,
+      }).catch(() => { });
+    }
+    return { succeeded: 0, failed: 0, total: 0 };
+  }
+
   console.log(`\n${'═'.repeat(78)}`);
   console.log(`⚡ CLUSTER BATCH RUNNER — ${workers} PARALLEL SCANNING WORKERS (HEADLESS: ${headless})`);
   console.log(`   Scan Run ID:   ${scanRunId}`);
@@ -1697,10 +1722,6 @@ export async function runClusterBatchRunner({
     console.log(`   Link Limit:    Max ${limitPerLink} clients per link (Test Mode)`);
   }
   console.log(`${'═'.repeat(78)}\n`);
-
-  // Step 1: Dynamically synchronize batch_job_queue with completed scanned_jobs and failed_jobs
-  const { syncQueueWithScannedAndFailedJobs } = await import('./supabaseClient.mjs');
-  await syncQueueWithScannedAndFailedJobs().catch(() => {});
 
   // Step 2: Concurrency & Worker Pool Configuration
   const maxWorkers = Number(workers) || PIPELINE_CONFIG.workersCount || 2;
@@ -1940,19 +1961,18 @@ export async function runClusterBatchRunner({
   }
 
   // If no clusters ran at all across both phases
-  const isStopActive = await isClusterStopRequested();
   if (clusterResults.length === 0) {
-    console.log(`ℹ️ No pending tasks were processed in batch_job_queue.`);
+    console.log(`ℹ️ [CLUSTER] 0 active tasks were processed in batch_job_queue. Workers remaining idle.`);
     const workerLimit = Number(workers) || 2;
     for (let slot = 1; slot <= workerLimit; slot++) {
       await updateWorkerStatus(`scanning_worker_${slot}`, {
-        state: isStopActive ? 'idle' : 'running',
+        state: 'idle',
         stage: 'scanning',
         bot_name: `Scanning Worker ${slot}`,
-        current_application_id: isStopActive ? null : 'Standing by for new jobs...',
+        current_application_id: null,
       }).catch(() => { });
     }
-    return;
+    return { succeeded: 0, failed: 0, total: 0 };
   }
 
   // If remaining batches in cycle (e.g. 14 batches total -> batches 11 to 14), print milestone report for them

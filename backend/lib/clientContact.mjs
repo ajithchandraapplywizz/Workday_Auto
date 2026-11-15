@@ -615,15 +615,25 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
   p.phone_device_type = p.phone_device_type || qa['phone device type'] || qa['device type'] || 'Mobile';
 
   const countryHint = `${p.country} ${p.country_phone_code}`;
-  const rawPhone = p.phone || qa['phone number'] || qa.phone || profile._applyWizzClientContext?.additional_information?.primary_phone || profile._applyWizzClientContext?.client?.callable_phone || '';
+  const rawPhone = (p.phone && digitsOnly(p.phone).length >= 7 ? p.phone : '')
+    || (p.mobile_number && digitsOnly(p.mobile_number).length >= 7 ? p.mobile_number : '')
+    || (profile._dbClient?.mobile_number && digitsOnly(profile._dbClient.mobile_number).length >= 7 ? profile._dbClient.mobile_number : '')
+    || (profile._dbClient?.phone && digitsOnly(profile._dbClient.phone).length >= 7 ? profile._dbClient.phone : '')
+    || profile._applyWizzClientContext?.additional_information?.primary_phone
+    || profile._applyWizzClientContext?.client?.callable_phone
+    || profile._applyWizzClientContext?.client?.phone
+    || (qa['phone number'] && digitsOnly(qa['phone number']).length >= 7 ? qa['phone number'] : '')
+    || (qa.phone && digitsOnly(qa.phone).length >= 7 ? qa.phone : '')
+    || '';
   const fromApi = normalizePhoneForCountry(rawPhone, countryHint);
-  if (fromApi && fromApi.length >= 10) {
-    p.phone = fromApi;
+  if (fromApi && digitsOnly(fromApi).length >= 7) {
+    p.phone = digitsOnly(fromApi).slice(-10);
+    p.mobile_number = p.phone;
   }
 
   let phone = normalizePhoneForCountry(p.phone || '', countryHint);
   const usJob = /united states|usa|\+\s*1\b/i.test(countryHint);
-  if (!phone || phone.length < 10) {
+  if (!phone || digitsOnly(phone).length < 10) {
     if (usJob && isUsTenDigitPhone(formatPlainUsPhone(phone))) {
       phone = formatPlainUsPhone(phone);
     } else if (usJob) {
@@ -639,7 +649,12 @@ export async function ensureWorkdayContactFromClient(profile = {}) {
       });
     }
   }
-  if (phone) p.phone = phone;
+  if (phone) {
+    const cleanDigits = digitsOnly(phone).slice(-10);
+    p.phone = cleanDigits;
+    p.mobile_number = cleanDigits;
+    profile.phone = cleanDigits;
+  }
 
   if (p.phone_extension == null || p.phone_extension === '') {
     p.phone_extension = '';

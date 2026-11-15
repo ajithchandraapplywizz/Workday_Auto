@@ -657,34 +657,52 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
   let phoneCode = profile?.personal?.country_phone_code || profile?._applyWizzQa?.['country phone code'] || workdayPhoneCodeForCountry(country) || 'United States of America (+1)';
   const phoneDeviceType = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
 
-  const phoneHint = `${country} ${phoneCode}`;
-  let phoneValue = normalizePhoneForCountry(
-    profile?.personal?.phone
-    || profile?.phone
-    || profile?.personal?.mobile_number
-    || profile?.personal?.mobile
-    || profile?._dbClient?.mobile_number
-    || profile?._dbClient?.phone
-    || profile?._supabaseQa?.['Phone Number*']
-    || profile?._supabaseQa?.['Phone Number']
-    || profile?._supabaseQa?.['phone']
-    || profile?._supabaseQa?.['Mobile Phone']
-    || profile?._supabaseQa?.['Mobile Number']
-    || profile?._resolvedAnswersMap?.get?.('phone number*')?.answer
-    || profile?._resolvedAnswersMap?.get?.('phone number')?.answer
-    || profile?._resolvedAnswersMap?.get?.('phone')?.answer
-    || profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
-    || profile?._applyWizzClientContext?.additional_information?.primary_phone
-    || profile?._applyWizzClientContext?.client?.callable_phone
-    || profile?._applyWizzClientContext?.client?.phone
-    || '',
-    phoneHint
+  const pickValidPhone = (...candidates) => {
+    for (const c of candidates) {
+      if (!c) continue;
+      const str = String(c).trim();
+      const digits = str.replace(/\D/g, '').slice(-10);
+      if (digits.length >= 7) return digits;
+    }
+    return '';
+  };
+  let cleanDigits = pickValidPhone(
+    profile?.personal?.phone,
+    profile?.phone,
+    profile?.personal?.mobile_number,
+    profile?.personal?.mobile,
+    profile?._dbClient?.mobile_number,
+    profile?._dbClient?.phone,
+    profile?._applyWizzClientContext?.additional_information?.primary_phone,
+    profile?._applyWizzClientContext?.client?.callable_phone,
+    profile?._applyWizzClientContext?.client?.phone,
+    profile?._supabaseQa?.['Phone Number*'],
+    profile?._supabaseQa?.['Phone Number'],
+    profile?._supabaseQa?.['phone'],
+    profile?._supabaseQa?.['Mobile Phone'],
+    profile?._supabaseQa?.['Mobile Number'],
+    profile?._resolvedAnswersMap?.get?.('phone number*')?.answer,
+    profile?._resolvedAnswersMap?.get?.('phone number')?.answer,
+    profile?._resolvedAnswersMap?.get?.('phone')?.answer,
+    profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
   );
-  if (!phoneValue || phoneValue.length < 7) {
-    phoneValue = '5102662606'; // reliable US contact phone fallback
+
+  if ((!cleanDigits || cleanDigits.length < 7) && profile._applyWizzId) {
+    try {
+      const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
+      const rec = await getClientRecordByAwlId(profile._applyWizzId);
+      if (rec?.mobile_number || rec?.phone) {
+        cleanDigits = String(rec.mobile_number || rec.phone).replace(/\D/g, '').slice(-10);
+      }
+    } catch {}
+  }
+  if (!cleanDigits || cleanDigits.length < 7) {
+    cleanDigits = '5102662606'; // reliable US contact phone fallback
   }
   profile.personal = profile.personal || {};
-  profile.personal.phone = phoneValue;
+  profile.personal.phone = cleanDigits;
+  profile.personal.mobile_number = cleanDigits;
+  profile.phone = cleanDigits;
   profile.personal.phone_device_type = phoneDeviceType;
 
   // 3. Fill / Verify Phone Device Type
@@ -738,21 +756,23 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
 
     if (await phoneNumberInput.isVisible({ timeout: 1500 }).catch(() => false)) {
       const currentDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
-      const wantDigits = String(phoneValue).replace(/\D/g, '').slice(-10);
+      const wantDigits = cleanDigits;
       if (currentDigits !== wantDigits) {
         await interactAndRescan(page, async () => {
           await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
           await phoneNumberInput.click({ force: true }).catch(() => {});
           await phoneNumberInput.fill('').catch(() => {});
-          await phoneNumberInput.pressSequentially(wantDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(phoneValue));
+          await phoneNumberInput.pressSequentially(wantDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(wantDigits));
           await phoneNumberInput.dispatchEvent('input').catch(() => {});
           await phoneNumberInput.dispatchEvent('change').catch(() => {});
           await phoneNumberInput.press('Enter').catch(() => {});
           await phoneNumberInput.press('Tab').catch(() => {});
+          await phoneNumberInput.dispatchEvent('blur').catch(() => {});
         });
         let verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
         if (verified !== wantDigits) {
           await phoneNumberInput.evaluate((el, val) => {
+            el.focus();
             el.value = val;
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
@@ -761,13 +781,13 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
           verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
         }
         if (verified === wantDigits) {
-          console.log(`    ✅ Phone Number verified in DOM: "${phoneValue}"`);
+          console.log(`    ✅ Phone Number verified in DOM: "${wantDigits}"`);
         } else {
           console.log(`    ⚠️  Phone Number DOM mismatch: expected "${wantDigits}", got "${verified}"`);
         }
-        recordFilled(profile, 'Phone Number', phoneValue);
+        recordFilled(profile, 'Phone Number', wantDigits);
       } else {
-        console.log(`    ✓ Phone Number already filled: "${phoneValue}"`);
+        console.log(`    ✓ Phone Number already filled: "${wantDigits}"`);
       }
     }
   } catch (err) {
@@ -886,13 +906,29 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         if (curEmail.toLowerCase() !== emailValue.toLowerCase()) {
           await interactAndRescan(page, async () => {
             await emailInput.scrollIntoViewIfNeeded().catch(() => {});
+            await emailInput.click({ force: true }).catch(() => {});
+            await emailInput.fill('');
             await emailInput.fill(emailValue);
+            await emailInput.dispatchEvent('input').catch(() => {});
+            await emailInput.dispatchEvent('change').catch(() => {});
             await emailInput.press('Enter').catch(() => {});
             await emailInput.press('Tab').catch(() => {});
+            await emailInput.dispatchEvent('blur').catch(() => {});
           });
         }
-        const verifiedEmail = (await emailInput.inputValue().catch(() => '')).trim();
-        const emailOk = verifiedEmail.toLowerCase() === emailValue.toLowerCase();
+        let verifiedEmail = (await emailInput.inputValue().catch(() => '')).trim();
+        let emailOk = verifiedEmail.toLowerCase() === emailValue.toLowerCase();
+        if (!emailOk) {
+          await emailInput.evaluate((el, val) => {
+            el.focus();
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, emailValue).catch(() => {});
+          verifiedEmail = (await emailInput.inputValue().catch(() => '')).trim();
+          emailOk = verifiedEmail.toLowerCase() === emailValue.toLowerCase();
+        }
         if (emailOk) {
           console.log(`    ✅ Field 0b Complete: Email Address verified in DOM: "${verifiedEmail}"`);
         } else {
@@ -1112,13 +1148,15 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           .first();
 
     const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false);
+    let hasValidSelection = false;
     if (isCountryVisible) {
       const liveText = ((await countryControl.innerText().catch(() => '')) ||
         (await countryControl.inputValue().catch(() => '')) ||
         (await countryControl.textContent().catch(() => '')) || '').trim();
-      if (!selectedCountry && liveText && !/select\s*one|select/i.test(liveText)) {
+      if (liveText && !/select(\s+one)?\.?$/i.test(liveText)) {
         selectedCountry = normalizeCountryForWorkday(liveText);
-        console.log(`    ✓ Country already selected on form: "${selectedCountry}"`);
+        hasValidSelection = true;
+        console.log(`    ✓ Country already selected on form: "${selectedCountry}" — keeping untouched to preserve phone/address cascade`);
       }
     }
 
@@ -1136,8 +1174,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
       }
 
-      const cur = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
-      if (!cur || !cur.toLowerCase().includes(selectedCountry.toLowerCase())) {
+      if (!hasValidSelection) {
         await interactAndRescan(page, async () => {
           await countryControl.scrollIntoViewIfNeeded().catch(() => {});
           await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
@@ -1151,6 +1188,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         try {
           await page.waitForSelector('input[data-automation-id*="addressLine1" i], input[data-automation-id*="postalCode" i], [data-automation-id="addressSection_countryRegion"], #address--addressLine1', { timeout: 3500 });
         } catch {}
+      } else {
+        recordFilled(profile, 'Country', selectedCountry);
       }
     }
   } catch (err) {
@@ -1170,29 +1209,54 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     step: 'My Information',
   });
 
-  console.log('  🎯 [Field 4/4] Resolving Phone Number...');
+  console.log('  🎯 [Field 4/4] Resolving Phone Number (strictly client clean digits)...');
   try {
-    const { normalizePhoneForCountry } = await import('./clientContact.mjs');
-    const phoneHint = `${profile?.personal?.country || ''} ${profile?.personal?.country_phone_code || ''}`;
-    let phoneValue = normalizePhoneForCountry(
-      profile?.personal?.phone
-      || profile?.phone
-      || profile?.personal?.mobile_number
-      || profile?._dbClient?.mobile_number
-      || profile?._dbClient?.phone
-      || profile?._supabaseQa?.['Phone Number*']
-      || profile?._supabaseQa?.['Phone Number']
-      || profile?._supabaseQa?.['phone']
-      || profile?._resolvedAnswersMap?.get?.('phone number*')?.answer
-      || profile?._resolvedAnswersMap?.get?.('phone number')?.answer
-      || '',
-      phoneHint
+    const pickValidPhone = (...candidates) => {
+      for (const c of candidates) {
+        if (!c) continue;
+        const str = String(c).trim();
+        const digits = str.replace(/\D/g, '').slice(-10);
+        if (digits.length >= 7) return digits;
+      }
+      return '';
+    };
+    let cleanDigits = pickValidPhone(
+      profile?.personal?.phone,
+      profile?.phone,
+      profile?.personal?.mobile_number,
+      profile?.personal?.mobile,
+      profile?._dbClient?.mobile_number,
+      profile?._dbClient?.phone,
+      profile?._applyWizzClientContext?.additional_information?.primary_phone,
+      profile?._applyWizzClientContext?.client?.callable_phone,
+      profile?._applyWizzClientContext?.client?.phone,
+      profile?._supabaseQa?.['Phone Number*'],
+      profile?._supabaseQa?.['Phone Number'],
+      profile?._supabaseQa?.['phone'],
+      profile?._supabaseQa?.['Mobile Phone'],
+      profile?._supabaseQa?.['Mobile Number'],
+      profile?._resolvedAnswersMap?.get?.('phone number*')?.answer,
+      profile?._resolvedAnswersMap?.get?.('phone number')?.answer,
+      profile?._resolvedAnswersMap?.get?.('phone')?.answer,
+      profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
     );
-    if (!phoneValue) {
-      phoneValue = '5102662606'; // reliable US contact phone fallback
+
+    if ((!cleanDigits || cleanDigits.length < 7) && profile._applyWizzId) {
+      try {
+        const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
+        const rec = await getClientRecordByAwlId(profile._applyWizzId);
+        if (rec?.mobile_number || rec?.phone) {
+          cleanDigits = String(rec.mobile_number || rec.phone).replace(/\D/g, '').slice(-10);
+        }
+      } catch {}
+    }
+    if (!cleanDigits || cleanDigits.length < 7) {
+      cleanDigits = '5102662606'; // reliable US contact phone fallback
     }
     profile.personal = profile.personal || {};
-    profile.personal.phone = phoneValue;
+    profile.personal.phone = cleanDigits;
+    profile.personal.mobile_number = cleanDigits;
+    profile.phone = cleanDigits;
 
     // Check if phone section needs to be expanded first
     const hasPhoneVisible = await page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 500 }).catch(() => false);
@@ -1211,41 +1275,45 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       .first();
 
     if (await phoneNumberInput.isVisible({ timeout: 2000 }).catch(() => false)) {
-      const cleanDigits = String(phoneValue).replace(/\D/g, '').slice(-10);
-      await interactAndRescan(page, async () => {
-        await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
-        await phoneNumberInput.click({ force: true }).catch(() => {});
-        await phoneNumberInput.fill('').catch(() => {});
-        await phoneNumberInput.pressSequentially(cleanDigits || String(phoneValue), { delay: 25 }).catch(() => phoneNumberInput.fill(phoneValue));
-        await phoneNumberInput.dispatchEvent('input').catch(() => {});
-        await phoneNumberInput.dispatchEvent('change').catch(() => {});
-        await phoneNumberInput.press('Enter').catch(() => {});
-        await phoneNumberInput.press('Tab').catch(() => {});
-      });
-      let verified = await phoneNumberInput.inputValue().catch(() => '');
-      let phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
-      if (!phoneOk && verified.length < 7) {
+      const curDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+      if (curDigits !== cleanDigits) {
+        await interactAndRescan(page, async () => {
+          await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
+          await phoneNumberInput.click({ force: true }).catch(() => {});
+          await phoneNumberInput.fill('').catch(() => {});
+          await phoneNumberInput.pressSequentially(cleanDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(cleanDigits));
+          await phoneNumberInput.dispatchEvent('input').catch(() => {});
+          await phoneNumberInput.dispatchEvent('change').catch(() => {});
+          await phoneNumberInput.press('Enter').catch(() => {});
+          await phoneNumberInput.press('Tab').catch(() => {});
+          await phoneNumberInput.dispatchEvent('blur').catch(() => {});
+        });
+      }
+      let verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+      let phoneOk = verified === cleanDigits;
+      if (!phoneOk) {
         await phoneNumberInput.evaluate((el, val) => {
+          el.focus();
           el.value = val;
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
           el.dispatchEvent(new Event('blur', { bubbles: true }));
-        }, cleanDigits || phoneValue).catch(() => {});
-        verified = await phoneNumberInput.inputValue().catch(() => '');
-        phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
+        }, cleanDigits).catch(() => {});
+        verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+        phoneOk = verified === cleanDigits;
       }
       if (!phoneOk) {
-        console.log(`    ⚠️  Phone verify mismatch: expected ${phoneValue}, got ${verified}`);
+        console.log(`    ⚠️  Phone verify mismatch: expected ${cleanDigits}, got ${verified}`);
       } else {
-        console.log(`    ✅ Field 4 Complete: Phone Number "${phoneValue}"`);
+        console.log(`    ✅ Field 4 Complete: Phone Number "${cleanDigits}"`);
       }
-      recordFilled(profile, 'Phone Number', String(phoneValue).trim());
+      recordFilled(profile, 'Phone Number', cleanDigits);
       logFieldTrace({
         automationId: 'phone-number',
         label: 'Phone Number',
         controlType: 'text',
         tier: 'tier1_profile_fact',
-        valueAttempted: phoneValue,
+        valueAttempted: cleanDigits,
         success: phoneOk,
         step: 'My Information',
       });
@@ -1742,7 +1810,10 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
       const label = f.label || f.id;
       const norm = normalizeLabel(label);
       if (!norm || seenNorms.has(norm)) return false;
-      if (isPhoneRelatedField(label, f)) return true;
+      if (isPhoneRelatedField(label, f)) {
+        if (stepName === 'My Information') return false;
+        return true;
+      }
       const mandatory = isMandatoryField(label, f) || f.required === true;
       if (!mandatory) {
         if (isSkippableUnimportantLabel(label, f)) return false;

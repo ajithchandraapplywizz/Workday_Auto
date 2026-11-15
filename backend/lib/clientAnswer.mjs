@@ -20,6 +20,7 @@ import {
 } from './applyWizzClient.mjs';
 import { tokenSetRatio, fuzzyScore } from './fields.mjs';
 import { formatPlainUsPhone, normalizePhoneForCountry, workdayPhoneCodeForCountry, isValidCityName, isValidStateName } from './clientContact.mjs';
+import { isInvalidSourceAnswer, isForbiddenSourceOption } from './workdaySource.mjs';
 import { resolveUnknownWithLlm, isOpenRouterEnabled, isPersonalIdentityQuestion } from './claudeLlm.mjs';
 import {
   resolveExperienceQuestionAnswer,
@@ -113,8 +114,13 @@ function profileFactForLabel(label, profile = {}) {
   }
   if (/^email/.test(n)) return p.email || null;
   if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(n)) {
-    const hint = `${p.country || ''} ${p.country_phone_code || ''}`;
-    return p.phone ? normalizePhoneForCountry(p.phone, hint) : null;
+    const raw = p.phone || p.mobile_number || profile._dbClient?.mobile_number || profile._dbClient?.phone || '';
+    const cleanDigits = String(raw).replace(/\D/g, '').slice(-10);
+    return cleanDigits.length >= 7 ? cleanDigits : null;
+  }
+  if (/how\s*did\s*you\s*hear\s*about\s*us|referral\s*source|^source$/i.test(n)) {
+    const src = p.source || profile.qa_answers?.['how did you hear about us'] || 'LinkedIn';
+    return (isInvalidSourceAnswer(src) || isForbiddenSourceOption(src)) ? 'LinkedIn' : src;
   }
   if (/country\s*(\/\s*territory\s*)?phone\s*code/i.test(n)) {
     return p.country_phone_code || workdayPhoneCodeForCountry(p.country) || null;
@@ -280,6 +286,14 @@ export function acceptClientValue(label, value, { options = [], fieldType = '', 
     return formatToMMDDYYYY(text) || text;
   }
   const normLabel = normalizeLabel(label);
+  if (/^(phone|mobile|cell)(\s*number)?$|phone\s*number/i.test(label) || /phone\s*number/i.test(normLabel)) {
+    const cleanDigits = String(text).replace(/\D/g, '').slice(-10);
+    if (cleanDigits.length < 7) return null; // Reject text or invalid values for phone
+    return cleanDigits;
+  }
+  if (/how\s*did\s*you\s*hear\s*about\s*us|referral\s*source|^source$/i.test(normLabel)) {
+    if (isInvalidSourceAnswer(text) || isForbiddenSourceOption(text)) return null;
+  }
   if (/^city$|^address--city$|\bcity\b/i.test(normLabel) && !/citizenship|capacity/i.test(normLabel)) {
     if (!isValidCityName(text)) return null;
   }

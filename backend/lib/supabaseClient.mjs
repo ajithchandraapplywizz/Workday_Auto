@@ -3589,6 +3589,91 @@ export async function syncQueueWithScannedAndFailedJobs() {
 }
 
 /**
+ * Checks whether batch_job_queue has any active, pending, unscanned jobs.
+ * Runs syncQueueWithScannedAndFailedJobs first to reconcile state, then queries
+ * batch_job_queue for genuinely pending, unscanned rows.
+ * If 0 unscanned pending jobs exist, returns { hasPending: false, pendingCount: 0, pendingUrls: [] }.
+ */
+export async function getPendingUnscannedJobsSummary() {
+  if (!isSupabaseConfigured()) {
+    return { hasPending: false, pendingCount: 0, pendingUrls: [] };
+  }
+  try {
+    // 1. Sync queue with scanned_jobs and failed_jobs first
+    await syncQueueWithScannedAndFailedJobs().catch(() => {});
+
+    // 2. Fetch all rows in batch_job_queue with status in ('pending', 'queued')
+    const pendingRows = await request('batch_job_queue', {
+      query: '?select=id,job_url,status,attempt_count&status=in.(pending,queued)&limit=5000',
+    });
+
+    if (!Array.isArray(pendingRows) || pendingRows.length === 0) {
+      return { hasPending: false, pendingCount: 0, pendingUrls: [] };
+    }
+
+    // 3. Double-check against scanned_jobs (canonical check to prevent false positives)
+    function normUrl(u) {
+      try {
+        const p = new URL(u);
+        return (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
+      } catch {
+        return String(u || '').toLowerCase().trim();
+      }
+    }
+
+    const sj = await request('scanned_jobs', {
+      query: '?select=id,job_url,screenshot_path&scan_status=eq.completed&limit=5000',
+    }).catch(() => []);
+
+    const scannedSet = new Set();
+    if (Array.isArray(sj)) {
+      for (const r of sj) {
+        if (r.job_url) scannedSet.add(normUrl(r.job_url));
+      }
+    }
+
+    const genuinelyPendingUrls = new Set();
+    const rowsToMarkScanned = [];
+
+    for (const row of pendingRows) {
+      const rawUrl = String(row.job_url || '').trim();
+      if (!rawUrl) continue;
+      const k = normUrl(rawUrl);
+      if (scannedSet.has(k)) {
+        rowsToMarkScanned.push(row.id);
+      } else {
+        genuinelyPendingUrls.add(rawUrl);
+      }
+    }
+
+    // Reconcile any remaining matching rows in batch_job_queue
+    if (rowsToMarkScanned.length > 0) {
+      for (const id of rowsToMarkScanned) {
+        await request('batch_job_queue', {
+          method: 'PATCH',
+          query: `?id=eq.${id}`,
+          prefer: 'return=minimal',
+          body: {
+            status: 'already_scanned',
+            updated_at: new Date().toISOString(),
+          },
+        }).catch(() => {});
+      }
+    }
+
+    const pendingList = Array.from(genuinelyPendingUrls);
+    return {
+      hasPending: pendingList.length > 0,
+      pendingCount: pendingList.length,
+      pendingUrls: pendingList,
+    };
+  } catch (err) {
+    console.warn(`[getPendingUnscannedJobsSummary] Warning:`, err.message);
+    return { hasPending: false, pendingCount: 0, pendingUrls: [] };
+  }
+}
+
+/**
  * Persists a newly resolved question/answer into BOTH qa_bank (strictly for candidate AWL ID)
  * and job_distributions.resolved_answers.
  */

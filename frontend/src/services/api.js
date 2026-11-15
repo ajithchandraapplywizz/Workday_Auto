@@ -559,59 +559,84 @@ export function getISTDateBounds(dateStr, timeframe = 'day') {
 
 /**
  * Extracts authentic submission or activity timestamp from an application row.
- * For submitted/completed applications: updated_at (moment of submission) or worker_leased_at.
+ * For submitted/completed/failed applications:
+ *   1. Timestamp embedded directly in screenshot URL (physical moment of capture)
+ *   2. worker_leased_at (moment worker claimed and executed the run)
+ *   3. submitted_at / completed_at
+ *   4. created_at (creation time)
+ *   NEVER prioritizes updated_at for terminal statuses, as background syncs/sweeps touch updated_at.
  * For in-flight/pending: worker_leased_at, then updated_at / created_at.
  */
 export function getApplicationEffectiveTimestamp(item) {
   if (!item) return 0;
   const st = String(item.status || '').toLowerCase();
-  const isSubmitted = st === 'submitted' || st === 'completed';
+  const isTerminal = st === 'submitted' || st === 'completed' || st === 'failed' || st === 'already_applied';
 
-  // For submitted applications, priority is the moment of submission (updated_at or worker_leased_at)
-  if (isSubmitted) {
-    if (item.updated_at) {
-      const t = new Date(item.updated_at).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
-    if (item.worker_leased_at) {
-      const t = new Date(item.worker_leased_at).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
-  } else {
-    // For leased / in-flight applications
-    if (item.worker_leased_at) {
-      const t = new Date(item.worker_leased_at).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
-    if (item.updated_at) {
-      const t = new Date(item.updated_at).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
+  // 1. Highest priority for terminal statuses: timestamp embedded in screenshot URL
+  const shotUrl = item.application_submitted_screenshot_url || item.screenshot_url || item.applied_screenshot || item.failure_screenshot_url || item.screenshot_path || '';
+  let shotText = typeof shotUrl === 'string' ? shotUrl : '';
+  if (!shotText && item.error_message && typeof item.error_message === 'string') {
+    const shotMatch = item.error_message.match(/diagnostic_screenshot:\s*([^\s\]]+)/i) || item.error_message.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+    if (shotMatch) shotText = shotMatch[1] || shotMatch[0];
   }
 
-  // Fallback: timestamp from screenshot URL if present
-  const shotUrl = item.application_submitted_screenshot_url || item.screenshot_url || item.applied_screenshot || item.screenshot_path || '';
-  if (shotUrl && typeof shotUrl === 'string') {
-    // Matches ISO timestamp like 2026-11-10T08-32-57-314Z or 2026-11-10T08:32:57.314Z
-    const isoMatch = shotUrl.match(/(\d{4}-\d{2}-\d{2})T(\d{2})[-:](\d{2})[-:](\d{2})(?:[-.](\d+))?Z?/i);
+  if (shotText) {
+    // Matches ISO timestamp like 2026-11-15T19-21-45-648Z or 2026-11-15T19:21:45.648Z
+    const isoMatch = shotText.match(/(\d{4}-\d{2}-\d{2})T(\d{2})[-:](\d{2})[-:](\d{2})(?:[-.](\d+))?Z?/i);
     if (isoMatch) {
       const [_, ymd, hh, mm, ss, ms] = isoMatch;
       const isoStr = `${ymd}T${hh}:${mm}:${ss}${ms ? '.' + ms.slice(0, 3) : ''}Z`;
       const t = new Date(isoStr).getTime();
       if (!isNaN(t) && t > 0) return t;
     }
-    // Matches epoch ms like 1773030491871
-    const msMatch = shotUrl.match(/_(\d{13})\./);
+    // Matches epoch ms like 1794774093550
+    const msMatch = shotText.match(/_(\d{13})(?:\.|$)/);
     if (msMatch) {
       const t = Number(msMatch[1]);
       if (!isNaN(t) && t > 0) return t;
     }
   }
 
-  // Fallback to created_at
-  const fallback = item.created_at;
-  const t = new Date(fallback).getTime();
-  return isNaN(t) ? 0 : t;
+  // 2. Second priority: Worker lease time (moment worker began processing)
+  if (item.worker_leased_at) {
+    const t = new Date(item.worker_leased_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+
+  // 3. Third priority: Specific terminal timestamps if populated
+  if (item.submitted_at) {
+    const t = new Date(item.submitted_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+  if (item.completed_at) {
+    const t = new Date(item.completed_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+
+  // 4. For terminal applications (submitted/completed/failed), fallback to created_at.
+  // NEVER use updated_at because queue sweeps, syncs, and migrations touch updated_at!
+  if (isTerminal) {
+    if (item.created_at) {
+      const t = new Date(item.created_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    if (item.updated_at) {
+      const t = new Date(item.updated_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+  } else {
+    // For pending/in-flight items, use worker_leased_at, then updated_at, then created_at
+    if (item.updated_at) {
+      const t = new Date(item.updated_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    if (item.created_at) {
+      const t = new Date(item.created_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+  }
+
+  return 0;
 }
 
 /**
@@ -1044,6 +1069,12 @@ export async function fetchApplicationsDynamic({
     let list = rawApps.map((dt) => {
       const proofShot = dt.application_submitted_screenshot_url || dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || dt.screenshot_url;
 
+      let failureShot = dt.failure_screenshot_url || null;
+      if (!failureShot && dt.error_message && typeof dt.error_message === 'string') {
+        const shotMatch = dt.error_message.match(/diagnostic_screenshot:\s*([^\s\]]+)/i) || dt.error_message.match(/https:\/\/[^\s"'<>]+\.(?:jpg|jpeg|png|webp)/i);
+        if (shotMatch) failureShot = shotMatch[1] || shotMatch[0];
+      }
+
       const rawSt = (dt.status || 'pending').toLowerCase();
       let normalizedStatus = rawSt;
       if (rawSt === 'submitted' || rawSt === 'completed') {
@@ -1066,16 +1097,16 @@ export async function fetchApplicationsDynamic({
         role_title: dt.role_title || 'Workday Application',
         ats: 'Workday',
         status: normalizedStatus,
-        screenshot_url: proofShot || null,
-        screenshot_path: proofShot || null,
+        screenshot_url: proofShot || failureShot || null,
+        screenshot_path: proofShot || failureShot || null,
         applied_screenshot: dt.applied_screenshot || dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
         original_application_screenshot_successful: dt.original_application_screenshot_successful || dt.final_submission_screenshot_url || null,
         resolved_answers_json: dt.resolved_answers,
         unanswered_questions: dt.unanswered_questions,
         unanswered_count: dt.unanswered_count || 0,
         is_fully_answered: dt.is_fully_answered,
-        failure_reason: dt.failure_reason || null,
-        failure_screenshot_url: dt.failure_screenshot_url || null,
+        failure_reason: dt.failure_reason || dt.error_message || null,
+        failure_screenshot_url: failureShot,
         stopped_at_step: dt.stopped_at_step || null,
         manager_id: dt.manager_id || null,
         ca_id: dt.ca_id || dt.ca_email || null,
@@ -1112,12 +1143,9 @@ export async function fetchApplicationsDynamic({
     // Filter strictly by day bounds: Submitted and failed stats are strictly for that selected day, while pending/ready_for_review tasks remain viewable
     if (bounds) {
       list = list.filter((item) => {
-        const updMs = item.updated_at ? new Date(item.updated_at).getTime() : 0;
-        const leaseMs = item.worker_leased_at ? new Date(item.worker_leased_at).getTime() : 0;
         const effTs = getApplicationEffectiveTimestamp(item);
-        const isInDay = (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
         if (item.status === 'submitted' || item.status === 'completed' || item.status === 'already_applied' || item.status === 'failed') {
-          return isInDay;
+          return effTs >= startMs && effTs <= endMs;
         }
         // Pending ready_for_review applications must always be viewable for submission regardless of exact generation hour
         return true;
@@ -1176,10 +1204,15 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
 
     const matchesDay = (a) => {
       if (!bounds) return true;
+      const st = (a.status || '').toLowerCase();
+      const isTerminal = st === 'submitted' || st === 'completed' || st === 'failed' || st === 'already_applied';
+      const effTs = getApplicationEffectiveTimestamp(a);
+      if (isTerminal) {
+        return effTs >= startMs && effTs <= endMs;
+      }
       const updMs = a.updated_at ? new Date(a.updated_at).getTime() : 0;
       const leaseMs = a.worker_leased_at ? new Date(a.worker_leased_at).getTime() : 0;
-      const effTs = getApplicationEffectiveTimestamp(a);
-      return (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
+      return (effTs >= startMs && effTs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (updMs >= startMs && updMs <= endMs);
     };
 
     // 1. Submitted: strictly matching the day's time bounds
@@ -2661,10 +2694,15 @@ export async function fetchCABotAutomationStats({ caEmail = '', dateStr = '' } =
 
     const matchesDay = (j) => {
       if (!bounds) return true;
+      const st = String(j.status || '').toLowerCase();
+      const isTerminal = st === 'submitted' || st === 'completed' || st === 'failed';
+      const effTs = getApplicationEffectiveTimestamp(j);
+      if (isTerminal) {
+        return effTs >= startMs && effTs <= endMs;
+      }
       const updMs = j.updated_at ? new Date(j.updated_at).getTime() : 0;
       const leaseMs = j.worker_leased_at ? new Date(j.worker_leased_at).getTime() : 0;
-      const effTs = getApplicationEffectiveTimestamp(j);
-      return (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (effTs >= startMs && effTs <= endMs);
+      return (effTs >= startMs && effTs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (updMs >= startMs && updMs <= endMs);
     };
 
     const clientStats = assignedClients.map((client) => {
@@ -3580,7 +3618,11 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
         const effectiveTs = getApplicationEffectiveTimestamp(d);
         const updMs = d.updated_at ? new Date(d.updated_at).getTime() : 0;
         const leaseMs = d.worker_leased_at ? new Date(d.worker_leased_at).getTime() : 0;
-        const matchesDate = !bounds || ((effectiveTs >= startMs && effectiveTs <= endMs) || (updMs >= startMs && updMs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs));
+        const matchesDate = !bounds || (
+          (isSubmitted || rawStatus === 'failed')
+            ? (effectiveTs >= startMs && effectiveTs <= endMs)
+            : ((effectiveTs >= startMs && effectiveTs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (updMs >= startMs && updMs <= endMs))
+        );
 
         // Day-wise filtering:
         // - If submitted / failed: MUST match the selected date bounds!

@@ -610,6 +610,16 @@ export async function stopAutonomousPool() {
  * Execute Stage 1: Scanning (scanning_worker_1..2)
  */
 async function runStage1Scanning() {
+  const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
+  const summary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
+  if (!summary.hasPending || summary.pendingCount === 0) {
+    console.log(`ℹ️ [STAGE 1] 0 pending unscanned jobs in batch_job_queue. Skipping scanning stage.`);
+    for (const wId of (PIPELINE_CONFIG.scanWorkerIds || [])) {
+      await updateWorkerStatus(wId, { state: 'idle', stage: 'scanning', current_application_id: null }).catch(() => {});
+    }
+    return { skipped: true, reason: 'no_pending_jobs' };
+  }
+
   currentStage = 'scanning';
 
   // Ensure scan_run_id exists in bot_control — auto-generate fallback if not provided
@@ -943,6 +953,33 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     return { success: false, reason: 'Local worker execution disabled. Railway cloud runs all scanning.' };
   }
 
+  // Pre-check: If 0 pending unscanned jobs exist, remain strictly idle without launching workers or logging loops
+  const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
+  const initialQueueSummary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
+
+  if (!initialQueueSummary.hasPending || initialQueueSummary.pendingCount === 0) {
+    console.log(`ℹ️ [SCANNER] 0 pending unscanned jobs in batch_job_queue (queue is empty or all links are already scanned). Remaining strictly idle.`);
+    scanStatus = 'off';
+    currentStage = 'idle';
+    currentMode = 'idle';
+    isPoolRunning = false;
+    for (const wId of (PIPELINE_CONFIG.scanWorkerIds || ['scanning_worker_1', 'scanning_worker_2'])) {
+      await updateWorkerStatus(wId, { state: 'idle', stage: 'scanning', current_application_id: null }).catch(() => {});
+    }
+    await syncBotControlState({
+      mode: 'idle',
+      stage: 'idle',
+      scan_enabled: false,
+      scan_status: 'off',
+      scan_stop_requested: false,
+      is_running: false,
+      current_action: 'Idle — 0 pending unscanned links in queue',
+      active_worker_count: 0,
+      last_action_requested: null,
+    });
+    return { success: true, idle: true, message: '0 pending unscanned jobs in batch_job_queue. Workers remaining idle.' };
+  }
+
   const bcState = await getBotControl().catch(() => null);
   const isParallel = Boolean(
     bcState?.stage === 'parallel' ||
@@ -982,6 +1019,40 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     console.log(`\n🚀 [DAEMON] Schedule 1: Starting Continuous Scan & Resolve Loop (Run ${scanRunId})...`);
 
     while (scanStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isScanStopRequested() && !isPoolPaused) {
+      // Re-verify pending unscanned jobs before launching parallel stage pass
+      const iterSummary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
+      if (!iterSummary.hasPending || iterSummary.pendingCount === 0) {
+        console.log(`ℹ️ [SCANNER] All links in batch_job_queue have been scanned (0 pending unscanned links remaining).`);
+        // Check remaining unresolved candidate distributions
+        const { getRecentBatchJobUrls: getRecentDaemonUrls } = await import('../lib/supabaseClient.mjs');
+        const { urls: recentDaemonUrls } = await getRecentDaemonUrls({ windowMinutes: 120 }).catch(() => ({ urls: [] }));
+        let hasPendingDist = false;
+        if (recentDaemonUrls && recentDaemonUrls.length > 0) {
+          const { data: pendingDistributions } = await supabase
+            .from('job_distributions')
+            .select('id')
+            .in('job_url', recentDaemonUrls)
+            .in('status', ['pending', 'queued', 'resolving'])
+            .limit(1);
+          hasPendingDist = Array.isArray(pendingDistributions) && pendingDistributions.length > 0;
+        }
+
+        if (!hasPendingDist) {
+          console.log(`\n✅ [DAEMON] [SCANNER & RESOLVER COMPLETE] All batch_job_queue links finalized and all distributions reached ready_for_review.`);
+          console.log(`🛑 [DAEMON] Scanner & resolver complete. Transitioning to idle state.`);
+          scanCompleteMessage = 'Scan & Resolve complete: all unique links finalized and ready for review.';
+          break;
+        }
+
+        // Only run resolving pass since scanner has no pending links
+        console.log(`⚡ [DAEMON] Scanner idle (0 pending links). Running resolving pass for remaining distributions...`);
+        await runStage2Resolving().catch((err) => {
+          console.error(`❌ [DAEMON] Stage 2 Resolving error:`, err?.message || err);
+        });
+        await new Promise((r) => setTimeout(r, 2000));
+        continue;
+      }
+
       await syncBotControlState({
         mode: currentMode,
         stage: currentStage,
@@ -2521,24 +2592,43 @@ export async function initOnStartup() {
         } else if (process.env.SCANNER_RUN === 'false' || process.env.RUN === 'false') {
           console.log(`\n⏸️ [SCANNER SERVICE] Scan signal received, but SCANNER_RUN is explicitly disabled in environment. Remaining safely idle.`);
         } else {
-          console.log(`\n⚡ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker scanning cluster...`);
-          const isUniversalSignal = bc?.last_action_requested === 'start_universal' || bc?.stage === 'parallel';
-          const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
-          await syncBotControlState({
-            last_action_requested: isUniversalSignal ? 'start_universal' : (bc?.last_action_requested === 'start_scan' ? null : bc?.last_action_requested),
-            trigger_requested: isUniversalSignal ? true : false,
-            is_running: true,
-            stage: targetStage,
-            mode: targetStage,
-            scan_status: 'running',
-            scan_enabled: true,
-            stop_requested: false,
-            scan_stop_requested: false
-          });
-          if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
-          runScanAndResolveParallel().catch(console.error);
-          if (!isSubmitStartRequested) {
-            return;
+          const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
+          const preCheck = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
+          if (!preCheck.hasPending || preCheck.pendingCount === 0) {
+            console.log(`ℹ️ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Scan signal received, but 0 pending unscanned links in batch_job_queue. Remaining completely idle.`);
+            await syncBotControlState({
+              last_action_requested: null,
+              trigger_requested: false,
+              scan_status: 'off',
+              scan_enabled: false,
+              stage: 'idle',
+              mode: 'idle',
+              is_running: false,
+              current_action: 'Idle — 0 pending unscanned links in queue',
+              active_worker_count: 0
+            });
+            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'off' }).catch(() => { });
+            if (!isSubmitStartRequested) return;
+          } else {
+            console.log(`\n⚡ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker scanning cluster...`);
+            const isUniversalSignal = bc?.last_action_requested === 'start_universal' || bc?.stage === 'parallel';
+            const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
+            await syncBotControlState({
+              last_action_requested: isUniversalSignal ? 'start_universal' : (bc?.last_action_requested === 'start_scan' ? null : bc?.last_action_requested),
+              trigger_requested: isUniversalSignal ? true : false,
+              is_running: true,
+              stage: targetStage,
+              mode: targetStage,
+              scan_status: 'running',
+              scan_enabled: true,
+              stop_requested: false,
+              scan_stop_requested: false
+            });
+            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
+            runScanAndResolveParallel().catch(console.error);
+            if (!isSubmitStartRequested) {
+              return;
+            }
           }
         }
       }
