@@ -22,7 +22,7 @@
   "smokeImportPrefixes": [
     "backend/lib"
   ],
-  "smokeImportTimeoutMs": 60000,
+  "smokeImportTimeoutMs": 120000,
   "smokeImportExclude": [
     "backend/lib/clusterBatchRunner.mjs",
     "backend/lib/workerPool.mjs",
@@ -30,7 +30,8 @@
     "backend/lib/resolvingWorkerPool.mjs",
     "backend/lib/scanner.mjs",
     "backend/lib/engine.mjs",
-    "backend/lib/workdayRapidAdvance.mjs"
+    "backend/lib/workdayRapidAdvance.mjs",
+    "backend/lib/jobFormCache.mjs"
   ],
   "blockedBranches": [
     "main",

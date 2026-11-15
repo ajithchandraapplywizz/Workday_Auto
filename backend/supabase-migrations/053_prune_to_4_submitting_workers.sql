@@ -1,4 +1,5 @@
--- Migration 051: Prune Obsolete Submitting Workers to Strictly 4 Workers
+-- precheck:allow-destructive
+-- Migration 053: Prune Obsolete Submitting Workers to Strictly 4 Workers
 -- Enforces 2 services x 2 workers = 4 submitting workers across cluster
 
 DELETE FROM public.worker_status 
