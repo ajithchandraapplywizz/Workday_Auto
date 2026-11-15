@@ -3111,13 +3111,37 @@ export async function recordJobDistributions({
       }
     }
 
+    const isUniversalLeadQuestion = (qText = '') => {
+      const q = String(qText || '').trim();
+      if (/(?:how|where)\s*(?:did|do)\s*you\s*hear|hear\s*about\s*(?:us|this)|^source$/i.test(q)) return true;
+      if (/(?:race|ethnic)/i.test(q) && !/gender|sex/i.test(q)) return true;
+      if (/terms|condition|certif|acknowledge|agree|consent|foregoing|privacy|policy|declaration|electronic\s*signature\s*consent/i.test(q)) {
+        if (/first\s*name|last\s*name|full\s*name|type\s*your\s*name|signature\s*name/i.test(q)) return false;
+        return true;
+      }
+      return false;
+    };
+
     const rows = dedupedClients.map((c) => {
       const awlId = typeof c === 'string' ? c : (c.applywizzId || c.applywizz_id || '');
       const specificJobId = (typeof c === 'object' && (c.jobId || c.job_id)) ? c.jobId || c.job_id : jobId;
       const specificJobUrl = (typeof c === 'object' && (c.jobUrl || c.job_url)) ? c.jobUrl || c.job_url : cleanUrl;
       const specificCompany = (typeof c === 'object' && c.company) ? c.company : cleanCompany;
       const specificRole = (typeof c === 'object' && c.roleTitle) ? c.roleTitle : cleanRole;
-      const clientResolved = (typeof c === 'object' && Array.isArray(c.resolvedAnswers)) ? c.resolvedAnswers : (Array.isArray(resolvedAnswers) ? resolvedAnswers : []);
+
+      // STRICT LEAD ANSWER ISOLATION:
+      // Lead candidate gets their full scanned review answers.
+      // Sibling candidates ONLY get allowed universal questions (Source, Race/Ethnicity, Terms/Agreements).
+      // All candidate-specific answers (Name, Contact, Experience, Education, Gender, etc.) are strictly excluded!
+      const isLeadCandidate = cleanLead && awlId.trim().toUpperCase() === cleanLead.trim().toUpperCase();
+      let clientResolved = [];
+      if (typeof c === 'object' && Array.isArray(c.resolvedAnswers) && c.resolvedAnswers.length > 0) {
+        clientResolved = c.resolvedAnswers;
+      } else if (isLeadCandidate && Array.isArray(resolvedAnswers)) {
+        clientResolved = resolvedAnswers;
+      } else if (!isLeadCandidate && Array.isArray(resolvedAnswers)) {
+        clientResolved = resolvedAnswers.filter((item) => isUniversalLeadQuestion(item.question || item.label));
+      }
 
       const rawUnanswered = (typeof c === 'object' && Array.isArray(c.unansweredQuestions))
         ? c.unansweredQuestions
@@ -3169,15 +3193,35 @@ export async function recordJobDistributions({
           reason: 'unresolved_answer',
         }));
 
-      const allUnresolvedFields = [...unresolvedFromAnswers, ...clientUnanswered.map(u => ({
-        question: u.question,
-        field_type: u.field_type || 'text',
-        reason: u.reason || 'missing_required_answer',
-      }))];
+      // Track truly required form questions that are not yet answered for this client
+      const answeredQSet = new Set(structuredClientResolved.filter(a => a.answer_is_question_true).map(a => String(a.question || '').toLowerCase().trim()));
+      const missingFormQuestions = questions
+        .filter(q => {
+          const isReq = Boolean(q.is_required || q.required);
+          if (!isReq) return false; // Optional questions never block ready_for_review status
+          const qText = String(q.label || q.question || '').toLowerCase().trim();
+          return qText && !answeredQSet.has(qText);
+        })
+        .map(q => ({
+          question: q.label || q.question,
+          field_type: q.field_type || q.type || 'text',
+          reason: 'awaiting_stage2_client_resolution',
+        }));
 
-      const clientCountUnanswered = allUnresolvedFields.length;
-      const clientIsFully = clientCountUnanswered === 0 && structuredClientResolved.length > 0;
-      const clientStatus = clientIsFully ? 'ready_for_review' : 'needs_answers';
+      const allUnresolvedFields = [
+        ...unresolvedFromAnswers,
+        ...clientUnanswered.map(u => ({
+          question: u.question,
+          field_type: u.field_type || 'text',
+          reason: u.reason || 'missing_required_answer',
+        })),
+        ...missingFormQuestions.filter(m => !unresolvedFromAnswers.some(u => u.question.toLowerCase() === m.question.toLowerCase())),
+      ];
+
+      const callerStatus = (typeof c === 'object' && c.status) ? c.status : status;
+      const clientCountUnanswered = (callerStatus === 'ready_for_review' || callerStatus === 'ready_to_review') ? 0 : allUnresolvedFields.length;
+      const clientIsFully = (callerStatus === 'ready_for_review' || callerStatus === 'ready_to_review') ? true : (clientCountUnanswered === 0 && structuredClientResolved.length >= questionCount);
+      const clientStatus = (callerStatus === 'ready_for_review' || callerStatus === 'ready_to_review') ? 'ready_for_review' : (clientIsFully ? 'ready_for_review' : 'needs_answers');
       const clientShot = (typeof c === 'object' && c.screenshotUrl) ? c.screenshotUrl : (screenshotUrl || null);
 
       const rawAwl = String(awlId).replace(/["'\[\]\\]/g, '').trim().toUpperCase();

@@ -22,6 +22,13 @@ export function isApiOnlyAnswerMode() {
 export function applyApiOnlyProfileGuards(profile = {}) {
   if (!isApiOnlyAnswerMode()) return profile;
   profile._apiOnlyMode = true;
-  profile.qa_answers = {};
+  const hasPreResolved = Boolean(
+    (profile._resolvedAnswersJson && profile._resolvedAnswersJson.length > 0) ||
+    (profile._resolvedAnswersMap && profile._resolvedAnswersMap.size > 0) ||
+    (profile.resolved_answers && (Array.isArray(profile.resolved_answers) ? profile.resolved_answers.length > 0 : Object.keys(profile.resolved_answers).length > 0))
+  );
+  if (!hasPreResolved) {
+    profile.qa_answers = {};
+  }
   return profile;
 }

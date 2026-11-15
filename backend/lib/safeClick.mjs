@@ -16,8 +16,8 @@ const RISKY_NAME_RE = /^(add|\+|add\s+another|add\s+a\s+new|create|delete|remove
 /** Page chrome / marketing / optional actions — never scripted. */
 const CHROME_BLOCK_RE = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over|view\s*job|return\s*to\s*job|linkedin|facebook|twitter|instagram|cookie|privacy\s*policy|terms\s*of\s*use)\b/i;
 
-/** Allow only these named section Adds (My Experience required rows). */
-const ALLOWED_SECTION_ADD_RE = /^add(\s+(another|a|an|new))?\s*(work\s*)?experience$|^add(\s+(another|a|an|new))?\s*education$/i;
+/** Allow only these named section Adds (My Experience initial row only — NEVER Add Another). */
+const ALLOWED_SECTION_ADD_RE = /^add\s*(work\s*)?experience$|^add\s*education$/i;
 
 /** Wizard footer / navigation that is intentionally clickable elsewhere. */
 const NAV_ALLOW_RE = /^(save\s*(and|&)\s*continue|next|continue|submit(\s+application)?|review\s*(and|&)\s*submit|sign\s*in|create\s*account|apply(\s+manually)?|continue\s*application)$/i;
@@ -42,6 +42,7 @@ export function isRiskyMisclickButton(name = '', opts = {}) {
   const text = normalizeButtonName(name);
   if (!text) return false;
   if (NAV_ALLOW_RE.test(text)) return false;
+  if (/\banother\b/i.test(text)) return true; // Strictly forbid "Add Another" in all contexts
   if (opts.allowSectionAdd && ALLOWED_SECTION_ADD_RE.test(text)) return false;
   if (isForbiddenOptionalAddName(text)) return true;
   if (RISKY_NAME_RE.test(text)) return true;
@@ -120,8 +121,8 @@ export async function installScriptOnlyClickGuard(page) {
     const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
     const optionalRe = new RegExp(optionalPattern, 'i');
     const optionalWordRe = /certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social\s*(network|media)|volunteer|credential|website/i;
-    const addRe = /^(\+\s*)?add\b|^add(\s+(another|a|an|new))?\b/i;
-    const allowedAddRe = /^add(\s+(another|a|an|new))?\s*(work\s*)?experience$|^add(\s+(another|a|an|new))?\s*education$/i;
+    const addRe = /^(\+\s*)?add\b|^add(\s+(a|an|new))?\b/i;
+    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$/i;
     const navAllowRe = /^(save\s*(and|&)\s*continue|next|continue|submit(\s+application)?|review\s*(and|&)\s*submit|sign\s*in|create\s*account|apply(\s+manually)?|continue\s*application)$/i;
     const chromeRe = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over|view\s*job|return\s*to\s*job|cookie)\b/i;
     const headingSelector = 'h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"],[data-automation-id="panelTitle"]';
@@ -151,6 +152,8 @@ export async function installScriptOnlyClickGuard(page) {
       const auto = btn.getAttribute('data-automation-id') || '';
       if (navAllowRe.test(name)) return null;
       if (chromeRe.test(name)) return name || 'chrome';
+      // Strictly block any button containing "another"
+      if (/\banother\b/i.test(name) || /\banother\b/i.test(auto)) return name || 'Add Another';
       if (allowedAddRe.test(name)) return null;
 
       const isAdd = addRe.test(name) || /^add$/i.test(auto);
@@ -216,9 +219,9 @@ export async function drainBlockedScriptClicks(page) {
 export async function disarmRiskyAddButtons(page) {
   return await page.evaluate(({ optionalPattern }) => {
     const optionalRe = new RegExp(optionalPattern, 'i');
-    const allowedAddRe = /^add(\s+(another|a|an|new))?\s*(work\s*)?experience$|^add(\s+(another|a|an|new))?\s*education$/i;
+    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$/i;
     const forbiddenNameRe = /add(\s+(another|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)/i;
-    const bareAddRe = /^(add|\+|add\s+another)$/i;
+    const bareAddRe = /^(add|\+)$/i;
     const chromeRe = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over)\b/i;
     const headingSelector = 'h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"],[data-automation-id="panelTitle"]';
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
@@ -252,6 +255,16 @@ export async function disarmRiskyAddButtons(page) {
         continue;
       }
 
+      // Strictly disarm any "Add Another" button anywhere on the page
+      if (/\banother\b/i.test(name) || /\banother\b/i.test(text) || /\banother\b/i.test(aria)) {
+        btn.setAttribute('data-wd-optional-add-blocked', '1');
+        btn.setAttribute('data-wd-script-block', '1');
+        btn.setAttribute('aria-disabled', 'true');
+        btn.style.pointerEvents = 'none';
+        blocked++;
+        continue;
+      }
+
       const isAddShaped = bareAddRe.test(text)
         || bareAddRe.test(aria)
         || auto === 'Add'
@@ -260,19 +273,19 @@ export async function disarmRiskyAddButtons(page) {
 
       if (!isAddShaped) continue;
 
-      // Explicit work/education Add is allowed — leave unblocked.
+      // Explicit work/education Add is allowed ONLY if not containing "another"
       if (allowedAddRe.test(text) || allowedAddRe.test(aria)) continue;
 
       const heading = nearestHeading(btn);
       const underWorkEdu = /work\s*experience|^education\b/i.test(heading);
       const underOptional = optionalRe.test(heading);
 
-      // Bare Add under Work/Education stays available for section expand.
+      // Bare Add under Work/Education stays available for initial section expand only.
       if (underWorkEdu && !underOptional && !forbiddenNameRe.test(name) && (bareAddRe.test(text) || bareAddRe.test(aria) || auto === 'Add')) {
         continue;
       }
 
-      // Everything else (Certifications Add, Add Another Language, orphan bare Add, …)
+      // Everything else (Certifications Add, Add Another, orphan bare Add, …)
       btn.setAttribute('data-wd-optional-add-blocked', '1');
       btn.setAttribute('data-wd-script-block', '1');
       btn.setAttribute('aria-disabled', 'true');

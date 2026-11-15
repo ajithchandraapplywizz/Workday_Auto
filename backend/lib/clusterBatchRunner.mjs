@@ -967,7 +967,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
   const rawReviewShot = blueprintResult?.reviewScreenshotUrl || blueprintResult?.screenshotUrl || null;
   const reviewShotUrl = (rawReviewShot && !rawReviewShot.includes('fail') && !rawReviewShot.includes('application-failures') && !rawReviewShot.includes('failed-applications')) ? rawReviewShot : null;
-  const harvestedQuestions = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
+  const rawHarvested = blueprintResult?.scrapedQuestions || blueprintResult?.harvestedFields || [];
+  const { isSkippableUnimportantLabel } = await import('./scanFieldFilter.mjs');
+  const harvestedQuestions = rawHarvested.filter((q) => {
+    const lbl = q.label || q.question || '';
+    return !isSkippableUnimportantLabel(lbl, q, q.step);
+  });
 
   // Dump temporary per-worker cache file for this blueprint
   const workerCachePath = resolve(process.cwd(), 'forms', `scanned_cache_${workerId}.json`);
@@ -1026,7 +1031,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
     // 1. Referral Source ("How Did You Hear About Us?")
     if (/how did you hear/i.test(qText)) {
-      const sourceVal = hq.value || blueprintResult?.answersMap?.[qText] || 'LinkedIn';
+      let sourceVal = hq.value || blueprintResult?.answersMap?.[qText] || 'LinkedIn';
+      if (/company|internal|employee|worker|colleague|referral\s*from/i.test(sourceVal)) {
+        sourceVal = 'LinkedIn';
+      }
       const existing = leadAnswers.find((a) => /how did you hear/i.test(a.question));
       if (existing) {
         if (!existing.answer || !existing.is_answered) {
@@ -1646,7 +1654,15 @@ export function print10BatchMilestoneReport({
 export async function runClusterBatchRunner({
   topLinks = 10,
   targetUrl = null,
-  workers = Number(process.env.WORKER_COUNT) || 2,
+  workers = Number(process.env.SCAN_WORKER_COUNT) ||
+    Number(process.env.SCAN_WORKERS) ||
+    Number(process.env.WORKER_COUNT) ||
+    Number(process.env.WORKERS_COUNT) ||
+    Number(process.env.WORKERS) ||
+    Number(process.env.MAX_WORKERS) ||
+    PIPELINE_CONFIG?.scanWorkersCount ||
+    PIPELINE_CONFIG?.workersCount ||
+    2,
   headless = process.env.HEADLESS !== 'false',
   confirmSubmit = false,
   limitPerLink = null,

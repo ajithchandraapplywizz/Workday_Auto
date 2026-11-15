@@ -43,6 +43,7 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
 
   // For submitted confirmation, target the popup/modal card rectangle instead of full-page
   if (/submitted|complete|success/i.test(safeLabel)) {
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     const modalSelectors = [
       '[data-automation-id="submissionSuccess"]',
       '[data-automation-id="applicationSubmitted"]',
@@ -50,6 +51,15 @@ export async function takeScreenshot(page, label, profileOrContext = {}) {
       '[data-automation-id="thankYouMessage"]',
       'div[role="dialog"]',
       'div[role="alertdialog"]',
+      'div[role="alert"]',
+      'div[role="status"]',
+      '[data-automation-id*="popup" i]',
+      '[data-automation-id*="banner" i]',
+      '[data-automation-id*="toast" i]',
+      '[data-automation-id*="notification" i]',
+      '[data-automation-id*="alert" i]',
+      '#popup-container',
+      '.wd-popup',
       '[data-automation-id="card"]',
       '[data-automation-id="modal"]',
     ];

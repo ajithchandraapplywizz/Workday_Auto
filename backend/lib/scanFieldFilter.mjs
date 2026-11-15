@@ -111,9 +111,25 @@ export function hasRequiredSignal(label = '', field = {}) {
   return false;
 }
 
+/**
+ * Detects whether a label or field is phone-related (Phone Number, Phone Device Type, Country Phone Code, Mobile, etc.)
+ * Strictly mandatory across all Workday forms regardless of whether marked required or optional.
+ */
+export function isPhoneRelatedField(label = '', field = {}) {
+  const text = String(label || '').trim().toLowerCase();
+  const idOrName = String(field?.id || field?.name || field?.automationId || '').toLowerCase();
+  if (/phone\s*extension|\bextension\b/i.test(text) && !/number|type|device|code/i.test(text)) return false;
+  if (/phone(\s*device)?\s*type|phone\s*type|device\s*type/i.test(text)) return true;
+  if (/country.*phone.*code|phone.*country.*code/i.test(text)) return true;
+  if (/phone(\s*number)?|mobile(\s*number|\s*phone)?|cell(\s*phone)?|telephone/i.test(text)) return true;
+  if (/phonenumber|phone-number|phonetype|phone-device-type|countryphonecode|country-phone-code/i.test(idOrName)) return true;
+  return false;
+}
+
 export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return true;
+  if (isPhoneRelatedField(label, field)) return false;
   if (isCc305SelfIdentifyField(label, field, stepName)) return false;
   if (hasRequiredSignal(text, field)) return false;
   if (isMinimumAgeQuestion(text)) return false;
@@ -146,6 +162,7 @@ export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '
 export function isMandatoryField(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
+  if (isPhoneRelatedField(label, field)) return true;
   if (isMinimumAgeQuestion(text)) return true;
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   const plain = text.replace(/\*+$/, '').trim();
@@ -205,6 +222,7 @@ export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
 
 /** Skip fill/prompt for optional fields (default). Set profile._fillOptionalFields = true to fill everything. */
 export function shouldSkipOptionalFill(label = '', field = {}, profile = {}, stepName = '') {
+  if (isPhoneRelatedField(label, field)) return false;
   if (profile?._fillOptionalFields === true) return false;
   return !shouldIncludeInScan(label, field, stepName);
 }

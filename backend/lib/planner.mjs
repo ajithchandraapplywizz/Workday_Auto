@@ -89,6 +89,8 @@ export const FIELD_MAP = [
   [/enter your name.*agency.*n\/?a/i, '_static.N/A'],
   [/country\s*(\/\s*territory\s*)?phone\s*code|^phoneNumber--countryPhoneCode/i, 'personal.country_phone_code'],
   [/^phone\s*number|^phoneNumber--phoneNumber$|^phone$/i, 'personal.phone'],
+  [/phone\s*(device)?\s*type|^phoneNumber--phoneType/i, 'personal.phone_device_type'],
+  [/mobile(\s*phone|\s*number)?/i, 'personal.phone'],
   [/phone\s*extension|^phoneNumber--extension$/i, 'personal.phone_extension'],
   [/linkedin/i, 'personal.linkedin'],
   [/portfolio|website|url|shared\s*url/i, 'personal.linkedin'],
@@ -215,6 +217,69 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
   if (!profile._applyWizzHydrated && !isApplyWizzConfigured()) {
     console.warn('  ⚠️  Apply Wizz not configured — set APPLYWIZZ_ID in .env; using resume + LLM only.');
   }
+
+  // Tier 1: Hydrate candidate facts directly from Supabase DB clients & client_questions tables
+  const cleanAwl = String(applywizzId || '').replace(/["'\\[\]]/g, '').trim().toUpperCase();
+  if (cleanAwl) {
+    try {
+      const { getClientRecordByAwlId, hydrateSupabaseAnswers } = await import('./supabaseClient.mjs');
+      const dbClient = await getClientRecordByAwlId(cleanAwl);
+      if (dbClient) {
+        profile._dbClient = dbClient;
+        const p = profile.personal = profile.personal || {};
+        p.first_name = p.first_name || dbClient.first_name || dbClient.client_name?.split(' ')[0] || '';
+        p.last_name = p.last_name || dbClient.last_name || dbClient.client_name?.split(' ').slice(1).join(' ') || '';
+        p.full_name = p.full_name || dbClient.client_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
+        p.email = p.email || dbClient.company_email || dbClient.email || '';
+        p.phone = p.phone || dbClient.mobile_number || dbClient.phone || '';
+        p.mobile_number = p.mobile_number || dbClient.mobile_number || '';
+        p.address_line1 = p.address_line1 || dbClient.address_line1 || dbClient.address || '';
+        p.city = p.city || dbClient.city || '';
+        p.state = p.state || dbClient.state || '';
+        p.postal_code = p.postal_code || dbClient.postal_code || dbClient.zip || '';
+        p.date_of_birth = p.date_of_birth || dbClient.date_of_birth || dbClient.dob || '';
+
+        const exp = profile.experience = profile.experience || {};
+        exp.current_company = exp.current_company || dbClient.latest_company || dbClient.company || '';
+        exp.current_title = exp.current_title || dbClient.latest_job_title || dbClient.role || dbClient.job_title || '';
+        exp.location = exp.location || dbClient.latest_job_location || dbClient.location || '';
+        exp.currently_working = exp.currently_working ?? dbClient.currently_working ?? true;
+        exp.from_date = exp.from_date || dbClient.work_from || dbClient.from_date || '';
+        exp.to_date = exp.to_date || dbClient.work_to || dbClient.to_date || '';
+
+        const edu = profile.education = profile.education || {};
+        edu.university = edu.university || dbClient.university_or_school || dbClient.university_name || dbClient.university || dbClient.school || '';
+        edu.degree = edu.degree || dbClient.degree || dbClient.highest_education || '';
+        edu.major = edu.major || dbClient.field_of_study || dbClient.main_subject || dbClient.major || '';
+        edu.to_year = edu.to_year || dbClient.graduation_year || '';
+        edu.gpa = edu.gpa || dbClient.gpa || '';
+
+        const eeo = profile.eeo = profile.eeo || {};
+        eeo.gender = eeo.gender || dbClient.gender || '';
+        eeo.race = eeo.race || dbClient.race || 'Asian';
+        eeo.veteran_status = eeo.veteran_status || dbClient.veteran_status || 'I am not a protected veteran';
+        eeo.disability_status = eeo.disability_status || dbClient.disability_status || 'No, I do not have a disability';
+        eeo.hispanic_latino = eeo.hispanic_latino || dbClient.hispanic_latino || 'No';
+
+        const w = profile.work_auth = profile.work_auth || {};
+        w.authorized_us = w.authorized_us ?? (dbClient.authorized_us ?? true);
+        w.require_sponsorship = w.require_sponsorship ?? (dbClient.require_sponsorship ?? false);
+        w.visa_type = w.visa_type || dbClient.visa_type || 'H1B';
+
+        if (dbClient.raw_profile_json) {
+          try {
+            const raw = typeof dbClient.raw_profile_json === 'string' ? JSON.parse(dbClient.raw_profile_json) : dbClient.raw_profile_json;
+            if (raw?.resume_text && !profile._resumeText) {
+              profile._resumeText = raw.resume_text;
+            }
+          } catch {}
+        }
+      }
+      await hydrateSupabaseAnswers(profile);
+    } catch (dbErr) {
+      console.warn(`  ⚠️  Supabase candidate hydration note: ${dbErr.message}`);
+    }
+  }
   if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
   await ensureUsWorkdayContact(profile);
   profile._mandatoryOnlyFill = true;
@@ -339,6 +404,15 @@ export function mapLabelToProfileValue(label, profile, options = {}) {
 
   if (/external\s*career\s*site\s*sources/i.test(cleanLabel) || /anthropic/i.test(cleanLabel)) {
     return ['External Career Site Sources', 'Anthropic'];
+  }
+
+  if (/phone\s*(device)?\s*type/i.test(cleanLabel)) {
+    return profile?.personal?.phone_device_type || profile?.qa_answers?.['phone device type'] || 'Mobile';
+  }
+
+  if (/^phone\s*number|^phone$|mobile(\s*number|\s*phone)?/i.test(cleanLabel)) {
+    const raw = profile?.personal?.phone || profile?.personal?.mobile_number || profile?.phone || profile?.qa_answers?.['phone number'] || profile?._supabaseQa?.['Phone Number'] || '';
+    if (raw) return raw;
   }
 
   if (isSignatureOrFullNameQuestion(cleanLabel)) {

@@ -10,6 +10,25 @@
 import { normalizeLabel } from './qaStore.mjs';
 
 export const ALLOWED_SOURCES = new Set([
+  'job_distributions_resolved_answers',
+  'job_distributions',
+  'resolved_answers',
+  'pre_resolved_answers',
+  'workday_password',
+  'minimum_age',
+  'ai',
+  'ai_analysis',
+  'default_password',
+  'terms_agreement_default',
+  'profile_dynamic_match',
+  'mandatory_safe_fallback',
+  'semantic_match',
+  'supabase_client_fact',
+  'supabase_clients_table',
+  'supabase_client_questions',
+  'client_qa',
+  'options_scoring',
+  'radio_fallback',
   'supabase',
   'supabase_exact',
   'supabase_fuzzy',
@@ -75,7 +94,9 @@ export function verifyProvenance(field = {}, decision = {}) {
     s.includes(source) ||
     source.startsWith('supabase') ||
     source.startsWith('applywizz') ||
-    source.startsWith('experience')
+    source.startsWith('experience') ||
+    source.includes('resolved_answers') ||
+    source.includes('job_distributions')
   ));
 
   // 2. Sensitive fields cannot use LLM
@@ -90,8 +111,8 @@ export function verifyProvenance(field = {}, decision = {}) {
     };
   }
 
-  // 3. Block hardcoded defaults, sensitive_safe, profile_fallback (unless scan_mandatory_fallback)
-  if (/sensitive_safe|profile_fallback|default|static|workday_default/i.test(source) && !/scan_mandatory_fallback/i.test(source)) {
+  // 3. Block hardcoded defaults, sensitive_safe, profile_fallback (unless scan_mandatory_fallback, terms_agreement_default, default_password, or mandatory_safe_fallback)
+  if (/sensitive_safe|profile_fallback|workday_default/i.test(source) || (/default|static/i.test(source) && !/scan_mandatory_fallback|terms_agreement_default|default_password|mandatory_safe_fallback/i.test(source))) {
     return {
       ok: false,
       blocked: true,

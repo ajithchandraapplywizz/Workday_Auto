@@ -338,7 +338,7 @@ export function discoverFieldsInDOM(container = document) {
           const norm = (label || '').toLowerCase();
           let stdOpts = [];
           if (/how did you hear|source/i.test(norm) && !/phone|device|code/i.test(norm)) {
-            stdOpts = ['LinkedIn', 'Glassdoor', 'Indeed', 'Company Website', 'Referral', 'Other'];
+            stdOpts = ['LinkedIn', 'Indeed', 'Glassdoor', 'Other'];
           } else if (/phone\s*(device)?\s*type|device\s*type/i.test(norm)) {
             stdOpts = ['Mobile', 'Landline', 'Home', 'Work'];
           } else if (/^country/i.test(norm.replace(/\*+/g, '').trim())) {

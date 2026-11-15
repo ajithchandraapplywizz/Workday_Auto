@@ -24,7 +24,19 @@ const KNOWN_JOB_BOARD_CHILDREN = [
 export function isInvalidSourceAnswer(value) {
   const v = String(value || '').trim().toLowerCase();
   if (!v) return true;
+  if (isForbiddenSourceOption(v)) return true;
   return /\+?\d{1,4}|phone|country|mobile|territory|device\s*type|india\s*\(|united states\s*\(/i.test(v);
+}
+
+/**
+ * Strictly forbidden source options:
+ * Company website, company mail, internal referral, employee referral, etc.
+ * Selecting these spawns mandatory employee name/email questions and blocks submission.
+ */
+export function isForbiddenSourceOption(text = '') {
+  const t = String(text || '').trim();
+  if (!t) return false;
+  return /company\s*(?:website|mail|referral|site|page|portal)|(?:employee|internal|worker|colleague|staff|friend)\s*referral|referral\s*from\s*(?:company|employee|worker)|current\s*employee|existing\s*employee|internal\s*candidate/i.test(t);
 }
 
 /** Dropdown option text that belongs to country/phone code lists, not referral source. */
@@ -324,7 +336,7 @@ export function matchPreferredToDomOption(preferred, domOptions, opts = {}) {
   let bestScore = 0;
 
   for (const dom of domOptions) {
-    if (isPhoneCodeDropdownOption(dom)) continue;
+    if (isPhoneCodeDropdownOption(dom) || isForbiddenSourceOption(dom)) continue;
     const text = normalizeOptionText(dom);
     if (!text) continue;
     const lowerDom = text.toLowerCase();
@@ -390,7 +402,7 @@ async function collectReferralSourceOptions(page) {
     }
     return out;
   });
-  return raw.filter((o) => !isPhoneCodeDropdownOption(o));
+  return raw.filter((o) => !isPhoneCodeDropdownOption(o) && !isForbiddenSourceOption(o));
 }
 
 /**

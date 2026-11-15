@@ -26,7 +26,7 @@ import { rememberVerified } from './memory.mjs';
 import { blockedResult, STATUS } from './types.mjs';
 import { logOrchestrator } from './logger.mjs';
 import { collectLiveFieldOptions } from '../workdayDom.mjs';
-import { resolveClientAnswer } from '../clientAnswer.mjs';
+import { resolveClientAnswer, lookupResolvedAnswerFromProfile } from '../clientAnswer.mjs';
 import { trace, logFieldTrace } from '../trace.mjs';
 import { makeGuard } from '../loopGuard.mjs';
 import { verifyProvenance } from '../provenanceGate.mjs';
@@ -299,6 +299,24 @@ export async function runPageOrchestrator({
       };
     }
 
+    // Tier 0: Direct check for pre-resolved answer from Stage 2 (job_distributions.resolved_answers)
+    if (!decision?.answer) {
+      const preResHit = lookupResolvedAnswerFromProfile(field.label, profile, {
+        options: field.options || [],
+        fieldType: field.elementType || field.fieldType || '',
+      });
+      if (preResHit?.answer) {
+        decision = {
+          questionId: field.questionId,
+          intent: classifyQuestionIntent(field.label, field),
+          answer: preResHit.answer,
+          confidence: 1.0,
+          requiresReview: false,
+          source: 'job_distributions_resolved_answers',
+        };
+      }
+    }
+
     // Check Tier 4 (QA Bank Table), Tier 5 (Semantic Match), Tier 6 (Master YAML) if not yet answered
     if (!decision?.answer) {
       try {
@@ -480,7 +498,8 @@ export async function runPageOrchestrator({
     }
 
     // Provenance Gate Check (Block-and-log mode)
-    const prov = verifyProvenance(field, decision);
+    const isPreResolved = decision?.tier === 0 || /resolved_answers|job_distributions/i.test(decision?.source || '');
+    const prov = isPreResolved ? { ok: true, source: decision?.source || 'job_distributions_resolved_answers' } : verifyProvenance(field, decision);
     if (!prov.ok) {
       if (profile?._isScanOnly || profile?._isClusterBlueprint) {
         logOrchestrator('provenance_scan_override', {

@@ -22,6 +22,28 @@ import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 export const RESOLVER_WORKER_IDS = (PIPELINE_CONFIG.resolveWorkerIds || Array.from({ length: 2 }, (_, i) => `resolving_worker_${i + 1}`)).slice(0, 2);
 
 /**
+ * Universal Question Copying Policy: ONLY allowed universal questions can copy from lead blueprint
+ * (How did you hear about us, Race/Ethnicity, Terms & Conditions/Agreements).
+ * Personal Identity, Experience, Education, Gender, Veteran, Disability, and custom answers MUST NOT be copied from lead!
+ */
+export function isAllowedUniversalLeadQuestion(text = '') {
+  const t = String(text || '').trim();
+  if (/(?:how|where)\s*(?:did|do)\s*you\s*hear|hear\s*about\s*(?:us|this)|^source$/i.test(t)) return true;
+  if (/(?:race|ethnic)/i.test(t) && !/gender|sex/i.test(t)) return true;
+  if (/terms|condition|certif|acknowledge|agree|consent|foregoing|privacy|policy|declaration|electronic\s*signature\s*consent/i.test(t)) {
+    if (/first\s*name|last\s*name|full\s*name|type\s*your\s*name|signature\s*name/i.test(t)) return false;
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Universal Question Copying Policy: ONLY allowed universal questions can copy from lead blueprint
+ * (How did you hear about us, Race/Ethnicity, Terms & Conditions/Agreements).
+ * Personal Identity, Experience, Education, Gender, Veteran, Disability, and custom answers MUST NOT be copied from lead!
+ */
+
+/**
  * Run Stage 2: Parallel Resolving Pool
  */
 export async function runResolvingWorkerPool(options = {}) {
@@ -242,10 +264,9 @@ export async function runResolvingWorkerPool(options = {}) {
               const qText = String(sa.question || sa.label || '').trim();
               const qNorm = String(sa.question_normalized || qText).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
 
-              // If sibling has no answer, copy lead answer for universal questions (only from real lead)
+
               if (!sa.answer || !sa.is_answered) {
-                const isPersonalIdentity = /first name|last name|email|phone|mobile|address line|street|postal|zip/i.test(qText);
-                if (!isPersonalIdentity && leadAnswerMap.has(qNorm)) {
+                if (isAllowedUniversalLeadQuestion(qText) && leadAnswerMap.has(qNorm)) {
                   sa.answer = leadAnswerMap.get(qNorm);
                   sa.is_answered = true;
                   sa.source = 'Lead Blueprint Answer (Universal)';
@@ -253,13 +274,13 @@ export async function runResolvingWorkerPool(options = {}) {
                 }
               }
 
-              // Comprehensive 5-Tier fallback with candidate's respective details if still unanswered
+              // Comprehensive 5-Tier resolution with candidate's respective genuine details if still unanswered
               if (!sa.answer || !sa.is_answered) {
                 const p = profile?.personal || {};
                 const w = profile?.work_auth || {};
                 const eeo = profile?.eeo || {};
-                const exp = profile?.experience || [];
-                const edu = profile?.education || [];
+                const exp = profile?.experience || {};
+                const edu = profile?.education || {};
 
                 if (/how did you hear|source|referral/i.test(qText)) {
                   sa.answer = 'LinkedIn';
@@ -271,45 +292,70 @@ export async function runResolvingWorkerPool(options = {}) {
                   sa.is_answered = true;
                   sa.source = 'Today Application Date';
                   sa.tier = 1;
-                } else if (/first\s*name/i.test(qText)) {
-                  sa.answer = p.first_name || 'Candidate';
+                } else if (/first\s*name/i.test(qText) && p.first_name) {
+                  sa.answer = p.first_name;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/last\s*name/i.test(qText)) {
-                  sa.answer = p.last_name || 'Applicant';
+                } else if (/last\s*name/i.test(qText) && p.last_name) {
+                  sa.answer = p.last_name;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/email/i.test(qText)) {
-                  sa.answer = p.email || profile?.company_email || profile?.email || `${awlId.toLowerCase()}@applywizard.ai`;
+                } else if (/email/i.test(qText) && (p.email || profile?.company_email || profile?.email)) {
+                  sa.answer = p.email || profile?.company_email || profile?.email;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/phone|mobile/i.test(qText)) {
-                  sa.answer = p.phone || '2035550199';
+                } else if (/phone|mobile/i.test(qText) && p.phone) {
+                  sa.answer = p.phone;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/city/i.test(qText)) {
-                  sa.answer = p.city || 'Hartford';
+                } else if (/city/i.test(qText) && p.city) {
+                  sa.answer = p.city;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/state|province/i.test(qText)) {
-                  sa.answer = p.state || 'Connecticut';
+                } else if (/state|province/i.test(qText) && p.state) {
+                  sa.answer = p.state;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/postal|zip/i.test(qText)) {
-                  sa.answer = p.postal_code || p.zip || '06085';
+                } else if (/postal|zip/i.test(qText) && (p.postal_code || p.zip)) {
+                  sa.answer = p.postal_code || p.zip;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
                   sa.tier = 1;
-                } else if (/address/i.test(qText)) {
-                  sa.answer = p.address_line_1 || p.address || '88 South Main Street';
+                } else if (/address/i.test(qText) && (p.address_line_1 || p.address_line1 || p.address)) {
+                  sa.answer = p.address_line_1 || p.address_line1 || p.address;
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Identity';
+                  sa.tier = 1;
+                } else if (/current\s*company|latest\s*company|^company$/i.test(qText) && (exp.current_company || exp.company)) {
+                  sa.answer = exp.current_company || exp.company;
+                  sa.is_answered = true;
+                  sa.source = 'Tier 1: Profile Experience';
+                  sa.tier = 1;
+                } else if (/current\s*(?:job\s*)?title|latest\s*(?:job\s*)?title|^job\s*title$/i.test(qText) && (exp.current_title || exp.role || exp.title)) {
+                  sa.answer = exp.current_title || exp.role || exp.title;
+                  sa.is_answered = true;
+                  sa.source = 'Tier 1: Profile Experience';
+                  sa.tier = 1;
+                } else if (/school|university|college|institution/i.test(qText) && (edu.university || edu.school)) {
+                  sa.answer = edu.university || edu.school;
+                  sa.is_answered = true;
+                  sa.source = 'Tier 1: Profile Education';
+                  sa.tier = 1;
+                } else if (/^degree$/i.test(qText) && edu.degree) {
+                  sa.answer = edu.degree;
+                  sa.is_answered = true;
+                  sa.source = 'Tier 1: Profile Education';
+                  sa.tier = 1;
+                } else if (/major|field\s*of\s*study/i.test(qText) && (edu.major || edu.field_of_study)) {
+                  sa.answer = edu.major || edu.field_of_study;
+                  sa.is_answered = true;
+                  sa.source = 'Tier 1: Profile Education';
                   sa.tier = 1;
                 } else if (/authorized to work|legally authorized|eligible to work/i.test(qText)) {
                   sa.answer = w.authorized_us !== false ? 'Yes' : 'No';

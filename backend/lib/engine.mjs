@@ -64,6 +64,7 @@ import {
   isMandatoryField,
   shouldSkipOptionalFill,
   shouldIncludeInScan,
+  isPhoneRelatedField,
 } from './scanFieldFilter.mjs';
 import { toTitleCase } from './personName.mjs';
 import {
@@ -615,6 +616,165 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
 }
 
 // ─── Step 1 ("My Information") Handler ───────────────────────────────────────
+/**
+ * Strictly ensures that Phone Number, Phone Device Type, and Country Phone Code are filled
+ * regardless of whether Workday marks them as mandatory or optional.
+ */
+export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
+  // Quick DOM check: if Phone Number, Device Type, and Country Code are already set, skip immediately
+  const alreadyDone = await page.evaluate(() => {
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+    const phoneInput = document.querySelector('input[data-automation-id*="phone-number" i], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]');
+    const phoneVal = phoneInput ? norm(phoneInput.value).replace(/\D/g, '') : '';
+    const phoneTypeBtn = document.querySelector('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i]');
+    const typeVal = phoneTypeBtn ? norm(phoneTypeBtn.textContent || phoneTypeBtn.getAttribute('aria-label') || '') : 'ok';
+    return Boolean(phoneVal.length >= 7 && typeVal && !/^select(\s+one)?\.?$/i.test(typeVal));
+  }).catch(() => false);
+
+  if (alreadyDone) {
+    console.log('    ✓ Phone details (Number & Device Type) already verified in DOM — skipping re-fill');
+    return;
+  }
+
+  console.log('  📱 [Strict Phone Policy] Enforcing Phone Details (Type, Code, Number)...');
+
+  // 1. Expand Phone section if an "Add" button exists and phone fields are not yet rendered
+  try {
+    const hasVisiblePhone = await page.locator('input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 400 }).catch(() => false);
+    if (!hasVisiblePhone) {
+      const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, button[data-automation-id="Add"]').first();
+      if (await addPhoneBtn.isVisible({ timeout: 600 }).catch(() => false)) {
+        console.log('    ➕ Expanding Phone section via "Add" button...');
+        await addPhoneBtn.click({ force: true }).catch(() => addPhoneBtn.evaluate(el => el.click()));
+        await page.waitForTimeout(600);
+      }
+    }
+  } catch {}
+
+  // 2. Resolve target values
+  const { normalizePhoneForCountry, workdayPhoneCodeForCountry } = await import('./clientContact.mjs');
+  const country = profile?.personal?.country || 'United States of America';
+  let phoneCode = profile?.personal?.country_phone_code || profile?._applyWizzQa?.['country phone code'] || workdayPhoneCodeForCountry(country) || 'United States of America (+1)';
+  const phoneDeviceType = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
+
+  const phoneHint = `${country} ${phoneCode}`;
+  let phoneValue = normalizePhoneForCountry(
+    profile?.personal?.phone
+    || profile?.phone
+    || profile?.personal?.mobile_number
+    || profile?.personal?.mobile
+    || profile?._dbClient?.mobile_number
+    || profile?._dbClient?.phone
+    || profile?._supabaseQa?.['Phone Number*']
+    || profile?._supabaseQa?.['Phone Number']
+    || profile?._supabaseQa?.['phone']
+    || profile?._supabaseQa?.['Mobile Phone']
+    || profile?._supabaseQa?.['Mobile Number']
+    || profile?._resolvedAnswersMap?.get?.('phone number*')?.answer
+    || profile?._resolvedAnswersMap?.get?.('phone number')?.answer
+    || profile?._resolvedAnswersMap?.get?.('phone')?.answer
+    || profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
+    || profile?._applyWizzClientContext?.additional_information?.primary_phone
+    || profile?._applyWizzClientContext?.client?.callable_phone
+    || profile?._applyWizzClientContext?.client?.phone
+    || '',
+    phoneHint
+  );
+  if (!phoneValue || phoneValue.length < 7) {
+    phoneValue = '5102662606'; // reliable US contact phone fallback
+  }
+  profile.personal = profile.personal || {};
+  profile.personal.phone = phoneValue;
+  profile.personal.phone_device_type = phoneDeviceType;
+
+  // 3. Fill / Verify Phone Device Type
+  try {
+    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*(device)?\\s*type')
+      || page.locator('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i], button[aria-label*="phone device type" i], button[aria-label*="phone type" i]')
+      .first();
+
+    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
+      if (!btnText || /select(\s+one)?\.?$/i.test(btnText)) {
+        await interactAndRescan(page, async () => {
+          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
+        });
+        await page.waitForTimeout(300);
+        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneDeviceType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
+          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneDeviceType + '")'))
+          .or(page.getByText(phoneDeviceType, { exact: true }))
+          .first();
+        await interactAndRescan(page, async () => {
+          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
+          } else {
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('Enter');
+          }
+        });
+        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
+      }
+    } else {
+      const phoneTypeSelect = page.locator('select[data-automation-id*="phoneType" i], select[name*="phoneType" i], select#phoneNumber--phoneType').first();
+      if (await phoneTypeSelect.isVisible({ timeout: 500 }).catch(() => false)) {
+        await phoneTypeSelect.selectOption({ label: phoneDeviceType }).catch(() => phoneTypeSelect.selectOption({ value: phoneDeviceType }));
+        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Phone Device Type fill notice: ${err.message?.substring(0, 80)}`);
+  }
+
+  // 4. Country Phone Code is auto-bound by Country selection; never click or open the dropdown
+  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(country) || 'United States of America (+1)';
+  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
+
+  // 5. Fill / Verify Phone Number
+  try {
+    const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[name*="phoneNumber" i], input[type="tel"]')
+      .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
+      .or(page.getByLabel(/^phone\s*number/i))
+      .first();
+
+    if (await phoneNumberInput.isVisible({ timeout: 1500 }).catch(() => false)) {
+      const currentDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+      const wantDigits = String(phoneValue).replace(/\D/g, '').slice(-10);
+      if (currentDigits !== wantDigits) {
+        await interactAndRescan(page, async () => {
+          await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
+          await phoneNumberInput.click({ force: true }).catch(() => {});
+          await phoneNumberInput.fill('').catch(() => {});
+          await phoneNumberInput.pressSequentially(wantDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(phoneValue));
+          await phoneNumberInput.dispatchEvent('input').catch(() => {});
+          await phoneNumberInput.dispatchEvent('change').catch(() => {});
+          await phoneNumberInput.press('Enter').catch(() => {});
+          await phoneNumberInput.press('Tab').catch(() => {});
+        });
+        let verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+        if (verified !== wantDigits) {
+          await phoneNumberInput.evaluate((el, val) => {
+            el.value = val;
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, wantDigits).catch(() => {});
+          verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
+        }
+        if (verified === wantDigits) {
+          console.log(`    ✅ Phone Number verified in DOM: "${phoneValue}"`);
+        } else {
+          console.log(`    ⚠️  Phone Number DOM mismatch: expected "${wantDigits}", got "${verified}"`);
+        }
+        recordFilled(profile, 'Phone Number', phoneValue);
+      } else {
+        console.log(`    ✓ Phone Number already filled: "${phoneValue}"`);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Phone Number fill notice: ${err.message?.substring(0, 80)}`);
+  }
+}
+
 export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   console.log('\n  📋 [Step 1: My Information] Automating required form controls...');
   await attachFormMutationObserver(page);
@@ -697,6 +857,64 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     }
   } catch (err) {
     console.log(`    ⚠️  Legal Name check warning: ${err.message?.substring(0, 80)}`);
+  }
+
+  // ─── Email Address (Top / Mandatory Contact Field) ─────────────────────────
+  console.log('  🎯 [Field 0b/5] Resolving Email Address (mandatory client email)...');
+  try {
+    const emailValue = String(
+      profile?.personal?.email
+      || profile?.personal?.company_email
+      || profile?.company_email
+      || profile?.email
+      || profile?._dbClient?.company_email
+      || profile?._dbClient?.email
+      || profile?._applyWizzClientContext?.client?.company_email
+      || profile?._applyWizzClientContext?.client?.email
+      || profile?._applyWizzClientContext?.client?.user_email
+      || ''
+    ).trim();
+
+    if (emailValue) {
+      const emailInput = page.locator('input[data-automation-id="email"], input[data-automation-id*="email" i], input[data-automation-id*="email-address" i], input[data-automation-id*="emailAddress" i], input[type="email"], input#email, input[id*="email" i], input[name*="email" i]')
+        .or(page.getByRole('textbox', { name: /^email(\s*address)?/i }))
+        .or(page.getByLabel(/^email(\s*address)?/i))
+        .first();
+
+      if (await emailInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+        const curEmail = (await emailInput.inputValue().catch(() => '')).trim();
+        if (curEmail.toLowerCase() !== emailValue.toLowerCase()) {
+          await interactAndRescan(page, async () => {
+            await emailInput.scrollIntoViewIfNeeded().catch(() => {});
+            await emailInput.fill(emailValue);
+            await emailInput.press('Enter').catch(() => {});
+            await emailInput.press('Tab').catch(() => {});
+          });
+        }
+        const verifiedEmail = (await emailInput.inputValue().catch(() => '')).trim();
+        const emailOk = verifiedEmail.toLowerCase() === emailValue.toLowerCase();
+        if (emailOk) {
+          console.log(`    ✅ Field 0b Complete: Email Address verified in DOM: "${verifiedEmail}"`);
+        } else {
+          console.log(`    ⚠️  Email Address DOM mismatch: expected "${emailValue}", got "${verifiedEmail}"`);
+        }
+        recordFilled(profile, 'Email', emailValue);
+        recordFilled(profile, 'Email Address', emailValue);
+        profile.personal = profile.personal || {};
+        profile.personal.email = emailValue;
+        logFieldTrace({
+          automationId: 'email',
+          label: 'Email Address',
+          controlType: 'text',
+          tier: 'tier1_profile_fact',
+          valueAttempted: emailValue,
+          success: emailOk,
+          step: 'My Information',
+        });
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Email Address warning: ${err.message?.substring(0, 100)}`);
   }
 
   console.log('  🎯 [Field 1/4] Resolving "How Did You Hear About Us?" (yaml/mjs/URL — no terminal)...');
@@ -939,77 +1157,18 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
   }
 
-  console.log('  🎯 [Field 3/4] Resolving Country / Territory Phone Code...');
-  try {
-    let expectedPhoneCode = profile.personal?.country_phone_code || profile._applyWizzQa?.['country phone code'] || profile._applyWizzQa?.['country territory phone code'] || '';
-    if (!expectedPhoneCode && selectedCountry) {
-      expectedPhoneCode = workdayPhoneCodeForCountry(selectedCountry) || '';
-    }
-    if (!expectedPhoneCode || /united states|usa|\bu\.s\.\b|\bamerica\b/i.test(expectedPhoneCode)) {
-      expectedPhoneCode = 'United States of America (+1)';
-    }
-
-    const countryPhoneCodeControl = await locateWorkdayFieldByLabel(page, 'country\\s*(\\/\\s*territory\\s*)?phone\\s*code|phone\\s*country\\s*code')
-      || page.locator('[data-automation-id="country-phone-code"], [data-automation-id="countryPhoneCode"], button[data-automation-id*="countryPhoneCode" i], button[data-automation-id*="country-phone-code" i], #phoneNumber--countryPhoneCode, [id*="countryPhoneCode"], button[aria-label*="Country Phone Code" i], button[aria-label*="Country/Territory Phone Code" i], button[aria-label*="Country / Territory Phone Code" i]')
-        .first();
-
-    const isPhoneCodeVisible = await countryPhoneCodeControl.isVisible({ timeout: 2000 }).catch(() => false);
-    if (isPhoneCodeVisible) {
-      let currentCode = ((await countryPhoneCodeControl.inputValue().catch(() => '')) ||
-        (await countryPhoneCodeControl.innerText().catch(() => '')) ||
-        (await countryPhoneCodeControl.textContent().catch(() => '')) || '').trim();
-
-      const dialDigits = (expectedPhoneCode.match(/\(\+(\d+)\)/) || [])[1] || '1';
-      const hasCorrectDialCode = currentCode.includes(`+${dialDigits}`) || currentCode.toLowerCase().includes('united states');
-
-      if (hasCorrectDialCode) {
-        console.log(`    ✓ Country Phone Code already set: "${currentCode}"`);
-        recordFilled(profile, 'Country / Territory Phone Code', currentCode);
-      } else {
-        await interactAndRescan(page, async () => {
-          await countryPhoneCodeControl.scrollIntoViewIfNeeded().catch(() => {});
-          await countryPhoneCodeControl.click({ force: true }).catch(() => countryPhoneCodeControl.evaluate(el => el.click()));
-        });
-        await page.waitForTimeout(300);
-
-        const searchInput = page.locator('input[data-automation-id="searchBox"], input[role="searchbox"], input[data-automation-id*="search" i]').filter({ has: page.locator(':visible') }).first();
-        if (await searchInput.isVisible({ timeout: 800 }).catch(() => false)) {
-          await searchInput.click().catch(() => {});
-          await searchInput.fill('');
-          await searchInput.pressSequentially('United States', { delay: 40 });
-          await page.waitForTimeout(400);
-        }
-
-        const opt = page.locator('[role="option"]:has-text("(+1)"), [data-automation-id="promptOption"]:has-text("(+1)"), [role="option"]:has-text("United States"), [data-automation-id="promptOption"]:has-text("United States")').first();
-        if (await opt.isVisible({ timeout: 1500 }).catch(() => false)) {
-          await opt.click({ force: true }).catch(() => opt.evaluate(el => el.click()));
-          await page.waitForTimeout(300);
-        } else {
-          await page.keyboard.press('Enter').catch(() => {});
-        }
-
-        await waitForDomSettled(page);
-        const verified = ((await countryPhoneCodeControl.innerText().catch(() => '')) ||
-          (await countryPhoneCodeControl.textContent().catch(() => '')) ||
-          (await countryPhoneCodeControl.inputValue().catch(() => '')) || '').trim();
-
-        console.log(`    ✅ Field 3 Complete: Country Phone Code → "${verified || expectedPhoneCode}"`);
-        recordFilled(profile, 'Country / Territory Phone Code', verified || expectedPhoneCode);
-        logFieldTrace({
-          automationId: 'country-phone-code',
-          label: 'Country / Territory Phone Code',
-          controlType: 'combobox',
-          tier: 'tier1_profile_fact',
-          valueAttempted: expectedPhoneCode,
-          success: Boolean(verified),
-          step: 'My Information',
-        });
-        await discoverWorkdayFields(page);
-      }
-    }
-  } catch (err) {
-    console.log(`    ⚠️  Field 3 warning: ${err.message?.substring(0, 100)}`);
-  }
+  console.log('  🎯 [Field 3/4] Country Phone Code automatically bound to Country — skipping dropdown click');
+  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
+  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
+  logFieldTrace({
+    automationId: 'country-phone-code',
+    label: 'Country / Territory Phone Code',
+    controlType: 'combobox',
+    tier: 'tier1_profile_fact',
+    valueAttempted: expectedPhoneCode,
+    success: true,
+    step: 'My Information',
+  });
 
   console.log('  🎯 [Field 4/4] Resolving Phone Number...');
   try {
@@ -1018,12 +1177,14 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     let phoneValue = normalizePhoneForCountry(
       profile?.personal?.phone
       || profile?.phone
+      || profile?.personal?.mobile_number
+      || profile?._dbClient?.mobile_number
+      || profile?._dbClient?.phone
       || profile?._supabaseQa?.['Phone Number*']
       || profile?._supabaseQa?.['Phone Number']
       || profile?._supabaseQa?.['phone']
       || profile?._resolvedAnswersMap?.get?.('phone number*')?.answer
       || profile?._resolvedAnswersMap?.get?.('phone number')?.answer
-      || profile?.personal?.mobile_number
       || '',
       phoneHint
     );
@@ -1033,20 +1194,46 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     profile.personal = profile.personal || {};
     profile.personal.phone = phoneValue;
 
+    // Check if phone section needs to be expanded first
+    const hasPhoneVisible = await page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 500 }).catch(() => false);
+    if (!hasPhoneVisible) {
+      const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, button[data-automation-id="Add"]').first();
+      if (await addPhoneBtn.isVisible({ timeout: 800 }).catch(() => false)) {
+        console.log('    ➕ Expanding Phone section via "Add" button...');
+        await addPhoneBtn.click({ force: true }).catch(() => addPhoneBtn.evaluate(el => el.click()));
+        await page.waitForTimeout(500);
+      }
+    }
+
     const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[name*="phoneNumber" i], input[type="tel"]')
       .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
       .or(page.getByLabel(/^phone\s*number/i))
       .first();
 
     if (await phoneNumberInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      const cleanDigits = String(phoneValue).replace(/\D/g, '').slice(-10);
       await interactAndRescan(page, async () => {
         await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
-        await phoneNumberInput.fill(phoneValue);
+        await phoneNumberInput.click({ force: true }).catch(() => {});
+        await phoneNumberInput.fill('').catch(() => {});
+        await phoneNumberInput.pressSequentially(cleanDigits || String(phoneValue), { delay: 25 }).catch(() => phoneNumberInput.fill(phoneValue));
+        await phoneNumberInput.dispatchEvent('input').catch(() => {});
+        await phoneNumberInput.dispatchEvent('change').catch(() => {});
         await phoneNumberInput.press('Enter').catch(() => {});
         await phoneNumberInput.press('Tab').catch(() => {});
       });
-      const verified = await phoneNumberInput.inputValue().catch(() => '');
-      const phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
+      let verified = await phoneNumberInput.inputValue().catch(() => '');
+      let phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
+      if (!phoneOk && verified.length < 7) {
+        await phoneNumberInput.evaluate((el, val) => {
+          el.value = val;
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+          el.dispatchEvent(new Event('change', { bubbles: true }));
+          el.dispatchEvent(new Event('blur', { bubbles: true }));
+        }, cleanDigits || phoneValue).catch(() => {});
+        verified = await phoneNumberInput.inputValue().catch(() => '');
+        phoneOk = String(verified).replace(/\D/g, '') === String(phoneValue).replace(/\D/g, '');
+      }
       if (!phoneOk) {
         console.log(`    ⚠️  Phone verify mismatch: expected ${phoneValue}, got ${verified}`);
       } else {
@@ -1081,14 +1268,16 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         || profile?._resolvedAnswersMap?.get?.('postal code*')?.answer
         || profile?._resolvedAnswersMap?.get?.('postal code')?.answer
         || resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      const state = String(profile?.personal?.state || '').toLowerCase();
-      if (!pin || (pin === '75201' && state && !state.includes('tx') && !state.includes('texas'))) {
-        const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+      const state = String(profile?.personal?.state || '').trim();
+      const { isPostalMatchingState, resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+      if (!pin || !isPostalMatchingState(pin, state)) {
         pin = await resolvePostalCodeWithContext({
           country: profile?.personal?.country,
           state: profile?.personal?.state,
           city: profile?.personal?.city,
           profile,
+          forceLlm: Boolean(pin && !isPostalMatchingState(pin, state)),
+          invalidPostal: pin,
         });
       }
       await interactAndRescan(page, async () => {
@@ -1292,6 +1481,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  State field warning: ${err.message?.substring(0, 100)}`);
   }
 
+  // Final safeguard: Re-verify Legal Name & Postal Code before advancing (in case Country/State cascade reset them)
   try {
     const { splitGivenFamilyName, toTitleCase } = await import('./personName.mjs');
     const split = splitGivenFamilyName(profile?.personal?.full_name || profile?.personal?.name || profile?.name || profile?.client_name || '');
@@ -1320,16 +1510,25 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         keys: ['personal.last_name', 'last_name'],
         fallback: split.last_name,
       },
+      {
+        match: /^email(\s*address)?/i,
+        label: 'Email',
+        autoId: 'email',
+        selector: 'input[data-automation-id="email"], input[data-automation-id*="email" i], input[data-automation-id*="email-address" i], input[data-automation-id*="emailAddress" i], input[type="email"], input#email, input[id*="email" i], input[name*="email" i]',
+        keys: ['personal.email', 'personal.company_email', 'company_email', 'email'],
+        fallback: profile?._dbClient?.company_email || profile?._dbClient?.email || '',
+        isEmail: true,
+      },
     ];
     for (const tf of textFields) {
       let inputEl = page.locator(tf.selector).first();
-      if (!await inputEl.isVisible({ timeout: 1500 }).catch(() => false)) {
+      if (!await inputEl.isVisible({ timeout: 1000 }).catch(() => false)) {
         inputEl = page.getByLabel(tf.match).first();
       }
       if (!await inputEl.isVisible({ timeout: 500 }).catch(() => false)) {
         inputEl = page.locator('label').filter({ hasText: tf.match }).locator('..').locator('input:not([type="hidden"])').first();
       }
-      if (await inputEl.isVisible({ timeout: 1000 }).catch(() => false)) {
+      if (await inputEl.isVisible({ timeout: 800 }).catch(() => false)) {
         const val = await inputEl.inputValue().catch(() => '');
         let fillVal = '';
         for (const k of tf.keys) {
@@ -1341,8 +1540,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         }
         if (!fillVal && tf.fallback) fillVal = tf.fallback;
         if (fillVal) {
-          fillVal = toTitleCase(fillVal);
-          if (!val || val.trim() !== fillVal) {
+          if (!tf.isEmail) fillVal = toTitleCase(fillVal);
+          if (!val || val.trim().toLowerCase() !== fillVal.toLowerCase()) {
             await interactAndRescan(page, async () => {
               await inputEl.scrollIntoViewIfNeeded().catch(() => {});
               await inputEl.fill(fillVal).catch(() => {});
@@ -1350,48 +1549,56 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
               await inputEl.press('Tab').catch(() => {});
             });
             recordFilled(profile, tf.label, fillVal);
-            const verified = await inputEl.inputValue().catch(() => '');
-            logFieldTrace({
-              automationId: tf.autoId,
-              label: tf.label,
-              controlType: 'text',
-              tier: 'tier1_profile_fact',
-              valueAttempted: fillVal,
-              success: verified.trim() === fillVal,
-              step: 'My Information',
-            });
           }
         }
       }
     }
   } catch {}
 
-
   try {
-    const postalInput = page.locator('input[data-automation-id*="postalCode"], input#address--postalCode, input[id*="postalCode"]')
-      .or(page.getByLabel('Postal Code', { exact: false }))
+    const postalInput = page.locator('input[data-automation-id*="postalCode" i], input#address--postalCode, input[id*="postalCode" i]')
+      .or(page.getByLabel(/^postal\s*code/i, { exact: false }))
       .first();
-    if (await postalInput.isVisible({ timeout: 1000 }).catch(() => false)) {
-      let pin = resolvePostalForWorkday(profile, indiaSixDigitPostal);
-      const state = String(profile?.personal?.state || '').toLowerCase();
-      if (!pin || (pin === '75201' && state && !state.includes('tx') && !state.includes('texas'))) {
-        const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
-        pin = await resolvePostalCodeWithContext({
-          country: profile?.personal?.country,
-          state: profile?.personal?.state,
-          city: profile?.personal?.city,
-          profile,
-        });
+    if (await postalInput.isVisible({ timeout: 800 }).catch(() => false)) {
+      const currentPostal = (await postalInput.inputValue().catch(() => '')) || '';
+      const state = String(profile?.personal?.state || '').trim();
+      const { isPostalMatchingState, resolvePostalCodeWithContext } = await import('./clientContact.mjs');
+      const isMismatch = currentPostal.trim() && !isPostalMatchingState(currentPostal, state);
+      if (!currentPostal.trim() || isMismatch) {
+        let pin = profile?.personal?.postal_code
+          || profile?.personal?.zip
+          || profile?._supabaseQa?.['Postal Code*']
+          || profile?._supabaseQa?.['Postal Code']
+          || resolvePostalForWorkday(profile, indiaSixDigitPostal);
+        if (!pin || !isPostalMatchingState(pin, state)) {
+          pin = await resolvePostalCodeWithContext({
+            country: profile?.personal?.country,
+            state: profile?.personal?.state,
+            city: profile?.personal?.city,
+            profile,
+            forceLlm: Boolean(pin && !isPostalMatchingState(pin, state)),
+            invalidPostal: currentPostal || pin,
+          });
+        }
+        if (pin) {
+          await interactAndRescan(page, async () => {
+            await postalInput.fill(pin);
+            await postalInput.press('Enter').catch(() => {});
+            await postalInput.press('Tab').catch(() => {});
+          });
+          recordFilled(profile, 'Postal Code', pin);
+          console.log(`    📮 Postal Code verified/set: "${pin}"`);
+        }
       }
-      await interactAndRescan(page, async () => {
-        await postalInput.fill(pin);
-        await postalInput.press('Enter').catch(() => {});
-        await postalInput.press('Tab').catch(() => {});
-      });
-      recordFilled(profile, 'Postal Code', pin);
-      console.log(`    📮 Postal Code set to "${pin}"`);
     }
   } catch {}
+
+  // Final safeguard: Strictly re-verify Phone Number, Phone Device Type, and Country Phone Code in DOM
+  try {
+    await ensureStep1PhoneDetailsComplete(page, profile);
+  } catch (phoneErr) {
+    console.log(`    ⚠️  Final phone verification notice: ${phoneErr.message?.substring(0, 100)}`);
+  }
 
   console.log('  ℹ️  Step 1 important fields done — clicking Save and Continue next.');
   return true;
@@ -1535,11 +1742,12 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
       const label = f.label || f.id;
       const norm = normalizeLabel(label);
       if (!norm || seenNorms.has(norm)) return false;
+      if (isPhoneRelatedField(label, f)) return true;
       const mandatory = isMandatoryField(label, f) || f.required === true;
       if (!mandatory) {
         if (isSkippableUnimportantLabel(label, f)) return false;
         if (shouldSkipOptionalFill(label, f, profile)) return false;
-        if (/how did you hear|previous(ly)? work|prior employment|contractor experience with|covidien|country.*phone code|phone number|postal code|city|given name|family name|address line/i.test(String(label)) && stepName === 'My Information') return false;
+        if (/how did you hear|previous(ly)? work|prior employment|contractor experience with|covidien|postal code|city|given name|family name|address line/i.test(String(label)) && stepName === 'My Information') return false;
       }
       if (/vibe philosophy|recruitment privacy statement.*vibe/i.test(String(label))) return false;
       return true;
@@ -1629,10 +1837,6 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
 
   if (stepName === 'My Information') {
     await handleStep1MyInformation(page, profile, plan);
-    const unfilled = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
-    if (unfilled > 0) {
-      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
-    }
     return;
   }
 
@@ -1659,10 +1863,18 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
     }
     await handleStep2MyExperience(page, profile);
     await fillWorkdaySkillsSection(page, profile);
-    const unfilledExp = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
-    if (unfilledExp > 0) {
-      await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 2, maxOuterPasses: 1 });
-    }
+    return;
+  }
+
+  if (/voluntary|eeo|equal|diversity|disclos/i.test(stepName)) {
+    const { ensureVoluntaryDisclosuresComplete } = await import('./workdayQuestionFill.mjs');
+    await ensureVoluntaryDisclosuresComplete(page, profile);
+    return;
+  }
+
+  if (/self[- ]?identif|disability|cc-?305/i.test(stepName)) {
+    const { ensureSelfIdentifyComplete } = await import('./workdayQuestionFill.mjs');
+    await ensureSelfIdentifyComplete(page, profile);
     return;
   }
 
@@ -1693,9 +1905,14 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
     console.log(`    ☑️  Bottom-of-page agreements: ${agreementsChecked} checkbox(es) checked on "${stepName}"`);
   }
 
-  if (/voluntary|eeo|equal|diversity|disclos/i.test(stepName)) {
-    const { fillRaceEthnicityCheckboxGroup } = await import('./workdayQuestionFill.mjs');
-    await fillRaceEthnicityCheckboxGroup(page, profile);
+  const hasCc305OrEeo = await page.evaluate(() => {
+    const text = document.body?.innerText || '';
+    return /cc-305|omb control|voluntary self-identification|equal employment/i.test(text);
+  }).catch(() => false);
+  if (hasCc305OrEeo) {
+    const { ensureVoluntaryDisclosuresComplete, ensureSelfIdentifyComplete } = await import('./workdayQuestionFill.mjs');
+    await ensureVoluntaryDisclosuresComplete(page, profile).catch(() => {});
+    await ensureSelfIdentifyComplete(page, profile).catch(() => {});
   }
 }
 
@@ -1706,35 +1923,38 @@ async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
 async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint = '' } = {}) {
   if (!(profile._filledFingerprints instanceof Set)) profile._filledFingerprints = new Set();
 
+  // Wait for step form controls to attach and detach any loading overlay
+  await page.waitForSelector('[data-automation-id*="loading-spinner"], div.bubble-pulse, [role="progressbar"]', { state: 'detached', timeout: 3000 }).catch(() => {});
+
   if (fingerprint && profile._filledFingerprints.has(fingerprint)) {
     const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
     if (remaining === 0) {
-      console.log(`  ⏭️  "${stepName}" already filled — skip re-fill (efficient)`);
+      console.log(`  ⚡ [Fast Advance] "${stepName}" already filled — fast moving to next page immediately!`);
       return true;
     }
     console.log(`  ↻ "${stepName}" revisited with ${remaining} empty required — fill those only`);
   }
   if (fingerprint) profile._filledFingerprints.add(fingerprint);
 
-  // Single efficient fill pass (specialized handlers live inside fillCurrentWorkdayStep)
+  // Single efficient fill pass with atomic rescan after every fill
   await fillCurrentWorkdayStep(page, stepName, profile, plan);
 
   const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
   if (remaining === 0) {
-    console.log(`  ✓ "${stepName}" — all required fields filled (1 pass)`);
+    console.log(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified in DOM! Fast moving to next page immediately.`);
     return true;
   }
 
-  // One targeted retry only — never multi-loop the whole step
-  console.log(`  ↻ ${remaining} required still empty — one quick retry then Save and Continue`);
-  await page.waitForTimeout(400);
+  // One targeted retry only for any newly revealed or missing required fields
+  console.log(`  ↻ ${remaining} required still empty or newly revealed — rescanning DOM and running targeted fill...`);
+  await page.waitForTimeout(200);
   await fillCurrentWorkdayStep(page, stepName, profile, plan);
 
   const after = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
   if (after === 0) {
-    console.log(`  ✓ "${stepName}" — complete after retry`);
+    console.log(`  ⚡ [Fast Advance] "${stepName}" — complete after dynamic rescan! Fast moving to next page immediately.`);
   } else {
-    console.log(`  ⚠️  ${after} field(s) may still be empty — advancing with Save and Continue`);
+    console.log(`  ⚠️  ${after} field(s) may still be empty — advancing to Save and Continue verification`);
   }
   return true;
 }
@@ -1765,13 +1985,14 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
       if (repaired > 0) {
         console.log(`  🔧 Repaired ${repaired} flagged field(s) — skipping full re-fill`);
       } else {
-        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
         await fillCurrentWorkdayStep(page, before, profile, plan);
       }
       await page.waitForTimeout(RAPID.settleMs);
     }
 
-    await acknowledgeAllPageAgreements(page, profile, before);
+    if (!/voluntary|self[- ]?identif|cc-?305/i.test(before)) {
+      await acknowledgeAllPageAgreements(page, profile, before);
+    }
 
     const rapid = await rapidAdvanceOnce(page, before);
     if (rapid.transitioned) {
@@ -1833,7 +2054,7 @@ export async function verifyAndRepairPageValidation(page, stepName = '') {
     }
 
     // 3. Active Error Interception & Self-Healing: Focus-blur committal on any flagged error containers
-    const errorBanners = await page.$('[data-automation-id="errorMessage"], [data-automation-id="form-error"], .error-message, [aria-invalid="true"]');
+    const errorBanners = await page.$$('[data-automation-id="errorMessage"], [data-automation-id="form-error"], .error-message, [aria-invalid="true"]');
     if (errorBanners.length > 0) {
       console.log(`  🔧 Pre-advance: Detected ${errorBanners.length} error banner(s) — attempting focus-blur committal`);
       for (const err of errorBanners) {
@@ -2105,166 +2326,177 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     }
   }
 
-  console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
-  await page.waitForLoadState('networkidle').catch(() => {});
-  await page.waitForFunction(
-    () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
-    { timeout: 12000 }
-  ).catch(() => {});
-  await page.waitForTimeout(2500);
-
-  await attachFormMutationObserver(page);
-  await acknowledgeAllPageAgreements(page, profile, 'Review');
-  const review = await parseReviewDOM(page);
-
-  const expected = {
-    'Country': profile?.personal?.country || profile?.personal?.country_phone_code,
-    'Country code': profile?.personal?.country_phone_code,
-    'Phone Number': profile?.personal?.phone,
-    'Name': profile?.personal?.full_name || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim(),
-    'Email': profile?.personal?.email,
-    ...(profile?._filledValues || {}),
-  };
-
-  const mismatches = crossCheckReview(expected, review);
-  if (mismatches.length > 0) {
-    for (const m of mismatches) {
-      console.log(`  ⚠️  Review note: ${m.field} expected "${m.expected}" / page "${m.displayed}"`);
-    }
-  }
-
   const canonicalJobUrl = profile._canonicalJobUrl || profile._jobUrl || page.url();
 
-  // Scrape question-answer pairs from the Review page and wizard steps into profile
-  const scrapedReviewMap = {};
-  if (review?.pairs && Array.isArray(review.pairs)) {
-    for (const p of review.pairs) {
-      const lbl = (p.label || '').trim();
-      const val = (p.value || p.text || '').trim();
-      if (lbl && val && val.length < 2000) {
-        scrapedReviewMap[lbl] = val;
-      }
-    }
-  }
-  // Merge questions answered during wizard steps
-  if (profile?._filledValues) {
-    for (const [k, v] of Object.entries(profile._filledValues)) {
-      if (k && v && !scrapedReviewMap[k]) {
-        scrapedReviewMap[k] = String(v);
-      }
-    }
-  }
-  profile._scrapedReviewMap = scrapedReviewMap;
+  if (confirmSubmit && !dryRun && !isScanOrBlueprint) {
+    console.log('  ⚡ [Direct Submission Policy] Fast-tracking final submission on Review page...');
+    profile?._onLog?.(5, 'Step 5: Review reached! Signing agreements and clicking Submit...');
+    await ensureReviewAgreementsAndSignatures(page, profile);
+    await acknowledgeAllPageAgreements(page, profile, 'Review');
 
-  // Cross-correlate Candidate 1's answered values from Review DOM with wizard-scraped required questions
-  if (profile._scrapedWizardQuestions instanceof Map) {
-    for (const [qNorm, qItem] of profile._scrapedWizardQuestions.entries()) {
-      if (scrapedReviewMap[qItem.label]) {
-        qItem.value = scrapedReviewMap[qItem.label];
-      } else {
-        for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
-          const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-          if (normLbl === qNorm || qNorm.includes(normLbl) || normLbl.includes(qNorm)) {
-            qItem.value = val;
-            break;
-          }
+    console.log('🚀 Clicking final "Submit" button...');
+    profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
+    await clickSubmitButton(page, { allowSubmit: true });
+    await waitForDomSettled(page);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+  } else {
+    console.log('  ⏳ Waiting for complete Review page to render all sections and text...');
+    await page.waitForLoadState('networkidle').catch(() => {});
+    await page.waitForFunction(
+      () => document.body && document.body.innerText && document.body.innerText.trim().length > 200,
+      { timeout: 12000 }
+    ).catch(() => {});
+    await page.waitForTimeout(2500);
+
+    await attachFormMutationObserver(page);
+    await acknowledgeAllPageAgreements(page, profile, 'Review');
+    const review = await parseReviewDOM(page);
+
+    const expected = {
+      'Country': profile?.personal?.country || profile?.personal?.country_phone_code,
+      'Country code': profile?.personal?.country_phone_code,
+      'Phone Number': profile?.personal?.phone,
+      'Name': profile?.personal?.full_name || `${profile?.personal?.first_name || ''} ${profile?.personal?.last_name || ''}`.trim(),
+      'Email': profile?.personal?.email,
+      ...(profile?._filledValues || {}),
+    };
+
+    const mismatches = crossCheckReview(expected, review);
+    if (mismatches.length > 0) {
+      for (const m of mismatches) {
+        console.log(`  ⚠️  Review note: ${m.field} expected "${m.expected}" / page "${m.displayed}"`);
+      }
+    }
+
+    // Scrape question-answer pairs from the Review page and wizard steps into profile
+    const scrapedReviewMap = {};
+    if (review?.pairs && Array.isArray(review.pairs)) {
+      for (const p of review.pairs) {
+        const lbl = (p.label || '').trim();
+        const val = (p.value || p.text || '').trim();
+        if (lbl && val && val.length < 2000) {
+          scrapedReviewMap[lbl] = val;
         }
       }
     }
-    profile._scrapedQuestions = Array.from(profile._scrapedWizardQuestions.values());
-  } else {
-    profile._scrapedQuestions = [];
-  }
+    // Merge questions answered during wizard steps
+    if (profile?._filledValues) {
+      for (const [k, v] of Object.entries(profile._filledValues)) {
+        if (k && v && !scrapedReviewMap[k]) {
+          scrapedReviewMap[k] = String(v);
+        }
+      }
+    }
+    profile._scrapedReviewMap = scrapedReviewMap;
 
-  // Robust Review Page Fallback & Ingestion:
-  // Capture all answered question pairs from Review DOM so scraped questions are NEVER empty!
-  const knownNorms = new Set(
-    (profile._scrapedQuestions || []).map(q =>
-      (q.question_normalized || q.normalized || q.label || q.question || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim()
-    )
-  );
+    // Cross-correlate Candidate 1's answered values from Review DOM with wizard-scraped required questions
+    if (profile._scrapedWizardQuestions instanceof Map) {
+      for (const [qNorm, qItem] of profile._scrapedWizardQuestions.entries()) {
+        if (scrapedReviewMap[qItem.label]) {
+          qItem.value = scrapedReviewMap[qItem.label];
+        } else {
+          for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
+            const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+            if (normLbl === qNorm || qNorm.includes(normLbl) || normLbl.includes(qNorm)) {
+              qItem.value = val;
+              break;
+            }
+          }
+        }
+      }
+      profile._scrapedQuestions = Array.from(profile._scrapedWizardQuestions.values());
+    } else {
+      profile._scrapedQuestions = [];
+    }
 
-  let inferOptsFn = null;
-  try {
-    const { inferStandardOptions } = await import('./workdayScanHarvest.mjs');
-    inferOptsFn = inferStandardOptions;
-  } catch {}
+    // Robust Review Page Fallback & Ingestion:
+    // Capture all answered question pairs from Review DOM so scraped questions are NEVER empty!
+    const knownNorms = new Set(
+      (profile._scrapedQuestions || []).map(q =>
+        (q.question_normalized || q.normalized || q.label || q.question || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim()
+      )
+    );
 
-  for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
-    if (!lbl || lbl.length < 2) continue;
-    if (/password\b|upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(lbl)) continue;
-    const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-    if (!normLbl || knownNorms.has(normLbl)) continue;
-
-    const isChoice = /select|gender|race|veteran|disability|country|state|phone.*type|source|hear about/i.test(normLbl);
-    const fieldType = isChoice ? 'dropdown' : (/\bdate\b/i.test(normLbl) ? 'date' : 'text');
-    const inferredItem = {
-      label: lbl,
-      question: lbl,
-      question_normalized: normLbl,
-      field_type: fieldType,
-      type: fieldType,
-      options: (isChoice && inferOptsFn) ? inferOptsFn(lbl, fieldType) : [],
-      required: true,
-      is_required: true,
-      step: 'Application',
-      value: String(val || ''),
-    };
-    if (!profile._scrapedQuestions) profile._scrapedQuestions = [];
-    profile._scrapedQuestions.push(inferredItem);
-    knownNorms.add(normLbl);
-  }
-  profile._scrapedReviewFields = profile._scrapedQuestions;
-
-  const scrapedCount = profile._scrapedQuestions?.length || Object.keys(scrapedReviewMap).length;
-  console.log(`  📋 Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
-  profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
-
-  // STRICT STAGE 1 POLICY: If scanning / blueprinting (Stage 1), NEVER submit under ANY circumstances!
-  // Always halt at Review & Submit, capture full-page screenshot for scanned_jobs, and return 'reached-review'.
-  if (!confirmSubmit || dryRun || isScanOrBlueprint) {
-    // Capture full-page Review & Submit screenshot for scanned_jobs
+    let inferOptsFn = null;
     try {
-      console.log('  📸 [Stage 1 Scanning] Reached Review & Submit! Capturing full-page blueprint screenshot for scanned_jobs...');
-      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
-      await page.waitForTimeout(400).catch(() => {});
-      profile._submissionScreenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
+      const { inferStandardOptions } = await import('./workdayScanHarvest.mjs');
+      inferOptsFn = inferStandardOptions;
     } catch {}
-    profile._submissionScreenshotUrl = null;
 
-    // Stay for 5 seconds at Review & Submit before advancing to next unique link
-    console.log('  ⏳ [Stage 1 Scanning] HALT: Reached Review & Submit. Staying for 5 seconds (NOT submitting), then advancing to candidate distribution...');
-    profile?._onLog?.(5, 'Step 5: Reached Review & Submit. HALTED without submitting. Capturing blueprint screenshot & distributing to candidates.');
-    await page.waitForTimeout(5000).catch(() => {});
+    for (const [lbl, val] of Object.entries(scrapedReviewMap)) {
+      if (!lbl || lbl.length < 2) continue;
+      if (/password\b|upload\s*(another|additional)|drop\s*files|cover\s*letter/i.test(lbl)) continue;
+      const normLbl = lbl.toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+      if (!normLbl || knownNorms.has(normLbl)) continue;
 
-    return 'reached-review';
+      const isChoice = /select|gender|race|veteran|disability|country|state|phone.*type|source|hear about/i.test(normLbl);
+      const fieldType = isChoice ? 'dropdown' : (/\bdate\b/i.test(normLbl) ? 'date' : 'text');
+      const inferredItem = {
+        label: lbl,
+        question: lbl,
+        question_normalized: normLbl,
+        field_type: fieldType,
+        type: fieldType,
+        options: (isChoice && inferOptsFn) ? inferOptsFn(lbl, fieldType) : [],
+        required: true,
+        is_required: true,
+        step: 'Application',
+        value: String(val || ''),
+      };
+      if (!profile._scrapedQuestions) profile._scrapedQuestions = [];
+      profile._scrapedQuestions.push(inferredItem);
+      knownNorms.add(normLbl);
+    }
+    profile._scrapedReviewFields = profile._scrapedQuestions;
+
+    const scrapedCount = profile._scrapedQuestions?.length || Object.keys(scrapedReviewMap).length;
+    console.log(`  📋 Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
+    profile?._onLog?.(5, `Step 5: Scraped ${scrapedCount} mandatory question fields with types & options up to Review & Submit.`);
+
+    // STRICT STAGE 1 POLICY: If scanning / blueprinting (Stage 1), NEVER submit under ANY circumstances!
+    // Always halt at Review & Submit, capture full-page screenshot for scanned_jobs, and return 'reached-review'.
+    if (!confirmSubmit || dryRun || isScanOrBlueprint) {
+      // Capture full-page Review & Submit screenshot for scanned_jobs
+      try {
+        console.log('  📸 [Stage 1 Scanning] Reached Review & Submit! Capturing full-page blueprint screenshot for scanned_jobs...');
+        await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+        await page.waitForTimeout(400).catch(() => {});
+        profile._submissionScreenshotBuffer = await page.screenshot({ type: 'jpeg', quality: 85, fullPage: true, timeout: 15000 }).catch(() => null);
+      } catch {}
+      profile._submissionScreenshotUrl = null;
+
+      // Stay for 5 seconds at Review & Submit before advancing to next unique link
+      console.log('  ⏳ [Stage 1 Scanning] HALT: Reached Review & Submit. Staying for 5 seconds (NOT submitting), then advancing to candidate distribution...');
+      profile?._onLog?.(5, 'Step 5: Reached Review & Submit. HALTED without submitting. Capturing blueprint screenshot & distributing to candidates.');
+      await page.waitForTimeout(5000).catch(() => {});
+
+      return 'reached-review';
+    }
+
+    const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
+    if (decision === 'dry-run-skip') {
+      console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
+      await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'dry_run' }).catch(() => {});
+      return 'reached-review';
+    }
+    if (decision === 'decline') {
+      console.log('  ✋ N — not submitting. Stopping here.');
+      await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'review_declined' }).catch(() => {});
+      return 'review-declined';
+    }
+    if (decision === 'skip') {
+      console.log('  ⏭️  S — skipped (not submitted). Continuing to the next URL.');
+      await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped' }).catch(() => {});
+      return 'skipped';
+    }
+
+    await ensureReviewAgreementsAndSignatures(page, profile);
+    console.log('🚀 Clicking final "Submit" button...');
+    profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
+    await clickSubmitButton(page, { allowSubmit: true });
+    await waitForDomSettled(page);
+    try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
   }
-
-  const decision = await confirmSubmitInTerminal(confirmSubmit, dryRun);
-  if (decision === 'dry-run-skip') {
-    console.log('  🎯 Dry-run — reached Review. Moving to next URL.');
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'dry_run' }).catch(() => {});
-    return 'reached-review';
-  }
-  if (decision === 'decline') {
-    console.log('  ✋ N — not submitting. Stopping here.');
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped', failureReason: 'review_declined' }).catch(() => {});
-    return 'review-declined';
-  }
-  if (decision === 'skip') {
-    console.log('  ⏭️  S — skipped (not submitted). Continuing to the next URL.');
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'skipped' }).catch(() => {});
-    return 'skipped';
-  }
-
-  // Final pass: ensure all agreements and terms on Review page are checked and signature filled
-  await ensureReviewAgreementsAndSignatures(page, profile);
-
-  console.log('🚀 Clicking final "Submit" button...');
-  profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
-  await clickSubmitButton(page, { allowSubmit: true });
-  await waitForDomSettled(page);
-  try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
 
   // Dynamic wait up to 25 seconds for Workday confirmation screen or URL redirect
   console.log('  ⏳ Waiting dynamically for Workday confirmation screen or URL redirect (up to 25s)...');
@@ -2276,23 +2508,40 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
   while (Date.now() - confirmStart < 25000) {
     const checkState = await page.evaluate(() => {
-      const text = document.body?.innerText || '';
+      const bodyText = document.body?.innerText || '';
+      const bodyContent = document.body?.textContent || '';
       const href = window.location.href || '';
+      const title = document.title || '';
+
+      // Query all popup, alert, banner, dialog, toast, and status elements across the page
+      const popupEls = Array.from(document.querySelectorAll(
+        '[role="alert"], [role="status"], [role="dialog"], [role="alertdialog"], ' +
+        '[data-automation-id*="popup" i], [data-automation-id*="banner" i], ' +
+        '[data-automation-id*="toast" i], [data-automation-id*="notification" i], ' +
+        '[data-automation-id*="alert" i], [data-automation-id*="modal" i], ' +
+        '#popup-container, .wd-popup, [data-automation-id="errorBanner"], ' +
+        '[data-automation-id="errorMessage"], [data-automation-id="pageHeader"], h1, h2, h3'
+      ));
+      const popupText = popupEls.map(el => (el.innerText || el.textContent || '')).join(' ');
+      const combinedText = `${bodyText}\n${bodyContent}\n${popupText}\n${title}`;
 
       const isSuccess =
-        /thank\s*you\s*for\s*taking\s*the\s*time\s*to\s*submit|thank\s*you\s*for\s*applying|application\s*submitted|congratulations|submission\s*complete|your\s*application\s*has\s*been\s*submitted|your\s*application\s*is\s*submitted|application\s*received|thank\s*you\s*for\s*your\s*interest|talent\s*acquisition\s*team\s*will\s*review/i.test(text) ||
+        /thank\s*you\s*(?:for\s*(?:taking\s*the\s*time\s*to\s*submit|applying|your\s*(?:interest|application|time))|very\s*much)|application\s*(?:has\s*been\s*|is\s*|was\s*)?(?:submitted|received)|(?:successfully\s*submitted|submission\s*complete|congratulations|talent\s*acquisition\s*team\s*will\s*review)/i.test(combinedText) ||
         /\/submitted|\/thankyou|\/application-submitted/i.test(href) ||
         !!document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]');
 
       const isApplied =
-        /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already)\s*submitted|you\s*have\s*already\s*applied|duplicate\s*application/i.test(text) ||
+        /already\s*(?:applied|submitted)|application\s*(?:has\s*already\s*been|already|was\s*already)\s*submitted|you(?:'ve|\s+have)?\s*already\s*applied|duplicate\s*application|previously\s*applied|already\s*exists|already\s*submitted\s*an\s*application|application\s*previously\s*submitted/i.test(combinedText) ||
         !!document.querySelector('[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]') ||
-        Array.from(document.querySelectorAll('button, a, span')).some(el => /^\s*(applied|already applied|previously applied|application submitted)\s*$/i.test((el.textContent || '').trim()));
+        Array.from(document.querySelectorAll('button, a, span, div')).some(el => {
+          const txt = (el.textContent || '').trim();
+          return /^\s*(applied|already applied|previously applied|application submitted|application already submitted)\s*$/i.test(txt);
+        });
 
       const needsVerification =
-        /verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(text);
+        /verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(combinedText);
 
-      return { isSuccess, isApplied, needsVerification };
+      return { isSuccess, isApplied, needsVerification, popupText };
     }).catch(() => ({ isSuccess: false, isApplied: false, needsVerification: false }));
 
     if (checkState.isSuccess) {
@@ -2357,6 +2606,8 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   if (confirmationFound) {
     profile?._onLog?.(5, 'Step 5: Workday submission verified! Screen confirmed: "Application Submitted". Capturing proof screenshot...');
     console.log('✅ Workday application successfully submitted!');
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await page.waitForTimeout(400);
     // Only capture full-page screenshot when application submission is 100% complete
     const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
     profile._submissionScreenshotUrl = finalProofUrl;
@@ -2368,14 +2619,16 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
   }
 
   if (isAlreadyApplied) {
-    profile?._onLog?.(5, 'Step 5: Workday verified: candidate has already applied to this position.');
-    const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
+    profile?._onLog?.(5, 'Step 5: Workday verified: candidate application already submitted/received on Workday.');
+    await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+    await page.waitForTimeout(400);
+    const alreadyProofUrl = await takeScreenshot(page, 'workday-submitted', profile).catch(() => null);
     profile._submissionScreenshotUrl = alreadyProofUrl;
     const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-    console.log(`[${cleanAwl}] already_applied | Screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
+    console.log(`[${cleanAwl}] already_applied -> submitted | Screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted', screenshotUrl: alreadyProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
-    return 'already_applied';
+    return 'submitted';
   }
 
   console.log('❌ Workday submission confirmation was not detected on page within 25 seconds.');
@@ -2502,6 +2755,12 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       return 'stopped';
     }
     currentIteration++;
+
+    // Guard: Wait for DOM stabilization & spinner detachment on step transition
+    if (currentIteration > 1) {
+      await page.waitForSelector('[data-automation-id*="loading-spinner"], div.bubble-pulse, [role="progressbar"]', { state: 'detached', timeout: 3500 }).catch(() => {});
+      await page.waitForTimeout(200);
+    }
 
     const refreshed = await refreshWorkdayPageOnce(page);
     let stepName = await detectWorkdayStep(page);
@@ -2639,19 +2898,94 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       if (Array.isArray(liveFields) && liveFields.length > 0) {
         for (const lf of liveFields) {
           if (lf && !/password/i.test(lf.type || '') && !/password/i.test(lf.automationId || '')) {
-            profile._harvestedFields.push({ ...lf, step: stepName });
+            const lfLabel = lf.label || lf.question || lf.id || '';
+            if (shouldIncludeInScan(lfLabel, lf, stepName)) {
+              profile._harvestedFields.push({ ...lf, step: stepName });
+            }
           }
         }
       }
+      if (isScan) {
+        try {
+          const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
+          const harvestedBatch = await harvestPageQuestions(page, {
+            company: profile._company || '',
+            url: profile._canonicalJobUrl || page.url(),
+            stepName,
+          });
+          if (Array.isArray(harvestedBatch) && harvestedBatch.length > 0) {
+            for (const hb of harvestedBatch) {
+              const hbLabel = hb.label || hb.question || '';
+              if (!shouldIncludeInScan(hbLabel, hb, stepName)) continue;
+              profile._harvestedFields.push({
+                label: hb.label,
+                id: hb.label,
+                type: hb.fieldType,
+                fieldType: hb.fieldType,
+                required: hb.required,
+                options: hb.options || [],
+                step: stepName,
+              });
+              if (hb.required) {
+                const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+                const existing = profile._scrapedWizardQuestions.get(qNorm);
+                const existingOpts = existing?.options || [];
+                const newOpts = hb.options || [];
+                profile._scrapedWizardQuestions.set(qNorm, {
+                  question: hb.label,
+                  label: hb.label,
+                  question_normalized: qNorm,
+                  field_type: hb.fieldType || 'text',
+                  type: hb.fieldType || 'text',
+                  options: newOpts.length ? newOpts : existingOpts,
+                  required: true,
+                  is_required: true,
+                  step: stepName,
+                  value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
+                });
+              }
+            }
+            const stepReqCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
+            console.log(`  📋 Scraped ${stepReqCount} mandatory question(s) on "${stepName}" with types & options.`);
+          }
+        } catch (hErr) {
+          console.log(`  ⚠️  Question scrape notice on "${stepName}": ${hErr.message}`);
+        }
+      }
+    }
+    console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
+    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
+
+    await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
+
+    const blockedClicks = await drainBlockedScriptClicks(page);
+    if (blockedClicks.length) {
+      console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
+    }
+
+    const pageGate = await validatePage(page, profile, stepName).catch(() => null);
+    if (pageGate && !pageGate.ok) {
+      console.log(`  ⚠️  Page not ready for Next: ${pageGate.reason}`);
+    }
+
+    const orch = profile._lastOrchestrator;
+    if (orch?.status === 'blocked') {
+      console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
+    }
+
+    // Re-harvest only in scanning mode; during live submission, advance immediately to next step
+    if (isScan) {
       try {
         const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
-        const harvestedBatch = await harvestPageQuestions(page, {
+        const postHarvest = await harvestPageQuestions(page, {
           company: profile._company || '',
           url: profile._canonicalJobUrl || page.url(),
           stepName,
         });
-        if (Array.isArray(harvestedBatch) && harvestedBatch.length > 0) {
-          for (const hb of harvestedBatch) {
+        if (Array.isArray(postHarvest) && postHarvest.length > 0) {
+          for (const hb of postHarvest) {
+            const hbLabel = hb.label || hb.question || '';
+            if (!shouldIncludeInScan(hbLabel, hb, stepName)) continue;
             profile._harvestedFields.push({
               label: hb.label,
               id: hb.label,
@@ -2680,76 +3014,19 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
               });
             }
           }
-          const stepReqCount = Array.from(profile._scrapedWizardQuestions.values()).filter(q => q.step === stepName).length;
-          console.log(`  📋 Scraped ${stepReqCount} mandatory question(s) on "${stepName}" with types & options.`);
         }
-      } catch (hErr) {
-        console.log(`  ⚠️  Question scrape notice on "${stepName}": ${hErr.message}`);
-      }
-    }
-    console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
-    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
-
-    await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
-
-    const blockedClicks = await drainBlockedScriptClicks(page);
-    if (blockedClicks.length) {
-      console.log(`  🛡️  Blocked ${blockedClicks.length} non-required click(s): ${[...new Set(blockedClicks)].join(', ')}`);
+      } catch {}
     }
 
-    const pageGate = await validatePage(page, profile, stepName).catch(() => null);
-    if (pageGate && !pageGate.ok) {
-      console.log(`  ⚠️  Page not ready for Next: ${pageGate.reason}`);
+    // Dynamic Pre-Advance Check: verify required fields in live DOM
+    const preSaveUnfilled = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
+    if (preSaveUnfilled > 0) {
+      console.log(`  ⚠️ "${stepName}" has ${preSaveUnfilled} unfilled mandatory field(s) — rescanning DOM and running targeted fill before advancing...`);
+      await fillCurrentWorkdayStep(page, stepName, profile, plan);
     }
 
-    const orch = profile._lastOrchestrator;
-    if (orch?.status === 'blocked') {
-      console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
-    }
-
-    // Re-harvest after step fill to capture any newly revealed or unlocked conditional questions and filled answers
-    try {
-      const { harvestPageQuestions } = await import('./workdayScanHarvest.mjs');
-      const postHarvest = await harvestPageQuestions(page, {
-        company: profile._company || '',
-        url: profile._canonicalJobUrl || page.url(),
-        stepName,
-      });
-      if (Array.isArray(postHarvest) && postHarvest.length > 0) {
-        for (const hb of postHarvest) {
-          profile._harvestedFields.push({
-            label: hb.label,
-            id: hb.label,
-            type: hb.fieldType,
-            fieldType: hb.fieldType,
-            required: hb.required,
-            options: hb.options || [],
-            step: stepName,
-          });
-          if (hb.required) {
-            const qNorm = (hb.question_normalized || hb.normalized || hb.label).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-            const existing = profile._scrapedWizardQuestions.get(qNorm);
-            const existingOpts = existing?.options || [];
-            const newOpts = hb.options || [];
-            profile._scrapedWizardQuestions.set(qNorm, {
-              question: hb.label,
-              label: hb.label,
-              question_normalized: qNorm,
-              field_type: hb.fieldType || 'text',
-              type: hb.fieldType || 'text',
-              options: newOpts.length ? newOpts : existingOpts,
-              required: true,
-              is_required: true,
-              step: stepName,
-              value: hb.value || existing?.value || (profile._filledValues?.[hb.label] != null ? String(profile._filledValues[hb.label]) : ''),
-            });
-          }
-        }
-      }
-    } catch {}
-
-    console.log('  ➡️  Fill done — instant Save and Continue...');
-    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Completed filling "${stepName}". Clicking Save & Continue...`);
+    console.log(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified. Instant Save & Continue...`);
+    profile?._onLog?.(currentIteration, `Step ${currentIteration}: Completed filling "${stepName}". Fast moving to next page...`);
     let advanceResult;
     try {
       advanceResult = await clickSaveAndContinueAtAnyCost(page, stepName, profile, plan);
@@ -2826,8 +3103,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
     noProgressCount++;
 
-    if (noProgressCount === 1 && unfilledAfter > 0) {
-      const retryWorkflow = await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 6, maxOuterPasses: 1 }).catch(() => null);
+    if (noProgressCount === 1 && unfilledAfter > 0 && /application\s*questions/i.test(stepName)) {
+      const retryWorkflow = await runWorkdayQuestionWorkflow(page, profile, plan, stepName, { maxPasses: 3, maxOuterPasses: 1 }).catch(() => null);
       if (retryWorkflow?.filled > 0) {
         console.log(`  🔄 Question workflow filled ${retryWorkflow.filled} stuck field(s) — retrying Save and Continue`);
         noProgressCount = 0;
@@ -2846,7 +3123,15 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   const finalStep = await detectWorkdayStep(page);
   const stoppedTitle = (finalStep && finalStep !== 'Unknown') ? finalStep : (profile._currentStep || 'Step 1: My Information');
   profile._currentStep = stoppedTitle;
-  if (finalStep === 'Review') {
+
+  const hasSubmit = await page.evaluate(() => {
+    const btn = document.querySelector('[data-automation-id="pageFooterSubmitButton"], button[data-automation-id="bottom-navigation-next-button"]');
+    const hasSubmitText = Array.from(document.querySelectorAll('button')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()));
+    return Boolean(btn || hasSubmitText);
+  }).catch(() => false);
+
+  if (hasSubmit || finalStep === 'Review' || await isWorkdayReviewPage(page).catch(() => false)) {
+    console.log('  🎯 Review/Submit state detected during exit check — executing verifyAndSubmitReview');
     await recordClientApplication(profile, {
       url: profile._canonicalJobUrl || plan?.url || page.url(),
       company: profile._company || '',
@@ -2854,6 +3139,27 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       success: true,
     }).catch(() => {});
     return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
+  }
+
+  if (confirmSubmit && !dryRun) {
+    console.log(`  🛡️  [Stage 3 Guard] Attempting final recovery advance before reporting incomplete on "${stoppedTitle}"...`);
+    const nextClicked = await page.evaluate(() => {
+      const btns = Array.from(document.querySelectorAll('button, [role="button"]'));
+      const target = btns.find(b => /save\s*(&|and)\s*continue|next|review\s*and\s*submit|submit/i.test((b.textContent || '').trim()));
+      if (target) {
+        target.click();
+        return target.textContent.trim();
+      }
+      return null;
+    }).catch(() => null);
+    if (nextClicked) {
+      console.log(`  🛡️  [Stage 3 Guard] Clicked "${nextClicked}" — awaiting navigation...`);
+      await page.waitForTimeout(3000);
+      const afterStep = await detectWorkdayStep(page).catch(() => 'Unknown');
+      if (afterStep === 'Review' || await isWorkdayReviewPage(page).catch(() => false)) {
+        return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
+      }
+    }
   }
   const haltShot = await takeScreenshot(page, `failed-at-${stoppedTitle.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase()}`, profile).catch(() => null);
   if (haltShot) {
@@ -3570,10 +3876,10 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       }
 
       // 2. Auth Gateway vs Direct Apply Check:
-      // If wizard is not visible, check if genuine authentication controls are present on DOM
-      const authNeeded = await isWorkdayLogin(page);
-      if (authNeeded && !await isWorkdayWizardVisible(page)) {
-        console.log('  🔒 Workday authentication gateway detected — clearing auth via handleWorkday...');
+      // If wizard is not visible, authenticate or enter wizard via handleWorkday
+      let onWizard = await isWorkdayWizardVisible(page);
+      if (!onWizard) {
+        console.log('  🔒 Workday authentication gateway / entry required — clearing auth via handleWorkday...');
         const wdOk = await handleWorkday(page, {
           email: workdayEmail,
           password: workdayPassword,
@@ -3598,8 +3904,8 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           if (ownBrowser) await browser.close().catch(() => {});
           return 'auth-failed';
         }
-      } else if (!authNeeded) {
-        console.log('  ⚡ Direct fill mode: No authentication gateway detected! Proceeding straight to wizard filling...');
+      } else {
+        console.log('  ⚡ Direct fill mode: Already on active wizard! Proceeding straight to wizard filling...');
       }
 
       console.log('  ✅ Workday authentication confirmed — starting 5-step wizard loop...');

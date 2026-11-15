@@ -128,7 +128,7 @@ function getTargetFiles() {
   }
   // branch mode
   if (mergeBase) {
-    const out = runGit(`diff --name-only ${mergeBase}...HEAD`, true);
+    const out = runGit(`diff --name-only ${mergeBase}`, true);
     return out ? out.split('\n').filter(Boolean) : [];
   }
   const out = runGit('diff --name-only HEAD~1', true);
@@ -142,7 +142,7 @@ function getAddedLinesByFile() {
   } else if (mode === 'full') {
     return new Map();
   } else if (mergeBase) {
-    diffText = runGit(`diff -U0 ${mergeBase}...HEAD`, true);
+    diffText = runGit(`diff -U0 ${mergeBase}`, true);
   } else {
     diffText = runGit('diff -U0 HEAD~1', true);
   }

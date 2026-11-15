@@ -163,20 +163,27 @@ export async function markDateWidget(page, opts) {
       let node = el;
       for (let depth = 0; depth < 40 && node; depth++) {
         const auto = (node.getAttribute?.('data-automation-id') || '').toLowerCase();
-        if (/certificat|licen[cs]|language|award|publication|affiliation|reference|socialnetwork|volunteer/.test(auto)) {
+        const id = (node.id || '').toLowerCase();
+        const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
+        const aria = (node.getAttribute?.('aria-label') || '').toLowerCase();
+        const combined = `${auto} ${id} ${cls} ${aria}`;
+        if (/certificat|licen[cs]|language|award|publication|affiliation|reference|socialnetwork|volunteer/.test(combined)) {
           return 'optional';
         }
-        if (/workexperiencesection|work-experience-section|workexperiencepanelset|workexperienceitem/.test(auto)) {
+        if (/(^|[_-])work\s*experience|workexperience|work-experience|work_experience/.test(combined)) {
           return 'work';
         }
-        if (/educationsection|educationpanelset|educationitem/.test(auto)) return 'education';
+        if (/(^|[_-])education|educationsection|educationpanelset|educationitem/.test(combined)) {
+          return 'education';
+        }
         node = node.parentElement;
       }
       let nearest = '';
-      const headings = document.querySelectorAll('h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"]');
+      const headings = document.querySelectorAll('h1,h2,h3,h4,h5,legend,[data-automation-id="panelTitle"],[data-automation-id="sectionTitle"],[data-automation-id="compositeHeader"],[data-automation-id="pageHeader"]');
       for (const h of headings) {
         const t = norm(h.textContent);
         if (!t || t.length > 60) continue;
+        if (/job\s*title|company|degree|school|university|field\s*of\s*study/i.test(t)) continue;
         if (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING) nearest = t;
       }
       if (/work\s*experience/i.test(nearest)) return 'work';
@@ -205,23 +212,22 @@ export async function markDateWidget(page, opts) {
       if (el.type === 'hidden' || el.type === 'checkbox' || el.type === 'radio') return false;
       const auto = (el.getAttribute('data-automation-id') || '').toLowerCase();
       if (/dateicon|datepicker|calendar/.test(auto) && el.tagName === 'BUTTON') return false;
-      if (/datesectionmonth-display|datesectionyear-display|datesectionday-display/.test(auto)) return true;
       if (el.getAttribute('role') === 'spinbutton') return true;
       if (el.tagName === 'INPUT' && /dateSection|dateInput/i.test(auto)) return true;
       if (el.tagName === 'INPUT' && classify(el)) return true;
       if (el.tagName === 'INPUT' && /^(mm|yyyy|m|yy|dd)$/i.test(el.getAttribute('placeholder') || '')) return true;
+      if (el.isContentEditable && classify(el)) return true;
       return false;
     }
 
     function unwrapDateControl(el) {
       if (!el) return null;
-      if (isDateControl(el)) return el;
-      const auto = (el.getAttribute('data-automation-id') || '').toLowerCase();
-      if (/datesectionmonth|datesectionyear|datesectionday|dateinputwrapper|datesection/.test(auto)) {
+      if (el.tagName !== 'INPUT' && el.getAttribute?.('role') !== 'spinbutton') {
         const inner = el.querySelector('input:not([type="hidden"]), [role="spinbutton"]');
         if (inner && isDateControl(inner)) return inner;
         if (inner) return inner;
       }
+      if (isDateControl(el)) return el;
       return null;
     }
 
@@ -535,7 +541,8 @@ async function readSpinLocator(locator) {
   if (!(await locator.count())) return '';
   return await locator.evaluate((el) => {
     const junk = /^(m+|y+|d+|mm|yyyy|yy|dd|empty|select)$/i;
-    const raw = (el.value || el.getAttribute('aria-valuenow') || el.getAttribute('aria-valuetext') || el.textContent || '').replace(/\s+/g, ' ').trim();
+    const input = el.tagName === 'INPUT' ? el : (el.querySelector('input:not([type="hidden"]), [role="spinbutton"]') || el);
+    const raw = (input.value || input.getAttribute('aria-valuenow') || input.getAttribute('aria-valuetext') || input.textContent || '').replace(/\s+/g, ' ').trim();
     return !raw || junk.test(raw) ? '' : raw;
   }).catch(() => '');
 }
@@ -557,33 +564,38 @@ async function typeSegment(page, locator, digits) {
   if (!(await locator.count())) return false;
   const wanted = String(digits);
 
-  await locator.scrollIntoViewIfNeeded().catch(() => {});
+  // If locator points to a container/display div, resolve to the underlying input
+  const inputLoc = locator.locator('input:not([type="hidden"]), [role="spinbutton"]').first();
+  const target = (await inputLoc.count()) > 0 ? inputLoc : locator;
+
+  await target.scrollIntoViewIfNeeded().catch(() => {});
 
   // 1. Direct fast fill
-  await locator.click({ force: true }).catch(() => {});
-  await locator.fill(wanted).catch(() => {});
-  if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
+  await target.click({ force: true }).catch(() => {});
+  await target.fill(wanted).catch(() => {});
+  if (numbersEqual(await readSpinLocator(target), wanted)) return true;
 
   // 2. Rapid keystrokes if spinbutton requires key sequence
-  await locator.click({ force: true }).catch(() => {});
-  await locator.press('Control+A').catch(() => {});
-  await locator.press('Backspace').catch(() => {});
-  await locator.pressSequentially(wanted, { delay: 15 }).catch(() => {});
-  if (numbersEqual(await readSpinLocator(locator), wanted)) return true;
+  await target.click({ force: true }).catch(() => {});
+  await target.press('Control+A').catch(() => {});
+  await target.press('Backspace').catch(() => {});
+  await target.pressSequentially(wanted, { delay: 15 }).catch(() => {});
+  if (numbersEqual(await readSpinLocator(target), wanted)) return true;
 
   // 3. DOM property setter fallback
-  await locator.evaluate((el, v) => {
-    el.focus();
+  await target.evaluate((el, v) => {
+    const input = el.tagName === 'INPUT' ? el : (el.querySelector('input:not([type="hidden"]), [role="spinbutton"]') || el);
+    input.focus();
     const desc = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-    desc?.set?.call(el, v);
-    try { el.value = v; } catch { /* display div */ }
-    try { el.setAttribute('aria-valuenow', String(Number(v) || v)); } catch { /* ignore */ }
-    if (el.tagName !== 'INPUT' && el.tagName !== 'TEXTAREA') el.textContent = v;
-    el.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: v, inputType: 'insertText' }));
-    el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: v, inputType: 'insertText' }));
-    el.dispatchEvent(new Event('change', { bubbles: true }));
+    desc?.set?.call(input, v);
+    try { input.value = v; } catch { /* display div */ }
+    try { input.setAttribute('aria-valuenow', String(Number(v) || v)); } catch { /* ignore */ }
+    if (input.tagName !== 'INPUT' && input.tagName !== 'TEXTAREA') input.textContent = v;
+    input.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, cancelable: true, data: v, inputType: 'insertText' }));
+    input.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, data: v, inputType: 'insertText' }));
+    input.dispatchEvent(new Event('change', { bubbles: true }));
   }, wanted).catch(() => {});
-  return numbersEqual(await readSpinLocator(locator), wanted);
+  return numbersEqual(await readSpinLocator(target), wanted);
 }
 
 /**

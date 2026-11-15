@@ -3,6 +3,7 @@
  */
 
 export const WORKDAY_STATES = {
+  AUTHENTICATION: 'Authentication',
   MY_INFORMATION: 'My Information',
   MY_EXPERIENCE: 'My Experience',
   APPLICATION_QUESTIONS: 'Application Questions',
@@ -19,16 +20,68 @@ export const WORKDAY_STATES = {
  */
 export async function detectWorkdayStep(page) {
   return await page.evaluate(() => {
-    // 0. Detect "Already Applied" state ONLY if NOT on an active application wizard step
+    const isVisible = (el) => {
+      if (!el) return false;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
+      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
+        try {
+          const style = window.getComputedStyle(el);
+          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+        } catch {}
+      }
+      return el.offsetParent !== null;
+    };
+
+    // 0. If visible authentication fields, verification codes, or auth buttons exist, it is strictly NOT a wizard step
+    const isAuthVisible = Array.from(document.querySelectorAll(
+      'input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"], ' +
+      'input[data-automation-id="emailAddress"], input[data-automation-id="email"], ' +
+      'input[data-automation-id*="passcode" i], input[data-automation-id*="code" i], input[data-automation-id*="verification" i], ' +
+      'button[data-automation-id="SignInWithEmailButton"], button[data-automation-id="signInSubmitButton"], ' +
+      'button[data-automation-id="createAccountSubmitButton"], button[data-automation-id="createAccountLink"], ' +
+      'button[data-automation-id="signInLink"], [data-automation-id="createAccountTab"], [data-automation-id="signInTab"], ' +
+      'button[data-automation-id="createAccountButton"], button[data-automation-id="signInButton"]'
+    )).some(el => isVisible(el));
+    if (isAuthVisible) return 'Authentication';
+
+    // Check for auth page headings or text prompts
+    const authHeaders = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], legend')).some(h => {
+      if (!isVisible(h)) return false;
+      const ht = (h.textContent || '').trim().toLowerCase();
+      return (
+        ht === 'sign in' ||
+        ht === 'create account' ||
+        ht === 'create an account' ||
+        ht === 'verify your identity' ||
+        ht === 'verification code' ||
+        ht === 'check your email' ||
+        ht === 'enter code' ||
+        ht.includes('email verification') ||
+        ht.includes('sign in with email')
+      );
+    });
+    if (authHeaders) return 'Authentication';
+
+    // 1. Detect genuine Workday wizard navigation buttons or step containers
     const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
     const hasWizardNavBtn = allButtons.some(b => {
+      if (!isVisible(b)) return false;
+      const inNav = !!b.closest('nav, header, [role="navigation"], [role="banner"]');
+      if (inNav) return false;
       const txt = (b.textContent || '').trim().toLowerCase();
+      const autoId = b.getAttribute('data-automation-id') || '';
       return (
+        autoId === 'pageFooterNextButton' ||
+        autoId === 'bottom-navigation-next-button' ||
+        autoId === 'saveAndContinue' ||
+        autoId === 'pageFooterSubmitButton' ||
         txt === 'save and continue' ||
         txt === 'save & continue' ||
         txt === 'save and next' ||
         txt === 'review and submit' ||
-        txt === 'back'
+        txt === 'submit application' ||
+        txt === 'submit'
       );
     });
 
@@ -37,7 +90,6 @@ export async function detectWorkdayStep(page) {
         'button[data-automation-id="bottom-navigation-next-button"], ' +
         'button[data-automation-id="pageFooterNextButton"], ' +
         'button[data-automation-id="saveAndContinue"], ' +
-        'button[data-automation-id="next-button"], ' +
         'div[data-automation-id="file-upload-drop-zone"], ' +
         '[data-automation-id="progressBar"], ' +
         '[data-automation-id="progressBarActiveStep"], ' +
@@ -49,19 +101,7 @@ export async function detectWorkdayStep(page) {
       )
     );
 
-    const isVisible = (el) => {
-      if (!el) return false;
-      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
-      if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
-      if (typeof window !== 'undefined' && typeof window.getComputedStyle === 'function') {
-        try {
-          const style = window.getComputedStyle(el);
-          if (style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-        } catch {}
-      }
-      return true;
-    };
-
+    // 2. If neither wizard navigation buttons nor wizard DOM containers exist, check Already Applied or return Unknown
     if (!hasWizardNavBtn && !hasWizardDomElement) {
       const appliedEl = document.querySelector(
         '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
@@ -89,17 +129,16 @@ export async function detectWorkdayStep(page) {
           return 'Already Applied';
         }
       }
+
+      // No wizard navigation controls and no wizard containers -> strictly Unknown (prevents false step triggers on landing/auth/footer)
+      return 'Unknown';
     }
 
-    // 1. If visible password/auth fields or Create Account/Sign In active step exist, it is NOT a wizard form step
-    const pwdVisible = Array.from(document.querySelectorAll('input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"]'))
-      .some((el) => el.offsetParent !== null);
-    if (pwdVisible) return 'Unknown';
-
+    // 3. Match active progress step in Workday stepper
     const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
-    if (activeStep) {
+    if (activeStep && isVisible(activeStep)) {
       const text = (activeStep.textContent || '').trim();
-      if (/create\s*account|sign\s*in/i.test(text)) return 'Unknown';
+      if (/^(create\s*account|sign\s*in|create\s*account\s*[\/\-]\s*sign\s*in)$/i.test(text)) return 'Authentication';
       if (/my\s*information/i.test(text)) return 'My Information';
       if (/my\s*experience/i.test(text)) return 'My Experience';
       if (/application\s*questions/i.test(text)) return 'Application Questions';
@@ -108,22 +147,24 @@ export async function detectWorkdayStep(page) {
       if (/review/i.test(text)) return 'Review';
     }
 
+    // 4. Match primary headings
     const headings = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], [data-automation-id="step-title"], [data-automation-id="compositeHeader"], legend'));
     for (const h of headings) {
+      if (!isVisible(h)) continue;
       const text = (h.textContent || '').trim();
-      if (/create\s*account|sign\s*in/i.test(text)) return 'Unknown';
+      if (/^(create\s*account|sign\s*in|create\s*account\s*[\/\-]\s*sign\s*in)$/i.test(text)) return 'Authentication';
       if (/\bmy\s*information\b/i.test(text)) return 'My Information';
       if (/\bmy\s*experience\b/i.test(text)) return 'My Experience';
       if (/\bapplication\s*questions\b/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
+      if (/voluntary\s*disclosures?|equal\s*employment\s*identification|diversity/i.test(text)) return 'Voluntary Disclosures';
       if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
       if (/^review(\s*application)?$/i.test(text) || /review\s*and\s*submit/i.test(text) || /review\s*your\s*application/i.test(text)) return 'Review';
     }
 
-    // 3. Direct Review & Submit page detection (must precede bodyText because Review contains full text of all previous steps)
+    // 5. Direct Review & Submit page detection
     const hasGenuineSubmitButton = Boolean(
       document.querySelector('[data-automation-id="pageFooterSubmitButton"]') ||
-      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()))
+      Array.from(document.querySelectorAll('button, [role="button"]')).some(b => isVisible(b) && /^\s*submit(?:\s+application)?\s*$/i.test((b.textContent || '').trim()))
     );
     if (hasGenuineSubmitButton && (/review/i.test(document.title) || /review\s*(?:and|&)\s*submit/i.test(document.body?.innerText || ''))) {
       return 'Review';
@@ -134,20 +175,31 @@ export async function detectWorkdayStep(page) {
       return 'Review';
     }
 
+    // 6. Section & Form field matching (strictly via visible containers and section headers — NEVER body text EEO footers)
     if (
       /How Did You Hear About Us/i.test(bodyText) ||
       /Country\s*(?:\/|and)?\s*Territory\s*Phone\s*Code/i.test(bodyText) ||
       /Country\s*Phone\s*Code/i.test(bodyText) ||
       /Legal\s*Name/i.test(bodyText) ||
       /Phone\s*Device\s*Type/i.test(bodyText) ||
-      Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"], input[data-automation-id*="firstName" i], input[data-automation-id="phone-number"]'))
+      Boolean(document.querySelector('input[data-automation-id="legalNameSection_firstName"], input[id*="legalName--firstName"], [data-automation-id="myInformationPage"]'))
     ) {
       return 'My Information';
     }
     if (/Work Experience/i.test(bodyText) && (/Resume\/CV|Education|Skills/i.test(bodyText))) return 'My Experience';
     if (/Conflict of Interest/i.test(bodyText)) return 'Application Questions';
-    if (/Voluntary Self-Identification of Disability/i.test(bodyText) || /CC-305/i.test(bodyText) || /OMB Control Number 1250-0005/i.test(bodyText)) return 'Self Identify';
-    if (/Voluntary Disclosures|Equal Employment Opportunity|Veteran Status|Race\/Ethnicity/i.test(bodyText)) return 'Voluntary Disclosures';
+    if (
+      Boolean(document.querySelector('[data-automation-id="selfIdentificationPage"], [data-automation-id*="selfIdentify" i]')) ||
+      Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], legend')).some(el => isVisible(el) && /self[- ]?identif|disability|cc-?305/i.test(el.textContent || ''))
+    ) {
+      return 'Self Identify';
+    }
+    if (
+      Boolean(document.querySelector('[data-automation-id="voluntaryDisclosuresPage"], [data-automation-id*="voluntaryDisclosures" i]')) ||
+      Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], legend')).some(el => isVisible(el) && /voluntary\s*disclosures?/i.test(el.textContent || ''))
+    ) {
+      return 'Voluntary Disclosures';
+    }
 
     return 'Unknown';
   });

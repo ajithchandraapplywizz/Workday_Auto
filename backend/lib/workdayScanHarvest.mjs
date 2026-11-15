@@ -33,7 +33,7 @@ export function inferStandardOptions(label = '', fieldType = '') {
 
   // 1. Referral Source ("How Did You Hear About Us?")
   if (/how did you hear|referral source|source/i.test(norm) && !/phone|device|code/i.test(norm)) {
-    return ['LinkedIn', 'Glassdoor', 'Indeed', 'Company Website', 'Referral', 'Other'];
+    return ['LinkedIn', 'Indeed', 'Glassdoor', 'Other'];
   }
   // 2. Phone Device Type
   if (/phone\s*(device)?\s*type|device\s*type/i.test(norm)) {

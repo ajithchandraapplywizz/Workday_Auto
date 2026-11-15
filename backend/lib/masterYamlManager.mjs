@@ -245,6 +245,25 @@ export async function saveMasterYamlTemplate(harvestedQuestions = [], metadata =
   };
 }
 
+export function isCandidatePersonalFact(label = '') {
+  const t = String(label || '').toLowerCase();
+  // Allow universal non-personal questions
+  if (/(?:how|where)\s*(?:did|do)\s*you\s*hear|hear\s*about\s*(?:us|this)|^source$/i.test(t)) return false;
+  if (/terms|condition|certif|acknowledge|agree|consent|foregoing|privacy|policy|declaration|electronic\s*signature\s*consent/i.test(t)) {
+    if (/first\s*name|last\s*name|full\s*name|signature/i.test(t)) return true;
+    return false;
+  }
+  return (
+    /first\s*name|last\s*name|full\s*name|middle\s*name|legal\s*name|signature/i.test(t) ||
+    /address|street|city|state|province|region|postal|zip\s*code/i.test(t) ||
+    /phone|mobile|cell/i.test(t) ||
+    /email/i.test(t) ||
+    /company|employer|job\s*title|role\s*title|position/i.test(t) ||
+    /school|university|college|degree|major|field\s*of\s*study|gpa|graduation/i.test(t) ||
+    /gender|sex|veteran|disability|date\s*of\s*birth|\bdob\b/i.test(t)
+  );
+}
+
 /**
  * Tier 4: Searches Supabase qa_bank table and memory cache
  */
@@ -256,6 +275,10 @@ export async function findAnswerFromQaBankTable({
   blockUniversalYaml = false,
 } = {}) {
   if (!questionLabel) return null;
+  // STRICT DATA ISOLATION: Candidate personal facts, contact, experience, education, and demographics
+  // MUST NEVER be resolved from generic shared qa_bank table!
+  if (isCandidatePersonalFact(questionLabel)) return null;
+
   const normKey = normalizeQuestionKey(questionLabel);
   if (!normKey) return null;
 

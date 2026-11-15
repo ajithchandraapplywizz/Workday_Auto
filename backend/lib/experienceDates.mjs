@@ -53,7 +53,7 @@ export function parseMonthYear(value) {
   m = raw.match(/^(\d{4})\s*[/\-.]\s*(\d{1,2})$/);
   if (m) return buildMonthYear(Number(m[2]), Number(m[1]));
 
-  m = raw.match(/^([A-Za-z]+)\.?\s+(\d{4})$/);
+  m = raw.match(/^([A-Za-z]+)\.?,?\s+(\d{4})$/);
   if (m) {
     const month = MONTH_NAMES[m[1].toLowerCase()];
     return month ? buildMonthYear(month, Number(m[2])) : null;

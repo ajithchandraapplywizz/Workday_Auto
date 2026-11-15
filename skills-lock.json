@@ -1,0 +1,45 @@
+{
+  "version": 2,
+  "skills": {
+    "workday-dom-playwright": {
+      "source": "ECC/skills/browser-qa",
+      "sourceType": "local",
+      "computedHash": "3ecc96fe00d887201dc86500f1dd4f0ac871bccbb5fb1496e4076fe5f92f9a38"
+    },
+    "tiered-answer-resolution": {
+      "source": "ECC/skills/regex-vs-llm-structured-text",
+      "sourceType": "local",
+      "computedHash": "456473bb20d03ef37a83c64a66a509c459ae47ef461841848baa32461fbcc1eb"
+    },
+    "browser-lifecycle-hardening": {
+      "source": "ECC/skills/error-handling",
+      "sourceType": "local",
+      "computedHash": "8c627a42b141e9ad1d35201649351cafd618358ddbf71bd675774fb670d72e52"
+    },
+    "database-and-queue-concurrency": {
+      "source": "ECC/skills/database-migrations",
+      "sourceType": "local",
+      "computedHash": "d68a54ce41f609e8fbfc6ea2978d4e2ebf839abbcefcc50ea8a87a4465d540f1"
+    },
+    "freellmapi-gateway": {
+      "source": "freellmapi",
+      "sourceType": "local",
+      "computedHash": "6f181381c46b67eb2b645dd296313b68f5b324f2032eb0a82752eb525f0d98ce"
+    },
+    "workday-public-apis": {
+      "source": "public-apis",
+      "sourceType": "local",
+      "computedHash": "4a60295103b888e7d6740b9e8f40b852d188e5ab00d737f825893f80bd3af58f"
+    },
+    "react-dashboard-ops": {
+      "source": "ECC/skills/react-patterns",
+      "sourceType": "local",
+      "computedHash": "f2aa1938b90664f12f250f707d85e17e71ac863506fba339e4ea516c6fd53dcf"
+    },
+    "verification-gate-runner": {
+      "source": "ECC/skills/verification-loop",
+      "sourceType": "local",
+      "computedHash": "60cb29eed9be04aa49283bd7ec0915aec538b7400b7e94d690cc9cf9ec19a7f8"
+    }
+  }
+}

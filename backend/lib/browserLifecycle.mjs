@@ -34,8 +34,12 @@ export const LEAN_CHROMIUM_ARGS = [
 
 /**
  * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID / pthread_create limit exhaustion.
+ * STRICT GUARD: Never reap processes if any active browser or worker context is currently alive!
  */
 export function cleanupOrphanChromeProcesses() {
+  if (activeBrowsers.size > 0 || activeSlots.size > 0 || activeWorkerContexts.size > 0) {
+    return;
+  }
   if (process.platform === 'linux') {
     try {
       exec('pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || pkill -9 -f "crashpad_handler" || true', () => {});
@@ -103,21 +107,66 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
 const activeBrowsers = new Set();
 const activeSlots = new Set();
 const waitingQueue = [];
-const MAX_CONCURRENT_BROWSERS = Number(process.env.MAX_ACTIVE_BROWSERS || process.env.WORKER_COUNT || 2);
+
+/**
+ * Dynamically calculates the maximum allowable concurrent browsers from environment variables.
+ * Checks MAX_ACTIVE_BROWSERS, SUBMIT_WORKER_COUNT, WORKER_COUNT, WORKERS_COUNT, etc.
+ */
+export function getDynamicMaxBrowsers() {
+  const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
+  if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.max(2, Math.floor(envExplicit));
+
+  const envSubmitWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
+    Number(process.env.SUBMIT_WORKERS) ||
+    Number(process.env.SUBMISSION_WORKER_COUNT) ||
+    Number(process.env.SUBMISSION_WORKERS) ||
+    Number(process.env.TOTAL_SUBMIT_WORKERS);
+  if (Number.isFinite(envSubmitWorkers) && envSubmitWorkers > 0) return Math.max(2, Math.floor(envSubmitWorkers));
+
+  const envGlobalWorkers = Number(process.env.WORKER_COUNT) ||
+    Number(process.env.WORKERS_COUNT) ||
+    Number(process.env.WORKERS) ||
+    Number(process.env.MAX_WORKERS) ||
+    Number(process.env.CONCURRENT_WORKERS);
+  if (Number.isFinite(envGlobalWorkers) && envGlobalWorkers > 0) return Math.max(2, Math.floor(envGlobalWorkers));
+
+  return 2;
+}
+
+const MAX_CONCURRENT_BROWSERS = getDynamicMaxBrowsers();
 
 let globalStopRequested = false;
 let scanStopRequested = false;
 let submitStopRequested = false;
 
 /**
- * Acquire an active Playwright browser slot strictly capping concurrent browsers at maxSlots (default 2).
- * If maxSlots is reached, pauses execution asynchronously until a running browser exits and calls releaseBrowserSlot.
+ * Acquire an active Playwright browser slot dynamically referencing worker counts from env.
+ * If dynamic slot limit is reached, pauses execution asynchronously until a running browser exits.
  */
-export async function acquireBrowserSlot(workerId = 'worker', maxSlots = MAX_CONCURRENT_BROWSERS) {
+export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
   if (isGlobalStopRequested()) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: global stop is active`);
   }
-  const effectiveMax = Math.max(1, Number(process.env.MAX_ACTIVE_BROWSERS) || Number(maxSlots) || MAX_CONCURRENT_BROWSERS);
+  // If this worker already owns an active slot, grant immediately
+  if (activeSlots.has(workerId)) {
+    return true;
+  }
+
+  // Prune any disconnected/closed browser handles
+  for (const b of activeBrowsers) {
+    if (typeof b.isConnected === 'function' && !b.isConnected()) {
+      activeBrowsers.delete(b);
+      browserRoles.delete(b);
+    }
+  }
+
+  const dynamicLimit = getDynamicMaxBrowsers();
+  const effectiveMax = Math.max(
+    2,
+    Number(process.env.MAX_ACTIVE_BROWSERS) ||
+    (maxSlots !== null && Number(maxSlots) > 0 ? Number(maxSlots) : 0) ||
+    dynamicLimit
+  );
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
     return true;
@@ -129,9 +178,9 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = MAX_CON
       waitingQueue.push({ workerId, resolve, reject });
     }),
     new Promise((resolve) => setTimeout(() => {
-      console.warn(`⚠️ [SLOT GUARD] Browser slot wait timed out for ${workerId} (45s). Self-healing slot to prevent lock.`);
+      console.warn(`⚠️ [SLOT GUARD] Browser slot wait timed out for ${workerId} (10s). Self-healing slot to prevent lock.`);
       resolve(true);
-    }, 45000))
+    }, 10000))
   ]);
   activeSlots.add(workerId);
   return true;
@@ -142,9 +191,17 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = MAX_CON
  */
 export function releaseBrowserSlot(workerId = 'worker') {
   activeSlots.delete(workerId);
+  // Prune any disconnected/closed browser handles
+  for (const b of activeBrowsers) {
+    if (typeof b.isConnected === 'function' && !b.isConnected()) {
+      activeBrowsers.delete(b);
+      browserRoles.delete(b);
+    }
+  }
   if (waitingQueue.length > 0) {
     const next = waitingQueue.shift();
     if (next && typeof next.resolve === 'function') {
+      activeSlots.add(next.workerId);
       next.resolve(true);
     }
   }
@@ -195,6 +252,17 @@ export function registerActiveBrowser(browser, meta = {}) {
     activeBrowsers.add(browser);
     const role = meta.role || (meta.workerId && String(meta.workerId).includes('submit') ? 'submit' : 'scan');
     browserRoles.set(browser, role);
+    try {
+      if (typeof browser.on === 'function') {
+        browser.on('disconnected', () => {
+          activeBrowsers.delete(browser);
+          browserRoles.delete(browser);
+          if (meta.workerId) {
+            releaseBrowserSlot(meta.workerId);
+          }
+        });
+      }
+    } catch {}
   }
 }
 
@@ -255,9 +323,29 @@ export async function abortScanBrowsers() {
 }
 
 /**
+ * Closes the browser strictly belonging to a single worker without affecting sibling workers.
+ */
+export async function abortWorkerBrowser(workerId) {
+  if (!workerId) return;
+  const ctx = activeWorkerContexts.get(workerId);
+  if (ctx?.browser) {
+    try {
+      await ctx.browser.close().catch(() => {});
+    } catch {}
+    activeBrowsers.delete(ctx.browser);
+    browserRoles.delete(ctx.browser);
+  }
+  unregisterWorkerContext(workerId);
+  releaseBrowserSlot(workerId);
+}
+
+/**
  * Forcefully and immediately close submission Playwright browser instances.
  */
-export async function abortSubmitBrowsers() {
+export async function abortSubmitBrowsers({ force = false } = {}) {
+  if (!force && !submitStopRequested && !globalStopRequested) {
+    return; // Never abort active submission browsers unless an explicit user stop is active!
+  }
   console.log(`\n🛑 [LIFECYCLE] Aborting submission Playwright browser(s)...`);
   const closePromises = [];
   for (const browser of Array.from(activeBrowsers)) {
@@ -270,8 +358,10 @@ export async function abortSubmitBrowsers() {
       browserRoles.delete(browser);
     }
   }
-  await Promise.allSettled(closePromises);
+  // Race against 2s timeout so stuck Playwright sockets never hang the stop signal
+  await Promise.race([Promise.allSettled(closePromises), new Promise((r) => setTimeout(r, 2000))]);
   console.log(`✅ [LIFECYCLE] Submission browser instances closed.`);
+  cleanupOrphanChromeProcesses();
   if (activeBrowsers.size === 0) deepCleanWhenZeroActiveInstances({ force: true });
 }
 
@@ -279,7 +369,10 @@ export async function abortSubmitBrowsers() {
  * Forcefully and immediately close all open Playwright browser instances.
  * Terminates active pages, network connections, and visible windows in <500ms.
  */
-export async function abortAllActiveBrowsers() {
+export async function abortAllActiveBrowsers({ force = false } = {}) {
+  if (!force && !globalStopRequested && !submitStopRequested && !scanStopRequested) {
+    return; // Never abort all active browsers unless an explicit user stop signal is present!
+  }
   console.log(`\n🛑 [LIFECYCLE] Aborting ${activeBrowsers.size} active Playwright browser(s)...`);
   const closePromises = [];
   for (const browser of Array.from(activeBrowsers)) {
@@ -298,7 +391,9 @@ export async function abortAllActiveBrowsers() {
     const item = waitingQueue.shift();
     try { item.reject(new Error('[LIFECYCLE] Aborted: global stop requested')); } catch {}
   }
-  await Promise.allSettled(closePromises);
+  // Race against 2s timeout so stuck Playwright sockets never hang the stop signal
+  await Promise.race([Promise.allSettled(closePromises), new Promise((r) => setTimeout(r, 2000))]);
   console.log(`✅ [LIFECYCLE] All browser instances closed cleanly.`);
+  cleanupOrphanChromeProcesses();
   deepCleanWhenZeroActiveInstances({ force: true });
 }

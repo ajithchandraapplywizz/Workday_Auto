@@ -185,7 +185,7 @@ export function isPersonalIdentityQuestion(label = '') {
     || isSignatureOrFullNameQuestion(label)
     || /^full\s*name$|^name$|^legal\s*name$/.test(norm)
     || /^email/.test(norm)
-    || /^(phone|mobile|cell)(\s*number)?$|phone\s*number/.test(norm)
+    || /^(phone|mobile|cell)(\s*number)?$|phone\s*number|phone.*(device)?.*type/.test(norm)
     || /country.*phone.*code/.test(norm)
     || /^city$|^address--city$/.test(norm)
     || /^state$|^address--countryregion$/.test(norm)

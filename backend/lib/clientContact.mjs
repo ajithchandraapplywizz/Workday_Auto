@@ -719,6 +719,100 @@ export function resolvePostalForWorkday(profile = {}, indiaFallback) {
   return usZip || '500001';
 }
 
+export const US_STATE_ZIP_PREFIXES = {
+  MA: ['01', '02'],
+  RI: ['02'],
+  NH: ['03'],
+  ME: ['03', '04'],
+  VT: ['05'],
+  CT: ['06'],
+  NJ: ['07', '08'],
+  NY: ['10', '11', '12', '13', '14'],
+  PA: ['15', '16', '17', '18', '19'],
+  DE: ['19'],
+  DC: ['20'],
+  MD: ['20', '21'],
+  VA: ['22', '23', '24'],
+  WV: ['24', '25', '26'],
+  NC: ['27', '28'],
+  SC: ['29'],
+  GA: ['30', '31', '39'],
+  FL: ['32', '33', '34'],
+  AL: ['35', '36'],
+  TN: ['37', '38'],
+  MS: ['38', '39'],
+  KY: ['40', '41', '42'],
+  OH: ['43', '44', '45'],
+  IN: ['46', '47'],
+  MI: ['48', '49'],
+  IA: ['50', '51', '52'],
+  WI: ['53', '54'],
+  MN: ['55', '56'],
+  SD: ['57'],
+  ND: ['58'],
+  MT: ['59'],
+  IL: ['60', '61', '62'],
+  MO: ['63', '64', '65'],
+  KS: ['66', '67'],
+  NE: ['68', '69'],
+  LA: ['70', '71'],
+  AR: ['71', '72'],
+  OK: ['73', '74'],
+  TX: ['75', '76', '77', '78', '79', '88'],
+  CO: ['80', '81'],
+  WY: ['82', '83'],
+  ID: ['83'],
+  UT: ['84'],
+  AZ: ['85', '86'],
+  NM: ['87', '88'],
+  NV: ['88', '89'],
+  CA: ['90', '91', '92', '93', '94', '95', '96'],
+  HI: ['96'],
+  OR: ['97'],
+  WA: ['98', '99'],
+  AK: ['99'],
+};
+
+export const US_STATE_DEFAULT_ZIPS = {
+  AL: '36104', AK: '99801', AZ: '85001', AR: '72201', CA: '94203',
+  CO: '80202', CT: '06103', DE: '19901', FL: '32301', GA: '30303',
+  HI: '96813', ID: '83702', IL: '62701', IN: '46204', IA: '50309',
+  KS: '66603', KY: '40601', LA: '70802', ME: '04330', MD: '21401',
+  MA: '02108', MI: '48933', MN: '55102', MS: '39201', MO: '65101',
+  MT: '59601', NE: '68502', NV: '89701', NH: '03301', NJ: '08608',
+  NM: '87501', NY: '12207', NC: '27601', ND: '58501', OH: '43215',
+  OK: '73102', OR: '97301', PA: '17101', RI: '02903', SC: '29201',
+  SD: '57501', TN: '37243', TX: '78701', UT: '84114', VT: '05602',
+  VA: '23219', WA: '98501', WV: '25301', WI: '53702', WY: '82001',
+  DC: '20001', PR: '00901',
+};
+
+export function getUsStateCode(stateName = '') {
+  const s = String(stateName || '').trim().toUpperCase();
+  if (US_STATES[s]) return s;
+  for (const [code, name] of Object.entries(US_STATES)) {
+    if (s.toLowerCase() === name.toLowerCase() || (s.length >= 4 && name.toLowerCase().includes(s.toLowerCase()))) {
+      return code;
+    }
+  }
+  return null;
+}
+
+export function isPostalMatchingState(zip = '', state = '') {
+  if (!state) return true;
+  const d = String(zip || '').trim().replace(/\D/g, '').slice(0, 5);
+  if (d.length !== 5) return false;
+  const code = getUsStateCode(state);
+  if (!code || !US_STATE_ZIP_PREFIXES[code]) return true; // not US or unknown
+  const prefix2 = d.slice(0, 2);
+  return US_STATE_ZIP_PREFIXES[code].includes(prefix2);
+}
+
+export function getUsStateDefaultZip(state = '') {
+  const code = getUsStateCode(state);
+  return (code && US_STATE_DEFAULT_ZIPS[code]) || '75201';
+}
+
 /**
  * Contextual postal code resolution using Country, State, and City.
  * If candidate profile information is corrupted, mismatched, or rejected by Workday,
@@ -730,16 +824,26 @@ export async function resolvePostalCodeWithContext({
   state = '',
   city = '',
   profile = {},
+  forceLlm = false,
+  invalidPostal = '',
 } = {}) {
   const targetCountry = String(country || profile?.personal?.country || 'United States').trim();
   const targetState = String(state || profile?.personal?.state || '').trim();
   const targetCity = String(city || profile?.personal?.city || '').trim();
   const isUs = /united states|\+1/i.test(targetCountry) || /^(us|usa)$/i.test(targetCountry);
+  const cleanInvalid = String(invalidPostal || '').trim();
 
-  // 1. Check in-memory cached QA
-  const cachedQa = profile?._supabaseQa?.['postal code'] || profile?.qa_answers?.['postal code'];
-  if (cachedQa && isUs && /^\d{5}$/.test(String(cachedQa).trim())) {
-    return String(cachedQa).trim();
+  // 1. Check in-memory cached QA (ONLY if not forced to LLM and not matching the invalid postal)
+  if (!forceLlm) {
+    const cachedQa = profile?._supabaseQa?.['postal code'] || profile?.qa_answers?.['postal code'];
+    if (cachedQa && isUs && /^\d{5}$/.test(String(cachedQa).trim())) {
+      const pinCandidate = String(cachedQa).trim();
+      if (!cleanInvalid || pinCandidate !== cleanInvalid) {
+        if (!targetState || isPostalMatchingState(pinCandidate, targetState)) {
+          return pinCandidate;
+        }
+      }
+    }
   }
 
   // 2. Query LLM with explicit location context
@@ -751,17 +855,22 @@ State/Province: "${targetState}"
 City: "${targetCity}"
 
 What is a valid standard ${isUs ? '5-digit US ZIP code' : 'postal code'} for this city, state, and country?
-Return ONLY the ${isUs ? '5-digit numeric ZIP code' : 'postal code'} as plain text (e.g. 43215), with NO explanation, no punctuation, and no other words.`;
+Return ONLY the ${isUs ? '5-digit numeric ZIP code' : 'postal code'} as plain text (e.g. 02108), with NO explanation, no punctuation, and no other words.`;
 
     const res = await claudeChat({
       messages: [{ role: 'user', content: prompt }],
       max_tokens: 30,
     });
 
-    const raw = String(res || '').trim();
+    const raw = String(res?.rawText || res?.choices?.[0]?.message?.content || res || '').trim();
     const zipMatch = isUs ? raw.match(/\b\d{5}\b/) : raw.match(/\b\w{3,10}\b/);
-    if (zipMatch) {
-      const pin = zipMatch[0];
+    let pin = zipMatch ? zipMatch[0] : null;
+
+    if (!pin && isUs && targetState) {
+      pin = getUsStateDefaultZip(targetState);
+    }
+
+    if (pin) {
       console.log(`    📮 [LLM Postal Code Recovery] Context: (${targetCity}, ${targetState}, ${targetCountry}) → "${pin}"`);
 
       // Update in profile
@@ -769,11 +878,14 @@ Return ONLY the ${isUs ? '5-digit numeric ZIP code' : 'postal code'} as plain te
       profile.personal.postal_code = pin;
       if (!profile.qa_answers) profile.qa_answers = {};
       profile.qa_answers['postal code'] = pin;
+      profile.qa_answers['Postal Code'] = pin;
       if (!profile._supabaseQa) profile._supabaseQa = {};
       profile._supabaseQa['postal code'] = pin;
+      profile._supabaseQa['Postal Code'] = pin;
+      profile._supabaseQa['Postal Code*'] = pin;
 
       // Persist to qa_bank and Supabase for future use
-      const applywizzId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id;
+      const applywizzId = profile?._applyWizzId || profile?.applywizz_id || profile?.client_id || profile?._dbClient?.applywizz_id;
       if (applywizzId) {
         try {
           const { persistNewResolvedAnswer } = await import('./supabaseClient.mjs');
@@ -792,6 +904,13 @@ Return ONLY the ${isUs ? '5-digit numeric ZIP code' : 'postal code'} as plain te
     }
   } catch (err) {
     console.warn(`    ⚠️ [LLM Postal Code Recovery Error] ${err.message}`);
+  }
+
+  if (isUs && targetState) {
+    const fallbackPin = getUsStateDefaultZip(targetState);
+    profile.personal = profile.personal || {};
+    profile.personal.postal_code = fallbackPin;
+    return fallbackPin;
   }
 
   return resolvePostalForWorkday(profile);

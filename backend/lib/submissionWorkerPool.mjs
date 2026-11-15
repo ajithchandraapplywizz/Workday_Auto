@@ -38,7 +38,22 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
 
 
 
-const envWorkerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
+function getDynamicSubmitWorkerCount() {
+  const envVal = Number(process.env.SUBMIT_WORKER_COUNT) ||
+    Number(process.env.SUBMIT_WORKERS) ||
+    Number(process.env.SUBMISSION_WORKER_COUNT) ||
+    Number(process.env.SUBMISSION_WORKERS) ||
+    Number(process.env.WORKER_COUNT) ||
+    Number(process.env.WORKERS_COUNT) ||
+    Number(process.env.WORKERS) ||
+    Number(process.env.MAX_WORKERS) ||
+    Number(process.env.CONCURRENT_WORKERS);
+  return (Number.isFinite(envVal) && envVal > 0)
+    ? Math.floor(envVal)
+    : (PIPELINE_CONFIG.submitWorkersCount || PIPELINE_CONFIG.workersCount || 2);
+}
+
+const envWorkerCount = getDynamicSubmitWorkerCount();
 
 export const SUBMISSION_WORKER_IDS = (PIPELINE_CONFIG.submitWorkerIds && PIPELINE_CONFIG.submitWorkerIds.length > 0)
   ? PIPELINE_CONFIG.submitWorkerIds
@@ -56,7 +71,7 @@ export async function resolveInstanceSubmissionWorkerIds() {
     return process.env.SUBMIT_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
   }
 
-  const workerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || PIPELINE_CONFIG.workersCount || 2;
+  const workerCount = getDynamicSubmitWorkerCount();
   const baseOffset = Number(process.env.WORKER_OFFSET);
   if (!Number.isNaN(baseOffset) && process.env.WORKER_OFFSET !== undefined) {
     return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + baseOffset}`);
@@ -397,11 +412,11 @@ export async function syncJobDistributionsToSubmissionTasks() {
 
  */
 
-export async function moveReadyTasksToQueued(limit = Number(process.env.WORKER_COUNT) || 2) {
+export async function moveReadyTasksToQueued(limit = getDynamicSubmitWorkerCount()) {
 
   // Direct pipeline: tasks remain in 'ready_for_review' and transition straight to 'applying'
 
-  // when an idle worker claims them. This ensures exactly and only 2 tasks are ever in flight.
+  // when an idle worker claims them. This ensures exactly and only active workers are ever in flight.
 
   return 0;
 
@@ -433,12 +448,13 @@ export async function claimNextTask(workerId) {
 
   const now = new Date().toISOString();
 
-  // Strictly respect worker count from env
-  const envWorkerCount = Number(process.env.WORKER_COUNT) || Number(process.env.SUBMIT_WORKER_COUNT) || Number(process.env.SUBMISSION_WORKER_COUNT) || 2;
-  const totalServices = Number(process.env.TOTAL_SERVICES) || 1;
+  // Strictly respect worker count dynamically from env
+  const envWorkerCount = getDynamicSubmitWorkerCount();
+  const totalServices = Number(process.env.TOTAL_SERVICES) || Number(PIPELINE_CONFIG.totalServices) || 2;
   const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
     Number(process.env.GLOBAL_WORKER_COUNT) ||
     Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
+    Number(process.env.TOTAL_SUBMIT_WORKERS) ||
     (envWorkerCount * totalServices);
 
   // Cluster Concurrency Guard: Strictly at most maxConcurrent rows can be 'applying' across all services and replicas
@@ -467,7 +483,7 @@ export async function claimNextTask(workerId) {
     let activeBatchUrls = null;
     try {
       const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
-      const { urls } = await getRecentBatchJobUrls({ windowMinutes: 120 });
+      const { urls } = await getRecentBatchJobUrls({ windowMinutes: 720 });
       if (urls && urls.length > 0) {
         activeBatchUrls = urls;
       }
@@ -475,10 +491,8 @@ export async function claimNextTask(workerId) {
       console.warn(`[${workerId}] Note on recent batch query: ${batchErr.message}`);
     }
 
-    // STRICT GUARD: If no recently uploaded batch links found, DO NOT touch older links! Return null.
     if (!activeBatchUrls || activeBatchUrls.length === 0) {
-      console.log(`[${workerId}] ℹ️ No recently uploaded batch links found in batch_job_queue. Strictly skipping older tasks.`);
-      return null;
+      console.log(`[${workerId}] ℹ️ No recent batch filter active. Proceeding with all ready_for_review tasks in job_distributions.`);
     }
 
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
@@ -493,16 +507,43 @@ export async function claimNextTask(workerId) {
       .neq('status', 'completed')
       .neq('status', 'archived')
       .not('error_message', 'ilike', '%Resource Cooldown%')
-      .not('error_message', 'ilike', '%Host process limit%')
-      .or('error_message.is.null,error_message.not.ilike.%[Attempt%,error_message.ilike.%Stopped by user%');
+      .not('error_message', 'ilike', '%Host process limit%');
 
-    if (activeBatchUrls && activeBatchUrls.length > 0) {
+    if (activeBatchUrls && activeBatchUrls.length > 0 && activeBatchUrls.length <= 30) {
       candQuery = candQuery.in('job_url', activeBatchUrls);
     }
 
-    let { data: candidates, error: candErr } = await candQuery
+    let { data: allRawCandidates, error: candErr } = await candQuery
       .order('created_at', { ascending: true })
-      .limit(10);
+      .limit(30);
+
+    if (candErr) {
+      console.warn(`[${workerId}] candQuery error: ${candErr.message}`);
+    }
+
+    if ((!allRawCandidates || allRawCandidates.length === 0) && activeBatchUrls && activeBatchUrls.length > 0) {
+      let fallback0Query = supabase
+        .from('job_distributions')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
+        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .is('application_submitted_screenshot_url', null)
+        .neq('status', 'submitted')
+        .neq('status', 'completed')
+        .neq('status', 'archived')
+        .not('error_message', 'ilike', '%Resource Cooldown%')
+        .not('error_message', 'ilike', '%Host process limit%');
+
+      const { data: fbCandidates } = await fallback0Query
+        .order('created_at', { ascending: true })
+        .limit(30);
+      allRawCandidates = fbCandidates || [];
+    }
+
+    // In JavaScript: filter strictly for 0th attempt tasks (error_message null or not containing [Attempt)
+    let candidates = (allRawCandidates || []).filter((r) => {
+      const err = r.error_message || '';
+      return !err || !err.includes('[Attempt') || err.includes('Stopped by user');
+    });
 
     // Cool-down for retries: Don't immediately re-claim a task that just failed seconds ago.
     // Give other tasks priority and provide a 60-second backoff before retrying.
@@ -521,13 +562,14 @@ export async function claimNextTask(workerId) {
         .or('error_message.ilike.%[Attempt 1/3]%,error_message.ilike.%[Attempt 1/2]%')
         .lte('updated_at', retryCooldownCutoff);
 
-      if (activeBatchUrls && activeBatchUrls.length > 0) {
+      if (activeBatchUrls && activeBatchUrls.length > 0 && activeBatchUrls.length <= 30) {
         retryQuery1 = retryQuery1.in('job_url', activeBatchUrls);
       }
 
-      const { data: retryCandidates } = await retryQuery1
+      const { data: retryCandidates, error: r1Err } = await retryQuery1
         .order('updated_at', { ascending: true })
         .limit(10);
+      if (r1Err) console.warn(`[${workerId}] retryQuery1 error: ${r1Err.message}`);
       candidates = retryCandidates || [];
     }
 
@@ -544,13 +586,14 @@ export async function claimNextTask(workerId) {
         .or('error_message.ilike.%[Attempt 2/3]%,error_message.ilike.%[Attempt 2/2]%')
         .lte('updated_at', retryCooldownCutoff);
 
-      if (activeBatchUrls && activeBatchUrls.length > 0) {
+      if (activeBatchUrls && activeBatchUrls.length > 0 && activeBatchUrls.length <= 30) {
         retryQuery2 = retryQuery2.in('job_url', activeBatchUrls);
       }
 
-      const { data: retryCandidates2 } = await retryQuery2
+      const { data: retryCandidates2, error: r2Err } = await retryQuery2
         .order('updated_at', { ascending: true })
         .limit(10);
+      if (r2Err) console.warn(`[${workerId}] retryQuery2 error: ${r2Err.message}`);
       candidates = retryCandidates2 || [];
     }
 
@@ -565,13 +608,10 @@ export async function claimNextTask(workerId) {
         .neq('status', 'completed')
         .neq('status', 'archived');
 
-      if (activeBatchUrls && activeBatchUrls.length > 0) {
-        retryQuery3 = retryQuery3.in('job_url', activeBatchUrls);
-      }
-
-      const { data: retryCandidates3 } = await retryQuery3
+      const { data: retryCandidates3, error: r3Err } = await retryQuery3
         .order('updated_at', { ascending: true })
         .limit(10);
+      if (r3Err) console.warn(`[${workerId}] retryQuery3 error: ${r3Err.message}`);
       candidates = retryCandidates3 || [];
     }
 
@@ -840,9 +880,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-  // B4 Task Watchdog: hard limit of 4 minutes per task (fail-fast to prevent queue block)
-
-  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs || 8 * 60 * 1000;
+  // B4 Task Watchdog: configurable or 25-minute default per task (prevents runaway browser while allowing multi-step forms)
+  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs
+    || (process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS ? parseInt(process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS, 10) : 25 * 60 * 1000);
+  const watchdogMins = Math.round(WATCHDOG_TIMEOUT_MS / 60000);
 
   let watchdogTimer = null;
 
@@ -962,9 +1003,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-        const { executeWorkerTask, setWorkerPoolStop } = await import('./workerPool.mjs');
-
-        setWorkerPoolStop(false);
+        const { executeWorkerTask } = await import('./workerPool.mjs');
 
         return await executeWorkerTask({
 
@@ -1044,7 +1083,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
       watchdogTimer = setTimeout(async () => {
 
-        console.log(`[${workerId}] watchdog fired: task timed out after 8 minutes (task #${task.id})`);
+        console.log(`[${workerId}] watchdog fired: task timed out after ${watchdogMins} minutes (task #${task.id})`);
 
         stopHeartbeat();
 
@@ -1120,9 +1159,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           isTimeout: true,
 
-          error: 'Task timed out after 8 minutes',
+          error: `Task timed out after ${watchdogMins} minutes`,
 
-          stoppedAtStep: 'Watchdog Timeout (8 min)',
+          stoppedAtStep: `Watchdog Timeout (${watchdogMins} min)`,
 
           screenshotUrl: shotUrl,
 
@@ -1316,8 +1355,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       });
 
     } else {
-      const failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
       const rawErrMsg = result?.error || result?.reason || result?.failureReason || `Submission ended with status: ${result?.status || 'failed'}`;
+      let failedStep = result?.stoppedAtStep || result?.stoppedBlock || result?.step || 'Unknown Step';
+      if (/auth|login|zoho|mailbox|sign[- ]?in|verification/i.test(rawErrMsg) || result?.status === 'auth-failed' || result?.status === 'zoho_not_connected' || result?.isZohoNotConnected) {
+        failedStep = 'Authentication';
+      }
 
       const isUserStop = Boolean(
         result?.status === 'stopped' ||

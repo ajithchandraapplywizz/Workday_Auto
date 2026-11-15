@@ -307,25 +307,57 @@ export async function preResolveClientAnswersDetailed({ jobUrl, schema, profile 
           if (spellMatch) {
             ansVal = spellMatch[1];
           } else if (/job\s*title|current\s*title|position/i.test(lowerLabel)) {
-            ansVal = profile?.personal?.job_title || profile?.job_title || profile?._roleTitle || profile?.experience?.[0]?.title || 'Software Engineer';
+            ansVal = profile?.experience?.current_title || profile?.experience?.role || profile?.personal?.job_title || profile?.job_title || profile?._roleTitle || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_experience'; }
+          } else if (/current\s*company|latest\s*company|^company(\s*name)?$/i.test(lowerLabel)) {
+            ansVal = profile?.experience?.current_company || profile?.experience?.company || profile?._company || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_experience'; }
+          } else if (/school|university|college|institution/i.test(lowerLabel)) {
+            ansVal = profile?.education?.university || profile?.education?.school || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_education'; }
+          } else if (/^degree$/i.test(lowerLabel)) {
+            ansVal = profile?.education?.degree || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_education'; }
+          } else if (/major|field\s*of\s*study/i.test(lowerLabel)) {
+            ansVal = profile?.education?.major || profile?.education?.field_of_study || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_education'; }
+          } else if (/first\s*name/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.first_name || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
+          } else if (/last\s*name/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.last_name || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
+          } else if (/phone|mobile/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.phone || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
+          } else if (/email/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.email || profile?.company_email || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
           } else if (/regionsubdivision|state|province/i.test(lowerLabel)) {
-            ansVal = profile?.personal?.state || profile?.personal?.region || profile?.state || 'Connecticut';
-          } else if (/if\s*yes|company\s*name|previous\s*company/i.test(lowerLabel)) {
+            ansVal = profile?.personal?.state || profile?.personal?.region || profile?.state || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
+          } else if (/if\s*yes|previous\s*company/i.test(lowerLabel)) {
             ansVal = 'N/A';
           } else if (/postal|zip/i.test(lowerLabel)) {
-            ansVal = profile?.personal?.postal_code || profile?.personal?.zip || '06085';
+            ansVal = profile?.personal?.postal_code || profile?.personal?.zip || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
           } else if (/city/i.test(lowerLabel)) {
-            ansVal = profile?.personal?.city || 'Hartford';
+            ansVal = profile?.personal?.city || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
           } else if (/address/i.test(lowerLabel)) {
-            ansVal = profile?.personal?.address_line_1 || profile?.personal?.address || '88 South Main Street';
+            ansVal = profile?.personal?.address_line_1 || profile?.personal?.address_line1 || profile?.personal?.address || null;
+            if (ansVal) { sourceTag = 'Tier 1: Profile Facts'; tier = 1; rawSource = 'profile_personal'; }
           } else if (/salary|compensation/i.test(lowerLabel)) {
-            ansVal = '90000';
+            ansVal = profile?.salary_expectation || profile?.personal?.salary || '90000';
+            if (ansVal) { sourceTag = 'Tier 3: CRM Profile'; tier = 3; rawSource = 'profile_salary'; }
           } else {
-            ansVal = 'N/A';
+            ansVal = null;
           }
-          sourceTag = 'Tier 5: Policy Fallback';
-          tier = 5;
-          rawSource = 'policy_fallback';
+          if (ansVal && !sourceTag.includes('Tier')) {
+            sourceTag = 'Tier 5: Policy Fallback';
+            tier = 5;
+            rawSource = 'policy_fallback';
+          }
         }
       }
     } catch { }

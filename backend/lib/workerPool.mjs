@@ -25,6 +25,7 @@ import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot, cleanupOrphanChromeProcesses, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
+import { isSkippableUnimportantLabel, hasRequiredSignal } from './scanFieldFilter.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -221,6 +222,24 @@ export function indexResolvedAnswers(profile, rawAnswersList) {
       profile.education.major = strVal;
       profile.education.field_of_study_hierarchy = [strVal];
     }
+
+    // Hydrate profile.eeo facts from pre-resolved answers
+    profile.eeo = profile.eeo || {};
+    if (/\bgender\b/i.test(cleanQ) && !profile.eeo.gender) {
+      profile.eeo.gender = strVal;
+    }
+    if (/\b(race|ethnicity)\b/i.test(cleanQ) && !profile.eeo.race) {
+      profile.eeo.race = strVal;
+    }
+    if (/\bveteran\b/i.test(cleanQ) && !profile.eeo.veteran_status) {
+      profile.eeo.veteran_status = strVal;
+    }
+    if (/hispanic|latino/i.test(cleanQ) && !profile.eeo.hispanic_latino) {
+      profile.eeo.hispanic_latino = strVal;
+    }
+    if (/disability/i.test(cleanQ) && !profile.eeo.disability) {
+      profile.eeo.disability = strVal;
+    }
   }
 
   return count;
@@ -365,10 +384,52 @@ export async function executeWorkerTask({
   if (candidateDbClient.mobile_number && candidateDbClient.mobile_number !== '+') {
     profile.personal.phone = candidateDbClient.mobile_number;
   }
-  if (!profile.personal.phone) {
-    profile.personal.phone = candidateDbClient?.phone || profile?.phone || '+1 (555) 234-5678';
+  if (!profile.personal.phone && candidateDbClient?.phone) {
+    profile.personal.phone = candidateDbClient.phone;
   }
-  if (candidateDbClient.client_name) profile.name = candidateDbClient.client_name;
+  if (candidateDbClient.client_name) {
+    profile.name = candidateDbClient.client_name;
+    profile.personal.full_name = candidateDbClient.client_name;
+  }
+
+  // Hydrate candidate's genuine Address, Experience, Education, and EEO from Supabase clients table
+  const rawInfo = candidateDbClient?.raw_profile_json?.additional_information || {};
+  const rawClient = candidateDbClient?.raw_profile_json?.client || {};
+
+  if (rawInfo.full_address || candidateDbClient.full_address) {
+    profile.personal.full_address = rawInfo.full_address || candidateDbClient.full_address;
+    profile.personal.address_line1 = profile.personal.address_line1 || rawInfo.full_address;
+  }
+  if (rawInfo.state_of_residence) profile.personal.state = rawInfo.state_of_residence;
+  if (rawInfo.zip_or_country) profile.personal.postal_code = profile.personal.postal_code || rawInfo.zip_or_country;
+  if (rawInfo.date_of_birth) profile.personal.date_of_birth = rawInfo.date_of_birth;
+
+  // Work Experience — Strictly from authenticated candidate's record
+  profile.experience = profile.experience || {};
+  if (candidateDbClient.latest_company) profile.experience.current_company = candidateDbClient.latest_company;
+  if (candidateDbClient.latest_job_title) profile.experience.current_title = candidateDbClient.latest_job_title;
+  if (candidateDbClient.latest_job_location) profile.experience.location = candidateDbClient.latest_job_location;
+  if (candidateDbClient.currently_working !== undefined && candidateDbClient.currently_working !== null) {
+    profile.experience.currently_working = Boolean(candidateDbClient.currently_working);
+  }
+  if (candidateDbClient.work_from) profile.experience.from_date = candidateDbClient.work_from;
+  if (candidateDbClient.work_to) profile.experience.to_date = candidateDbClient.work_to;
+
+  // Education — Strictly from authenticated candidate's record
+  profile.education = profile.education || {};
+  if (candidateDbClient.university_or_school) profile.education.university = candidateDbClient.university_or_school;
+  if (candidateDbClient.degree) profile.education.degree = candidateDbClient.degree;
+  if (candidateDbClient.field_of_study) profile.education.major = candidateDbClient.field_of_study;
+  if (candidateDbClient.graduation_year) profile.education.to_year = candidateDbClient.graduation_year;
+  if (candidateDbClient.gpa) profile.education.gpa = candidateDbClient.gpa;
+
+  // EEO & Voluntary Disclosures — Strictly from authenticated candidate's record
+  profile.eeo = profile.eeo || {};
+  if (rawInfo.gender) profile.eeo.gender = rawInfo.gender;
+  if (rawInfo.race_ethnicity) profile.eeo.race = rawInfo.race_ethnicity;
+  if (rawInfo.veteran_status) profile.eeo.veteran_status = rawInfo.veteran_status;
+  if (rawInfo.disability_status) profile.eeo.disability_status = rawInfo.disability_status;
+  if (rawInfo.is_hispanic_latino) profile.eeo.hispanic_latino = rawInfo.is_hispanic_latino;
 
   const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
 
@@ -445,8 +506,9 @@ export async function executeWorkerTask({
     }
   }
 
-  // 5. Launch isolated Playwright browser context (matching cluster concurrency)
-  await acquireBrowserSlot(workerId, Number(process.env.MAX_ACTIVE_BROWSERS) || 4);
+  // 5. Launch isolated Playwright browser context (dynamically sized to match active workers and env)
+  cleanupOrphanChromeProcesses();
+  await acquireBrowserSlot(workerId);
   const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
   await new Promise((r) => setTimeout(r, launchJitterMs));
   appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
@@ -592,6 +654,7 @@ export async function executeWorkerTask({
         }
       } catch {}
 
+      unregisterActiveBrowser(browser, workerId);
       await browser.close().catch(() => {});
 
       if (queueTaskId) {
@@ -676,7 +739,8 @@ export async function executeWorkerTask({
             }
           } catch {}
 
-          await browser.close().catch(() => {});
+          unregisterActiveBrowser(browser, workerId);
+      await browser.close().catch(() => {});
           if (queueTaskId) {
             await updateQueueTaskStatus(queueTaskId, { status: 'already_applied', errorMessage: null, screenshotPath: alreadyShotUrl });
           }
@@ -737,7 +801,8 @@ export async function executeWorkerTask({
           await purgeDeadJobUrlAcrossQueue(jobUrl, workerId, expiredShotUrl);
         }
 
-        await browser.close().catch(() => {});
+        unregisterActiveBrowser(browser, workerId);
+      await browser.close().catch(() => {});
         if (queueTaskId) {
           await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
         }
@@ -855,7 +920,8 @@ export async function executeWorkerTask({
           }
         } catch {}
 
-        await browser.close().catch(() => {});
+        unregisterActiveBrowser(browser, workerId);
+      await browser.close().catch(() => {});
 
         if (queueTaskId) {
           await updateQueueTaskStatus(queueTaskId, {
@@ -1047,7 +1113,8 @@ export async function executeWorkerTask({
             }
           } catch {}
 
-          await browser.close().catch(() => {});
+          unregisterActiveBrowser(browser, workerId);
+      await browser.close().catch(() => {});
           if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
 
           const distId = task.distribution_id || task.distributionId || task.id;
@@ -1360,7 +1427,10 @@ export async function executeWorkerTask({
             // Upload failure screenshot to failed-applications (strictly flat, zero nested folders)
             // MANDATORY ON ALL ATTEMPTS: Always upload failure screenshot on Attempt 1, Attempt 2, and Attempt 3!
             bucket = 'failed-applications';
-            const effectiveStep = (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
+            const isAuthFailure = status === 'auth-failed' || status === 'mailbox_not_connected' || status === 'zoho_not_connected' || /auth|login|zoho|mailbox/i.test(status || '');
+            const effectiveStep = isAuthFailure
+              ? 'authentication'
+              : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'failure')).replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
             const attemptSuffix = currentAttempt ? `_attempt${currentAttempt}` : '';
             filename = `${compPrefix}_${cleanTaskId}${attemptSuffix}_failed_${effectiveStep}_${Date.now()}.png`;
             storagePath = filename;
@@ -1395,11 +1465,19 @@ export async function executeWorkerTask({
       (status === 'human-required' && onReviewPage) ||
       onReviewPage
     );
+    const isAuthFailure = status === 'auth-failed' || status === 'mailbox_not_connected' || status === 'zoho_not_connected' || /auth|login|zoho|mailbox/i.test(status || '');
     const stoppedBlock = (status === 'already_applied')
       ? 'Already Applied'
       : isSuccessStatus
         ? 'Step 5: Review & Submit'
-        : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+        : isAuthFailure
+          ? 'Authentication'
+          : (detectedStep && detectedStep !== 'Unknown' ? detectedStep : (profile._currentStep || 'Step 1: My Information'));
+
+    if (status === 'stopped' || isGlobalStopRequested() || ((options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? isSubmitStopRequested() : isScanStopRequested())) {
+      console.log(`🛑 [${workerId}] Task #${taskId || task.id} concluded with status 'stopped' (user requested).`);
+      return { status: 'stopped', error: 'Stopped by user', stoppedAtStep: stoppedBlock };
+    }
 
     let fullFailureReason = null;
     if (status === 'already_applied') {
@@ -1577,6 +1655,9 @@ export async function executeWorkerTask({
     for (const f of allWizardFields) {
       if (!f || !(f.label || f.question)) continue;
       const lbl = f.label || f.question;
+      // STRICT FILTER: Only scrape required and genuine application questions in Stage 1!
+      // Skip optional chrome, social media, middle names, address line 2, cover letters, certifications, etc.
+      if (isSkippableUnimportantLabel(lbl, f, f.step)) continue;
       const qKey = getQKey(lbl);
       if (!qKey || qKey.length < 2) continue;
 
@@ -1585,7 +1666,7 @@ export async function executeWorkerTask({
         ? String(f.value)
         : (profile?._filledValues?.[lbl] != null ? String(profile._filledValues[lbl]) : '');
 
-      const isReq = Boolean(f.is_required ?? f.required ?? true);
+      const isReq = hasRequiredSignal(lbl, f) || Boolean(f.is_required || f.required);
 
       if (!questionMap.has(qKey)) {
         questionMap.set(qKey, {
@@ -1621,9 +1702,11 @@ export async function executeWorkerTask({
     if (profile?._filledValues) {
       for (const [lbl, val] of Object.entries(profile._filledValues)) {
         if (!lbl || val == null) continue;
+        if (isSkippableUnimportantLabel(lbl, {}, profile?._currentStep)) continue;
         const qKey = getQKey(lbl);
         if (!qKey || qKey.length < 2) continue;
 
+        const isReq = hasRequiredSignal(lbl);
         if (questionMap.has(qKey)) {
           const existing = questionMap.get(qKey);
           if (!existing.value) existing.value = String(val);
@@ -1637,8 +1720,8 @@ export async function executeWorkerTask({
             field_type: fieldType,
             type: fieldType,
             options,
-            required: true,
-            is_required: true,
+            required: isReq,
+            is_required: isReq,
             important: true,
             step: profile?._currentStep || 'Application',
           });
@@ -1650,9 +1733,11 @@ export async function executeWorkerTask({
     if (profile?._scrapedReviewMap) {
       for (const [lbl, val] of Object.entries(profile._scrapedReviewMap)) {
         if (!lbl) continue;
+        if (isSkippableUnimportantLabel(lbl, {}, 'Review & Submit')) continue;
         const qKey = getQKey(lbl);
         if (!qKey || qKey.length < 2) continue;
 
+        const isReq = hasRequiredSignal(lbl);
         if (questionMap.has(qKey)) {
           const existing = questionMap.get(qKey);
           if (!existing.value && val) existing.value = String(val);
@@ -1666,8 +1751,8 @@ export async function executeWorkerTask({
             field_type: fieldType,
             type: fieldType,
             options,
-            required: true,
-            is_required: true,
+            required: isReq,
+            is_required: isReq,
             important: true,
             step: 'Review & Submit',
           });
@@ -1677,14 +1762,16 @@ export async function executeWorkerTask({
 
     // Strictly filter to mandatory/required questions only and ensure options are filled
     const allQuestions = Array.from(questionMap.values());
-    const requiredQuestions = allQuestions.filter((q) => q.is_required || q.required);
-    const finalScrapedQuestions = (requiredQuestions.length > 0 ? requiredQuestions : allQuestions).map((q) => {
-      if ((!q.options || !q.options.length) && /dropdown|select|radio|combobox/i.test(q.field_type)) {
-        const inferred = inferStandardOptions(q.label || q.question, q.field_type);
-        if (inferred.length) q.options = inferred;
-      }
-      return q;
-    });
+    const requiredQuestions = allQuestions.filter((q) => (q.is_required || q.required || hasRequiredSignal(q.label || q.question, q)) && !isSkippableUnimportantLabel(q.label || q.question, q, q.step));
+    const finalScrapedQuestions = (requiredQuestions.length > 0 ? requiredQuestions : allQuestions)
+      .filter((q) => !isSkippableUnimportantLabel(q.label || q.question, q, q.step))
+      .map((q) => {
+        if ((!q.options || !q.options.length) && /dropdown|select|radio|combobox/i.test(q.field_type)) {
+          const inferred = inferStandardOptions(q.label || q.question, q.field_type);
+          if (inferred.length) q.options = inferred;
+        }
+        return q;
+      });
 
     if (status === 'submitted') {
       try {
@@ -1853,6 +1940,7 @@ export async function executeWorkerTask({
 
     if (options.isClusterBlueprint || options.isScanOnly) {
       console.log(`   🔒 [${workerId}] Blueprint scan completed — closing browser instance.`);
+      unregisterActiveBrowser(browser, workerId);
       await browser.close().catch(() => {});
     }
 
@@ -1881,6 +1969,18 @@ export async function executeWorkerTask({
       scrapedQuestions: finalScrapedQuestions,
     };
   } catch (err) {
+    const isUserExplicitStop = Boolean(
+      isGlobalStopRequested() ||
+      ((options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? isSubmitStopRequested() : isScanStopRequested()) ||
+      getWorkerPoolStop(workerId) ||
+      /Target page, context or browser has been closed|browser has been closed|Target closed|aborted: global stop requested|stopped by user|stop requested/i.test(err?.message || '')
+    );
+
+    if (isUserExplicitStop) {
+      console.log(`🛑 [${workerId}] Task #${taskId || task.id} aborted cleanly due to user stop signal.`);
+      return { status: 'stopped', error: 'Stopped by user', stoppedAtStep: profile?._currentStep || 'User Stop' };
+    }
+
     console.error(`   ❌ [${workerId}] Error executing task: ${err.message}`);
     // Failed job: skipped saving schema to scanned_jobs
     let errShotUrl = null;
@@ -1890,6 +1990,7 @@ export async function executeWorkerTask({
         const { detectWorkdayStep } = await import('./stateDetector.mjs');
         const liveStep = await detectWorkdayStep(page).catch(() => null);
         if (liveStep && liveStep !== 'Unknown') errStep = liveStep;
+        if (/auth|login|sign[- ]?in|create.*account|verification|zoho/i.test(err?.message || '')) errStep = 'Authentication';
         // MANDATORY: Full-page high-resolution screenshot on ANY failure across Attempt 1, Attempt 2, and Attempt 3!
         const buf = await page.screenshot({ type: 'png', fullPage: true, timeout: 10000 })
           .catch(() => page.screenshot({ type: 'jpeg', quality: 90, fullPage: true, timeout: 8000 }).catch(() => null))

@@ -448,11 +448,25 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const options = opts.options || [];
   const fieldType = opts.fieldType || '';
 
-  // ─── TIER 0: Pre-Resolved JSON Lookup (PRIMARY) ───
-  const fromResolvedJson = lookupResolvedAnswerFromProfile(question, profile, { options, fieldType });
-  if (fromResolvedJson?.answer) {
-    const jsonOk = acceptClientValue(question, fromResolvedJson.answer, { options, fieldType, profile });
-    if (jsonOk) return jsonOk;
+  // ─── TIER 0: Pre-Resolved JSON Lookup (PRIMARY for non-personal fields) ───
+  const isPersonalOrExp = isPersonalIdentityQuestion(question)
+    || /current\s*company|latest\s*company|^company$|job\s*title|current\s*title|^title$|^role$|from\s*date|^from$|to\s*date|^to$|university|school|degree|major|field\s*of\s*study|gender|race|veteran|disabilit|authorized\s*to\s*work|sponsorship|require.*sponsor|visa|work\s*permit|citizenship|clearance|salary|compensation|notice\s*period|start\s*date|available\s*to\s*start|earliest\s*start|relocat|commute/i.test(question);
+
+  // If candidate has an authentic identity/contact fact in clients table, prioritize it unconditionally
+  const fromProfileIdentity = isPersonalIdentityQuestion(question) ? profileFactForLabel(question, profile) : null;
+  if (fromProfileIdentity) return acceptClientValue(question, fromProfileIdentity, { options, fieldType, profile }) || fromProfileIdentity;
+
+  // If candidate has an explicit verified answer in client_questions for their AWL ID, prioritize it
+  const fromSupabase = lookupSupabaseAnswerSync(question, profile, { options, fieldType });
+  const supabaseOk = acceptClientValue(question, fromSupabase?.answer, { options, fieldType, profile });
+  if (supabaseOk) return supabaseOk;
+
+  if (opts.stage !== 'stage2' && !isPersonalOrExp) {
+    const fromResolvedJson = lookupResolvedAnswerFromProfile(question, profile, { options, fieldType });
+    if (fromResolvedJson?.answer) {
+      const jsonOk = acceptClientValue(question, fromResolvedJson.answer, { options, fieldType, profile });
+      if (jsonOk) return jsonOk;
+    }
   }
 
   const priorEmployer = priorEmployerAnswer(question, profile);
@@ -464,16 +478,7 @@ export function peekClientAnswer(label, profile = {}, opts = {}) {
   const sensitive = lookupSensitiveSafeAnswer(question);
   if (sensitive) return acceptClientValue(question, sensitive, { options, fieldType, profile }) || sensitive;
 
-  const fromProfileIdentity = isPersonalIdentityQuestion(question) ? profileFactForLabel(question, profile) : null;
-  if (fromProfileIdentity) return acceptClientValue(question, fromProfileIdentity, { options, fieldType, profile }) || fromProfileIdentity;
-
   const currentStep = profile?._currentStepIndex || 2;
-
-  // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
-  // 1a. Check Supabase client_questions table with respective AWL ID
-  const fromSupabase = lookupSupabaseAnswerSync(question, profile, { options, fieldType });
-  const supabaseOk = acceptClientValue(question, fromSupabase?.answer, { options, fieldType, profile });
-  if (supabaseOk) return supabaseOk;
 
   // 1b. Check Supabase clients table facts
   const fromProfile = profileFactForLabel(question, profile);
@@ -538,25 +543,6 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   const currentStep = profile?._currentStepIndex || 2;
 
-  // ─── TIER 0: Pre-Resolved Answers JSON from job_distributions (PRIMARY FIRST CHOICE) ───
-  const preResolvedHit = lookupResolvedAnswerFromProfile(label, profile, { options, fieldType });
-  if (preResolvedHit?.answer) {
-    const validated = finish(preResolvedHit.answer, preResolvedHit.source);
-    if (validated) {
-      logResolution(`    ⚡ [Tier 0 Pre-Resolved JSON] "${label.slice(0, 55)}" ← "${validated.answer}" (${preResolvedHit.matched_question || 'exact'})`);
-      profile?._onLog?.(currentStep, `[Tier 0 JSON Match] "${label.slice(0, 50)}" ← "${validated.answer}"`);
-      return validated;
-    }
-  }
-
-  const ageYes = resolveMinimumAgeAnswer(label, profile);
-  if (ageYes) {
-    const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
-    logResolution(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
-    return hit;
-  }
-
-
   // ─── TIER 1: Supabase Direct Answer (clients table -> client_questions table) ───
   // 1a. Core Identity from Supabase clients table (name, phone, email, address)
   const fromProfileIdentity = isPersonalIdentityQuestion(label) ? profileFactForLabel(label, profile) : null;
@@ -578,6 +564,29 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
       profile?._onLog?.(currentStep, `[Tier 1 Supabase Match] "${label.slice(0, 50)}" ← "${supabaseHit.answer.slice(0, 45)}"`);
       return supabaseHit;
     }
+  }
+
+  // ─── TIER 0: Pre-Resolved Answers JSON from job_distributions (for non-personal fields) ───
+  const isPersonalOrExp = isPersonalIdentityQuestion(label)
+    || /current\s*company|latest\s*company|^company$|job\s*title|current\s*title|^title$|^role$|from\s*date|^from$|to\s*date|^to$|university|school|degree|major|field\s*of\s*study|gender|race|veteran|disabilit|authorized\s*to\s*work|sponsorship|require.*sponsor|visa|work\s*permit|citizenship|clearance|salary|compensation|notice\s*period|start\s*date|available\s*to\s*start|earliest\s*start|relocat|commute/i.test(label);
+
+  if (opts.stage !== 'stage2' && !isPersonalOrExp) {
+    const preResolvedHit = lookupResolvedAnswerFromProfile(label, profile, { options, fieldType });
+    if (preResolvedHit?.answer) {
+      const validated = finish(preResolvedHit.answer, preResolvedHit.source);
+      if (validated) {
+        logResolution(`    ⚡ [Tier 0 Pre-Resolved JSON] "${label.slice(0, 55)}" ← "${validated.answer}" (${preResolvedHit.matched_question || 'exact'})`);
+        profile?._onLog?.(currentStep, `[Tier 0 JSON Match] "${label.slice(0, 50)}" ← "${validated.answer}"`);
+        return validated;
+      }
+    }
+  }
+
+  const ageYes = resolveMinimumAgeAnswer(label, profile);
+  if (ageYes) {
+    const hit = { answer: ageYes, source: 'minimum_age', field_type_code: code, field_type: fieldType };
+    logResolution(`    🎂 [Age] "${label.slice(0, 55)}" ← "Yes"`);
+    return hit;
   }
 
   // 1c. Other attributes from Supabase clients table (education, degree, skills, dates)
@@ -718,22 +727,24 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
 
   // ─── TIER 4: QA Bank & Universal Reference Bank (Persistent Table & Templates) ───
   try {
-    const { findAnswerFromQaBank } = await import('./masterYamlManager.mjs');
-    const qaBankAnswer = await findAnswerFromQaBank({
-      questionLabel: label,
-      options,
-      tenant,
-      isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
-      isScanOnly: Boolean(opts.isScanOnly || opts.isClusterBlueprint),
-      blockUniversalYaml: Boolean(opts.blockUniversalYaml),
-    });
-    if (qaBankAnswer) {
-      const qaHit = finish(qaBankAnswer, 'qa_bank');
-      if (qaHit) {
-        trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
-        logResolution(`    🏦 [Tier 4 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
-        profile?._onLog?.(currentStep, `[Tier 4 QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
-        return qaHit;
+    const { findAnswerFromQaBank, isCandidatePersonalFact } = await import('./masterYamlManager.mjs');
+    if (!isCandidatePersonalFact(label)) {
+      const qaBankAnswer = await findAnswerFromQaBank({
+        questionLabel: label,
+        options,
+        tenant,
+        isSubmission: Boolean(opts.isSubmission || !opts.isScanOnly),
+        isScanOnly: Boolean(opts.isScanOnly || opts.isClusterBlueprint),
+        blockUniversalYaml: Boolean(opts.blockUniversalYaml),
+      });
+      if (qaBankAnswer) {
+        const qaHit = finish(qaBankAnswer, 'qa_bank');
+        if (qaHit) {
+          trace({ stage: 'qa_bank', clientId, tenant, query: normalizeLabel(label), hit: true, answer: qaHit.answer });
+          logResolution(`    🏦 [Tier 4 QA Bank Match] "${label.slice(0, 55)}" ← "${qaHit.answer.slice(0, 40)}"`);
+          profile?._onLog?.(currentStep, `[Tier 4 QA Bank Match] "${label.slice(0, 50)}" ← "${qaHit.answer.slice(0, 45)}"`);
+          return qaHit;
+        }
       }
     }
   } catch {}
@@ -924,6 +935,17 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   );
 
   if (isSubmissionMode) {
+    // STRICT DATA ISOLATION GUARD: Candidate personal identity, contact, work experience,
+    // and education facts MUST NEVER be answered by generic fallbacks or synthesized as 'Yes'.
+    // Missing candidate profile facts must return null so they remain flagged for human review.
+    const isPersonalOrExp = isPersonalIdentityQuestion(label)
+      || /company|job\s*title|employer|school|university|degree|major|field\s*of\s*study|gpa|graduation\s*year|from\s*date|to\s*date|currently\s*work/i.test(label)
+      || /gender|sex|veteran|disability|date\s*of\s*birth|\bdob\b/i.test(label);
+    if (isPersonalOrExp) {
+      logResolution(`    🛑 [Candidate Fact Missing] "${label}" cannot be synthesized with fallback. Returning null.`);
+      return null;
+    }
+
     let fallback = null;
     const lower = label.toLowerCase();
 

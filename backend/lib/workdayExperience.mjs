@@ -8,6 +8,7 @@
 import { fillApplicationQuestionField } from './workdayQuestionFill.mjs';
 import { handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, typeAndClickOption } from './fields.mjs';
 import { resolveField, mapLabelToProfileValue, getNestedValue } from './planner.mjs';
+import { lookupResolvedAnswerFromProfile } from './clientAnswer.mjs';
 import { createQAStore, saveAnswerToYaml } from './qaStore.mjs';
 import { lookupDefaultAnswer, leadingYesNo, selectionMatchesAnswer } from './workdayDefaults.mjs';
 import { getWorkdayTenant } from './discovery.mjs';
@@ -151,21 +152,29 @@ async function markFieldByLabel(page, labelPattern, sectionType = null) {
       let node = el;
       for (let depth = 0; depth < 40 && node; depth++) {
         const auto = (node.getAttribute?.('data-automation-id') || '').toLowerCase();
-        if (/certificat|licen[cs]|language|award|publication|affiliation|reference|socialnetwork|volunteer/.test(auto)) {
+        const id = (node.id || '').toLowerCase();
+        const cls = (typeof node.className === 'string' ? node.className : '').toLowerCase();
+        const aria = (node.getAttribute?.('aria-label') || '').toLowerCase();
+        const combined = `${auto} ${id} ${cls} ${aria}`;
+        if (/certificat|licen[cs]|language|award|publication|affiliation|reference|socialnetwork|volunteer/.test(combined)) {
           return 'optional';
         }
-        // Narrow containers only — page-level workExperience wrappers are ignored here.
-        if (/workexperiencesection|work-experience-section|workexperiencepanelset/.test(auto)) return 'work';
-        if (/educationsection|educationpanelset/.test(auto)) return 'education';
+        if (/(^|[_-])work\s*experience|workexperience|work-experience|work_experience/.test(combined)) {
+          return 'work';
+        }
+        if (/(^|[_-])education|educationsection|educationpanelset|educationitem/.test(combined)) {
+          return 'education';
+        }
         node = node.parentElement;
       }
 
       // Nearest preceding heading decides (avoids page-wide false work/education hits).
       let nearest = '';
-      const headingEls = document.querySelectorAll('h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"]');
+      const headingEls = document.querySelectorAll('h1,h2,h3,h4,h5,legend,[data-automation-id="panelTitle"],[data-automation-id="sectionTitle"],[data-automation-id="compositeHeader"],[data-automation-id="pageHeader"]');
       for (const h of headingEls) {
         const t = norm(h.textContent);
         if (!t || t.length > 60) continue;
+        if (/job\s*title|company|degree|school|university|field\s*of\s*study/i.test(t)) continue;
         if (h === el || (h.compareDocumentPosition(el) & Node.DOCUMENT_POSITION_FOLLOWING)) {
           nearest = t;
         }
@@ -378,23 +387,94 @@ async function isSectionRequiredInDom(page, sectionType) {
 }
 
 /**
+ * True when Work Experience or Education already has any entries/cards/inputs populated (e.g. from resume).
+ * In this case, clicking "Add" or "Add Another" is strictly forbidden.
+ * @param {import('playwright').Page} page
+ * @param {'work'|'education'} sectionType
+ * @returns {Promise<boolean>}
+ */
+export async function sectionAlreadyHasEntries(page, sectionType) {
+  return await page.evaluate((kind) => {
+    const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+    if (kind === 'work') {
+      const workScopes = document.querySelectorAll(
+        '[data-automation-id*="workExperience"], [data-automation-id*="work-experience"]'
+      );
+      for (const scope of workScopes) {
+        // Any existing card / row container
+        const rows = scope.querySelectorAll(
+          '[data-automation-id*="panelSetRow"], [data-automation-id*="workExperience-"], [data-automation-id*="row-"]'
+        );
+        if (rows.length > 0) return true;
+
+        // Any delete or remove button inside work experience proves an entry exists
+        const deleteBtn = scope.querySelector('button[data-automation-id*="delete" i], button[aria-label*="delete" i], button[aria-label*="remove" i]');
+        if (deleteBtn) return true;
+
+        // Any non-empty input for job title, company, or dates
+        const inputs = scope.querySelectorAll('input:not([type="hidden"]), textarea');
+        for (const inp of inputs) {
+          if (norm(inp.value).length > 0) return true;
+        }
+      }
+      // Also check document-wide for workExperience row indicators
+      const globalRows = document.querySelectorAll('[data-automation-id*="workExperience-"], [data-automation-id*="workExperienceSection"] [data-automation-id*="panelSetRow"]');
+      if (globalRows.length > 0) return true;
+      return false;
+    }
+
+    if (kind === 'education') {
+      const eduScopes = document.querySelectorAll(
+        '[data-automation-id*="education"], [data-automation-id*="Education"]'
+      );
+      for (const scope of eduScopes) {
+        const rows = scope.querySelectorAll(
+          '[data-automation-id*="panelSetRow"], [data-automation-id*="education-"], [data-automation-id*="row-"]'
+        );
+        if (rows.length > 0) return true;
+
+        const deleteBtn = scope.querySelector('button[data-automation-id*="delete" i], button[aria-label*="delete" i], button[aria-label*="remove" i]');
+        if (deleteBtn) return true;
+
+        const inputs = scope.querySelectorAll('input:not([type="hidden"]), textarea');
+        for (const inp of inputs) {
+          if (norm(inp.value).length > 0) return true;
+        }
+      }
+      const globalEduRows = document.querySelectorAll('[data-automation-id*="education-"], [data-automation-id*="educationSection"] [data-automation-id*="panelSetRow"]');
+      if (globalEduRows.length > 0) return true;
+      return false;
+    }
+
+    return false;
+  }, sectionType).catch(() => false);
+}
+
+/**
  * Click the Add control for Work Experience or Education only.
  * Never clicks Certifications / Languages / Awards / etc.
+ * Never clicks "Add Another".
  * @param {import('playwright').Page} page
  * @param {'work'|'education'} sectionType
  * @returns {Promise<boolean>}
  */
 async function clickRequiredSectionAdd(page, sectionType) {
+  const alreadyHasEntries = await sectionAlreadyHasEntries(page, sectionType);
+  if (alreadyHasEntries) {
+    console.log(`    ⏭️  Strictly avoiding Add click — ${sectionType} section already has entries populated`);
+    return false;
+  }
+
   const marker = await page.evaluate(({ sectionType, optionalPattern }) => {
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
     const optionalRe = new RegExp(optionalPattern, 'i');
     const headingSelector = 'h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"],[data-automation-id="panelTitle"]';
     const headingRe = sectionType === 'work' ? /work\s*experience/i : /^education\b/i;
-    // ONLY named Adds — never bare "Add" (bare Add is how Certifications get clicked).
+    // ONLY named Adds — never bare "Add", never "Add Another".
     const namedAddRe = sectionType === 'work'
       ? /^add(\s+work)?\s*experience$/i
       : /^add\s*education$/i;
-    const forbiddenAddRe = /add(\s+(another|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)/i;
+    const forbiddenAddRe = /add(\s+(another|additional|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)|another/i;
 
     document.querySelectorAll('[data-wd-section-add]').forEach((el) => el.removeAttribute('data-wd-section-add'));
 
@@ -418,6 +498,7 @@ async function clickRequiredSectionAdd(page, sectionType) {
         btn.getAttribute('title') || '',
       ].map(norm).join(' ');
       if (forbiddenAddRe.test(name)) return true;
+      if (/\banother\b/i.test(name)) return true;
       const heading = nearestHeading(btn);
       if (optionalRe.test(heading)) return true;
       let node = btn;
@@ -437,10 +518,11 @@ async function clickRequiredSectionAdd(page, sectionType) {
       return { id, via };
     };
 
-    // Only explicit "Add Work Experience" / "Add Education" — never bare Add.
+    // Only explicit "Add Work Experience" / "Add Education" — never bare Add, never Add Another.
     for (const btn of document.querySelectorAll('button, [role="button"], a[role="button"]')) {
       const text = norm(btn.textContent);
       const aria = norm(btn.getAttribute('aria-label'));
+      if (/\banother\b/i.test(text) || /\banother\b/i.test(aria)) continue;
       if (!(namedAddRe.test(text) || namedAddRe.test(aria))) continue;
       if (isForbidden(btn)) continue;
       if (btn.offsetParent === null && btn.getClientRects().length === 0) continue;
@@ -479,6 +561,7 @@ async function clickRequiredSectionAdd(page, sectionType) {
         if (isForbidden(btn)) continue;
         const text = norm(btn.textContent);
         const aria = norm(btn.getAttribute('aria-label'));
+        if (/\banother\b/i.test(text) || /\banother\b/i.test(aria)) continue;
         const auto = btn.getAttribute('data-automation-id') || '';
         const isBareAdd = auto === 'Add' || /^(add|\+)$/i.test(text) || /^(add|\+)$/i.test(aria);
         if (!isBareAdd) continue;
@@ -503,7 +586,7 @@ async function clickRequiredSectionAdd(page, sectionType) {
     return false;
   }
   const accessible = norm(await btn.getAttribute('aria-label').catch(() => '') || await btn.innerText().catch(() => ''));
-  if (isForbiddenOptionalAddName(accessible)) {
+  if (/\banother\b/i.test(accessible) || isForbiddenOptionalAddName(accessible)) {
     console.log(`    ⏭️  Blocked Add click — forbidden name "${accessible}"`);
     return false;
   }
@@ -544,6 +627,13 @@ async function ensureSectionsExpanded(page) {
       continue;
     }
 
+    // Never click Add or expand if section already has entries populated from resume
+    const hasEntries = await sectionAlreadyHasEntries(page, check.sectionType);
+    if (hasEntries) {
+      console.log(`  ✓ ${check.name} section already has entries populated — strictly skipping Add / Add Another`);
+      continue;
+    }
+
     const fieldLoc = await markFieldByLabel(page, check.fieldRe.source || check.fieldRe, check.sectionType);
     const visible = fieldLoc && await fieldLoc.locator('input, textarea, [role="combobox"], button[aria-haspopup]').first()
       .isVisible({ timeout: 600 }).catch(() => false);
@@ -565,8 +655,11 @@ async function findFieldLocator(page, spec, sectionType) {
   const pattern = spec.labelPattern || spec.label;
 
   // 1. Check direct Workday automation-id selectors scoped to section
-  if (Array.isArray(spec.automationIds) && spec.automationIds.length) {
-    for (const autoId of spec.automationIds) {
+  const autoIds = Array.isArray(spec.automationIds)
+    ? spec.automationIds
+    : (spec.automationId ? [spec.automationId] : []);
+  if (autoIds.length) {
+    for (const autoId of autoIds) {
       const sectionPrefix = sectionType === 'work'
         ? '[data-automation-id*="workExperience" i], [data-automation-id*="work-experience" i], [data-automation-id*="workExperiencePanelSet" i]'
         : sectionType === 'education'
@@ -1502,22 +1595,30 @@ function stripKeyPrefix(overrides, prefix) {
  */
 function resolveDateFieldAnswer(profileKey, profile) {
   if (profileKey === 'experience.from_date' || profileKey === 'experience.to_date') {
+    const rawFrom = String(profile?.experience?.from_date || profile?.experience?.start_date || '').trim();
+    const rawTo = String(profile?.experience?.to_date || profile?.experience?.end_date || '').trim();
     const source = {
       ...WORKDAY_DEFAULT_EXPERIENCE,
       ...(profile?.experience || {}),
+      from_date: rawFrom || WORKDAY_DEFAULT_EXPERIENCE.from_date,
+      to_date: rawTo || WORKDAY_DEFAULT_EXPERIENCE.to_date,
     };
     const range = resolveWorkDateRange(source);
     for (const note of range.notes) console.log(`    📅 Work dates — ${note}`);
-    return profileKey === 'experience.from_date' ? range.from : range.to;
+    return profileKey === 'experience.from_date' ? (range.from || source.from_date) : (range.to || source.to_date);
   }
 
+  const rawEduFrom = String(profile?.education?.from_year || profile?.education?.start_year || '').trim();
+  const rawEduTo = String(profile?.education?.to_year || profile?.education?.graduation_year || profile?.education?.end_year || '').trim();
   const source = {
     ...WORKDAY_DEFAULT_EDUCATION,
     ...(profile?.education || {}),
+    from_year: rawEduFrom || WORKDAY_DEFAULT_EDUCATION.from_year,
+    to_year: rawEduTo || WORKDAY_DEFAULT_EDUCATION.to_year,
   };
   const range = resolveEducationYearRange(source);
   for (const note of range.notes) console.log(`    📅 Education years — ${note}`);
-  return profileKey === 'education.from_year' ? range.from : range.to;
+  return profileKey === 'education.from_year' ? (range.from || source.from_year) : (range.to || source.to_year);
 }
 
 const DATE_PROFILE_KEYS = new Set([
@@ -1527,10 +1628,28 @@ const DATE_PROFILE_KEYS = new Set([
   'education.to_year',
 ]);
 
-async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url, fieldType) {
+export async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url, fieldType) {
   // Dates are never hardcoded here — a wrong date is worse than an empty one.
   if (DATE_PROFILE_KEYS.has(profileKey)) {
     return resolveDateFieldAnswer(profileKey, profile);
+  }
+
+  // Work Experience fields must STRICTLY resolve from candidate's genuine profile first!
+  if (profileKey === 'experience.current_company') {
+    const comp = profile?.experience?.current_company || profile?.experience?.company;
+    if (comp) return String(comp);
+  }
+  if (profileKey === 'experience.current_title') {
+    const title = profile?.experience?.current_title || profile?.experience?.role || profile?.experience?.title;
+    if (title) return String(title);
+  }
+  if (profileKey === 'experience.location') {
+    const loc = profile?.experience?.location;
+    if (loc) return String(loc);
+  }
+  if (profileKey === 'experience.description') {
+    const desc = profile?.experience?.description;
+    if (desc) return String(desc);
   }
 
   if (profileKey === 'education.university') {
@@ -1551,6 +1670,12 @@ async function resolveAnswer(label, profileKey, labelText, profile, qaStore, url
         ? profile.education.field_of_study_hierarchy[profile.education.field_of_study_hierarchy.length - 1]
         : '');
     return major || 'Computer Science';
+  }
+
+  // Pre-resolved answers JSON from job_distributions (Tier 0 instant fill) — ONLY for non-experience fields
+  const preRes = lookupResolvedAnswerFromProfile(labelText || label, profile);
+  if (preRes?.answer != null && String(preRes.answer).trim() !== '') {
+    return String(preRes.answer);
   }
   if (profileKey) {
     const fromProfile = getNestedValue(profile, profileKey);
@@ -2103,8 +2228,13 @@ export async function handleStep2MyExperience(page, profile = {}) {
 
     for (const spec of WORK_FIELDS) {
       if (spec.label === 'To' && currentlyWorking) {
-        console.log('  ┌── Work Experience › To ──\n  │  current job ("I currently work here" checked) — no To date needed\n  └──');
-        continue;
+        const toFieldLoc = await findFieldLocator(page, spec, 'work');
+        const toRequired = toFieldLoc ? await isFieldRequiredInDom(page, toFieldLoc, 'To') : false;
+        if (!toRequired) {
+          console.log('  ┌── Work Experience › To ──\n  │  current job ("I currently work here" checked) — no To date needed\n  └──');
+          continue;
+        }
+        console.log('  ┌── Work Experience › To ──\n  │  "I currently work here" checked, but Workday marks To required — filling date\n  └──');
       }
       const ok = await fillFieldAtAnyCost(page, 'Work Experience', 'work', spec, profile, qaStore, url);
       if (ok) filled++;

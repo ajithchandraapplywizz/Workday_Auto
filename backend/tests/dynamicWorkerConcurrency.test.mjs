@@ -73,3 +73,33 @@ test('Worker lease expiry logic accurately detects leases older than timeout', (
   const isNullExpired = !nullLease || (now - (new Date(nullLease).getTime() || 0) > timeoutMs);
   assert.equal(isNullExpired, true);
 });
+
+test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS and worker counts from env', async () => {
+  const { getDynamicMaxBrowsers } = await import('../lib/browserLifecycle.mjs');
+
+  const originalMax = process.env.MAX_ACTIVE_BROWSERS;
+  const originalWorkerCount = process.env.WORKER_COUNT;
+  const originalSubmitCount = process.env.SUBMIT_WORKER_COUNT;
+
+  try {
+    delete process.env.MAX_ACTIVE_BROWSERS;
+    delete process.env.SUBMIT_WORKER_COUNT;
+    process.env.WORKER_COUNT = '3';
+    assert.equal(getDynamicMaxBrowsers(), 3, 'Should pick up WORKER_COUNT=3');
+
+    process.env.SUBMIT_WORKER_COUNT = '5';
+    assert.equal(getDynamicMaxBrowsers(), 5, 'Should pick up SUBMIT_WORKER_COUNT=5');
+
+    process.env.MAX_ACTIVE_BROWSERS = '6';
+    assert.equal(getDynamicMaxBrowsers(), 6, 'Should prioritize explicit MAX_ACTIVE_BROWSERS=6');
+  } finally {
+    if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
+    else delete process.env.MAX_ACTIVE_BROWSERS;
+
+    if (originalWorkerCount !== undefined) process.env.WORKER_COUNT = originalWorkerCount;
+    else delete process.env.WORKER_COUNT;
+
+    if (originalSubmitCount !== undefined) process.env.SUBMIT_WORKER_COUNT = originalSubmitCount;
+    else delete process.env.SUBMIT_WORKER_COUNT;
+  }
+});

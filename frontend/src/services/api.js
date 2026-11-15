@@ -3026,35 +3026,35 @@ export async function triggerSubmissionStage() {
     console.warn('Supabase bot_control error:', err);
   }
 
-  const backendBase = getBackendBaseUrl();
+  const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
 
-  const endpoints = [
-    ...(backendBase ? [`${backendBase}/api/bot/submit/start`, `${backendBase}/api/bot/submit`, `${backendBase}/api/bot/webhook`] : []),
-    ...(!backendBase && isLocal ? [
-      'http://localhost:3002/api/bot/submit/start',
-      'http://localhost:3002/api/bot/submit',
-      'http://localhost:3001/api/bot/submit/start',
-      'http://localhost:3001/api/bot/submit',
-    ] : []),
-  ];
+  const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3002', 'http://localhost:3001'] : [])];
+  const endpoints = [];
+  for (const b of new Set(baseList)) {
+    endpoints.push(
+      `${b}/api/bot/submit/start`,
+      `${b}/api/bot/submit`,
+      `${b}/api/bot/webhook`
+    );
+  }
 
-  for (const ep of endpoints) {
-    try {
-      const resp = await fetch(ep, {
+  let anyApiSuccess = false;
+  await Promise.allSettled(
+    endpoints.map((ep) =>
+      fetch(ep, {
         method: 'POST',
         headers: getStaffAuthHeaders(),
         body: JSON.stringify({ action: 'submit_approved', nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(3000),
-      });
-      if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions triggered across dedicated submitting workers!' };
-      }
-    } catch { }
-  }
+      }).then((resp) => {
+        if (resp && resp.ok) anyApiSuccess = true;
+      })
+    )
+  );
 
-  if (supabaseSuccess) {
-    return { success: true, message: 'Stage 3 Submissions signal dispatched via Supabase cloud bridge across dedicated submitting workers!' };
+  if (anyApiSuccess || supabaseSuccess) {
+    return { success: true, message: 'Stage 3 Submissions signal dispatched across all dedicated submitting workers!' };
   }
   return { success: false, error: 'Could not reach daemon webhook server or cloud bridge.' };
 }
@@ -3124,40 +3124,31 @@ export async function stopSubmissionStage() {
     console.warn('Note on resetting applying job_distributions:', rbErr?.message);
   }
 
-  const backendBase = getBackendBaseUrl();
+  const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
-  const endpoints = [
-    ...(backendBase ? [
-      `${backendBase}/api/bot/submit/stop`,
-      `${backendBase}/api/bot/stop`,
-      `${backendBase}/api/bot/webhook`,
-      `${backendBase}/api/bot/controls`,
-    ] : []),
-    ...(!backendBase && isLocal ? [
-      'http://localhost:3002/api/bot/submit/stop',
-      'http://localhost:3002/api/bot/stop',
-      'http://localhost:3002/api/bot/controls',
-      'http://localhost:3001/api/bot/submit/stop',
-      'http://localhost:3001/api/bot/stop',
-      'http://localhost:3001/api/bot/controls',
-    ] : []),
-  ];
+  const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3002', 'http://localhost:3001'] : [])];
+  const endpoints = [];
+  for (const b of new Set(baseList)) {
+    endpoints.push(
+      `${b}/api/bot/submit/stop`,
+      `${b}/api/bot/stop`,
+      `${b}/api/bot/webhook`,
+      `${b}/api/bot/controls`
+    );
+  }
 
-  for (const ep of endpoints) {
-    try {
-      const resp = await fetch(ep, {
+  await Promise.allSettled(
+    endpoints.map((ep) =>
+      fetch(ep, {
         method: 'POST',
         headers: getStaffAuthHeaders(),
         body: JSON.stringify({ key: 'submit', action: 'stop', stop_requested: true, stop: true, stage: 'submitting', nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(2000),
-      });
-      if (resp.ok) {
-        return { success: true, message: 'Stage 3 Submissions stopped across all workers.' };
-      }
-    } catch { }
-  }
+      })
+    )
+  );
 
-  return { success: true, message: 'Stop signal dispatched across bot_control.' };
+  return { success: true, message: 'Stop signal dispatched across all submitting workers.' };
 }
 
 /**
@@ -3223,25 +3214,19 @@ export async function triggerAllParallelStage() {
   }
 
   // 4. Dispatch webhook start calls to both services
-  const backendBase = getBackendBaseUrl();
+  const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
-  const endpoints = [
-    ...(backendBase ? [
-      `${backendBase}/api/bot/universal`,
-      `${backendBase}/api/bot/start-all`,
-      `${backendBase}/api/bot/start`,
-      `${backendBase}/api/bot/submit/start`,
-      `${backendBase}/api/bot/webhook`,
-    ] : []),
-    ...(!backendBase && isLocal ? [
-      'http://localhost:3001/api/bot/universal',
-      'http://localhost:3002/api/bot/universal',
-      'http://localhost:3001/api/bot/start',
-      'http://localhost:3002/api/bot/submit/start',
-      'http://localhost:3001/api/bot/webhook',
-      'http://localhost:3002/api/bot/webhook',
-    ] : []),
-  ];
+  const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3001', 'http://localhost:3002'] : [])];
+  const endpoints = [];
+  for (const b of new Set(baseList)) {
+    endpoints.push(
+      `${b}/api/bot/universal`,
+      `${b}/api/bot/start-all`,
+      `${b}/api/bot/start`,
+      `${b}/api/bot/submit/start`,
+      `${b}/api/bot/webhook`
+    );
+  }
 
   await Promise.allSettled(
     endpoints.map((ep) =>
@@ -3318,26 +3303,20 @@ export async function stopAllParallelStage() {
     supabase.from('job_distributions').update({ status: 'ready_for_review', worker_id: null, worker_leased_at: null, updated_at: now }).eq('status', 'applying'),
   ]);
 
-  // 5. Send HTTP stop to all endpoints
-  const backendBase = getBackendBaseUrl();
+  // 5. Send HTTP stop to all endpoints across both services
+  const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
-  const stopEndpoints = [
-    ...(backendBase ? [
-      `${backendBase}/api/bot/stop`,
-      `${backendBase}/api/bot/scan/stop`,
-      `${backendBase}/api/bot/submit/stop`,
-      `${backendBase}/api/bot/controls`,
-      `${backendBase}/api/bot/webhook`,
-    ] : []),
-    ...(!backendBase && isLocal ? [
-      'http://localhost:3001/api/bot/stop',
-      'http://localhost:3001/api/bot/scan/stop',
-      'http://localhost:3002/api/bot/stop',
-      'http://localhost:3002/api/bot/submit/stop',
-      'http://localhost:3001/api/bot/controls',
-      'http://localhost:3002/api/bot/controls',
-    ] : []),
-  ];
+  const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3001', 'http://localhost:3002'] : [])];
+  const stopEndpoints = [];
+  for (const b of new Set(baseList)) {
+    stopEndpoints.push(
+      `${b}/api/bot/stop`,
+      `${b}/api/bot/scan/stop`,
+      `${b}/api/bot/submit/stop`,
+      `${b}/api/bot/controls`,
+      `${b}/api/bot/webhook`
+    );
+  }
 
   await Promise.allSettled(
     stopEndpoints.map((ep) =>
@@ -3387,18 +3366,19 @@ export async function fetchBotDaemonStatus() {
       } catch {}
     }
 
-    if (backendBase) {
+    const backendUrls = getBackendBaseUrls();
+    for (const bUrl of backendUrls) {
       try {
-        const resBase = await fetch(`${backendBase}/api/bot/status`, {
+        const resBase = await fetch(`${bUrl}/api/bot/status`, {
           headers: { 'Accept': 'application/json' },
           signal: AbortSignal.timeout(2000),
         });
         if (resBase.ok) {
           const jb = await resBase.json();
-          daemonApiRunning = Boolean(jb.isRunning);
-          daemonApiStage = jb.stage || 'idle';
-          if (jb.stage === 'scanning' || jb.stage === 'resolving') scannerApiRunning = true;
-          if (jb.stage === 'submitting') submitterApiRunning = true;
+          if (jb.isRunning) daemonApiRunning = true;
+          if (jb.stage && jb.stage !== 'idle') daemonApiStage = jb.stage;
+          if (jb.stage === 'scanning' || jb.stage === 'resolving' || jb.scan_status === 'running') scannerApiRunning = true;
+          if (jb.stage === 'submitting' || jb.submit_status === 'running') submitterApiRunning = true;
           if (jb.stage === 'parallel' || jb.stage === 'parallel_pipeline') {
             scannerApiRunning = true;
             submitterApiRunning = true;

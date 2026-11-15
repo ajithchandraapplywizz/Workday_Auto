@@ -122,6 +122,13 @@ workday-auto-apply/data/
 # Markdown and CSV exclusions
 *.md
 **/*.md
+!AGENTS.md
+!GEMINI.md
+!rules.md
+!architecture.md
+!CLAUDE.md
+!.ai/**/*.md
+!.agents/**/*.md
 *.csv
 **/*.csv
 *.xlsx

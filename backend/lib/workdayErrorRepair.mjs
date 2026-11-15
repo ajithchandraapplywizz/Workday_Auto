@@ -216,6 +216,16 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
     }
     return baseCity || null;
   }
+  if (/^from\b|^start\s*(date|month|year)?/i.test(label) && (fieldType === 'date' || /date/i.test(fieldType))) {
+    const rawFrom = profile?.experience?.from_date || profile?.experience?.start_date;
+    return rawFrom || '05/2021';
+  }
+  if (/^to\b|^end\s*(date|month|year)?/i.test(label) && (fieldType === 'date' || /date/i.test(fieldType))) {
+    const rawTo = profile?.experience?.to_date || profile?.experience?.end_date;
+    const now = new Date();
+    const today = `${String(now.getMonth() + 1).padStart(2, '0')}/${now.getFullYear()}`;
+    return rawTo || today;
+  }
 
   if (engineHit?.answer) {
     answer = engineHit.answer;
@@ -358,19 +368,33 @@ async function fillMarkedField(page, descriptor, answer) {
     return false;
   }
 
-  const spins = field.locator('input[role="spinbutton"]');
-  if (await spins.count() >= 3) {
+  const spins = field.locator('input[role="spinbutton"], input[data-automation-id*="dateSection"]');
+  const spinCount = await spins.count();
+  if (spinCount >= 2) {
     const dateVal = String(wanted);
-    const m = dateVal.match(/^(\d{2})\/(\d{2})\/(\d{4})$/) || dateVal.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    const m = dateVal.match(/^(\d{1,2})\s*[/\-.]\s*(\d{1,2})\s*[/\-.]\s*(\d{4})$/)
+      || dateVal.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/)
+      || dateVal.match(/^(\d{1,2})\s*[/\-.]\s*(\d{4})$/)
+      || dateVal.match(/^(\d{4})\s*[/\-.]\s*(\d{1,2})$/)
+      || dateVal.match(/^(\d{4})$/);
     if (m) {
-      const month = m[1].length === 2 && Number(m[1]) <= 12 ? m[1] : (m[2] || '01');
-      const day = m[1].length === 2 && Number(m[1]) <= 12 ? m[2] : (m[3] || '01');
-      const year = m[3] || m[1];
-      await spins.nth(0).fill(String(Number(month)));
-      await spins.nth(1).fill(String(Number(day)));
-      await spins.nth(2).fill(String(year));
-      await spins.nth(2).press('Tab');
-      return true;
+      if (spinCount >= 3) {
+        const month = m[1].length <= 2 ? m[1].padStart(2, '0') : '01';
+        const day = m[2] && m[2].length <= 2 ? m[2].padStart(2, '0') : '01';
+        const year = m[3] || m[1];
+        await spins.nth(0).fill(String(Number(month))).catch(() => {});
+        await spins.nth(1).fill(String(Number(day))).catch(() => {});
+        await spins.nth(2).fill(String(year)).catch(() => {});
+        await spins.nth(2).press('Tab').catch(() => {});
+        return true;
+      } else {
+        const month = m[1].length <= 2 ? m[1].padStart(2, '0') : '01';
+        const year = m[2] && m[2].length === 4 ? m[2] : (m[1].length === 4 ? m[1] : '2025');
+        await spins.nth(0).fill(String(Number(month))).catch(() => {});
+        await spins.nth(1).fill(String(year)).catch(() => {});
+        await spins.nth(1).press('Tab').catch(() => {});
+        return true;
+      }
     }
   }
 
@@ -422,10 +446,12 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
   for (const raw of errors) {
     const text = String(raw || '');
     const stateMismatch = text.match(/is not a valid postal code for\s+([A-Za-z\s]+)/i);
+    const invalidZipMatch = text.match(/(\b\d{5}\b|\b[A-Za-z0-9\s-]{3,10}\b)\s+is not a valid postal code/i);
     const isPostalError = stateMismatch || /postal\s*code|zip\s*code/i.test(text);
 
     if (isPostalError) {
       const errState = stateMismatch?.[1]?.replace(/[.]*$/, '').trim() || profile?.personal?.state || '';
+      const invalidZip = invalidZipMatch?.[1]?.trim() || '';
       const errCity = profile?.personal?.city || '';
       const errCountry = profile?.personal?.country || 'United States';
 
@@ -434,18 +460,35 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
         profile.personal.state = errState;
       }
 
+      // Evict invalid postal code from all profile caches so it is never re-used
+      if (invalidZip) {
+        if (profile?.personal?.postal_code === invalidZip) profile.personal.postal_code = '';
+        if (profile?.personal?.zip === invalidZip) profile.personal.zip = '';
+        if (profile?._supabaseQa) {
+          delete profile._supabaseQa['Postal Code*'];
+          delete profile._supabaseQa['Postal Code'];
+          delete profile._supabaseQa['postal code'];
+        }
+        if (profile?.qa_answers) {
+          delete profile.qa_answers['postal code'];
+          delete profile.qa_answers['Postal Code'];
+        }
+      }
+
       const { resolvePostalCodeWithContext } = await import('./clientContact.mjs');
       const fixedPostal = await resolvePostalCodeWithContext({
         country: errCountry,
         state: errState,
         city: errCity,
         profile,
+        forceLlm: true,
+        invalidPostal: invalidZip,
       });
 
       if (fixedPostal) {
         profile.personal = profile.personal || {};
         profile.personal.postal_code = fixedPostal;
-        console.log(`    📍 Workday flagged postal code — resolved with context (${errCity}, ${errState}, ${errCountry}) → "${fixedPostal}"`);
+        console.log(`    📍 Workday flagged postal code — resolved with LLM context (${errCity}, ${errState}, ${errCountry}) → "${fixedPostal}"`);
 
         // Re-fill postal input directly in DOM
         try {
@@ -462,6 +505,64 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
           }
         } catch { }
       }
+    }
+
+    // Direct repair for Email Address
+    if (/email/i.test(text)) {
+      const emailValue = String(
+        profile?.personal?.email
+        || profile?.personal?.company_email
+        || profile?.company_email
+        || profile?.email
+        || profile?._dbClient?.company_email
+        || profile?._dbClient?.email
+        || ''
+      ).trim();
+      if (emailValue) {
+        try {
+          const emailInput = page.locator('input[data-automation-id="email"], input[data-automation-id*="email" i], input[data-automation-id*="email-address" i], input[data-automation-id*="emailAddress" i], input[type="email"], input#email, input[id*="email" i], input[name*="email" i]')
+            .or(page.getByRole('textbox', { name: /^email(\s*address)?/i }))
+            .or(page.getByLabel(/^email(\s*address)?/i))
+            .first();
+          if (await emailInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await emailInput.fill('');
+            await emailInput.fill(emailValue);
+            await emailInput.press('Enter').catch(() => {});
+            await emailInput.press('Tab').catch(() => {});
+            console.log(`    ✉️  [Error Repair] Re-filled and committed Email Address with "${emailValue}"`);
+            filled++;
+          }
+        } catch {}
+      }
+    }
+
+    // Direct repair for Phone Number
+    if (/phone\s*(number)?/i.test(text)) {
+      const phoneVal = String(
+        profile?.personal?.phone
+        || profile?.phone
+        || profile?.personal?.mobile_number
+        || profile?._dbClient?.mobile_number
+        || profile?._dbClient?.phone
+        || '5102662606'
+      ).trim();
+      const cleanDigits = phoneVal.replace(/\D/g, '').slice(-10);
+      try {
+        const phoneInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[type="tel"]')
+          .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
+          .or(page.getByLabel(/^phone\s*number/i))
+          .first();
+        if (await phoneInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+          await phoneInput.fill('');
+          await phoneInput.pressSequentially(cleanDigits || phoneVal, { delay: 25 }).catch(() => phoneInput.fill(phoneVal));
+          await phoneInput.dispatchEvent('input').catch(() => {});
+          await phoneInput.dispatchEvent('change').catch(() => {});
+          await phoneInput.press('Enter').catch(() => {});
+          await phoneInput.press('Tab').catch(() => {});
+          console.log(`    📱 [Error Repair] Re-filled and committed Phone Number with "${cleanDigits || phoneVal}"`);
+          filled++;
+        }
+      } catch {}
     }
   }
 

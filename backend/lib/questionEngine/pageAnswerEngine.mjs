@@ -4,7 +4,7 @@
  */
 
 import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWizzConfigured } from '../applyWizzClient.mjs';
-import { peekClientAnswer, acceptClientValue, resolveClientAnswer } from '../clientAnswer.mjs';
+import { peekClientAnswer, acceptClientValue, resolveClientAnswer, lookupResolvedAnswerFromProfile } from '../clientAnswer.mjs';
 import { lookupSupabaseAnswerSync, upsertSupabaseAnswer, recordSupabaseAnswerInMemory } from '../supabaseClient.mjs';
 import { resolveMinimumAgeAnswer } from '../minimumAge.mjs';
 import { isMandatoryField } from '../scanFieldFilter.mjs';
@@ -347,6 +347,29 @@ export function resolveFieldWithoutLlm(field, profile = {}) {
   const label = field.label || '';
   const intent = classifyQuestionIntent(label, field);
   const answerType = answerTypeFromField(field);
+
+  // ─── Tier 0: Pre-Resolved Answers from job_distributions (Stage 2 Scan) ─────────
+  const preResolved = lookupResolvedAnswerFromProfile(label, profile, {
+    options: optionsOf(field),
+    fieldType: field.fieldType || field.elementType || '',
+  });
+  if (preResolved?.answer) {
+    const preAccepted = acceptClientValue(label, preResolved.answer, {
+      options: optionsOf(field),
+      fieldType: field.fieldType || field.elementType || '',
+      profile,
+    });
+    if (preAccepted) {
+      return finish(
+        field,
+        intent,
+        preAccepted,
+        'job_distributions_resolved_answers',
+        REASON.EXPLICIT_PROFILE_MATCH,
+        1.0,
+      );
+    }
+  }
 
   const special = deterministicSpecial(field, profile);
   if (special) return special;

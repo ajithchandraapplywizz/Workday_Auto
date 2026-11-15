@@ -224,8 +224,14 @@ function cleanResumeLine(line = '') {
 }
 
 function parseResumeMonthYear(value = '') {
-  const match = String(value || '').match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{4})\b/i);
-  return match ? `${match[1].slice(0, 3)} ${match[2]}` : '';
+  const v = String(value || '').trim();
+  const match = v.match(/\b(Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+(\d{4})\b/i);
+  if (match) return `${match[1].slice(0, 3)} ${match[2]}`;
+  const my = v.match(/\b(\d{1,2})\s*[/\-.]\s*(\d{4})\b/);
+  if (my) return `${my[1].padStart(2, '0')}/${my[2]}`;
+  const y = v.match(/\b(1[89]\d{2}|20\d{2}|21\d{2})\b/);
+  if (y) return `01/${y[1]}`;
+  return '';
 }
 
 function splitEducationCredential(line = '') {
@@ -265,9 +271,15 @@ export function parseResumeProfile(text = '') {
   const experienceLines = experienceIndex >= 0
     ? lines.slice(experienceIndex + 1, experienceEnd > experienceIndex ? experienceEnd : lines.length)
     : [];
-  const dateIndex = experienceLines.findIndex((line) => /\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b/i.test(line));
+  const monthNamesPattern = '(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\\.?\\s+\\d{4}';
+  const numericDatePattern = '\\d{1,2}\\s*[\\/\\-.]\\s*\\d{4}';
+  const yearPattern = '(?:19|20|21)\\d{2}';
+  const anyDatePattern = new RegExp(`\\b(?:${monthNamesPattern}|${numericDatePattern}|${yearPattern})\\b`, 'i');
+  const dateRangePattern = new RegExp(`(\\b(?:${monthNamesPattern}|${numericDatePattern}|${yearPattern})\\b)\\s*(?:[-–—]|to)\\s*(Present|Current|\\b(?:${monthNamesPattern}|${numericDatePattern}|${yearPattern})\\b)?`, 'i');
+
+  const dateIndex = experienceLines.findIndex((line) => anyDatePattern.test(line));
   const dateLine = dateIndex >= 0 ? experienceLines[dateIndex] : '';
-  const dateParts = dateLine.match(/(\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4}\b)\s*(?:[-–—]|to)\s*(Present|Current|\b(?:Jan(?:uary)?|Feb(?:ruary)?|Mar(?:ch)?|Apr(?:il)?|May|Jun(?:e)?|Jul(?:y)?|Aug(?:ust)?|Sep(?:t(?:ember)?)?|Oct(?:ober)?|Nov(?:ember)?|Dec(?:ember)?)\.?\s+\d{4})?/i);
+  const dateParts = dateLine.match(dateRangePattern);
   const title = dateIndex >= 0 ? cleanResumeLine(dateLine.slice(0, dateLine.indexOf(dateParts?.[1] || dateLine)).replace(/[|—–-]\s*$/, '')) : '';
   const companyParts = (dateIndex >= 0 ? experienceLines[dateIndex + 1] || '' : '').split('|').map(cleanResumeLine).filter(Boolean);
   const current = /\b(present|current)\b/i.test(dateLine);
