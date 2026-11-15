@@ -1403,9 +1403,11 @@ export function getBackendBaseUrls() {
     add(import.meta.env.VITE_API_URL);
     add(import.meta.env.VITE_BACKEND_URL_2);
   }
-  // Fallback to active Railway production services (Scanner & Submitter) so mobile/remote clients connect automatically
+  // Fallback to active Railway production services (Scanner & Submitter clusters across both replicas)
   add('https://scannerresolver-production.up.railway.app');
+  add('https://scannerresolver2-production.up.railway.app');
   add('https://submitting-production.up.railway.app');
+  add('https://submitting2-production.up.railway.app');
   return urls;
 }
 
@@ -3011,8 +3013,8 @@ export async function triggerSubmissionStage() {
       console.warn('Supabase bot_control update error:', sbErr?.message);
     }
 
-    // Mark submitting workers as in_flight
-    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3'];
+    // Mark submitting workers as in_flight (4 canonical workers across 2 services)
+    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
     await supabase
       .from('worker_status')
       .update({
@@ -3188,7 +3190,7 @@ export async function triggerAllParallelStage() {
     // 3. Mark both scanning and submitting workers as in_flight
     const { scan } = getEnvWorkerCounts();
     const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
-    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3'];
+    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
 
     await supabase
       .from('worker_status')

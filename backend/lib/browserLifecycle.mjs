@@ -110,27 +110,15 @@ const waitingQueue = [];
 
 /**
  * Dynamically calculates the maximum allowable concurrent browsers from environment variables.
- * Checks MAX_ACTIVE_BROWSERS, SUBMIT_WORKER_COUNT, WORKER_COUNT, WORKERS_COUNT, etc.
+ * Defaults strictly to 1 active browser per service container to prevent Linux pthread_create (11)
+ * resource exhaustion and container OOM crashes.
  */
 export function getDynamicMaxBrowsers() {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
-  if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.max(2, Math.floor(envExplicit));
+  if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
-  const envSubmitWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
-    Number(process.env.SUBMIT_WORKERS) ||
-    Number(process.env.SUBMISSION_WORKER_COUNT) ||
-    Number(process.env.SUBMISSION_WORKERS) ||
-    Number(process.env.TOTAL_SUBMIT_WORKERS);
-  if (Number.isFinite(envSubmitWorkers) && envSubmitWorkers > 0) return Math.max(2, Math.floor(envSubmitWorkers));
-
-  const envGlobalWorkers = Number(process.env.WORKER_COUNT) ||
-    Number(process.env.WORKERS_COUNT) ||
-    Number(process.env.WORKERS) ||
-    Number(process.env.MAX_WORKERS) ||
-    Number(process.env.CONCURRENT_WORKERS);
-  if (Number.isFinite(envGlobalWorkers) && envGlobalWorkers > 0) return Math.max(2, Math.floor(envGlobalWorkers));
-
-  return 2;
+  // Strict Single-Browser Limit per service container (Workday Auto container hardening)
+  return 1;
 }
 
 const MAX_CONCURRENT_BROWSERS = getDynamicMaxBrowsers();
@@ -141,11 +129,13 @@ let submitStopRequested = false;
 
 /**
  * Acquire an active Playwright browser slot dynamically referencing worker counts from env.
- * If dynamic slot limit is reached, pauses execution asynchronously until a running browser exits.
+ * Enforces strict per-service mutual exclusion ("if one is running in same service, don't open another;
+ * if one closes, another has to open").
+ * If dynamic slot limit is reached, pauses execution asynchronously until the running browser exits.
  */
 export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
-  if (isGlobalStopRequested()) {
-    throw new Error(`[LIFECYCLE] Cannot acquire browser slot: global stop is active`);
+  if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
+    throw new Error(`[LIFECYCLE] Cannot acquire browser slot: stop requested`);
   }
   // If this worker already owns an active slot, grant immediately
   if (activeSlots.has(workerId)) {
@@ -160,34 +150,64 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
     }
   }
 
-  const dynamicLimit = getDynamicMaxBrowsers();
-  const effectiveMax = Math.max(
-    2,
-    Number(process.env.MAX_ACTIVE_BROWSERS) ||
-    (maxSlots !== null && Number(maxSlots) > 0 ? Number(maxSlots) : 0) ||
-    dynamicLimit
-  );
+  const effectiveMax = (maxSlots !== null && Number(maxSlots) > 0)
+    ? Math.floor(Number(maxSlots))
+    : getDynamicMaxBrowsers();
+
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
     return true;
   }
 
-  console.log(`⏳ [SLOT GUARD] ${workerId} waiting for active browser slot (${activeBrowsers.size}/${effectiveMax} active)...`);
-  await Promise.race([
-    new Promise((resolve, reject) => {
-      waitingQueue.push({ workerId, resolve, reject });
-    }),
-    new Promise((resolve) => setTimeout(() => {
-      console.warn(`⚠️ [SLOT GUARD] Browser slot wait timed out for ${workerId} (10s). Self-healing slot to prevent lock.`);
-      resolve(true);
-    }, 10000))
-  ]);
-  activeSlots.add(workerId);
-  return true;
+  console.log(`⏳ [SLOT GUARD] ${workerId} waiting for active browser slot in this service (${activeBrowsers.size}/${effectiveMax} active, queue depth: ${waitingQueue.length + 1})...`);
+
+  return new Promise((resolve, reject) => {
+    let checkTimer = null;
+    const cleanup = () => {
+      if (checkTimer) {
+        clearInterval(checkTimer);
+        checkTimer = null;
+      }
+    };
+    const queueItem = { workerId, resolve, reject, cleanup };
+    waitingQueue.push(queueItem);
+
+    // Periodic check to self-heal against dead browsers and unblock on stop signals
+    checkTimer = setInterval(() => {
+      if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
+        cleanup();
+        const idx = waitingQueue.indexOf(queueItem);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+        reject(new Error(`[LIFECYCLE] Aborted: stop requested while waiting for browser slot`));
+        return;
+      }
+
+      // Prune dead/disconnected browser handles
+      for (const b of activeBrowsers) {
+        if (typeof b.isConnected === 'function' && !b.isConnected()) {
+          activeBrowsers.delete(b);
+          browserRoles.delete(b);
+        }
+      }
+
+      // If slot freed up and this worker is next in line
+      if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax && waitingQueue[0] === queueItem) {
+        cleanup();
+        waitingQueue.shift();
+        activeSlots.add(workerId);
+        console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot (${activeBrowsers.size + 1}/${effectiveMax})`);
+        resolve(true);
+      }
+    }, 500);
+
+    if (checkTimer && typeof checkTimer.unref === 'function') {
+      checkTimer.unref();
+    }
+  });
 }
 
 /**
- * Release an active browser slot and immediately wake up the next queued worker.
+ * Release an active browser slot and immediately wake up the next queued worker in this service.
  */
 export function releaseBrowserSlot(workerId = 'worker') {
   activeSlots.delete(workerId);
@@ -200,9 +220,15 @@ export function releaseBrowserSlot(workerId = 'worker') {
   }
   if (waitingQueue.length > 0) {
     const next = waitingQueue.shift();
-    if (next && typeof next.resolve === 'function') {
-      activeSlots.add(next.workerId);
-      next.resolve(true);
+    if (next) {
+      if (typeof next.cleanup === 'function') {
+        next.cleanup();
+      }
+      if (typeof next.resolve === 'function') {
+        activeSlots.add(next.workerId);
+        console.log(`🔓 [SLOT GUARD] Previous browser closed. Handing slot to next worker in service: ${next.workerId}`);
+        next.resolve(true);
+      }
     }
   }
 }

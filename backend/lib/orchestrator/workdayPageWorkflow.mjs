@@ -26,7 +26,7 @@ import { waitForDomSettled } from '../workdayDom.mjs';
  * @param {{ maxCycles?: number, maxOuterPasses?: number, pageNumber?: number }} [options]
  */
 export async function runWorkdayPageWorkflow(page, profile = {}, plan = {}, stepName = '', options = {}) {
-  const maxCycles = options.maxCycles ?? (/voluntary disclosures|application questions/i.test(stepName) ? 6 : 4);
+  const maxCycles = options.maxCycles ?? (/voluntary disclosures|application questions/i.test(stepName) ? 3 : 2);
   const maxOuter = options.maxOuterPasses ?? 1;
   profile._currentStep = stepName;
   profile._jobUrl = profile._jobUrl || page.url();

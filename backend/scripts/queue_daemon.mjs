@@ -85,9 +85,9 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 // Configuration
 const args = process.argv.slice(2);
 const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-// In production (Railway), HEADLESS is strictly enforced.
-// On local machines, HEADLESS is true by default unless --headed is explicitly passed.
-const HEADLESS = isProduction ? true : (process.env.HEADLESS !== 'false' && !args.includes('--headful') && !args.includes('--headed'));
+// In production (Railway) and background daemons, HEADLESS is strictly enforced (true).
+// Headed mode is ONLY activated if --headed or --headful is explicitly passed in CLI args.
+const HEADLESS = isProduction ? true : (args.includes('--headful') || args.includes('--headed') ? false : true);
 const TEST_MODE = args.includes('--test');
 
 let envRole = (process.env.SERVICE_ROLE || '').toLowerCase();
@@ -678,6 +678,11 @@ async function runStage2Resolving() {
  * Execute Stage 3: Submissions across parallel workers
  */
 export async function runStage3Submissions({ isStreaming = false } = {}) {
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
+    console.log(`[DAEMON] 🛡️ Cloud Protection Active: Local workers disabled to prevent stealing tasks from Railway. Railway cloud workers handle all submissions.`);
+    return { success: false, reason: 'Local worker execution disabled. Railway cloud runs all submissions.' };
+  }
+
   const bcState = await getBotControl().catch(() => null);
   const isParallel = Boolean(
     isStreaming ||
@@ -755,10 +760,10 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
             bcCheck && (
               bcCheck.stop_requested === true ||
               bcCheck.submit_stop_requested === true ||
-              bcCheck.last_action_requested === 'stop_submit' ||
-              bcCheck.last_action_requested === 'stop' ||
-              bcCheck.last_action_requested === 'stop_all' ||
-              (bcCheck.is_running === false && bcCheck.submit_status === 'off')
+              ((bcCheck.last_action_requested === 'stop_submit' ||
+                bcCheck.last_action_requested === 'stop' ||
+                bcCheck.last_action_requested === 'stop_all') &&
+                bcCheck.submit_status !== 'running')
             )
           );
           if (isSubmitStopped) {
@@ -931,6 +936,11 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
   if (!canScan.allowed) {
     console.warn(`[DAEMON] Scan refused: ${canScan.reason}`);
     return { success: false, refused: true, reason: canScan.reason };
+  }
+
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
+    console.log(`[DAEMON] 🛡️ Cloud Protection Active: Local workers disabled to prevent stealing tasks from Railway. Railway cloud workers handle all scanning.`);
+    return { success: false, reason: 'Local worker execution disabled. Railway cloud runs all scanning.' };
   }
 
   const bcState = await getBotControl().catch(() => null);
@@ -2068,6 +2078,9 @@ export async function dispatchQueuedSubmissions() {
     // Scanner service strictly ignores submission dispatching
     return;
   }
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
+    return; // Local daemon never claims tasks when running in Railway
+  }
   if (isGlobalStopRequested() || isPoolPaused || isSubmitStopRequested()) return;
   // R11: Submit runs only when Developer turns Submit toggle ON
   if (submitStatus !== 'running') return;
@@ -2135,43 +2148,10 @@ export async function dispatchQueuedSubmissions() {
       }
     }
 
-    // Auto-off: when no tasks claimed and no active workers, check if any ready_for_review, ready_to_review or queued remain
+    // Continuous Standby: Never auto-turn off submit service when no tasks are currently ready.
+    // Both submitter services/replicas MUST run continuously at all costs until the user explicitly stops the trigger.
     if (!claimedAny && activeSubmittingWorkers.size === 0) {
-      // In parallel / universal mode or while scanning is running, DO NOT auto-turn off!
-      // The scanner is actively scanning and feeding job_distributions.
-      const isScanActive = scanStatus === 'running' || currentStage === 'parallel' || currentMode === 'parallel';
-      if (isScanActive) {
-        return; // Standby: keep submission service waiting for newly arrived jobs!
-      }
-
-      const { data: remaining } = await supabase
-        .from('job_distributions')
-        .select('id')
-        .in('status', ['ready_for_review', 'ready_to_review', 'queued', 'applying'])
-        .limit(1);
-
-      if (!remaining || remaining.length === 0) {
-        console.log(`\n✅ [DAEMON] All submission tasks finished. Submit toggle turning OFF automatically (R8/R11).`);
-        submitStatus = 'off';
-        if (currentMode === 'submitting') {
-          currentMode = 'idle';
-          currentStage = 'idle';
-          isPoolRunning = false;
-        }
-        await updateWorkerControl('submit', { enabled: false, stop_requested: false, updated_by: 'system_auto_off' }).catch(() => { });
-        for (const workerId of SUBMISSION_WORKER_IDS) {
-          await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => { });
-        }
-        await syncBotControlState({
-          mode: 'idle',
-          stage: 'idle',
-          submit_enabled: false,
-          submit_status: 'off',
-          is_running: false,
-          current_action: 'Submissions complete. Idle.',
-          active_worker_count: 0,
-        });
-      }
+      return; // Standby: keep submission service alive and waiting for newly arrived/reviewed jobs!
     }
   } catch (err) {
     console.warn(`[SUBMISSION DISPATCHER] Error in cycle:`, err?.message);
@@ -2284,7 +2264,9 @@ export async function initOnStartup() {
 
     await ensureCanonicalWorkers();
     await resetAllWorkersIdle();
-    if (SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
+    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true') {
+      console.log(`[DAEMON] 🛡️ Local development environment detected — strictly preserving production cloud bot_control and worker states.`);
+    } else if (SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
       await syncBotControlState({
         mode: 'idle',
         stage: 'idle',

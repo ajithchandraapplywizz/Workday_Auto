@@ -1727,7 +1727,6 @@ const CANONICAL_IDS = PIPELINE_CONFIG?.allWorkerIds || [
   'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
   'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
   'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
-  'submitting_worker_5', 'submitting_worker_6', 'submitting_worker_7', 'submitting_worker_8',
 ];
 
 export const CANONICAL_10_WORKERS = new Set(CANONICAL_IDS);
@@ -1890,10 +1889,14 @@ export async function ensureCanonicalWorkers() {
       }
     }
 
-    // Delete any non-canonical rows
+    // Delete any non-canonical rows (e.g. submitting_worker_5..8)
     for (const r of current) {
       if (!CANONICAL_10_WORKERS.has(r.worker_id)) {
         await request('worker_status', {
+          method: 'DELETE',
+          query: `?worker_id=eq.${encodeURIComponent(r.worker_id)}`,
+        }).catch(() => { });
+        await request('worker_control', {
           method: 'DELETE',
           query: `?worker_id=eq.${encodeURIComponent(r.worker_id)}`,
         }).catch(() => { });

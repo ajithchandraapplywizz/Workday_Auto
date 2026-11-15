@@ -7,12 +7,36 @@ import { detectWorkdayStep } from './stateDetector.mjs';
 import { getApplicationQuestionsPageInfo } from './workdayQuestionFill.mjs';
 
 export const RAPID = {
-  settleMs: 150,
-  pollMs: 200,
-  maxPolls: 50,
+  settleMs: 80,
+  pollMs: 120,
+  maxPolls: 20,
   burstClicks: 1,
-  burstGapMs: 100,
+  burstGapMs: 80,
 };
+
+/**
+ * Instantly dismisses any Workday address verification / USPS suggestion modal popup.
+ */
+export async function dismissAddressVerificationModal(page) {
+  return page.evaluate(() => {
+    const isVisible = (el) => {
+      const s = window.getComputedStyle(el);
+      return s.display !== 'none' && s.visibility !== 'hidden' && (el.offsetParent !== null || el.getClientRects().length > 0);
+    };
+    const buttons = Array.from(document.querySelectorAll('button, [role="button"]'));
+    for (const btn of buttons) {
+      if (!isVisible(btn) || btn.disabled) continue;
+      const t = (btn.textContent || '').replace(/\s+/g, ' ').trim();
+      const aid = (btn.getAttribute('data-automation-id') || '').toLowerCase();
+      if (/use\s*(address\s*)?as\s*entered|confirm(\s*address)?|use\s*suggested|accept/i.test(t) ||
+          aid.includes('useaddressasentered') || aid.includes('confirmaddress') || aid.includes('usesuggested')) {
+        btn.click();
+        return { clicked: t || aid };
+      }
+    }
+    return null;
+  }).catch(() => null);
+}
 
 /**
  * @param {import('playwright').Page} page
@@ -26,6 +50,10 @@ export async function waitForWizardProgress(page, beforeStep, ctx = {}) {
     : null);
 
   for (let i = 0; i < RAPID.maxPolls; i++) {
+    // Instantly dismiss any address confirmation / USPS suggestion modal
+    if (i % 2 === 0) {
+      await dismissAddressVerificationModal(page).catch(() => null);
+    }
     const step = await detectWorkdayStep(page);
     if (step === 'Review' || (step && step !== beforeStep)) {
       return { changed: true, step };
@@ -112,9 +140,11 @@ export async function rapidAdvanceOnce(page, beforeStep) {
   try {
     await page.waitForSelector('[data-automation-id="loading-spinner"], div[class*="loading-spinner"]', {
       state: 'detached',
-      timeout: 8000,
+      timeout: 3000,
     });
   } catch { /* spinner optional */ }
+
+  await dismissAddressVerificationModal(page).catch(() => null);
 
   const prog = await waitForWizardProgress(page, beforeStep, { aqBefore });
   return {

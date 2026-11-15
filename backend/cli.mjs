@@ -494,7 +494,7 @@ async function cmdApply(url, { isBatch = false } = {}) {
     process.exit(1);
   }
 
-  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+  const isHeadless = !process.argv.includes('--headed') && !process.argv.includes('--headful');
   const browser = await chromium.launch({ headless: isHeadless });
   const context = await browser.newContext({
     viewport: { width: 1280, height: 900 },
@@ -824,7 +824,7 @@ async function cmdBatchWorkers(file) {
     }
   } catch {}
 
-  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+  const isHeadless = !process.argv.includes('--headed') && !process.argv.includes('--headful');
 
   await runWorkerPool(tasks, {
     concurrency: workerCount,
@@ -837,7 +837,7 @@ async function cmdBatchWorkers(file) {
 
 // ─── 10-WORKER SUPABASE QUEUE RUNNER ─────────────────────────────────────────
 async function cmdRunQueue() {
-  const isHeadless = process.argv.includes('--headless') || process.env.HEADLESS === 'true' || process.env.HEADLESS === '1';
+  const isHeadless = !process.argv.includes('--headed') && !process.argv.includes('--headful');
 
   await runQueueWorkerPool({
     concurrency: workerCount,
@@ -869,7 +869,7 @@ Usage:
     process.exit(1);
   }
 
-  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  const isHeadless = !demoHeaded && !process.argv.includes('--headed') && !process.argv.includes('--headful');
   const { runDemoBatch } = await import('./lib/demoRunner.mjs');
 
   await runDemoBatch({
@@ -900,7 +900,7 @@ Usage:
     process.exit(1);
   }
 
-  const isHeadless = !demoHeaded && (process.argv.includes('--headless') || process.env.HEADLESS === 'true');
+  const isHeadless = !demoHeaded && !process.argv.includes('--headed') && !process.argv.includes('--headful');
   const { runQueueBatchForUrl } = await import('./lib/queueBatchRunner.mjs');
 
   await runQueueBatchForUrl({
@@ -915,7 +915,7 @@ Usage:
 // ─── CLUSTER BATCH RUNNER (3 PARALLEL WORKERS ON TOP 3 LINKS) ───────────────
 async function cmdClusterRun() {
   // User explicitly wants HEADED only: defaults to false (HEADED browser), visible windows
-  const isHeadless = process.argv.includes('--headless') && !process.argv.includes('--headed');
+  const isHeadless = !process.argv.includes('--headed') && !process.argv.includes('--headful');
   const targetUrlIdx = process.argv.findIndex((a) => a === '--url' || a === '--job-url');
   const targetUrl = targetUrlIdx !== -1 ? process.argv[targetUrlIdx + 1] : null;
   const { runClusterBatchRunner } = await import('./lib/clusterBatchRunner.mjs');

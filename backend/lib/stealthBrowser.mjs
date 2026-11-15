@@ -122,6 +122,12 @@ function createResilientLauncher(extraLauncher = null) {
   const origStandardLaunch = standardChromium.launch.bind(standardChromium);
 
   return async function resilientLaunch(baseOptions = {}) {
+    const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
+    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+      console.warn(`[BROWSER GUARD] 🛑 Local browser launch blocked: Workday Auto is running in Railway cloud. Local system browser launch prevented.`);
+      throw new Error(`[LOCAL_EXECUTION_BLOCKED] Browser launch blocked on local system. Automation runs in Railway cloud. (Set RUN_LOCAL_WORKERS=true or pass --run-local-workers to override).`);
+    }
+
     const prepared = prepareLaunchOptions(baseOptions);
     const preferredChannel = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || baseOptions.channel || 'chromium';
 

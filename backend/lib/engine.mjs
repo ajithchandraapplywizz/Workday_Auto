@@ -1963,7 +1963,7 @@ async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint =
 async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
   const before = stepName || await detectWorkdayStep(page);
 
-  const maxAdvance = 3;
+  const maxAdvance = 2;
   let lastErrors = [];
 
   for (let attempt = 0; attempt < maxAdvance; attempt++) {
@@ -2731,8 +2731,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     await tryUsePreviousApplication(page, profile).catch(() => false);
   }
 
-  const maxSteps = 18;
-  const maxNoProgress = 4;
+  const maxSteps = 10;
+  const maxNoProgress = 2;
   let currentIteration = 0;
   let lastFingerprint = '';
   let noProgressCount = 0;
@@ -3909,8 +3909,8 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       }
 
       console.log('  ✅ Workday authentication confirmed — starting 5-step wizard loop...');
-      try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
-      await page.waitForTimeout(1000);
+      await page.waitForLoadState('domcontentloaded', { timeout: 4000 }).catch(() => {});
+      await page.waitForTimeout(400);
 
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
 

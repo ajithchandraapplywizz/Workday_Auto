@@ -4404,7 +4404,7 @@ export async function handleVoluntaryDisclosuresStep(page, profile) {
  */
 export async function sweepAndFillAllRemainingDropdowns(page, profile = null, stepName = '') {
   let filledCount = 0;
-  for (let attempt = 0; attempt < 3; attempt++) {
+  for (let attempt = 0; attempt < 1; attempt++) {
     const unfilledCount = await page.evaluate((triggerSel) => {
       const norm = (s) => (s || '').replace(/\s+/g, ' ').trim();
       const btns = Array.from(document.querySelectorAll(triggerSel));

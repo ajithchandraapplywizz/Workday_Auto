@@ -1652,7 +1652,7 @@ export default function DeveloperDashboard() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {[1, 2, 3, 4, 5, 6, 7, 8].map((slot) => {
+                {[1, 2, 3, 4].map((slot) => {
                   const wid = `submitting_worker_${slot}`;
                   const w = (workerPool.submitWorkers || []).find((row) => row.worker_id === wid) ||
                     (workerPool.workers || []).find((row) => row.worker_id === wid);
@@ -2005,15 +2005,11 @@ export default function DeveloperDashboard() {
                   {/* Worker Sub-Filter */}
                   <div style={{ display: 'flex', gap: '4px' }}>
                     {[
-                      { id: 'all', label: 'All Submissions (W1-8)' },
+                      { id: 'all', label: 'All Submissions (W1-4)' },
                       { id: 'submitting_worker_1', label: 'Worker 1' },
                       { id: 'submitting_worker_2', label: 'Worker 2' },
                       { id: 'submitting_worker_3', label: 'Worker 3' },
                       { id: 'submitting_worker_4', label: 'Worker 4' },
-                      { id: 'submitting_worker_5', label: 'Worker 5' },
-                      { id: 'submitting_worker_6', label: 'Worker 6' },
-                      { id: 'submitting_worker_7', label: 'Worker 7' },
-                      { id: 'submitting_worker_8', label: 'Worker 8' },
                     ].map((w) => (
                       <button
                         key={w.id}

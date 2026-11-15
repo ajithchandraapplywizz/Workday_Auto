@@ -644,6 +644,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     scanRunId = null,
   } = options;
 
+  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+    console.warn(`[CLUSTER GUARD] 🛑 Local cluster worker blocked: Running in Railway cloud. Local system scanning disabled.`);
+    return;
+  }
+
   const jobUrl = cluster.jobUrl;
   const company = cluster.company;
   const role = cluster.roleTitle;

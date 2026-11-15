@@ -33,9 +33,9 @@ import { verifyProvenance } from '../provenanceGate.mjs';
 import { autoRecordVerifiedFieldAnswer } from '../supabaseClient.mjs';
 import { resolveAnswerFromLiveOptions } from '../workdayQuestionFill.mjs';
 
-const MAX_FIELD_RETRIES = 2;
+const MAX_FIELD_RETRIES = 1;
 const MAX_FILLS_PER_CYCLE = 24;
-const MAX_VERIFY_FAILS_PER_FIELD = 2;
+const MAX_VERIFY_FAILS_PER_FIELD = 1;
 
 function synthesizeScanMandatoryAnswer(field = {}, profile = {}) {
   const label = String(field.label || '').trim().toLowerCase();
@@ -204,7 +204,7 @@ export async function runPageOrchestrator({
   adapter,
   stepName = '',
   pageNumber = 1,
-  maxCycles = 12,
+  maxCycles = 3,
   answerFn = answerPageQuestions,
 } = {}) {
   if (!adapter) throw new Error('runPageOrchestrator requires an ATS adapter');

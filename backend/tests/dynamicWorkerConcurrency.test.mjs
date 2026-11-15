@@ -74,32 +74,61 @@ test('Worker lease expiry logic accurately detects leases older than timeout', (
   assert.equal(isNullExpired, true);
 });
 
-test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS and worker counts from env', async () => {
+test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env and defaults safely to 1', async () => {
   const { getDynamicMaxBrowsers } = await import('../lib/browserLifecycle.mjs');
 
   const originalMax = process.env.MAX_ACTIVE_BROWSERS;
-  const originalWorkerCount = process.env.WORKER_COUNT;
-  const originalSubmitCount = process.env.SUBMIT_WORKER_COUNT;
 
   try {
     delete process.env.MAX_ACTIVE_BROWSERS;
-    delete process.env.SUBMIT_WORKER_COUNT;
-    process.env.WORKER_COUNT = '3';
-    assert.equal(getDynamicMaxBrowsers(), 3, 'Should pick up WORKER_COUNT=3');
+    assert.equal(getDynamicMaxBrowsers(), 1, 'Default should be 1 browser per container');
 
-    process.env.SUBMIT_WORKER_COUNT = '5';
-    assert.equal(getDynamicMaxBrowsers(), 5, 'Should pick up SUBMIT_WORKER_COUNT=5');
+    process.env.MAX_ACTIVE_BROWSERS = '1';
+    assert.equal(getDynamicMaxBrowsers(), 1, 'Should respect explicit MAX_ACTIVE_BROWSERS=1');
 
-    process.env.MAX_ACTIVE_BROWSERS = '6';
-    assert.equal(getDynamicMaxBrowsers(), 6, 'Should prioritize explicit MAX_ACTIVE_BROWSERS=6');
+    process.env.MAX_ACTIVE_BROWSERS = '2';
+    assert.equal(getDynamicMaxBrowsers(), 2, 'Should respect explicit MAX_ACTIVE_BROWSERS=2');
+
+    process.env.MAX_ACTIVE_BROWSERS = '4';
+    assert.equal(getDynamicMaxBrowsers(), 4, 'Should respect explicit MAX_ACTIVE_BROWSERS=4');
   } finally {
     if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
     else delete process.env.MAX_ACTIVE_BROWSERS;
+  }
+});
 
-    if (originalWorkerCount !== undefined) process.env.WORKER_COUNT = originalWorkerCount;
-    else delete process.env.WORKER_COUNT;
+test('acquireBrowserSlot strictly enforces single browser mutex and serializes workers in same service', async () => {
+  const { acquireBrowserSlot, releaseBrowserSlot } = await import('../lib/browserLifecycle.mjs');
 
-    if (originalSubmitCount !== undefined) process.env.SUBMIT_WORKER_COUNT = originalSubmitCount;
-    else delete process.env.SUBMIT_WORKER_COUNT;
+  const originalMax = process.env.MAX_ACTIVE_BROWSERS;
+  process.env.MAX_ACTIVE_BROWSERS = '1';
+
+  try {
+    // 1. Worker 1 acquires slot
+    const acquiredW1 = await acquireBrowserSlot('submitting_worker_1');
+    assert.equal(acquiredW1, true, 'Worker 1 should acquire initial slot');
+
+    // 2. Worker 2 attempts to acquire slot while Worker 1 is active (must be queued/waiting)
+    let worker2Acquired = false;
+    const w2Promise = acquireBrowserSlot('submitting_worker_2').then((res) => {
+      worker2Acquired = res;
+    });
+
+    // Verify Worker 2 is queued and hasn't acquired yet
+    await new Promise((r) => setTimeout(r, 100));
+    assert.equal(worker2Acquired, false, 'Worker 2 must not acquire slot while Worker 1 is running');
+
+    // 3. Worker 1 finishes and releases browser slot
+    releaseBrowserSlot('submitting_worker_1');
+
+    // 4. Worker 2 should immediately receive slot
+    await w2Promise;
+    assert.equal(worker2Acquired, true, 'Worker 2 must acquire slot immediately after Worker 1 closes');
+
+    // Cleanup Worker 2 slot
+    releaseBrowserSlot('submitting_worker_2');
+  } finally {
+    if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
+    else delete process.env.MAX_ACTIVE_BROWSERS;
   }
 });

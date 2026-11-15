@@ -83,9 +83,10 @@ export async function resolveInstanceSubmissionWorkerIds() {
     return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + effectiveOffset}`);
   }
 
-  // Multi-replica Railway automatic allocation of size workerCount across max cluster workers:
+  // Multi-replica Railway automatic allocation of size workerCount across max cluster workers (2 services * 2 workers = 4 total):
+  const maxTotalSubmitWorkers = Number(process.env.TOTAL_SUBMIT_WORKERS) || 4;
   const candidateGroups = [];
-  for (let offset = 0; offset < 8; offset += workerCount) {
+  for (let offset = 0; offset < maxTotalSubmitWorkers; offset += workerCount) {
     candidateGroups.push(
       Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + offset}`)
     );
@@ -435,8 +436,13 @@ export async function moveReadyTasksToQueued(limit = getDynamicSubmitWorkerCount
  */
 
 export async function claimNextTask(workerId) {
-
   if (!workerId || !supabase) return null;
+
+  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running
+  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+    return null;
+  }
 
   const { isSubmitStopRequested } = await import('./browserLifecycle.mjs');
 
