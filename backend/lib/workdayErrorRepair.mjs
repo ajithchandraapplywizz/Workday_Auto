@@ -601,16 +601,30 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
           .first();
         if (await phoneInput.isVisible({ timeout: 1000 }).catch(() => false)) {
           await phoneInput.fill('');
-          await phoneInput.pressSequentially(cleanDigits, { delay: 25 }).catch(() => phoneInput.fill(cleanDigits));
-          await phoneInput.dispatchEvent('input').catch(() => {});
-          await phoneInput.dispatchEvent('change').catch(() => {});
-          await phoneInput.press('Enter').catch(() => {});
+          await phoneInput.fill(cleanDigits).catch(() => {});
+          await phoneInput.evaluate((el, val) => {
+            el.focus();
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(el, val);
+            } else {
+              el.value = val;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, cleanDigits).catch(() => {});
           await phoneInput.press('Tab').catch(() => {});
-          await phoneInput.dispatchEvent('blur').catch(() => {});
           const actual = (await phoneInput.inputValue().catch(() => '')).replace(/\D/g, '');
           if (actual !== cleanDigits) {
             await phoneInput.evaluate((el, val) => {
-              el.value = val;
+              el.focus();
+              const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+              if (nativeSetter) {
+                nativeSetter.call(el, val);
+              } else {
+                el.value = val;
+              }
               el.dispatchEvent(new Event('input', { bubbles: true }));
               el.dispatchEvent(new Event('change', { bubbles: true }));
               el.dispatchEvent(new Event('blur', { bubbles: true }));

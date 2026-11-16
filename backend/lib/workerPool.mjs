@@ -1122,8 +1122,8 @@ export async function executeWorkerTask({
             email: workdayEmail,
             password: workdayPassword,
             company,
-            startTime: Date.now() - 120000,
-            timeoutMs: 45000,
+            startTime: Date.now() - 600000,
+            timeoutMs: 90000,
             applywizzId,
             jobUrl,
             taskId: queueTaskId,
@@ -2776,22 +2776,30 @@ export async function executeSingleTargetedSubmission({
     }
   } else {
     console.log(`\n❌ [${workerId}] Targeted submission stopped (${result?.failureReason || result?.status || 'Failed'}).`);
-    const targetStatus = result?.status === 'already_applied' ? 'already_applied' : 'failed';
+    const isAlreadyApplied = result?.status === 'already_applied';
+    const currentAttempt = Number(distRow?.attempt_count || 1);
+    const nextAttempt = currentAttempt + 1;
+    const isFatal = isAlreadyApplied || currentAttempt >= 3;
+    const targetStatus = isAlreadyApplied ? 'already_applied' : (isFatal ? 'failed' : 'ready_for_review');
+    const attemptPrefix = isAlreadyApplied ? '' : `[Attempt ${currentAttempt}/3] `;
+    const rawReason = result?.failureReason || result?.error || (isAlreadyApplied ? 'Application already submitted on Workday' : 'Submission halted');
     const updateBody = {
       status: targetStatus,
-      error_message: result?.failureReason || result?.error || (targetStatus === 'already_applied' ? 'Application already submitted on Workday' : 'Submission failed'),
+      attempt_count: nextAttempt,
+      error_message: `${attemptPrefix}${rawReason}`,
       application_submitted_screenshot_url: finalProofShot,
-      worker_id: workerId,
+      worker_id: isFatal ? workerId : null,
+      worker_leased_at: null,
       updated_at: completionTimestamp,
     };
     if (distributionId) {
       try {
-        await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed');
       } catch {}
     }
     if (finalApplywizzId && finalJobUrl) {
       try {
-        await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).neq('status', 'submitted').neq('status', 'completed');
       } catch {}
     }
   }

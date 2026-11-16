@@ -14,6 +14,26 @@ const BASE_UI_URL = `${ZOHO_BASE_URL}/api/zoho/ui`;
 let usersCache = null;
 let usersCacheTime = 0;
 const CACHE_TTL_MS = 60000; // 1 minute
+let lastWarmupTime = 0;
+
+/**
+ * Proactively warm up Zoho Mail Reader on Render to eliminate 50-70s cold start delays.
+ * Fires a non-blocking background ping.
+ */
+export function warmupZohoMailReader() {
+  const now = Date.now();
+  if (now - lastWarmupTime < 180000) return; // Warmed up within last 3 mins
+  lastWarmupTime = now;
+  fetch(`${BASE_UI_URL}/users`, { signal: AbortSignal.timeout(12000) })
+    .then((r) => r.json())
+    .then((users) => {
+      if (Array.isArray(users)) {
+        usersCache = users;
+        usersCacheTime = Date.now();
+      }
+    })
+    .catch(() => {});
+}
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -280,7 +300,7 @@ export async function getVerificationLink({
   subjectIncludes = ['verify', 'confirm', 'activate', 'workday', 'welcome', 'reset', 'password'],
   limit = 10,
   intervalMs = 2500,
-  timeoutMs = 60000,
+  timeoutMs = 90000,
 } = {}) {
   const enc = encodeURIComponent(email);
   const tenant = extractWorkdayTenant(jobUrl);
@@ -480,11 +500,13 @@ export async function pollZohoWorkdayAuth({
   jobUrl = '',
   cutoffTime = null,
   triggerTime = null,
-  timeoutMs = 60000,
+  timeoutMs = 90000,
   pollIntervalMs = 1500,
 } = {}) {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail) return { found: false, reason: 'missing_email' };
+
+  warmupZohoMailReader();
 
   const tenant = extractWorkdayTenant(jobUrl);
   const effectiveTriggerTime = triggerTime || cutoffTime || (Date.now() - 300000);
@@ -514,14 +536,14 @@ export async function pollZohoWorkdayAuth({
     }
   }
 
-  // Try direct getVerificationLink engine first
+  // Try direct getVerificationLink engine first (with full 90s window for Workday SMTP transit)
   try {
     const directLink = await getVerificationLink({
       email: cleanEmail,
       company,
       jobUrl,
       triggerTime: effectiveTriggerTime,
-      timeoutMs: Math.min(timeoutMs, 45000),
+      timeoutMs: Math.max(timeoutMs, 90000),
       intervalMs: Math.max(pollIntervalMs, 2500),
     });
     if (directLink) {

@@ -119,20 +119,44 @@ export async function resolveResumePath(explicitPath) {
  * @returns {Promise<string|null>} absolute path
  */
 export async function getResumePathForApply(profile = {}, plan = {}) {
+  const targetAwl = String(
+    profile?._applyWizzId
+    || profile?.applywizz_id
+    || profile?.applywizzId
+    || profile?.candidateId
+    || ''
+  ).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+
+  // 1. Direct candidate authentic resume check via applyWizzResume (disk cache + Supabase Storage + CRM)
   try {
-    const { resolveApplyWizzResumeUrl, ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-    const candResumeUrl = resolveApplyWizzResumeUrl(profile);
-    if (candResumeUrl) {
-      const fromApi = await ensureClientResumeFromApplyWizz(profile);
-      if (fromApi) {
-        console.log(`    📎 Candidate authentic resume cached: ${basename(fromApi)}`);
-        if (profile) profile._resumePath = fromApi;
-        return fromApi;
-      }
+    const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+    const fromStore = await ensureClientResumeFromApplyWizz(profile);
+    if (fromStore) {
+      console.log(`    📎 Candidate authentic resume resolved: ${basename(fromStore)}`);
+      if (profile) profile._resumePath = fromStore;
+      return fromStore;
     }
   } catch (err) {
     console.warn(`    ⚠️ Candidate resume resolution notice: ${err.message}`);
-    /* fall through to local resumes/ */
+  }
+
+  // 2. Direct local check in data/client-resumes/
+  if (targetAwl && targetAwl !== 'CLIENT') {
+    for (const root of appRootCandidates()) {
+      const candidates = [
+        resolve(root, 'data', 'client-resumes', `${targetAwl}.pdf`),
+        resolve(root, 'data', 'client-resumes', `_${targetAwl}_.pdf`),
+        resolve(root, 'resumes', `${targetAwl}.pdf`),
+        resolve(root, 'resumes', `_${targetAwl}_.pdf`),
+      ];
+      for (const cand of candidates) {
+        if (existsSync(cand)) {
+          console.log(`    📎 Candidate authentic resume found on disk: ${basename(cand)}`);
+          if (profile) profile._resumePath = cand;
+          return cand;
+        }
+      }
+    }
   }
 
   // Drop stale relative paths that no longer resolve from current cwd
@@ -152,7 +176,6 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
   }
 
   const path = await resolveResumePath(null);
-  const targetAwl = String(profile?._applyWizzId || profile?.applywizz_id || '').toUpperCase();
   if (targetAwl && targetAwl !== 'CLIENT') {
     if (path && !basename(path).toUpperCase().includes(targetAwl)) {
       console.warn(`    ⚠️  Strict Resume Match: Rejecting mismatched resume ${basename(path)} for client ${targetAwl}`);

@@ -109,18 +109,78 @@ function downloadBinary(url, destPath, { rejectUnauthorized = true } = {}) {
  * @returns {Promise<string|null>} absolute path to PDF
  */
 export async function ensureClientResumeFromApplyWizz(profile = {}) {
-  const url = resolveApplyWizzResumeUrl(profile);
-  if (!url) return profile._resumePath || null;
+  const clientAwlId = String(
+    profile._applyWizzId
+    || profile.applywizz_id
+    || profile.applywizzId
+    || profile._dbClient?.applywizz_id
+    || profile._dbClient?.applywizzId
+    || process.env.APPLYWIZZ_ID
+    || ''
+  ).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
 
   const cached = cachePathForClient(profile);
+  const altCached = clientAwlId ? resolve(CACHE_DIR, `_${clientAwlId}_.pdf`) : null;
   const applicationKey = String(profile._jobUrl || profile._currentJobUrl || '').trim();
+
+  // 1. Instant check: Already on disk in data/client-resumes/
   if (existsSync(cached)) {
     profile._resumePath = cached;
-    profile._resumeUrl = url;
     profile._resumeDownloadedForApplication = true;
     profile._resumeApplicationKey = applicationKey;
     return cached;
   }
+  if (altCached && existsSync(altCached)) {
+    profile._resumePath = altCached;
+    profile._resumeDownloadedForApplication = true;
+    profile._resumeApplicationKey = applicationKey;
+    return altCached;
+  }
+
+  // 2. Cloud Fallback: Supabase Storage bucket 'client-resumes'
+  if (clientAwlId && clientAwlId !== 'CLIENT') {
+    try {
+      const { supabase } = await import('./supabaseClient.mjs');
+      if (supabase?.storage) {
+        const { data: publicData } = supabase.storage.from('client-resumes').getPublicUrl(`${clientAwlId}.pdf`);
+        const sbUrl = publicData?.publicUrl;
+        if (sbUrl) {
+          console.log(`  📥 [Cloud Storage] Fetching authentic resume from Supabase: ${clientAwlId}.pdf...`);
+          try {
+            await downloadBinary(sbUrl, cached, { rejectUnauthorized: true });
+            if (existsSync(cached)) {
+              profile._resumePath = cached;
+              profile._resumeUrl = sbUrl;
+              profile._resumeDownloadedForApplication = true;
+              profile._resumeApplicationKey = applicationKey;
+              console.log(`  ✅ Resume cached from Supabase Storage: ${basename(cached)}`);
+              return cached;
+            }
+          } catch (dlErr) {
+            // Try alternative format e.g. _AWL-1568_.pdf in Supabase Storage
+            const { data: altData } = supabase.storage.from('client-resumes').getPublicUrl(`_${clientAwlId}_.pdf`);
+            if (altData?.publicUrl) {
+              await downloadBinary(altData.publicUrl, cached, { rejectUnauthorized: true }).catch(() => {});
+              if (existsSync(cached)) {
+                profile._resumePath = cached;
+                profile._resumeUrl = altData.publicUrl;
+                profile._resumeDownloadedForApplication = true;
+                profile._resumeApplicationKey = applicationKey;
+                console.log(`  ✅ Resume cached from Supabase Storage: ${basename(cached)}`);
+                return cached;
+              }
+            }
+          }
+        }
+      }
+    } catch (sbErr) {
+      console.log(`  ⚠️ Supabase Storage resume lookup notice: ${sbErr.message}`);
+    }
+  }
+
+  // 3. Fallback: External URL from Apply Wizz CRM
+  const url = resolveApplyWizzResumeUrl(profile);
+  if (!url) return profile._resumePath || null;
 
   try {
     console.log(`  📥 Apply Wizz resume — downloading for upload/parse...`);

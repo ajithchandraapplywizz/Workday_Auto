@@ -783,18 +783,31 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
           await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
           await phoneNumberInput.click({ force: true }).catch(() => {});
           await phoneNumberInput.fill('').catch(() => {});
-          await phoneNumberInput.pressSequentially(wantDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(wantDigits));
-          await phoneNumberInput.dispatchEvent('input').catch(() => {});
-          await phoneNumberInput.dispatchEvent('change').catch(() => {});
-          await phoneNumberInput.press('Enter').catch(() => {});
+          await phoneNumberInput.fill(wantDigits).catch(() => {});
+          await phoneNumberInput.evaluate((el, val) => {
+            el.focus();
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(el, val);
+            } else {
+              el.value = val;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, wantDigits).catch(() => {});
           await phoneNumberInput.press('Tab').catch(() => {});
-          await phoneNumberInput.dispatchEvent('blur').catch(() => {});
         });
         let verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
         if (verified !== wantDigits) {
           await phoneNumberInput.evaluate((el, val) => {
             el.focus();
-            el.value = val;
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(el, val);
+            } else {
+              el.value = val;
+            }
             el.dispatchEvent(new Event('input', { bubbles: true }));
             el.dispatchEvent(new Event('change', { bubbles: true }));
             el.dispatchEvent(new Event('blur', { bubbles: true }));
@@ -1302,12 +1315,20 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           await phoneNumberInput.scrollIntoViewIfNeeded().catch(() => {});
           await phoneNumberInput.click({ force: true }).catch(() => {});
           await phoneNumberInput.fill('').catch(() => {});
-          await phoneNumberInput.pressSequentially(cleanDigits, { delay: 25 }).catch(() => phoneNumberInput.fill(cleanDigits));
-          await phoneNumberInput.dispatchEvent('input').catch(() => {});
-          await phoneNumberInput.dispatchEvent('change').catch(() => {});
-          await phoneNumberInput.press('Enter').catch(() => {});
+          await phoneNumberInput.fill(cleanDigits).catch(() => {});
+          await phoneNumberInput.evaluate((el, val) => {
+            el.focus();
+            const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+            if (nativeSetter) {
+              nativeSetter.call(el, val);
+            } else {
+              el.value = val;
+            }
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+          }, cleanDigits).catch(() => {});
           await phoneNumberInput.press('Tab').catch(() => {});
-          await phoneNumberInput.dispatchEvent('blur').catch(() => {});
         });
       }
       let verified = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
@@ -1315,7 +1336,12 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       if (!phoneOk) {
         await phoneNumberInput.evaluate((el, val) => {
           el.focus();
-          el.value = val;
+          const nativeSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value')?.set;
+          if (nativeSetter) {
+            nativeSetter.call(el, val);
+          } else {
+            el.value = val;
+          }
           el.dispatchEvent(new Event('input', { bubbles: true }));
           el.dispatchEvent(new Event('change', { bubbles: true }));
           el.dispatchEvent(new Event('blur', { bubbles: true }));

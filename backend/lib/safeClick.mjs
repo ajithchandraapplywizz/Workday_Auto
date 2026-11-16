@@ -219,7 +219,7 @@ export async function drainBlockedScriptClicks(page) {
 export async function disarmRiskyAddButtons(page) {
   return await page.evaluate(({ optionalPattern }) => {
     const optionalRe = new RegExp(optionalPattern, 'i');
-    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$/i;
+    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$|^add\s*(phone|contact(\s*information)?)(\s*number)?$/i;
     const forbiddenNameRe = /add(\s+(another|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)/i;
     const bareAddRe = /^(add|\+)$/i;
     const chromeRe = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over)\b/i;
@@ -277,11 +277,11 @@ export async function disarmRiskyAddButtons(page) {
       if (allowedAddRe.test(text) || allowedAddRe.test(aria)) continue;
 
       const heading = nearestHeading(btn);
-      const underWorkEdu = /work\s*experience|^education\b/i.test(heading);
+      const underAllowedSection = /work\s*experience|^education\b|phone|contact/i.test(heading);
       const underOptional = optionalRe.test(heading);
 
-      // Bare Add under Work/Education stays available for initial section expand only.
-      if (underWorkEdu && !underOptional && !forbiddenNameRe.test(name) && (bareAddRe.test(text) || bareAddRe.test(aria) || auto === 'Add')) {
+      // Bare Add under Work/Education/Phone stays available for initial section expand only.
+      if ((underAllowedSection || /phone/i.test(name)) && !underOptional && !forbiddenNameRe.test(name) && (bareAddRe.test(text) || bareAddRe.test(aria) || auto === 'Add' || /phone/i.test(name))) {
         continue;
       }
 

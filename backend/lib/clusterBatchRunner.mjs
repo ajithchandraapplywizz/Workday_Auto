@@ -785,10 +785,15 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       result?.stoppedAtStep === 'Job Discovery / Already Applied' ||
       /(?:already\s*applied|already\s*submitted)/i.test(String(result?.failureReason || result?.reason || result?.status || result?.stoppedAtStep || ''));
 
-    if (isAlreadyApplied && cIdx < candidatePool.length - 1) {
-      console.log(`\nℹ️ [${workerId}] Candidate ${candidateAwlId} has ALREADY APPLIED to this job (${company}).`);
-      console.log(`   ➡️ Rollover: Trying next candidate in batch queue list: ${candidatePool[cIdx + 1]} to complete blueprint scan...\n`);
-      continue;
+    if (isAlreadyApplied) {
+      if (cIdx < candidatePool.length - 1) {
+        console.log(`\nℹ️ [${workerId}] Candidate ${candidateAwlId} has ALREADY APPLIED to this job (${company}).`);
+        console.log(`   ➡️ Rollover: Trying next candidate in batch queue list: ${candidatePool[cIdx + 1]} to complete blueprint scan...\n`);
+        continue;
+      } else {
+        console.log(`\nℹ️ [${workerId}] All ${candidatePool.length} candidate(s) in list have already applied to this job (${company}).`);
+        break;
+      }
     }
 
     // Check if failure was due to Zoho mail verification / not connected:
@@ -813,6 +818,15 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       } else {
         console.log(`\n⚠️ [${workerId}] All ${candidatePool.length} sibling candidate(s) in pool were attempted and had disconnected Zoho mailboxes for "${company}".`);
       }
+    }
+
+    // Sibling cascade on ANY middle step failure (missing resume, DOM validation error, step block):
+    // In Stage 1, if scanning halted for one candidate AWL ID, try next candidate in candidatePool to discover blueprint!
+    if (cIdx < candidatePool.length - 1) {
+      console.log(`\n⚠️ [${workerId}] Candidate ${candidateAwlId} halted at step "${leadFailStep}": ${leadFailReason}`);
+      console.log(`   📸 Diagnostic screenshot captured: ${leadProofShot || 'None'}`);
+      console.log(`   ➡️ Sibling cascade: Proceeding to NEXT candidate in batch queue list (${candidatePool[cIdx + 1]}) for "${company}"...\n`);
+      continue;
     }
 
     break;
@@ -922,24 +936,27 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           String(leadFailReason).toLowerCase().includes('review')
         );
         if (!reachedReview) {
-          console.log(`[SCANNER] [${workerId}] [${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] Company: ${company} | Status: failed | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
-          const { recordFailedJob } = await import('./supabaseClient.mjs');
-          await recordFailedJob({
-            applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
-            clientIds: allSiblingAwlIds,
-            failedClientCount: allSiblingAwlIds.length,
-            jobId: leadTask.job_id || cluster.reqId || null,
-            jobUrl,
-            company,
-            roleTitle: role,
-            failureReason: leadFailReason,
-            failedAtStep: leadFailStep,
-            screenshotPath: leadProofShot,
-          }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
-
+          console.log(`[SCANNER] [${workerId}] [${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] Company: ${company} | Status: pending | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
+          // USER STRICT RULE: In Stage 1 scanning, do NOT update status as failed if not expired!
+          // Save proof screenshot to screenshot_path and retain status as 'pending' for retry / inspection.
           if (allTaskIds.length > 0) {
-            await failClusterTasksByIds(allTaskIds, leadFailReason, leadProofShot);
-            console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts with failure screenshot.`);
+            for (const tId of allTaskIds) {
+              await queueDbRequest('batch_job_queue', {
+                method: 'PATCH',
+                query: `?id=eq.${encodeURIComponent(tId)}`,
+                prefer: 'return=minimal',
+                body: {
+                  status: 'pending',
+                  attempt_count: MAX_ATTEMPTS,
+                  screenshot_path: leadProofShot || null,
+                  error_message: leadFailReason ? `[Scan Halted] ${leadFailReason}` : null,
+                  worker_id: null,
+                  locked_at: null,
+                  updated_at: new Date().toISOString(),
+                },
+              }).catch(() => {});
+            }
+            console.log(`   ✓ Retained batch_job_queue status as 'pending' with proof screenshot (non-expired scan halted).`);
           }
         } else {
           console.log(`ℹ️ [${workerId}] Link reached Review step ("${leadFailStep}"). Marking batch_job_queue as scanned.`);

@@ -2112,6 +2112,16 @@ export async function checkMyExperienceRequiredFields(page, profile = {}) {
       }
     }
 
+    // Check if Resume/CV section is present on My Experience and missing upload
+    const hasResumePrompt = Array.from(document.querySelectorAll('label, div, p, [data-automation-id*="file" i]')).some((el) => {
+      const t = norm(el.textContent);
+      return /upload a file.*required|resume.*required|\bresume\s*\/\s*cv\b/i.test(t);
+    }) || Boolean(document.querySelector('input[type="file"][aria-required="true"], [data-automation-id*="file-upload" i]'));
+    const hasUploadedFile = Boolean(document.querySelector('[data-automation-id="file-upload-item"], [data-automation-id="delete-file"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'));
+    if (hasResumePrompt && !hasUploadedFile) {
+      missing.push('Resume / Document Upload');
+    }
+
     return { unfilledCount: missing.length, missing };
   }).catch(() => ({ unfilledCount: 0, missing: [] }));
 }
@@ -2255,6 +2265,22 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   await handleWebsitesSection(page, profile, { force: stepBlocked });
+
+  // Ensure authentic candidate resume is uploaded if Resume/CV dropzone exists on Step 2
+  const hasResumeBox = await page.evaluate(() => {
+    const text = (document.body?.innerText || '').replace(/\s+/g, ' ');
+    return /resume\s*\/\s*cv|\bresume\b|upload a file|drop files here|select files/i.test(text);
+  }).catch(() => false);
+
+  if (hasResumeBox) {
+    const { handleWorkdayResumeUpload } = await import('./engine.mjs');
+    const { getResumePathForApply } = await import('./resumeParser.mjs');
+    const rPath = profile?._resumePath || (await getResumePathForApply(profile, {}).catch(() => null));
+    if (rPath) {
+      const ok = await handleWorkdayResumeUpload(page, rPath, profile);
+      if (ok) filled++;
+    }
+  }
 
   // Auto-repair date validation error (e.g. Workday resume parsing auto-filled "To" before "From")
   const dateError = await page.evaluate(() => {

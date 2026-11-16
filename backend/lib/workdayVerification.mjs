@@ -804,7 +804,7 @@ export async function executeWorkdayForgotPassword(page, {
   email,
   password,
   company,
-  timeoutMs = 45000,
+  timeoutMs = 90000,
   applywizzId = '',
   jobUrl = '',
   distributionId = '',
@@ -850,13 +850,21 @@ export async function executeWorkdayForgotPassword(page, {
         const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
         const name = await inp.getAttribute('name').catch(() => '');
         if (autoId === 'beecatcher' || name === 'website') continue;
-        await inp.click().catch(() => {});
-        await inp.fill('').catch(() => {});
-        await inp.fill(email);
-        await inp.dispatchEvent('input').catch(() => {});
-        await inp.dispatchEvent('change').catch(() => {});
-        await page.keyboard.press('Tab').catch(() => {});
-        await page.waitForTimeout(300).catch(() => {});
+        if (typeof inp.click === 'function') await inp.click().catch(() => {});
+        if (typeof inp.fill === 'function') {
+          await inp.fill('').catch(() => {});
+          await inp.fill(email);
+        }
+        if (typeof inp.dispatchEvent === 'function') {
+          await inp.dispatchEvent('input').catch(() => {});
+          await inp.dispatchEvent('change').catch(() => {});
+        }
+        if (page.keyboard && typeof page.keyboard.press === 'function') {
+          await page.keyboard.press('Tab').catch(() => {});
+        }
+        if (typeof page.waitForTimeout === 'function') {
+          await page.waitForTimeout(300).catch(() => {});
+        }
         return true;
       }
     }
@@ -905,10 +913,20 @@ export async function executeWorkdayForgotPassword(page, {
         return { success: false, reason: 'submit_button_not_found' };
       }
     } else {
-      await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
-      await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-      await page.keyboard.press('Enter').catch(() => {});
-      await page.waitForTimeout(1500).catch(() => {});
+      if (typeof submitBtn.scrollIntoViewIfNeeded === 'function') {
+        await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
+      }
+      if (typeof submitBtn.click === 'function') {
+        await submitBtn.click({ force: true }).catch(() => {
+          if (typeof submitBtn.evaluate === 'function') return submitBtn.evaluate(el => el.click());
+        });
+      }
+      if (page.keyboard && typeof page.keyboard.press === 'function') {
+        await page.keyboard.press('Enter').catch(() => {});
+      }
+      if (typeof page.waitForTimeout === 'function') {
+        await page.waitForTimeout(1500).catch(() => {});
+      }
       try {
         await Promise.race([
           page.waitForLoadState('networkidle', { timeout: 4000 }),
@@ -941,14 +959,16 @@ export async function executeWorkdayForgotPassword(page, {
     });
   }
 
-  const hitTimeoutMs = Math.min(timeoutMs || 45000, 45000);
-  console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader for reset email link (cutoff: ${new Date(requestTime - 15000).toLocaleTimeString()}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
+  const hitTimeoutMs = Math.max(timeoutMs || 90000, 90000);
+  // Ensure we check up to 10 minutes back to catch reset emails that already arrived
+  const lookbackCutoff = isAlreadyRequested ? (requestTime - 30000) : (Date.now() - 600000);
+  console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader for reset email link (cutoff: ${new Date(lookbackCutoff).toLocaleTimeString()}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
 
   const verifResult = await resolveWorkdayVerification(page, {
     email,
     password,
     company: effectiveCompany,
-    startTime: requestTime - 15000,
+    startTime: lookbackCutoff,
     timeoutMs: hitTimeoutMs,
     applywizzId,
     jobUrl,
