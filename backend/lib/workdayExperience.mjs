@@ -2117,9 +2117,7 @@ export async function checkMyExperienceRequiredFields(page, profile = {}) {
 }
 
 export async function handleStep2MyExperience(page, profile = {}) {
-  console.log('\n  ══════════════════════════════════════════');
-  console.log('  📋 STEP 2: MY EXPERIENCE — REQUIRED FIELDS ONLY');
-  console.log('  ══════════════════════════════════════════');
+  console.log('  📋 [Step 2: My Experience] Automating required experience & education fields...');
 
   // Defaults fill the gaps; configured values (Apply Wizz / profile.yml) win.
   profile.experience = {
@@ -2311,10 +2309,8 @@ export async function handleStep2MyExperience(page, profile = {}) {
     }
   }
 
-  console.log('\n  ══════════════════════════════════════════');
   const skipNote = skipped > 0 ? `, ${skipped} skipped (section not on page)` : '';
   console.log(`  ✓ My Experience done: ${filled} filled, ${failed} failed${skipNote}`);
-  console.log('  ══════════════════════════════════════════\n');
   return filled;
 }
 

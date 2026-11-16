@@ -930,8 +930,20 @@ export async function discoverFormFieldQuestions(page) {
           }).filter((t) => t && t.length < 120);
         }
       } else if (typeAttr === 'checkbox') {
-        const cbs = groupRoot.querySelectorAll('input[type="checkbox"]');
+        const cbs = Array.from(groupRoot.querySelectorAll('input[type="checkbox"]'));
         fieldType = cbs.length > 1 ? 'checkbox-group' : 'checkbox';
+        if (cbs.length > 0) {
+          fieldOptions = cbs.map((cb) => {
+            const id = cb.id;
+            const ariaLabelledBy = cb.getAttribute('aria-labelledby');
+            const lab = (id && document.querySelector(`label[for="${CSS.escape(id)}"]`))
+              || (ariaLabelledBy && document.getElementById(ariaLabelledBy))
+              || cb.closest('label')
+              || cb.parentElement?.querySelector('label')
+              || cb.closest('[data-automation-id*="checkbox"]')?.querySelector('label');
+            return (lab?.textContent || cb.getAttribute('aria-label') || cb.value || '').replace(/\s+/g, ' ').trim();
+          }).filter((t) => t && t.length < 120);
+        }
       } else if (typeAttr === 'date' || control.getAttribute('role') === 'spinbutton') {
         fieldType = 'date';
       }

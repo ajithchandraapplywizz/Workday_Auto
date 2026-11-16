@@ -144,6 +144,42 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   } catch (err) {
     console.log(`  ⚠️  Apply Wizz resume download failed: ${formatHttpError(err)}`);
     console.log(`     (Apply Wizz returned resume_url in API — fetch ${url ? 'attempted' : 'skipped: no URL'})`);
+
+    // ── FALLBACK: Supabase Storage bucket 'client-resumes' ──────────────────────
+    const clientAwlId = String(
+      profile._applyWizzId
+      || profile.applywizz_id
+      || profile.applywizzId
+      || profile._dbClient?.applywizz_id
+      || profile._dbClient?.applywizzId
+      || process.env.APPLYWIZZ_ID
+      || ''
+    ).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+
+    if (clientAwlId && clientAwlId !== 'CLIENT') {
+      try {
+        const { supabase } = await import('./supabaseClient.mjs');
+        if (supabase?.storage) {
+          const { data: publicData } = supabase.storage.from('client-resumes').getPublicUrl(`${clientAwlId}.pdf`);
+          const sbUrl = publicData?.publicUrl;
+          if (sbUrl) {
+            console.log(`  📥 [Cloud Fallback] Fetching authentic resume from Supabase Storage: ${clientAwlId}.pdf...`);
+            await downloadBinary(sbUrl, cached, { rejectUnauthorized: true });
+            if (existsSync(cached)) {
+              profile._resumePath = cached;
+              profile._resumeUrl = sbUrl;
+              profile._resumeDownloadedForApplication = true;
+              profile._resumeApplicationKey = applicationKey;
+              console.log(`  ✅ Resume cached from Supabase Storage: ${basename(cached)}`);
+              return cached;
+            }
+          }
+        }
+      } catch (sbErr) {
+        console.log(`  ⚠️ Supabase Storage resume fallback failed: ${sbErr.message}`);
+      }
+    }
+
     return profile._resumePath || null;
   }
 }

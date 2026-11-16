@@ -979,6 +979,21 @@ export async function executeWorkerTask({
             scan.reason = 'zoho mail not connected';
             scan.isZohoNotConnected = true;
           }
+
+          // STRICT PASSWORD RESET PENDING HANDLER:
+          if (authRes?.passwordResetPending || authRes?.status === 'ready_for_review' || authRes?.reason === 'password_reset_pending') {
+            console.log(`   ⏳ [${workerId}] Password reset instructions submitted for ${applywizzId} — awaiting Zoho Mail delivery. Closing browser cleanly to protect memory.`);
+            unregisterActiveBrowser(browser, workerId);
+            await browser.close().catch(() => {});
+            return {
+              status: 'ready_for_review',
+              reason: 'password_reset_pending',
+              passwordResetPending: true,
+              error: authRes.error_message || authRes.error || `[password_reset_requested:${authRes.requestedAt || Date.now()}] Password reset requested on Workday — awaiting Zoho Mail delivery`,
+              screenshotUrl: authRes.screenshotUrl || null,
+              stoppedAtStep: 'Authentication',
+            };
+          }
           await page.waitForTimeout(1500).catch(() => {});
           if (authRes === 'already_applied' || await isWorkdayAlreadyApplied(page)) {
             console.log(`   ℹ️ [${workerId}] Candidate ${applywizzId} ALREADY APPLIED to this job after credentials check.`);
@@ -2686,23 +2701,25 @@ export async function executeSingleTargetedSubmission({
     bot_name: `Submitting Worker ${workerId.slice(-1)}`,
   }).catch(() => {});
 
-  if (distributionId) {
-    await supabase.from('job_distributions').update({
-      status: 'applying',
-      worker_id: workerId,
-      reviewed_by: 'Career Associate',
-      reviewed_at: now,
-      updated_at: now,
-    }).eq('id', distributionId).catch(() => {});
-  } else {
-    await supabase.from('job_distributions').update({
-      status: 'applying',
-      worker_id: workerId,
-      reviewed_by: 'Career Associate',
-      reviewed_at: now,
-      updated_at: now,
-    }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).catch(() => {});
-  }
+  try {
+    if (distributionId) {
+      await supabase.from('job_distributions').update({
+        status: 'applying',
+        worker_id: workerId,
+        reviewed_by: 'Career Associate',
+        reviewed_at: now,
+        updated_at: now,
+      }).eq('id', distributionId);
+    } else {
+      await supabase.from('job_distributions').update({
+        status: 'applying',
+        worker_id: workerId,
+        reviewed_by: 'Career Associate',
+        reviewed_at: now,
+        updated_at: now,
+      }).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl);
+    }
+  } catch {}
 
   // 3. Execute submission task via Playwright
   let result = null;

@@ -179,8 +179,7 @@ function isNoisyLog(text) {
     /Batch Success Rate/i.test(trimmed) ||
     /^#\s*\|\s*Candidate\s*\|\s*Company/i.test(trimmed) ||
     /^\d+\s*\|\s*AWL-[A-Za-z0-9_-]+/i.test(trimmed) ||
-    /^\[#\d+\]\s*[✅❌ℹ️]/i.test(trimmed) ||
-    /^[═─┌└┼│\-─=]{10,}$/.test(trimmed)
+    /^\[#\d+\]\s*[✅❌ℹ️]/i.test(trimmed)
   ) {
     return false;
   }

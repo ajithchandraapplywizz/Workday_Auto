@@ -688,10 +688,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
   // Sibling AWL-ID cascade: If a candidate requires Zoho verification but their mailbox is not connected,
   // do NOT fail the job link. Reject only that candidate and immediately try the next candidate AWL-ID in the list!
-  const candidatePool = Array.from(new Set([
-    ...allSiblingAwlIds,
-    ...(MOCK_SCAN_CLIENT_ID ? [MOCK_SCAN_CLIENT_ID] : []),
-  ].filter(Boolean)));
+  const candidatePool = allSiblingAwlIds.length > 0
+    ? allSiblingAwlIds
+    : (MOCK_SCAN_CLIENT_ID ? [MOCK_SCAN_CLIENT_ID] : []);
 
   let deadJob = false;
 

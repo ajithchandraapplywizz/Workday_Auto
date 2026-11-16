@@ -280,6 +280,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
         return finishSuccessfulLogin(page, mode, profile);
       }
     }
+
+    // STRICT RESUMPTION GUARD: If password reset was requested and is waiting for Zoho delivery, return immediately!
+    if (forgotResult?.passwordResetPending || forgotResult?.status === 'ready_for_review' || forgotResult?.reason === 'password_reset_pending') {
+      return forgotResult;
+    }
   }
 
   // 3. Check if email verification is requested
@@ -338,6 +343,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
         return finishSuccessfulLogin(page, mode, profile);
       }
     }
+
+    // STRICT RESUMPTION GUARD: If password reset was requested and is waiting for Zoho delivery, return immediately!
+    if (forgotResult?.passwordResetPending || forgotResult?.status === 'ready_for_review' || forgotResult?.reason === 'password_reset_pending') {
+      return forgotResult;
+    }
   }
 
   // 4. Return to Sign In page and attempt login with registered credentials
@@ -385,10 +395,13 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     password: effectivePassword,
     company,
     timeoutMs: 55000,
+    applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
+    jobUrl: page.url(),
+    distributionId: profile?._distributionId || '',
   }).catch(() => null);
 
-  if (finalForgot?.reason === 'mailbox_not_connected') {
-    return 'mailbox_not_connected';
+  if (finalForgot?.reason === 'mailbox_not_connected' || finalForgot?.reason === 'zoho mail not connected' || finalForgot?.isZohoNotConnected) {
+    return { status: 'zoho_not_connected', reason: 'zoho mail not connected', isZohoNotConnected: true };
   }
 
   if (finalForgot?.success) {
@@ -400,6 +413,11 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     if (postResetLogin === true || await isWorkdayWizardVisible(page)) {
       return finishSuccessfulLogin(page, mode, profile);
     }
+  }
+
+  // STRICT RESUMPTION GUARD: If password reset was requested and is waiting for Zoho delivery, return immediately!
+  if (finalForgot?.passwordResetPending || finalForgot?.status === 'ready_for_review' || finalForgot?.reason === 'password_reset_pending') {
+    return finalForgot;
   }
 
   if (await isWorkdayWizardVisible(page)) {
@@ -919,6 +937,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           if (postForgotLogin === true || await isWorkdayWizardVisible(page)) {
             return finishSuccessfulLogin(page, mode, profile);
           }
+        }
+
+        // STRICT RESUMPTION GUARD: If password reset was requested and is waiting for Zoho delivery, return immediately!
+        if (forgotResult?.passwordResetPending || forgotResult?.status === 'ready_for_review' || forgotResult?.reason === 'password_reset_pending') {
+          return forgotResult;
         }
       }
 

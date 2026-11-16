@@ -152,11 +152,19 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
   }
 
   const path = await resolveResumePath(null);
+  const targetAwl = String(profile?._applyWizzId || profile?.applywizz_id || '').toUpperCase();
+  if (targetAwl && targetAwl !== 'CLIENT') {
+    if (path && !basename(path).toUpperCase().includes(targetAwl)) {
+      console.warn(`    ⚠️  Strict Resume Match: Rejecting mismatched resume ${basename(path)} for client ${targetAwl}`);
+      return null;
+    }
+  }
+
   if (path && profile) profile._resumePath = path;
   if (path) {
     console.log(`    📎 Resume resolved: ${basename(path)}`);
   } else {
-    console.log('    ⚠️  No resume PDF found under resumes/ (checked cwd + auto-apply roots)');
+    console.log('    ⚠️  No matching resume PDF found for client (checked cloud + data/client-resumes/)');
   }
   return path;
 }

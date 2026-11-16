@@ -1989,8 +1989,14 @@ async function readCheckboxGroupOptions(fieldBox) {
     let boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
     if (!boxes.length) boxes = Array.from(doc.querySelectorAll('input[type="checkbox"]'));
     return boxes.map((cb) => {
-      const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
-      return (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const id = cb.id;
+      const ariaLabelledBy = cb.getAttribute('aria-labelledby');
+      const lab = (id && doc.querySelector(`label[for="${CSS.escape(id)}"]`))
+        || (ariaLabelledBy && doc.getElementById(ariaLabelledBy))
+        || cb.closest('label')
+        || cb.parentElement?.querySelector('label')
+        || cb.closest('[data-automation-id*="checkbox"]')?.querySelector('label');
+      return (lab?.textContent || cb.getAttribute('aria-label') || cb.value || '').replace(/\s+/g, ' ').trim();
     }).filter(Boolean);
   }).catch(() => []);
 }
@@ -2054,7 +2060,8 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
       }).catch(() => false) || isMandatoryField(label);
 
       if (isMandatory) {
-        const fallbackOpt = groupOptions.find((o) => /^(i\s+consent|consent|i\s+agree|i\s+acknowledge|i\s+accept|agree|accept|acknowledge)\b/i.test(o))
+        const fallbackOpt = (workTypeGroup ? groupOptions.find((o) => /full[-\s]?time/i.test(o)) : null)
+          || groupOptions.find((o) => /^(i\s+consent|consent|i\s+agree|i\s+acknowledge|i\s+accept|agree|accept|acknowledge)\b/i.test(o))
           || groupOptions.find((o) => /^(none\s+of\s+the\s+above|not\s+applicable|n\/?a|i\s+choose\s+not|decline|prefer\s+not\s+to\s+say|i\s+do\s+not\s+wish|not\s+declared)\b/i.test(o))
           || groupOptions[0];
         if (fallbackOpt) {
@@ -2084,8 +2091,14 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
     return boxes
       .filter((cb) => cb.checked)
       .map((cb) => {
-        const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
-        return (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+        const id = cb.id;
+        const ariaLabelledBy = cb.getAttribute('aria-labelledby');
+        const lab = (id && doc.querySelector(`label[for="${CSS.escape(id)}"]`))
+          || (ariaLabelledBy && doc.getElementById(ariaLabelledBy))
+          || cb.closest('label')
+          || cb.parentElement?.querySelector('label')
+          || cb.closest('[data-automation-id*="checkbox"]')?.querySelector('label');
+        return (lab?.textContent || cb.getAttribute('aria-label') || cb.value || '').replace(/\s+/g, ' ').trim();
       })
       .filter(Boolean);
   }).catch(() => []);
@@ -2129,12 +2142,24 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
     if (!boxes.length) boxes = Array.from(doc.querySelectorAll('input[type="checkbox"]'));
 
     const labelOf = (cb) => {
-      const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
-      return (lab?.textContent || cb.getAttribute('aria-label') || '').replace(/\s+/g, ' ').trim();
+      const id = cb.id;
+      const ariaLabelledBy = cb.getAttribute('aria-labelledby');
+      const lab = (id && doc.querySelector(`label[for="${CSS.escape(id)}"]`))
+        || (ariaLabelledBy && doc.getElementById(ariaLabelledBy))
+        || cb.closest('label')
+        || cb.parentElement?.querySelector('label')
+        || cb.closest('[data-automation-id*="checkbox"]')?.querySelector('label');
+      return (lab?.textContent || cb.getAttribute('aria-label') || cb.value || '').replace(/\s+/g, ' ').trim();
     };
     const setChecked = (cb, want) => {
       if (cb.checked === want) return;
-      const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+      const id = cb.id;
+      const ariaLabelledBy = cb.getAttribute('aria-labelledby');
+      const lab = (id && doc.querySelector(`label[for="${CSS.escape(id)}"]`))
+        || (ariaLabelledBy && doc.getElementById(ariaLabelledBy))
+        || cb.closest('label')
+        || cb.parentElement?.querySelector('label')
+        || cb.closest('[data-automation-id*="checkbox"]')?.querySelector('label');
       if (lab) lab.click();
       else cb.click();
       if (cb.checked !== want) {

@@ -850,8 +850,13 @@ export async function executeWorkdayForgotPassword(page, {
         const autoId = await inp.getAttribute('data-automation-id').catch(() => '');
         const name = await inp.getAttribute('name').catch(() => '');
         if (autoId === 'beecatcher' || name === 'website') continue;
+        await inp.click().catch(() => {});
+        await inp.fill('').catch(() => {});
         await inp.fill(email);
-        await page.waitForTimeout(200).catch(() => {});
+        await inp.dispatchEvent('input').catch(() => {});
+        await inp.dispatchEvent('change').catch(() => {});
+        await page.keyboard.press('Tab').catch(() => {});
+        await page.waitForTimeout(300).catch(() => {});
         return true;
       }
     }
@@ -900,9 +905,16 @@ export async function executeWorkdayForgotPassword(page, {
         return { success: false, reason: 'submit_button_not_found' };
       }
     } else {
+      await submitBtn.scrollIntoViewIfNeeded().catch(() => {});
       await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-      await page.waitForTimeout(1000).catch(() => {});
-      try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
+      await page.keyboard.press('Enter').catch(() => {});
+      await page.waitForTimeout(1500).catch(() => {});
+      try {
+        await Promise.race([
+          page.waitForLoadState('networkidle', { timeout: 4000 }),
+          page.waitForSelector(':has-text("email with instructions"), :has-text("check your email"), :has-text("instructions")', { timeout: 3000 })
+        ]);
+      } catch {}
 
       // MANDATORY SCREENSHOT: Immediately after clicking "Reset Password" once
       try {

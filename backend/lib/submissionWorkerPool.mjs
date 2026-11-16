@@ -1440,6 +1440,34 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         return { status: 'stopped', reason: 'Stopped by user' };
       }
 
+      // PASSWORD RESET PENDING: Protect against attempt burn while waiting for Zoho Mail delivery
+      const isPasswordResetPending = Boolean(
+        result?.passwordResetPending ||
+        result?.reason === 'password_reset_pending' ||
+        /password_reset_pending|password reset requested/i.test(rawErrMsg)
+      );
+
+      if (isPasswordResetPending) {
+        const resetMsg = result?.error || `[Attempt 1/3] Halted at "Authentication": [password_reset_requested:${result?.requestedAt || Date.now()}] Password reset requested on Workday — awaiting Zoho Mail delivery (valid for 2 hours)`;
+        const resetShot = result?.screenshotUrl || finalShotUrl;
+        console.log(`⏳ [STAGE 3: SUBMITTER] [${workerId}] Password reset instructions submitted for ${task.applywizz_id} — preserving in ready_for_review without burning attempt count.`);
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            worker_leased_at: null,
+            error_message: resetShot ? `${resetMsg} [diagnostic_screenshot: ${resetShot}]` : resetMsg,
+            application_submitted_screenshot_url: resetShot || undefined,
+            updated_at: now,
+          },
+        });
+        return { status: 'ready_for_review', reason: 'password_reset_pending' };
+      }
+
       const isHostResourceError = Boolean(
         /spawn.*EAGAIN|browserType\.launch|Failed to launch|HOST_RESOURCE_EXHAUSTION|ENOMEM|EACCES/i.test(rawErrMsg)
       );
@@ -1693,16 +1721,17 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
           });
 
           if (result?.status === 'job_expired' || /expired|no longer available/i.test(rawErrMsg)) {
-            await supabase.from('batch_job_queue')
-              .update({
-                status: 'expired',
-                screenshot_path: finalShotUrl,
-                worker_id: null,
-                locked_at: null,
-                updated_at: now,
-              })
-              .eq('job_url', task.job_url)
-              .catch(() => {});
+            try {
+              await supabase.from('batch_job_queue')
+                .update({
+                  status: 'expired',
+                  screenshot_path: finalShotUrl,
+                  worker_id: null,
+                  locked_at: null,
+                  updated_at: now,
+                })
+                .eq('job_url', task.job_url);
+            } catch {}
           }
         } catch (recErr) {
           console.warn(`[${workerId}] Warning writing to failed_jobs:`, recErr.message);

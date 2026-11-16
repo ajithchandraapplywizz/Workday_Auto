@@ -2937,7 +2937,14 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
 
     const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-    const isScan = Boolean(profile?._isScanning || mode === 'scan' || mode === 'scanning');
+    const isScan = Boolean(
+      profile?._isScanning ||
+      profile?._isScanOnly ||
+      profile?._isClusterBlueprint ||
+      profile?._stage === 'scanning' ||
+      mode === 'scan' ||
+      mode === 'scanning'
+    );
     const action = isScan ? 'Scanning' : 'Submitting';
 
     // Standardized single-line uppercase step name
