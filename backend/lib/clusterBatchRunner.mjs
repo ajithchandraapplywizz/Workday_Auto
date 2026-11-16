@@ -1853,6 +1853,30 @@ export async function runClusterBatchRunner({
             break; // Terminate worker loop immediately
           }
 
+          const isHostResourceError = Boolean(
+            /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM|EACCES/i.test(err?.message || '')
+          );
+
+          if (isHostResourceError) {
+            console.warn(`\n⚠️ [Scanning Worker ${slot}] Host resource limitation caught on batch #${myIndex + 1} (${errorUrl}): ${err.message}. Safely resetting task(s) to pending for automatic retry.`);
+            try {
+              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+                if (taskIds.length > 0) {
+                  await resetClusterTasksToPending(taskIds);
+                }
+              }
+            } catch (resetErr) {
+              console.warn(`[RESOURCE ROLLBACK ERROR]`, resetErr.message);
+            }
+            try {
+              const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
+              cleanupOrphanChromeProcesses({ ignoreSlots: true });
+            } catch {}
+            await new Promise((r) => setTimeout(r, 6000 + Math.floor(Math.random() * 4000)));
+            continue;
+          }
+
           console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${errorUrl}): ${err.message}`);
           try {
             const { recordFailedJob } = await import('./supabaseClient.mjs');

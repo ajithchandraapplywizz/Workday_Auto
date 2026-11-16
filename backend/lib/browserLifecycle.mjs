@@ -34,15 +34,20 @@ export const LEAN_CHROMIUM_ARGS = [
 
 /**
  * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID / pthread_create limit exhaustion.
- * STRICT GUARD: Never reap processes if any active browser or worker context is currently alive!
+ * STRICT GUARD: Never reap processes if any active browser context is currently alive, unless forced.
  */
-export function cleanupOrphanChromeProcesses() {
-  if (activeBrowsers.size > 0 || activeSlots.size > 0 || activeWorkerContexts.size > 0) {
-    return;
+export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = false } = {}) {
+  if (!force) {
+    if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0) {
+      return;
+    }
+    if (!ignoreSlots && activeSlots.size > 0) {
+      return;
+    }
   }
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || pkill -9 -f "crashpad_handler" || true', () => {});
+      exec('pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || true', () => {});
       exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
     } catch {}
   }
@@ -118,6 +123,13 @@ export function getDynamicMaxBrowsers() {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
   if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
+  // In Linux container environments (Railway / Docker cgroups), strictly enforce MAX_ACTIVE_BROWSERS = 1
+  // per container to prevent Linux pthread_create (errno 11) & spawn EAGAIN resource exhaustion.
+  // Concurrency is scaled horizontally across container replicas (Scanner_Resolver_1/2, Submitting_1/2).
+  if (process.platform === 'linux') {
+    return 1;
+  }
+
   const envWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
     Number(process.env.SUBMIT_WORKERS) ||
     Number(process.env.SUBMISSION_WORKER_COUNT) ||
@@ -130,8 +142,7 @@ export function getDynamicMaxBrowsers() {
     return Math.floor(envWorkers);
   }
 
-  // Default to 2 concurrent active browsers per container,
-  // allowing both workers in each submitting service to work simultaneously.
+  // Default to 2 concurrent active browsers per container on local/Windows development
   return 2;
 }
 

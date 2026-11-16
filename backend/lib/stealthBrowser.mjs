@@ -52,6 +52,14 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disable-translate',                      // Disable Google Translate overhead
     '--disk-cache-size=33554432',               // Cap disk cache to 32MB
     '--media-cache-size=1',                     // Disable media cache
+    // ── Linux Thread & Process Exhaustion Prevention (pthread_create 11 & EAGAIN) ──
+    '--no-zygote',                              // Disable zygote process to prevent Linux cgroup process limits
+    '--in-process-gpu',                         // In-process GPU to eliminate external GPU sub-processes
+    '--renderer-process-limit=1',               // Strict limit: 1 renderer process per browser instance
+    '--num-raster-threads=1',                   // Strict limit: 1 raster thread (saves dozens of OS threads)
+    '--disable-threaded-animation',             // Disable threaded animation to reduce OS thread count
+    '--disable-threaded-scrolling',             // Disable threaded scrolling to reduce OS thread count
+    '--disable-features=AudioServiceOutOfProcess,OptimizationHints,Translate,PaintHolding,DialMediaRouteProvider,GlobalMediaControls', // Strip external service daemons
   ];
 
   const incomingArgs = Array.isArray(baseOptions.args) ? baseOptions.args : [];
@@ -131,6 +139,17 @@ function createResilientLauncher(extraLauncher = null) {
     const prepared = prepareLaunchOptions(baseOptions);
     const preferredChannel = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || baseOptions.channel || 'chromium';
 
+    const handleTierResourceCooldown = async (err) => {
+      const isRes = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page/i.test(err?.message || '');
+      if (isRes) {
+        try {
+          const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
+          cleanupOrphanChromeProcesses({ ignoreSlots: true });
+        } catch {}
+        await new Promise((r) => setTimeout(r, 1200));
+      }
+    };
+
     // Tier 1: Stealth launcher with full Chromium channel ("new headless" - avoids chrome-headless-shell SIGTRAP)
     if (origExtraLaunch) {
       try {
@@ -141,6 +160,7 @@ function createResilientLauncher(extraLauncher = null) {
         return wrapBrowserInstance(browser);
       } catch (err1) {
         console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}). Retrying stealth without channel...`);
+        await handleTierResourceCooldown(err1);
         // Tier 2: Stealth launcher with default headless shell
         try {
           const { channel: _, ...withoutChannel } = prepared;
@@ -148,6 +168,7 @@ function createResilientLauncher(extraLauncher = null) {
           return wrapBrowserInstance(browser);
         } catch (err2) {
           console.warn(`[STEALTH] Stealth launch failed (${err2?.message}), falling back to standard Chromium.`);
+          await handleTierResourceCooldown(err2);
         }
       }
     }
@@ -161,6 +182,7 @@ function createResilientLauncher(extraLauncher = null) {
       return wrapBrowserInstance(browser);
     } catch (err3) {
       console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}). Retrying standard without channel...`);
+      await handleTierResourceCooldown(err3);
     }
 
     // Tier 4: Standard Chromium with default binary and hardened container args
@@ -170,6 +192,7 @@ function createResilientLauncher(extraLauncher = null) {
       return wrapBrowserInstance(browser);
     } catch (err4) {
       console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}). Attempting minimal safe container launch...`);
+      await handleTierResourceCooldown(err4);
     }
 
     // Tier 5: Minimal emergency container launch

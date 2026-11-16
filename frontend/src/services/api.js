@@ -715,10 +715,10 @@ export async function fetchOperators({ status = '', managerId = '', dateStr = ''
     }
 
     const [authRes, clientRes, appRes, mgrsRes] = await Promise.all([
-      supabase.from('auth_users').select('email, status, last_sign_in').catch(() => ({ data: [] })),
-      supabase.from('clients').select('applywizz_id, current_ca_email').catch(() => ({ data: [] })),
-      supabase.from('job_distributions').select('applywizz_id, status').catch(() => ({ data: [] })),
-      supabase.from('managers').select('id, name').catch(() => ({ data: [] })),
+      Promise.resolve(supabase.from('auth_users').select('email, status, last_sign_in')).catch(() => ({ data: [] })),
+      Promise.resolve(supabase.from('clients').select('applywizz_id, current_ca_email')).catch(() => ({ data: [] })),
+      Promise.resolve(supabase.from('job_distributions').select('applywizz_id, status')).catch(() => ({ data: [] })),
+      Promise.resolve(supabase.from('managers').select('id, name')).catch(() => ({ data: [] })),
     ]);
 
     const mgrMap = new Map((mgrsRes.data || []).map((m) => [m.id, m.name]));

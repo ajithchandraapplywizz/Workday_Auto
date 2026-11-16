@@ -520,50 +520,54 @@ export async function executeWorkerTask({
   // 5. Launch isolated Playwright browser context (dynamically sized to match active workers and env)
   cleanupOrphanChromeProcesses();
   await acquireBrowserSlot(workerId);
-  const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
-  await new Promise((r) => setTimeout(r, launchJitterMs));
-  appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
   let browser = null;
-  for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
-    try {
-      browser = await chromium.launch({
-        headless: Boolean(headless),
-        channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
-        args: LEAN_CHROMIUM_ARGS,
-      });
-      break;
-    } catch (launchErr) {
-      const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
-      console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
-      cleanupOrphanChromeProcesses();
-      if (launchAttempt < 3) {
-        const retryDelay = isHostResourceError ? 3000 + Math.floor(Math.random() * 2000) : 1000;
-        await new Promise((r) => setTimeout(r, retryDelay));
-      } else {
-        throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
-      }
-    }
-  }
-  registerActiveBrowser(browser, {
-    role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
-    workerId,
-  });
-  const context = await browser.newContext({
-    viewport: { width: 1280, height: 900 },
-    userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale: 'en-US',
-    timezoneId: 'America/New_York',
-  });
-  await context.clearCookies().catch(() => {});
-  await context.clearPermissions().catch(() => {});
-  await context.addInitScript(() => {
-    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-  }).catch(() => {});
-  const page = await context.newPage();
-  registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
+  let context = null;
+  let page = null;
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
+    const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
+    await new Promise((r) => setTimeout(r, launchJitterMs));
+    appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
+
+    for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
+      try {
+        browser = await chromium.launch({
+          headless: Boolean(headless),
+          channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
+          args: LEAN_CHROMIUM_ARGS,
+        });
+        break;
+      } catch (launchErr) {
+        const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
+        console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
+        cleanupOrphanChromeProcesses({ ignoreSlots: true });
+        if (launchAttempt < 3) {
+          const retryDelay = isHostResourceError ? (3000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
+          await new Promise((r) => setTimeout(r, retryDelay));
+        } else {
+          throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
+        }
+      }
+    }
+    registerActiveBrowser(browser, {
+      role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
+      workerId,
+    });
+    context = await browser.newContext({
+      viewport: { width: 1280, height: 900 },
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'en-US',
+      timezoneId: 'America/New_York',
+    });
+    await context.clearCookies().catch(() => {});
+    await context.clearPermissions().catch(() => {});
+    await context.addInitScript(() => {
+      Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+    }).catch(() => {});
+    page = await context.newPage();
+    registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
+
     // Direct submission is strictly forbidden during scan / blueprint tasks (Stage 1)
     const directSubmit = isDirectSubmission && !isScanTask;
     let status;
@@ -687,10 +691,14 @@ export async function executeWorkerTask({
           updated_at: now,
         };
         if (distId) {
-          await supabase.from('job_distributions').update(distPatch).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
+          try {
+            await supabase.from('job_distributions').update(distPatch).eq('id', distId).neq('status', 'submitted').neq('status', 'completed');
+          } catch {}
         }
         if (applywizzId && jobUrl) {
-          await supabase.from('job_distributions').update(distPatch).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
+          try {
+            await supabase.from('job_distributions').update(distPatch).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed');
+          } catch {}
         }
       }
 
@@ -760,12 +768,14 @@ export async function executeWorkerTask({
           if (distId) {
             const { supabase } = await import('./supabaseClient.mjs');
             if (supabase) {
-              await supabase.from('job_distributions').update({
-                status: 'already_applied',
-                error_message: null,
-                application_submitted_screenshot_url: alreadyShotUrl,
-                updated_at: now,
-              }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
+              try {
+                await supabase.from('job_distributions').update({
+                  status: 'already_applied',
+                  error_message: null,
+                  application_submitted_screenshot_url: alreadyShotUrl,
+                  updated_at: now,
+                }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed');
+              } catch {}
             }
           }
 
@@ -947,12 +957,14 @@ export async function executeWorkerTask({
         if (distId) {
           const { supabase } = await import('./supabaseClient.mjs');
           if (supabase) {
-            await supabase.from('job_distributions').update({
-              status: 'already_applied',
-              error_message: 'Application already submitted on Workday',
-              application_submitted_screenshot_url: alreadyShotUrl,
-              updated_at: now,
-            }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').catch(() => {});
+            try {
+              await supabase.from('job_distributions').update({
+                status: 'already_applied',
+                error_message: 'Application already submitted on Workday',
+                application_submitted_screenshot_url: alreadyShotUrl,
+                updated_at: now,
+              }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed');
+            } catch {}
           }
         }
 
@@ -1132,12 +1144,14 @@ export async function executeWorkerTask({
           if (distId) {
             const { supabase } = await import('./supabaseClient.mjs');
             if (supabase) {
-              await supabase.from('job_distributions').update({
-                status: 'failed',
-                error_message: failReasonText,
-                application_submitted_screenshot_url: authShotUrl,
-                updated_at: new Date().toISOString(),
-              }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
+              try {
+                await supabase.from('job_distributions').update({
+                  status: 'failed',
+                  error_message: failReasonText,
+                  application_submitted_screenshot_url: authShotUrl,
+                  updated_at: new Date().toISOString(),
+                }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+              } catch {}
             }
           }
           if (isZohoNotConnected && workdayEmail) {
@@ -1805,10 +1819,14 @@ export async function executeWorkerTask({
           });
         } catch {
           if (distId) {
-            await supabase.from('job_distributions').update(distUpdate).eq('id', distId).catch(() => {});
+            try {
+              await supabase.from('job_distributions').update(distUpdate).eq('id', distId);
+            } catch {}
           }
           if (applywizzId && jobUrl) {
-            await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
+            try {
+              await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+            } catch {}
           }
         }
         console.log(`   ✅ [${workerId}] job_distributions marked 'submitted' with proof screenshot.`);
@@ -1838,10 +1856,14 @@ export async function executeWorkerTask({
           });
         } catch {
           if (distId) {
-            await supabase.from('job_distributions').update(distUpdate).eq('id', distId).catch(() => {});
+            try {
+              await supabase.from('job_distributions').update(distUpdate).eq('id', distId);
+            } catch {}
           }
           if (applywizzId && jobUrl) {
-            await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl).catch(() => {});
+            try {
+              await supabase.from('job_distributions').update(distUpdate).eq('applywizz_id', applywizzId).eq('job_url', jobUrl);
+            } catch {}
           }
         }
         console.log(`   ℹ️ [${workerId}] job_distributions marked 'already_applied' with proof screenshot.`);
@@ -2671,10 +2693,14 @@ export async function executeSingleTargetedSubmission({
       updated_at: completionTimestamp,
     };
     if (distributionId) {
-      await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
+      try {
+        await supabase.from('job_distributions').update(updateBody).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+      } catch {}
     }
     if (finalApplywizzId && finalJobUrl) {
-      await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => {});
+      try {
+        await supabase.from('job_distributions').update(updateBody).eq('applywizz_id', finalApplywizzId).eq('job_url', finalJobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+      } catch {}
     }
   }
 

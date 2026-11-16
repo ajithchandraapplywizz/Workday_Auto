@@ -2157,9 +2157,13 @@ const server = http.createServer(async (req, res) => {
         updated_at: nowIso,
       };
       if (distributionId) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
+        try {
+          await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        } catch {}
       } else if (cleanId && jobUrl) {
-        await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
+        try {
+          await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        } catch {}
       }
 
 
@@ -2188,12 +2192,14 @@ const server = http.createServer(async (req, res) => {
       // All 3 submitting workers are currently in_flight -> Queue this application!
       console.log(`\n⏳ [DAEMON WEBHOOK] All 3 submitting workers are busy. Queuing application for ${cleanId}...`);
 
-      await supabase.from('job_distributions').update({
-        status: 'queued',
-        reviewed_by: 'Career Associate',
-        reviewed_at: nowIso,
-        updated_at: nowIso,
-      }).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null).catch(() => { });
+      try {
+        await supabase.from('job_distributions').update({
+          status: 'queued',
+          reviewed_by: 'Career Associate',
+          reviewed_at: nowIso,
+          updated_at: nowIso,
+        }).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+      } catch {}
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({
