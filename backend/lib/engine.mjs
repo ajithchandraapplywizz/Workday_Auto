@@ -441,6 +441,13 @@ export async function promptUserInTerminal(label, fieldType, options = [], { com
 
 // ─── Workday Resume Upload (direct setInputFiles — never open OS file picker) ─
 async function findResumeFileInput(page) {
+  // If there is exactly one file input on the page, it is definitively the resume/document uploader
+  const allFileInputs = page.locator('input[type="file"]');
+  const fileInputCount = await allFileInputs.count().catch(() => 0);
+  if (fileInputCount === 1) {
+    return allFileInputs.first();
+  }
+
   const scoreInput = (el) => el.evaluate((node) => {
     let score = 0;
     let current = node;
@@ -448,14 +455,14 @@ async function findResumeFileInput(page) {
       const text = (current.textContent || '').toLowerCase().replace(/\s+/g, ' ');
       const auto = (current.getAttribute?.('data-automation-id') || '').toLowerCase();
       const hasCoverLetter = /cover\s*letter|additional\s*attachment|supporting\s*document/i.test(text) || /coverletter|additionalattachment/i.test(auto);
-      const hasResume = /resume\s*\/\s*cv|\bresume\b|\bcv\b/i.test(text) || /resume|\bcv\b/i.test(auto);
+      const hasResume = /resume\s*\/\s*cv|\bresume\b|\bcv\b|upload a file|drop files here|select files/i.test(text) || /resume|\bcv\b|fileupload|file-upload/i.test(auto);
 
       if (hasCoverLetter && !hasResume) {
         return -100;
       }
       if (hasResume) score += 50;
-      if (/upload a file|drop files here|select files|attachments?/i.test(text)) score += 10;
-      if (/file-?upload|fileupload|attachment/i.test(auto)) score += 20;
+      if (/upload a file|drop files here|select files|attachments?/i.test(text)) score += 20;
+      if (/file-?upload|fileupload|attachment/i.test(auto)) score += 25;
     }
     const accept = (node.getAttribute('accept') || '').toLowerCase();
     if (/pdf|doc|\*/.test(accept) || !accept) score += 5;
@@ -491,6 +498,7 @@ async function findResumeFileInput(page) {
   }
 
   if (best && bestScore >= 0) return best;
+  if (fileInputCount > 0) return allFileInputs.first();
   return null;
 }
 
@@ -508,15 +516,15 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
     await page.waitForTimeout(700);
     const state = await page.evaluate((needle) => {
       const item = document.querySelector(
-        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+        '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"], [data-automation-id="fileItem"], [data-automation-id="file-item"], [data-automation-id="selectedFile"]'
       );
-      const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+      const deleteBtn = document.querySelector('[data-automation-id="delete-file"], [data-automation-id="delete-file-button"], button[aria-label*="Delete" i], button[aria-label*="Remove" i], [data-automation-id*="deleteFile"]');
       const itemText = (item?.textContent || '').replace(/\s+/g, ' ').trim();
       const body = document.body?.innerText || '';
       const successBanner = /successfully\s*uploaded/i.test(body);
       const nameHit = needle
         ? itemText.toLowerCase().includes(needle) || (deleteBtn && body.toLowerCase().includes(needle))
-        : /\.pdf\b/i.test(itemText);
+        : /\.pdf\b/i.test(itemText) || /\.pdf\b/i.test(body);
       return {
         hasItem: Boolean(item && (item.offsetParent !== null || item.getClientRects().length > 0)),
         hasDelete: Boolean(deleteBtn),
@@ -557,9 +565,9 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
 
   const already = await page.evaluate((needle) => {
     const item = document.querySelector(
-      '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"]'
+      '[data-automation-id="file-upload-item"], [data-automation-id="file-upload-item-name"], [data-automation-id*="uploadedFile"], [class*="file-upload-item"], [data-automation-id="fileItem"], [data-automation-id="file-item"], [data-automation-id="selectedFile"]'
     );
-    const deleteBtn = document.querySelector('[data-automation-id="delete-file"]');
+    const deleteBtn = document.querySelector('[data-automation-id="delete-file"], [data-automation-id="delete-file-button"], button[aria-label*="Delete" i], button[aria-label*="Remove" i], [data-automation-id*="deleteFile"]');
     const text = ((item?.textContent || '') + ' ' + (document.body?.innerText || '')).toLowerCase();
     if (item && (item.offsetParent !== null || item.getClientRects().length > 0)) {
       if (!needle || text.includes(needle) || /\.pdf\b/i.test(item.textContent || '')) {
@@ -567,6 +575,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
       }
     }
     if (deleteBtn && needle && text.includes(needle)) return needle;
+    if (deleteBtn && /\.pdf\b/i.test(text)) return 'uploaded file';
     return '';
   }, fileName.replace(/\.[^.]+$/, '').slice(0, 24).toLowerCase()).catch(() => '');
 
@@ -642,7 +651,7 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
   try {
     const hasVisiblePhone = await page.locator('input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 400 }).catch(() => false);
     if (!hasVisiblePhone) {
-      const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, button[data-automation-id="Add"]').first();
+      const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, [data-automation-id*="phone" i] button[data-automation-id="Add"], button:has-text("Add Phone")').first();
       if (await addPhoneBtn.isVisible({ timeout: 600 }).catch(() => false)) {
         console.log('    ➕ Expanding Phone section via "Add" button...');
         await addPhoneBtn.click({ force: true }).catch(() => addPhoneBtn.evaluate(el => el.click()));
@@ -749,10 +758,22 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
 
   // 5. Fill / Verify Phone Number
   try {
-    const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[name*="phoneNumber" i], input[type="tel"]')
-      .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
-      .or(page.getByLabel(/^phone\s*number/i))
-      .first();
+    const phoneLocators = [
+      'input[data-automation-id="phone-number"]',
+      'input[data-automation-id*="phoneNumber" i]',
+      'input[data-automation-id*="phone-device-number" i]',
+      'input#phoneNumber--phoneNumber',
+      'input[id*="phoneNumber" i]',
+      'input[name*="phoneNumber" i]',
+      'input[type="tel"]',
+      'input[data-automation-id*="phone" i]:not([type="hidden"])',
+    ];
+    let phoneNumberInput = page.locator(phoneLocators.join(', ')).first();
+    if (!await phoneNumberInput.isVisible({ timeout: 500 }).catch(() => false)) {
+      phoneNumberInput = page.getByRole('textbox', { name: /^(phone|mobile|contact\s*phone)(\s*(number|phone))?(\s*\*|$)/i })
+        .or(page.getByLabel(/^(phone|mobile|contact\s*phone)(\s*(number|phone))?(\s*\*|$)/i))
+        .first();
+    }
 
     if (await phoneNumberInput.isVisible({ timeout: 1500 }).catch(() => false)) {
       const currentDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');

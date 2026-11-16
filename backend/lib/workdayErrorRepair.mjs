@@ -339,15 +339,16 @@ async function fillMarkedField(page, descriptor, answer) {
 
   if (descriptor.fieldType === 'radio' || descriptor.fieldType === 'checkbox-group') {
     const clicked = await field.evaluate((root, target) => {
-      const norm = (v) => (v || '').replace(/\s+/g, ' ').trim().toLowerCase();
+      const norm = (v) => (v || '').toLowerCase().replace(/[-_]/g, ' ').replace(/\s+/g, ' ').trim();
       const want = norm(target);
       const boxes = Array.from(root.querySelectorAll('input[type="radio"], input[type="checkbox"]'));
       for (const box of boxes) {
         const labelEl = box.id ? root.querySelector(`label[for="${CSS.escape(box.id)}"]`) : box.closest('label');
         const text = norm(labelEl?.textContent || box.getAttribute('aria-label'));
         if (!text) continue;
-        if (text === want || text.includes(want) || want.includes(text)) {
+        if (text === want || text.includes(want) || want.includes(text) || (/full\s*time/i.test(want) && /full\s*time/i.test(text))) {
           (labelEl || box).click();
+          box.dispatchEvent(new Event('change', { bubbles: true }));
           return true;
         }
       }
@@ -624,8 +625,8 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
 
   const names = parseErrorFieldNames(errors);
 
-  if (names.some(n => /resume|cv/i.test(n))) {
-    console.log('    📎 Workday validation flagged Resume — retrying resume upload from resumes/ folder...');
+  if (names.some(n => /resume|cv|upload a file|attachment|file/i.test(n))) {
+    console.log('    📎 Workday validation flagged Resume/Document upload — retrying authentic resume upload...');
     try {
       const { handleWorkdayResumeUpload } = await import('./engine.mjs');
       const { getResumePathForApply } = await import('./resumeParser.mjs');

@@ -1918,8 +1918,11 @@ function parseCheckboxGroupAnswers(answer, options = []) {
   }
   const raw = String(answer || '').trim();
   if (list.length && raw) {
-    const lower = raw.toLowerCase();
-    const hits = list.filter((opt) => lower.includes(opt.toLowerCase()));
+    const lower = raw.toLowerCase().replace(/[-_]/g, ' ');
+    const hits = list.filter((opt) => {
+      const optNorm = opt.toLowerCase().replace(/[-_]/g, ' ');
+      return lower.includes(optNorm) || optNorm.includes(lower);
+    });
     if (hits.length) return hits;
     if (isYesNoAnswer(raw) && !list.some((o) => isYesNoAnswer(o))) {
       const best = list.find((o) => /full[-\s]?time|regular/i.test(o)) || pickShiftOption(list);
@@ -1932,15 +1935,16 @@ function parseCheckboxGroupAnswers(answer, options = []) {
 function isWorkTypeCheckboxLabel(label = '') {
   const text = String(label || '');
   return /work\s*types?|employment\s*types?|schedule\s*preference|shift\s*preference|what.*schedule|hours?\s*per\s*week|available\s*for/i.test(text)
-    || /what\s*work\s*types?\s*are\s*you\s*open\s*to/i.test(text);
+    || /what\s*work\s*types?\s*are\s*you\s*open\s*to/i.test(text)
+    || /seeking a full[-\s]?time/i.test(text);
 }
 
 function isFullTimeWorkTypeLabel(label = '') {
-  return /^full[-\s]?time$/i.test(String(label || '').replace(/\*+/g, '').trim());
+  return /^full[-\s]?time(\s*(only|role|position|basis))?$/i.test(String(label || '').replace(/\*+/g, '').trim());
 }
 
 function isPartTimeWorkTypeLabel(label = '') {
-  return /^part[-\s]?time$/i.test(String(label || '').replace(/\*+/g, '').trim());
+  return /^part[-\s]?time(\s*(only|role|position|basis))?$/i.test(String(label || '').replace(/\*+/g, '').trim());
 }
 
 function isWorkTypeContainerText(text = '') {
@@ -2118,7 +2122,7 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
 
   const result = await fieldBox.evaluate((root, { targets, mode }) => {
     const doc = root.ownerDocument || document;
-    const norm = (v) => String(v || '').toLowerCase().replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
+    const norm = (v) => String(v || '').toLowerCase().replace(/[-_]/g, ' ').replace(/[^\w\s]/g, '').replace(/\s+/g, ' ').trim();
 
     // Scope to this field; only fall back to the page when the group sits outside it.
     let boxes = Array.from(root.querySelectorAll('input[type="checkbox"]'));
@@ -2130,12 +2134,14 @@ export async function fillCheckboxGroupField(page, fieldBox, label, answer, prof
     };
     const setChecked = (cb, want) => {
       if (cb.checked === want) return;
-      cb.click();
+      const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
+      if (lab) lab.click();
+      else cb.click();
       if (cb.checked !== want) {
-        const lab = cb.id ? doc.querySelector(`label[for="${CSS.escape(cb.id)}"]`) : cb.closest('label');
-        lab?.click();
+        cb.click();
       }
       cb.dispatchEvent(new Event('change', { bubbles: true }));
+      cb.dispatchEvent(new Event('input', { bubbles: true }));
     };
 
     const picked = [];

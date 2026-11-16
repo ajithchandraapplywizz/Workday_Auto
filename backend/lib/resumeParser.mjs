@@ -120,16 +120,18 @@ export async function resolveResumePath(explicitPath) {
  */
 export async function getResumePathForApply(profile = {}, plan = {}) {
   try {
-    const { isApplyWizzConfigured } = await import('./applyWizzClient.mjs');
     const { resolveApplyWizzResumeUrl, ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
-    if (isApplyWizzConfigured() && resolveApplyWizzResumeUrl(profile)) {
+    const candResumeUrl = resolveApplyWizzResumeUrl(profile);
+    if (candResumeUrl) {
       const fromApi = await ensureClientResumeFromApplyWizz(profile);
       if (fromApi) {
-        console.log(`    📎 Resume from Apply Wizz: ${basename(fromApi)}`);
+        console.log(`    📎 Candidate authentic resume cached: ${basename(fromApi)}`);
+        if (profile) profile._resumePath = fromApi;
         return fromApi;
       }
     }
-  } catch {
+  } catch (err) {
+    console.warn(`    ⚠️ Candidate resume resolution notice: ${err.message}`);
     /* fall through to local resumes/ */
   }
 

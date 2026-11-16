@@ -442,6 +442,44 @@ export async function executeWorkerTask({
   if (rawInfo.disability_status) profile.eeo.disability_status = rawInfo.disability_status;
   if (rawInfo.is_hispanic_latino) profile.eeo.hispanic_latino = rawInfo.is_hispanic_latino;
 
+  // Wire authentic client resume URL & context from Supabase clients table
+  const authenticResumeUrl = candidateDbClient.resume_url
+    || rawInfo.resume_url
+    || rawInfo.resume_path
+    || rawClient.resume_url
+    || rawClient.resume_path
+    || '';
+  if (authenticResumeUrl) {
+    profile._resumeUrl = authenticResumeUrl;
+    profile.resume_url = authenticResumeUrl;
+  }
+  profile._applyWizzId = applywizzId;
+  profile.applywizz_id = applywizzId;
+  profile._applyWizzClientContext = candidateDbClient.raw_profile_json || { additional_information: rawInfo, client: rawClient };
+
+  // Mobile number fallback across raw profile JSON
+  if (!cleanCandidateDigits || cleanCandidateDigits.length < 7) {
+    const rawMobile = rawInfo.phone_number || rawInfo.mobile_number || rawInfo.primary_phone || rawClient.phone_number || rawClient.mobile_number || rawClient.callable_phone || '';
+    const extraDigits = String(rawMobile).replace(/\D/g, '').slice(-10);
+    if (extraDigits.length >= 7) {
+      profile.personal.phone = extraDigits;
+      profile.personal.mobile_number = extraDigits;
+      profile.phone = extraDigits;
+    }
+  }
+
+  // Pre-fetch/cache candidate authentic resume PDF immediately for Stage 1 scanning and Stage 3 submission
+  if (profile._resumeUrl || candidateDbClient.resume_url) {
+    try {
+      const { getResumePathForApply } = await import('./resumeParser.mjs');
+      const cachedResume = await getResumePathForApply(profile, {});
+      if (cachedResume) {
+        profile._resumePath = cachedResume;
+        console.log(`   📎 [${workerId}] Loaded authentic candidate resume: ${basename(cachedResume)}`);
+      }
+    } catch {}
+  }
+
   const workdayPassword = defaultPassword || process.env.WORKDAY_PASSWORD || 'Applywizz@2026789';
 
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
@@ -578,12 +616,18 @@ export async function executeWorkerTask({
       appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
       console.log(`   ⚡ [${workerId}] Direct Submission Mode: Skipping scanForm & generatePlan. Filling directly from pre-resolved answers.`);
 
-      // Pick resume for candidate
-      console.log(`   [${workerId}] Preparing resume...`);
-      const resumesYml = findFilePath('config/resumes.yml');
-      let resumePath = null;
-      if (existsSync(resumesYml)) {
-        resumePath = await pickResume('', resumesYml);
+      // Pick authentic candidate resume (clients.resume_url -> cached PDF)
+      console.log(`   [${workerId}] Preparing authentic candidate resume...`);
+      let resumePath = profile._resumePath || null;
+      if (!resumePath) {
+        const { getResumePathForApply } = await import('./resumeParser.mjs');
+        resumePath = await getResumePathForApply(profile, {}).catch(() => null);
+      }
+      if (!resumePath) {
+        const resumesYml = findFilePath('config/resumes.yml');
+        if (existsSync(resumesYml)) {
+          resumePath = await pickResume('', resumesYml);
+        }
       }
       if (resumePath) profile._resumePath = resumePath;
 
@@ -1233,15 +1277,21 @@ export async function executeWorkerTask({
     }
   }
 
-    // Step B: Pick resume for candidate
-    console.log(`   [${workerId}] Step 2: Preparing resume...`);
+    // Step B: Pick authentic candidate resume (clients.resume_url -> cached PDF)
+    console.log(`   [${workerId}] Step 2: Preparing authentic candidate resume...`);
     let jdText = '';
     try { jdText = await extractJDText(page); } catch {}
     const jdWords = jdText ? jdText.split(/\s+/).filter(Boolean).length : 0;
-    const resumesYml = findFilePath('config/resumes.yml');
-    let resumePath = null;
-    if (existsSync(resumesYml)) {
-      resumePath = await pickResume(jdText, resumesYml);
+    let resumePath = profile._resumePath || null;
+    if (!resumePath) {
+      const { getResumePathForApply } = await import('./resumeParser.mjs');
+      resumePath = await getResumePathForApply(profile, { jdText }).catch(() => null);
+    }
+    if (!resumePath) {
+      const resumesYml = findFilePath('config/resumes.yml');
+      if (existsSync(resumesYml)) {
+        resumePath = await pickResume(jdText, resumesYml);
+      }
     }
     if (resumePath) profile._resumePath = resumePath;
     const resumeFile = resumePath ? basename(resumePath) : 'Candidate_ATS_Resume.pdf';

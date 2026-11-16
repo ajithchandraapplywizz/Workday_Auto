@@ -34,6 +34,13 @@ export function absolutizeApplyWizzResumeUrl(raw = '') {
 export function resolveApplyWizzResumeUrl(profile = {}) {
   const raw = String(
     profile._resumeUrl
+    || profile.resume_url
+    || profile._dbClient?.resume_url
+    || profile._dbClient?.resume_path
+    || profile._dbClient?.raw_profile_json?.additional_information?.resume_url
+    || profile._dbClient?.raw_profile_json?.additional_information?.resume_path
+    || profile._dbClient?.raw_profile_json?.client?.resume_url
+    || profile._dbClient?.raw_profile_json?.client?.resume_path
     || profile._applyWizzClientContext?.additional_information?.resume_url
     || profile._applyWizzClientContext?.additional_information?.resume_path
     || profile._applyWizzClientContext?.client?.resume_url
@@ -44,7 +51,15 @@ export function resolveApplyWizzResumeUrl(profile = {}) {
 }
 
 function cachePathForClient(profile = {}) {
-  const id = String(profile._applyWizzId || process.env.APPLYWIZZ_ID || 'client').replace(/[^\w.-]+/g, '_');
+  const id = String(
+    profile._applyWizzId
+    || profile.applywizz_id
+    || profile.applywizzId
+    || profile._dbClient?.applywizz_id
+    || profile._dbClient?.applywizzId
+    || process.env.APPLYWIZZ_ID
+    || 'client'
+  ).replace(/[^\w.-]+/g, '_');
   return resolve(CACHE_DIR, `${id}.pdf`);
 }
 
