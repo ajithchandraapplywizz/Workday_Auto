@@ -447,7 +447,8 @@ export default function DeveloperDashboard() {
       const s = statusFilter.toLowerCase();
       if (s === 'submitted') return st === 'submitted' || st === 'completed';
       if (s === 'applying' || s === 'in_progress') return ['applying', 'in_flight', 'in_progress', 'started'].includes(st);
-      if (s === 'ready_for_review') return ['ready_for_review', 'ready_to_review', 'already_scanned', 'review_and_submit', 'distributed'].includes(st);
+      if (s === 'ready_for_review' || s === 'queued') return (st === 'ready_for_review' || st === 'ready_to_review') && app.is_fully_answered === true;
+      if (s === 'needs_answers') return st === 'needs_answers' || app.is_fully_answered === false;
       return st === s;
     });
   }, [applications, statusFilter]);
@@ -1279,7 +1280,7 @@ export default function DeveloperDashboard() {
 
             {/* Tile 5: Queued */}
             <div className="video-kpi-box">
-              <span className="vkpi-label">QUEUED</span>
+              <span className="vkpi-label">READY FOR REVIEW (IN QUEUE)</span>
               <span className="vkpi-val">{kpis.queued}</span>
             </div>
           </div>
@@ -2402,12 +2403,12 @@ export default function DeveloperDashboard() {
               className="video-select-filter"
             >
               <option value="All">All Statuses</option>
-              <option value="queued">Queued</option>
-              <option value="already_scanned">Already Scanned</option>
+              <option value="ready_for_review">Ready For Review (In Queue)</option>
+              <option value="needs_answers">Needs Answers</option>
               <option value="applying">Applying (In Progress)</option>
-              <option value="ready_for_review">Ready For Review</option>
               <option value="submitted">Submitted</option>
               <option value="failed">Failed</option>
+              <option value="already_scanned">Already Scanned</option>
               <option value="skipped">Skipped</option>
             </select>
             <span style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
@@ -2891,7 +2892,7 @@ export default function DeveloperDashboard() {
         <div className="tab-body-fade">
           <div className="video-kpi-row">
             <div className="video-kpi-box">
-              <span className="vkpi-label">QUEUED TASKS</span>
+              <span className="vkpi-label">READY FOR REVIEW IN QUEUE</span>
               <span className="vkpi-val">{queueItems.length || kpis.queued}</span>
             </div>
             <div className="video-kpi-box">
@@ -2905,7 +2906,7 @@ export default function DeveloperDashboard() {
           </div>
 
           <div className="video-card-section" style={{ marginTop: '1rem' }}>
-            <span className="vcs-title">CURRENTLY QUEUED CANDIDATES &amp; WORKDAY JOB LINKS</span>
+            <span className="vcs-title">APPLICATIONS IN QUEUE READY FOR REVIEW</span>
             <div className="video-table-container" style={{ marginTop: '0.75rem' }}>
               <table className="video-data-table">
                 <thead>

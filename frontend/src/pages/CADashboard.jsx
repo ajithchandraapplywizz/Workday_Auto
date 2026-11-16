@@ -413,7 +413,7 @@ export default function CADashboard() {
               job_url: dj.job_url,
               company: dj.company || sj?.company || 'Workday Partner',
               role_title: dj.role_title || sj?.role_title || 'Workday Application',
-              status: (dj.status === 'distributed' || dj.status === 'ready_to_review') ? 'ready_for_review' : dj.status,
+              status: dj.status === 'ready_to_review' ? 'ready_for_review' : dj.status,
               is_fully_answered: dj.is_fully_answered,
               resolved_answers: dj.resolved_answers || [],
               unanswered_count: dj.unanswered_count || 0,
@@ -518,7 +518,7 @@ export default function CADashboard() {
                   changed = true;
                   return {
                     ...j,
-                    status: (f.status === 'distributed' || f.status === 'ready_to_review') ? 'ready_for_review' : f.status,
+                    status: f.status === 'ready_to_review' ? 'ready_for_review' : f.status,
                     application_submitted_screenshot_url: freshProof,
                     applied_screenshot: freshProof,
                     screenshot_url: freshProof,
@@ -1136,18 +1136,18 @@ export default function CADashboard() {
                       const isSub = j.status === 'submitted';
                       const isAlreadyApplied = j.status === 'already_applied';
                       const isApplying = j.status === 'applying' || j.status === 'in_flight' || j.status === 'in_progress';
-                      const isQ = j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission';
-                      const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers';
+                      const isQ = (j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission') && j.is_fully_answered === true;
+                      const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers' || j.is_fully_answered === false;
                       const isSelected = activeTask?.id === j.id;
                       const isSubmitted = j.status === 'submitted' || j.status === 'already_applied';
                       const cardScreenshot = (isSubmitted || j.application_submitted_screenshot_url || j.applied_screenshot)
                         ? (j.application_submitted_screenshot_url || j.applied_screenshot || j.screenshot_url || null)
                         : null;
 
-                      let badgeBg = 'rgba(56, 189, 248, 0.15)';
-                      let badgeColor = '#38bdf8';
-                      let badgeBorder = 'rgba(56, 189, 248, 0.3)';
-                      let badgeText = 'READY FOR REVIEW';
+                      let badgeBg = hasMissing ? 'rgba(245, 158, 11, 0.15)' : 'rgba(56, 189, 248, 0.15)';
+                      let badgeColor = hasMissing ? '#fbbf24' : '#38bdf8';
+                      let badgeBorder = hasMissing ? 'rgba(245, 158, 11, 0.35)' : 'rgba(56, 189, 248, 0.3)';
+                      let badgeText = hasMissing ? `NEEDS ANSWERS (${j.unanswered_count || 1})` : 'READY FOR REVIEW';
 
                       if (isSub) {
                         badgeBg = 'rgba(16, 185, 129, 0.15)';

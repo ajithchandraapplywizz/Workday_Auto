@@ -281,8 +281,9 @@ export async function fetchBatchQueue() {
 
     let query = supabase
       .from('job_distributions')
-      .select('id, applywizz_id, job_url, company, role_title, status, created_at, updated_at')
-      .in('status', ['ready_to_review', 'ready_for_review', 'review_and_submit', 'queued', 'queued_for_submission', 'distributed', 'pending', 'approved_for_submission', 'needs_answers'])
+      .select('id, applywizz_id, job_url, company, role_title, status, is_fully_answered, created_at, updated_at')
+      .in('status', ['ready_for_review', 'ready_to_review'])
+      .eq('is_fully_answered', true)
       .neq('status', 'archived');
 
     if (activeBatchUrls && activeBatchUrls.length > 0) {
@@ -1001,7 +1002,7 @@ export async function fetchApplicationsDynamic({
   applywizzId = '',
   dateStr = '',
   timeframe = '',
-  limit = 200,
+  limit = 1000,
 } = {}) {
   try {
     let query = supabase.from('job_distributions').select('*').order('updated_at', { ascending: false }).limit(limit);
@@ -1010,12 +1011,12 @@ export async function fetchApplicationsDynamic({
       const s = status.toLowerCase();
       if (s === 'applying' || s === 'in_progress' || s === 'in_flight') {
         query = query.in('status', ['in_progress', 'started', 'applying', 'in_flight']);
-      } else if (s === 'queued' || s === 'pending') {
-        query = query.in('status', ['queued', 'queued_for_submission', 'pending', 'distributed', 'ready_for_review', 'ready_to_review', 'review_and_submit', 'approved_for_submission']);
-      } else if (s === 'ready_for_review' || s === 'ready_to_review') {
-        query = query.in('status', ['ready_for_review', 'ready_to_review', 'distributed', 'review_and_submit']);
+      } else if (s === 'queued' || s === 'ready_for_review' || s === 'ready_to_review') {
+        query = query.in('status', ['ready_for_review', 'ready_to_review']).eq('is_fully_answered', true);
+      } else if (s === 'needs_answers') {
+        query = query.or('status.eq.needs_answers,is_fully_answered.eq.false');
       } else if (s === 'submitted' || s === 'completed') {
-        query = query.in('status', ['submitted', 'completed', 'already_applied']);
+        query = query.in('status', ['submitted', 'completed']);
       } else if (s === 'already_applied') {
         query = query.eq('status', 'already_applied');
       } else {
@@ -1049,12 +1050,6 @@ export async function fetchApplicationsDynamic({
       isToday = !dateStr || bounds.startDateStr === formatLocalDate(new Date());
       startMs = new Date(bounds.startIso).getTime();
       endMs = new Date(bounds.endIso).getTime();
-
-      if (isToday) {
-        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
-      } else {
-        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso}),status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
-      }
     }
 
     const { data, error } = await query;
@@ -1079,10 +1074,12 @@ export async function fetchApplicationsDynamic({
       let normalizedStatus = rawSt;
       if (rawSt === 'submitted' || rawSt === 'completed') {
         normalizedStatus = 'submitted';
-      } else if (['ready_for_review', 'ready_to_review', 'already_scanned', 'distributed', 'review_and_submit'].includes(rawSt)) {
-        normalizedStatus = 'ready_for_review';
+      } else if (rawSt === 'ready_for_review' || rawSt === 'ready_to_review') {
+        normalizedStatus = (dt.is_fully_answered === false || (dt.unanswered_count && dt.unanswered_count > 0)) ? 'needs_answers' : 'ready_for_review';
       } else if (['queued', 'queued_for_submission', 'pending', 'approved_for_submission'].includes(rawSt)) {
-        normalizedStatus = 'queued';
+        normalizedStatus = (dt.is_fully_answered === false || (dt.unanswered_count && dt.unanswered_count > 0)) ? 'needs_answers' : 'queued';
+      } else if (rawSt === 'needs_answers') {
+        normalizedStatus = 'needs_answers';
       } else if (['applying', 'in_flight', 'in_progress', 'started'].includes(rawSt)) {
         normalizedStatus = 'in_flight';
       } else if (rawSt === 'failed') {
@@ -1165,7 +1162,7 @@ export async function fetchApplicationsDynamic({
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
     let query = supabase.from('job_distributions')
-      .select('id, status, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at, job_url')
+      .select('id, status, is_fully_answered, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at, job_url')
       .neq('status', 'archived');
 
     if (managerId && managerId !== 'All') {
@@ -1185,12 +1182,6 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       isToday = !dateStr || bounds.startDateStr === formatLocalDate(new Date());
       startMs = new Date(bounds.startIso).getTime();
       endMs = new Date(bounds.endIso).getTime();
-
-      if (isToday) {
-        query = query.or(`worker_leased_at.gte.${bounds.startIso},created_at.gte.${bounds.startIso},updated_at.gte.${bounds.startIso},status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
-      } else {
-        query = query.or(`and(worker_leased_at.gte.${bounds.startIso},worker_leased_at.lte.${bounds.endIso}),and(created_at.gte.${bounds.startIso},created_at.lte.${bounds.endIso}),and(updated_at.gte.${bounds.startIso},updated_at.lte.${bounds.endIso}),status.in.(applying,in_flight,in_progress,ready_for_review,ready_to_review,queued,queued_for_submission,distributed,pending,approved_for_submission,needs_answers,review_and_submit)`);
-      }
     }
 
     const { data: apps, error: appsErr } = await query;
@@ -1254,21 +1245,10 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return st === 'failed' && matchesDay(a);
     }).length;
 
-    // 4. Queued: ready_to_review / ready_for_review / queued / distributed / pending / etc.
+    // 4. Queued: Strictly completely resolved applications with status ready_for_review / ready_to_review AND is_fully_answered === true
     const queued = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      const isQ = [
-        'ready_to_review',
-        'ready_for_review',
-        'already_scanned',
-        'review_and_submit',
-        'queued',
-        'queued_for_submission',
-        'distributed',
-        'pending',
-        'approved_for_submission',
-        'needs_answers'
-      ].includes(st);
+      const isQ = (st === 'ready_for_review' || st === 'ready_to_review') && a.is_fully_answered === true;
       const isRecentBatch = !activeBatchUrls?.length || activeBatchUrls.includes(a.job_url?.trim());
       return isQ && isRecentBatch;
     }).length;
@@ -3654,7 +3634,9 @@ export async function fetchClientApplications(applywizzId, { dateStr = '', timef
           company: d.company || 'Workday Employer',
           role_title: d.role_title || 'Workday Application',
           ats: 'Workday',
-          status: (rawStatus === 'distributed' || rawStatus === 'ready_to_review') ? 'ready_for_review' : rawStatus,
+          status: (rawStatus === 'distributed' || rawStatus === 'ready_to_review')
+            ? (d.is_fully_answered === false || unansCount > 0 ? 'needs_answers' : 'ready_for_review')
+            : (rawStatus === 'ready_for_review' && (d.is_fully_answered === false || unansCount > 0) ? 'needs_answers' : rawStatus),
           scraped_questions: d.scraped_questions || [],
           resolved_answers: d.resolved_answers || [],
           unanswered_questions: unans,
