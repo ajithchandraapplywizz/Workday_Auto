@@ -7,7 +7,7 @@ import { hydrateProfileFromApplyWizz, resolveDomQuestionFromApplyWizz, isApplyWi
 import { peekClientAnswer, acceptClientValue, resolveClientAnswer, lookupResolvedAnswerFromProfile } from '../clientAnswer.mjs';
 import { lookupSupabaseAnswerSync, upsertSupabaseAnswer, recordSupabaseAnswerInMemory } from '../supabaseClient.mjs';
 import { resolveMinimumAgeAnswer } from '../minimumAge.mjs';
-import { isMandatoryField } from '../scanFieldFilter.mjs';
+import { isMandatoryField, isPhoneRelatedField } from '../scanFieldFilter.mjs';
 import { findBestMatch, normalizeLabel, isComplianceSensitive } from '../qaStore.mjs';
 import { toTitleCase } from '../personName.mjs';
 import { isApiOnlyAnswerMode } from '../apiOnlyProfile.mjs';
@@ -241,6 +241,21 @@ function deterministicSpecial(field, profile) {
     const isText = /textarea|text|free-text/i.test(String(field.elementType || field.controlType || field.fieldType || ''));
     const val = isText ? 'No limitations' : 'No';
     return finish(field, intent, val, SOURCE.DETERMINISTIC, REASON.EXPLICIT_PROFILE_MATCH, 0.96);
+  }
+
+  if (intent === 'identity_phone' || isPhoneRelatedField(label, field) || /phone|mobile|tel\b/i.test(label)) {
+    const raw = profile?.personal?.phone
+      || profile?.personal?.mobile_number
+      || profile?.phone
+      || profile?._dbClient?.mobile_number
+      || profile?._dbClient?.phone
+      || profile?._applyWizzClientContext?.additional_information?.primary_phone
+      || profile?._applyWizzClientContext?.client?.callable_phone
+      || profile?._applyWizzClientContext?.client?.phone
+      || '5102662606';
+    const digits = String(raw).replace(/\D/g, '').slice(-10);
+    const phone = digits.length >= 7 ? digits : '5102662606';
+    return finish(field, 'identity_phone', phone, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
   }
 
   if (intent === 'commute_ability') {

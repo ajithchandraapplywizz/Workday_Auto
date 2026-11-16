@@ -1464,13 +1464,18 @@ export function getStaffAuthHeaders(baseHeaders = {}) {
       if (parsed?.email) {
         headers['x-staff-email'] = parsed.email;
       }
+      if (parsed?.token || parsed?.session?.access_token) {
+        headers['Authorization'] = `Bearer ${parsed.token || parsed.session?.access_token}`;
+      }
     }
   } catch {}
   try {
     const anonKey = (typeof import.meta !== 'undefined' && import.meta.env?.VITE_SUPABASE_ANON_KEY) || SUPABASE_ANON_KEY || '';
     if (anonKey) {
       headers['apikey'] = anonKey;
-      headers['Authorization'] = `Bearer ${anonKey}`;
+      if (!headers['Authorization']) {
+        headers['Authorization'] = `Bearer ${anonKey}`;
+      }
     }
   } catch {}
   return headers;

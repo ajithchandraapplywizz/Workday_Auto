@@ -110,15 +110,29 @@ const waitingQueue = [];
 
 /**
  * Dynamically calculates the maximum allowable concurrent browsers from environment variables.
- * Defaults strictly to 1 active browser per service container to prevent Linux pthread_create (11)
- * resource exhaustion and container OOM crashes.
+ * Defaults to 2 active browsers per service container (or WORKER_COUNT from env)
+ * to allow both dedicated submitting workers in each service (e.g. submitting_worker_1 & 2 on Service 1,
+ * and submitting_worker_3 & 4 on Service 2) to execute applications concurrently.
  */
 export function getDynamicMaxBrowsers() {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
   if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
-  // Strict Single-Browser Limit per service container (Workday Auto container hardening)
-  return 1;
+  const envWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
+    Number(process.env.SUBMIT_WORKERS) ||
+    Number(process.env.SUBMISSION_WORKER_COUNT) ||
+    Number(process.env.WORKER_COUNT) ||
+    Number(process.env.WORKERS_COUNT) ||
+    Number(process.env.WORKERS) ||
+    Number(process.env.MAX_WORKERS);
+
+  if (Number.isFinite(envWorkers) && envWorkers > 0) {
+    return Math.floor(envWorkers);
+  }
+
+  // Default to 2 concurrent active browsers per container,
+  // allowing both workers in each submitting service to work simultaneously.
+  return 2;
 }
 
 const MAX_CONCURRENT_BROWSERS = getDynamicMaxBrowsers();
@@ -129,9 +143,9 @@ let submitStopRequested = false;
 
 /**
  * Acquire an active Playwright browser slot dynamically referencing worker counts from env.
- * Enforces strict per-service mutual exclusion ("if one is running in same service, don't open another;
- * if one closes, another has to open").
- * If dynamic slot limit is reached, pauses execution asynchronously until the running browser exits.
+ * Enforces per-service concurrency limits (allowing all configured workers in the container,
+ * default 2 per container, to work simultaneously without serializing).
+ * If dynamic slot limit is reached, pauses execution asynchronously until an active browser exits.
  */
 export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
   if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {

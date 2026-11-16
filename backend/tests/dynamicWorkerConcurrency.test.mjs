@@ -74,14 +74,14 @@ test('Worker lease expiry logic accurately detects leases older than timeout', (
   assert.equal(isNullExpired, true);
 });
 
-test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env and defaults safely to 1', async () => {
+test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env and defaults safely to 2', async () => {
   const { getDynamicMaxBrowsers } = await import('../lib/browserLifecycle.mjs');
 
   const originalMax = process.env.MAX_ACTIVE_BROWSERS;
 
   try {
     delete process.env.MAX_ACTIVE_BROWSERS;
-    assert.equal(getDynamicMaxBrowsers(), 1, 'Default should be 1 browser per container');
+    assert.equal(getDynamicMaxBrowsers(), 2, 'Default should be 2 concurrent browsers per container');
 
     process.env.MAX_ACTIVE_BROWSERS = '1';
     assert.equal(getDynamicMaxBrowsers(), 1, 'Should respect explicit MAX_ACTIVE_BROWSERS=1');
@@ -97,36 +97,41 @@ test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env an
   }
 });
 
-test('acquireBrowserSlot strictly enforces single browser mutex and serializes workers in same service', async () => {
+test('acquireBrowserSlot allows concurrent browsers up to effectiveMax (2) and queues on overflow', async () => {
   const { acquireBrowserSlot, releaseBrowserSlot } = await import('../lib/browserLifecycle.mjs');
 
   const originalMax = process.env.MAX_ACTIVE_BROWSERS;
-  process.env.MAX_ACTIVE_BROWSERS = '1';
+  process.env.MAX_ACTIVE_BROWSERS = '2';
 
   try {
     // 1. Worker 1 acquires slot
     const acquiredW1 = await acquireBrowserSlot('submitting_worker_1');
     assert.equal(acquiredW1, true, 'Worker 1 should acquire initial slot');
 
-    // 2. Worker 2 attempts to acquire slot while Worker 1 is active (must be queued/waiting)
-    let worker2Acquired = false;
-    const w2Promise = acquireBrowserSlot('submitting_worker_2').then((res) => {
-      worker2Acquired = res;
+    // 2. Worker 2 acquires slot concurrently (both workers work simultaneously in same service)
+    const acquiredW2 = await acquireBrowserSlot('submitting_worker_2');
+    assert.equal(acquiredW2, true, 'Worker 2 should acquire slot concurrently with Worker 1');
+
+    // 3. Worker 3 attempts to acquire slot while Worker 1 & 2 are active (must be queued/waiting)
+    let worker3Acquired = false;
+    const w3Promise = acquireBrowserSlot('submitting_worker_3').then((res) => {
+      worker3Acquired = res;
     });
 
-    // Verify Worker 2 is queued and hasn't acquired yet
+    // Verify Worker 3 is queued and hasn't acquired yet
     await new Promise((r) => setTimeout(r, 100));
-    assert.equal(worker2Acquired, false, 'Worker 2 must not acquire slot while Worker 1 is running');
+    assert.equal(worker3Acquired, false, 'Worker 3 must not acquire slot while capacity is full');
 
-    // 3. Worker 1 finishes and releases browser slot
+    // 4. Worker 1 finishes and releases browser slot
     releaseBrowserSlot('submitting_worker_1');
 
-    // 4. Worker 2 should immediately receive slot
-    await w2Promise;
-    assert.equal(worker2Acquired, true, 'Worker 2 must acquire slot immediately after Worker 1 closes');
+    // 5. Worker 3 should immediately receive slot
+    await w3Promise;
+    assert.equal(worker3Acquired, true, 'Worker 3 must acquire slot immediately after a worker closes');
 
-    // Cleanup Worker 2 slot
+    // Cleanup remaining slots
     releaseBrowserSlot('submitting_worker_2');
+    releaseBrowserSlot('submitting_worker_3');
   } finally {
     if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
     else delete process.env.MAX_ACTIVE_BROWSERS;

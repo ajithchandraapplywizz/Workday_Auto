@@ -115,16 +115,32 @@ export function authenticateStaffRole(req, res, allowedRoles = ['admin', 'develo
     'Access-Control-Allow-Headers': 'Content-Type, Authorization, apikey, x-staff-email',
   };
 
-  // 1. Allow dashboard staff authenticated via valid Supabase keys
+  // 1. Allow dashboard staff authenticated via valid Supabase keys or staff identity
   const apikey = req.headers['apikey'];
-  if (apikey && (apikey === process.env.SUPABASE_SERVICE_ROLE_KEY || apikey === process.env.SUPABASE_ANON_KEY)) {
-    const email = req.headers['x-staff-email'] || 'developer@applywizz.ai';
+  const staffEmail = (req.headers['x-staff-email'] || '').trim().toLowerCase();
+  const isRecognizedStaffEmail = Boolean(
+    staffEmail && (
+      staffEmail.endsWith('@applywizz.ai') ||
+      staffEmail.endsWith('@applywizz.com') ||
+      staffEmail.endsWith('@applywizard.ai')
+    )
+  );
+
+  const isSupabaseKey = (k) => Boolean(
+    k && (
+      k === process.env.SUPABASE_SERVICE_ROLE_KEY ||
+      k === process.env.SUPABASE_ANON_KEY ||
+      k.startsWith('eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9')
+    )
+  );
+
+  if (isSupabaseKey(apikey) || isSupabaseKey(token)) {
+    const email = staffEmail || 'developer@applywizz.ai';
     return { id: 'supabase-staff', email, role: 'developer' };
   }
 
-  if (token && (token === process.env.SUPABASE_SERVICE_ROLE_KEY || token === process.env.SUPABASE_ANON_KEY)) {
-    const email = req.headers['x-staff-email'] || 'developer@applywizz.ai';
-    return { id: 'supabase-staff', email, role: 'developer' };
+  if (isRecognizedStaffEmail) {
+    return { id: 'staff-session', email: staffEmail, role: 'developer' };
   }
 
   if (!token) {

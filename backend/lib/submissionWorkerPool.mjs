@@ -435,6 +435,32 @@ export async function moveReadyTasksToQueued(limit = getDynamicSubmitWorkerCount
 
  */
 
+/**
+ * Counts all remaining applications awaiting submission across the system.
+ * Returns total count of unsubmitted ready_for_review, ready_to_review, queued, or in-flight applying tasks.
+ */
+export async function getRemainingReadyForReviewCount() {
+  if (!supabase) return 0;
+  try {
+    const { count, error } = await supabase
+      .from('job_distributions')
+      .select('*', { count: 'exact', head: true })
+      .in('status', ['ready_for_review', 'ready_to_review', 'queued', 'applying'])
+      .is('application_submitted_screenshot_url', null)
+      .neq('status', 'submitted')
+      .neq('status', 'completed')
+      .neq('status', 'archived');
+    if (error) {
+      console.warn('[SUBMISSION QUEUE] getRemainingReadyForReviewCount error:', error.message);
+      return 0;
+    }
+    return typeof count === 'number' ? count : 0;
+  } catch (err) {
+    console.warn('[SUBMISSION QUEUE] getRemainingReadyForReviewCount exception:', err.message);
+    return 0;
+  }
+}
+
 export async function claimNextTask(workerId) {
   if (!workerId || !supabase) return null;
 

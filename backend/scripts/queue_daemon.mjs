@@ -796,9 +796,32 @@ export async function runStage3Submissions({ isStreaming = false } = {}) {
               deepCleanWhenZeroActiveInstances();
             } catch {}
           }
-          // Continuous standby: wait 3s before re-checking for unlocked or newly ready applications
+
+          // 1. If sibling workers in this container are still active, wait 3s and retry claiming
+          if (activeSubmittingWorkers.size > 0) {
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+
+          // 2. No active workers in this container: check remaining tasks across the queue
+          const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
+          const remaining = await getRemainingReadyForReviewCount();
+          if (remaining > 0) {
+            // Unprocessed or in-flight applications still exist — keep worker alive until every application is completed
+            await new Promise((r) => setTimeout(r, 3000));
+            continue;
+          }
+
+          // 3. Double-check confirmation after 3s to prevent premature exit during race conditions
           await new Promise((r) => setTimeout(r, 3000));
-          continue;
+          const confirmRemaining = await getRemainingReadyForReviewCount();
+          if (confirmRemaining > 0) {
+            continue;
+          }
+
+          // 4. Truly 0 ready_for_review tasks remaining across all services — complete and exit loop!
+          console.log(`🏁 [SUBMISSION WORKER] ${workerId}: All ready_for_review applications completed (0 remaining). Exiting worker loop.`);
+          break;
         }
 
         activeSubmittingWorkers.add(workerId);
@@ -1239,8 +1262,76 @@ const server = http.createServer(async (req, res) => {
     } catch { }
   }
 
-  // 2a-1. Dedicated Stop Endpoints for Scan & Submit
+  // 2a-1. Dedicated Start & Stop Endpoints for Scan & Submit
+  if ((pathname === '/api/bot/submit/start' || pathname === '/api/bot/submit' || pathname === '/api/bot/start-submissions') && req.method === 'POST') {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
+
+    console.log(`\n🚀 [DAEMON WEBHOOK (${SERVICE_ROLE.toUpperCase()})] Direct submit start requested on ${pathname}!`);
+    setGlobalStop(false);
+    setSubmitStop(false);
+    isPoolPaused = false;
+
+    if (SERVICE_ROLE === 'main') {
+      await syncBotControlState({
+        last_action_requested: 'start_submit',
+        trigger_requested: true,
+        is_running: true,
+        stage: 'submitting',
+        mode: 'submitting',
+        submit_status: 'running',
+        submit_enabled: true,
+        submit_stop_requested: false,
+        stop_requested: false,
+        current_action: 'Submissions dispatched to Submitter Service via Supabase.',
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'Submit trigger dispatched to Submitter Service via Supabase.', stage: 'submitting' }));
+      return;
+    }
+
+    if (SERVICE_ROLE === 'scanner') {
+      console.log(`ℹ️ [SCANNER SERVICE] Submit signal received via direct webhook. Forwarding to dedicated Submitter service via Supabase.`);
+      await syncBotControlState({
+        submit_status: 'running',
+        submit_enabled: true,
+        submit_stop_requested: false,
+        last_action_requested: 'start_submit',
+        trigger_requested: true,
+        is_running: true,
+      });
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, message: 'Submit signal forwarded to Submitter Service via Supabase.', stage: 'submitting' }));
+      return;
+    }
+
+    // Submitter or combined
+    submitStatus = 'running';
+    isPoolRunning = true;
+    currentStage = 'submitting';
+    currentMode = 'submitting';
+
+    await syncBotControlState({
+      mode: 'submitting',
+      stage: 'submitting',
+      submit_enabled: true,
+      submit_status: 'running',
+      submit_stop_requested: false,
+      is_running: true,
+      stop_requested: false,
+      refusal_reason: null,
+      current_action: `Submitting approved applications across ${PIPELINE_CONFIG.submitWorkerIds.length} parallel workers`,
+      active_worker_count: PIPELINE_CONFIG.submitWorkerIds.length,
+    });
+    runStage3Submissions().catch(console.error);
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, message: 'Submission pipeline started cleanly across workers.', submit_status: 'running' }));
+    return;
+  }
+
   if ((pathname === '/api/bot/scan/stop' || pathname === '/api/bot/stop-scan') && req.method === 'POST') {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
     console.log(`\n🛑 [DAEMON WEBHOOK] Direct scan stop requested on ${pathname}`);
     await stopScanPool();
     res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -1253,30 +1344,22 @@ const server = http.createServer(async (req, res) => {
   }
 
   if ((pathname === '/api/bot/submit/stop' || pathname === '/api/bot/stop-submit') && req.method === 'POST') {
-
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
     console.log(`\n🛑 [DAEMON WEBHOOK] Direct submit stop requested on ${pathname}`);
-
     await stopSubmitPool();
-
     res.writeHead(200, { 'Content-Type': 'application/json' });
-
     res.end(JSON.stringify({
-
       success: true,
-
       message: 'Submission pipeline halted cleanly. Submitting workers idle.',
-
       submit_status: 'off',
-
     }));
-
     return;
-
   }
 
-
-
   if ((pathname === '/api/bot/universal' || pathname === '/api/bot/start-all') && req.method === 'POST') {
+    const authUser = authenticateStaffRole(req, res, ['admin', 'developer', 'dev']);
+    if (!authUser) return;
     console.log(`\n⚡ [DAEMON WEBHOOK (${SERVICE_ROLE.toUpperCase()})] Direct universal trigger requested on ${pathname}! Launching all stages concurrently.`);
     setGlobalStop(false);
     setScanStop(false);
@@ -2366,10 +2449,16 @@ export async function initOnStartup() {
     await reapExpiredLeases(10).catch(() => { });
     console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
 
-    // Only trigger immediate submissions on startup if explicitly requested via flag
-    if ((args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
-      console.log(`[DAEMON] Startup trigger detected: initiating Stage 3 Submissions across 2 workers...`);
-      runStage3Submissions().catch(console.error);
+    // Autonomous startup trigger: dedicated submitter container or explicit flag
+    if (SERVICE_ROLE === 'submitter' || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
+      const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
+      const pendingStartupCount = await getRemainingReadyForReviewCount();
+      if (pendingStartupCount > 0) {
+        console.log(`[DAEMON] Submitter startup detected ${pendingStartupCount} ready_for_review application(s): initiating Stage 3 Submissions across workers...`);
+        runStage3Submissions().catch(console.error);
+      } else {
+        console.log(`[DAEMON] Submitter startup: 0 ready_for_review tasks pending. Standing by in idle mode awaiting applications.`);
+      }
     }
 
     // Only trigger immediate scanning on startup if explicitly requested via flag
@@ -2691,6 +2780,47 @@ export async function initOnStartup() {
         submitStatus = 'running';
         runStage3Submissions({ isStreaming: isParallelSignal }).catch(console.error);
         return;
+      }
+
+      // 3b. Autonomous Stage 3 Trigger: Auto-start submissions on ready_for_review without any manual trigger
+      if (
+        SERVICE_ROLE !== 'scanner' &&
+        !isPoolRunning &&
+        submitStatus !== 'running' &&
+        activeSubmittingWorkers.size === 0
+      ) {
+        const isExplicitStop = Boolean(
+          bc?.stop_requested ||
+          bc?.submit_stop_requested ||
+          bc?.last_action_requested === 'stop_all' ||
+          bc?.last_action_requested === 'stop_submit' ||
+          submitCtrl?.stop_requested
+        );
+
+        if (!isExplicitStop && (process.env.SUBMIT_RUN !== 'false' && process.env.RUN !== 'false')) {
+          const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
+          const pendingCount = await getRemainingReadyForReviewCount();
+          if (pendingCount > 0) {
+            console.log(`\n🚀 [AUTONOMOUS SUBMIT TRIGGER (${SERVICE_ROLE.toUpperCase()})] Found ${pendingCount} ready_for_review application(s)! Auto-starting Stage 3 Submissions across ${PIPELINE_CONFIG.submitWorkersCount || 2} workers immediately...`);
+            isPoolRunning = true;
+            currentStage = 'submitting';
+            currentMode = 'submitting';
+            submitStatus = 'running';
+            await syncBotControlState({
+              is_running: true,
+              stage: 'submitting',
+              mode: 'submitting',
+              submit_status: 'running',
+              submit_enabled: true,
+              stop_requested: false,
+              submit_stop_requested: false,
+              current_action: `Autonomous Submissions: running ${pendingCount} ready_for_review application(s)`,
+              active_worker_count: PIPELINE_CONFIG.submitWorkersCount || 2,
+            }).catch(() => {});
+            runStage3Submissions().catch(console.error);
+            return;
+          }
+        }
       }
 
       if (!bc && !warnedMissingBotControl) {

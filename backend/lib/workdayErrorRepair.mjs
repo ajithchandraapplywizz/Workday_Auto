@@ -20,6 +20,7 @@ import { waitForDomSettled } from './workdayDom.mjs';
 import { fillEducationFieldOfStudy } from './workdayExperience.mjs';
 import { lookupSupabaseAnswerSync } from './supabaseClient.mjs';
 import { resolvePostalForWorkday } from './clientContact.mjs';
+import { isPhoneRelatedField } from './scanFieldFilter.mjs';
 
 /** Field names mentioned in Workday validation messages. */
 export function parseErrorFieldNames(errors = []) {
@@ -204,6 +205,21 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
       resumePath: profile._resumePath,
     },
   );
+  if (isPhoneRelatedField(label, descriptor) || /phone|mobile|tel\b/i.test(label)) {
+    const rawPhone = String(
+      profile?.personal?.phone
+      || profile?.personal?.mobile_number
+      || profile?.phone
+      || profile?._dbClient?.mobile_number
+      || profile?._dbClient?.phone
+      || profile?._applyWizzClientContext?.additional_information?.primary_phone
+      || profile?._applyWizzClientContext?.client?.callable_phone
+      || profile?._applyWizzClientContext?.client?.phone
+      || '5102662606'
+    ).trim();
+    const digits = rawPhone.replace(/\D/g, '').slice(-10);
+    return digits.length >= 7 ? digits : '5102662606';
+  }
   if (/postal\s*code|zip\s*code/i.test(label)) {
     return resolvePostalForWorkday(profile);
   }
@@ -401,8 +417,26 @@ async function fillMarkedField(page, descriptor, answer) {
   const control = field.locator('textarea, input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([role="spinbutton"])').first();
   if (!(await control.isVisible({ timeout: 600 }).catch(() => false))) return false;
   await control.click({ force: true }).catch(() => { });
-  await control.fill(wanted).catch(() => { });
-  await control.press('Tab').catch(() => { });
+
+  const isPhoneField = isPhoneRelatedField(descriptor.label, descriptor) || /phone|mobile|tel\b/i.test(descriptor.label || descriptor.name || '');
+  let finalVal = wanted;
+  if (isPhoneField) {
+    const rawDigits = String(wanted || '').replace(/\D/g, '').slice(-10);
+    finalVal = rawDigits.length >= 7 ? rawDigits : '5102662606';
+  }
+
+  await control.fill('').catch(() => { });
+  if (isPhoneField) {
+    await control.pressSequentially(finalVal, { delay: 25 }).catch(() => control.fill(finalVal));
+    await control.dispatchEvent('input').catch(() => {});
+    await control.dispatchEvent('change').catch(() => {});
+    await control.press('Enter').catch(() => {});
+    await control.press('Tab').catch(() => {});
+    await control.dispatchEvent('blur').catch(() => {});
+  } else {
+    await control.fill(finalVal).catch(() => { });
+    await control.press('Tab').catch(() => { });
+  }
   const after = await control.inputValue().catch(() => '');
   return Boolean(after);
 }
@@ -623,7 +657,13 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
       }
     }
 
-    if (descriptor.currentValue && !/postal|zip/i.test(descriptor.label || descriptor.name || '')) continue;
+    if (descriptor.currentValue && !/postal|zip/i.test(descriptor.label || descriptor.name || '')) {
+      const isPhoneField = isPhoneRelatedField(descriptor.label, descriptor) || /phone|mobile|tel\b/i.test(descriptor.label || descriptor.name || '');
+      const hasAlpha = /[a-zA-Z]/.test(descriptor.currentValue);
+      if (!isPhoneField || !hasAlpha) {
+        continue;
+      }
+    }
 
     const answer = await resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepName);
     if (!answer) {
