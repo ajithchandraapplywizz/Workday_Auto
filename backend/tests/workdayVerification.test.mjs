@@ -24,6 +24,8 @@ describe('Workday Email Verification (workdayVerification.mjs)', () => {
     let visitedUrl = '';
     const mockPage = {
       url: () => 'https://workday.wd5.myworkdayjobs.com/en-US/Careers/job/Engineer',
+      evaluate: async () => 'Please verify your email address to activate your account.',
+      $: async (sel) => sel.includes('verificationCode') ? {} : null,
       waitForTimeout: async () => {},
       waitForLoadState: async () => {},
       goto: async (url) => { visitedUrl = url; },
@@ -95,6 +97,8 @@ describe('Workday Email Verification (workdayVerification.mjs)', () => {
 
     const mockPage = {
       url: () => 'https://workday.wd5.myworkdayjobs.com/en-US/Careers/job/Engineer',
+      evaluate: async () => 'Please enter the verification code sent to your email to verify your account.',
+      $: async (sel) => sel.includes('verificationCode') ? {} : null,
       waitForTimeout: async () => {},
       waitForLoadState: async () => {},
       locator: (selector) => {

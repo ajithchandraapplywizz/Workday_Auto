@@ -3530,7 +3530,7 @@ export async function syncQueueWithScannedAndFailedJobs() {
   if (!isSupabaseConfigured()) return { scanned: 0, failed: 0 };
   try {
     const sj = await request('scanned_jobs', { query: '?select=id,job_url,screenshot_path&scan_status=eq.completed&limit=5000' });
-    const fj = await request('failed_jobs', { query: '?select=id,job_url,screenshot_path&limit=5000' });
+    const fj = await request('failed_jobs', { query: '?select=id,job_url,failure_reason,failed_at_step,screenshot_path&limit=5000' });
     const bq = await request('batch_job_queue', { query: '?select=id,job_url,status&limit=5000' });
 
     if (!Array.isArray(bq) || bq.length === 0) return { scanned: 0, failed: 0 };
@@ -3584,23 +3584,27 @@ export async function syncQueueWithScannedAndFailedJobs() {
           },
         }).catch(() => { });
         markedScanned++;
-      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'already_expired' && row.status !== 'submitted') {
-        const isExpired = String(matchedFj.failure_reason || '').toLowerCase().includes('expired') ||
-                          String(matchedFj.failed_at_step || '').toLowerCase().includes('expired');
-        const targetStatus = isExpired ? 'already_expired' : 'failed';
-        await request('batch_job_queue', {
-          method: 'PATCH',
-          query: `?id=eq.${row.id}`,
-          prefer: 'return=minimal',
-          body: {
-            status: targetStatus,
-            screenshot_path: matchedFj.screenshot_path || null,
-            worker_id: null,
-            locked_at: null,
-            updated_at: new Date().toISOString(),
-          },
-        }).catch(() => { });
-        markedFailed++;
+      } else if (matchedFj && !matchedSj && row.status !== 'failed' && row.status !== 'already_expired' && row.status !== 'expired' && row.status !== 'submitted') {
+        const text = String(matchedFj.failure_reason || '') + ' ' + String(matchedFj.failed_at_step || '');
+        const isBrowserCloseError = /(?:browser|context|target).*closed/i.test(text) && !/link\s*expired|job\s*expired/i.test(text);
+        const isExpired = !isBrowserCloseError && /(?:link\s*expired|job\s*expired|dead\/expired|^expired$|does not exist|doesn'?t exist|page not found|\b(?:error\s*)?404\b|no longer accepting applications|no longer available|(?:job|posting|position)\s*(?:has been\s*)?(?:closed|filled))/i.test(text);
+        // STRICT GUARD: NEVER overwrite fresh pending or queued jobs to 'failed' based on historical non-expired failure!
+        // Non-expired links must be scanned and resolved. Only mark 'expired' if link is verifiably dead.
+        if (isExpired) {
+          await request('batch_job_queue', {
+            method: 'PATCH',
+            query: `?id=eq.${row.id}`,
+            prefer: 'return=minimal',
+            body: {
+              status: 'expired',
+              screenshot_path: matchedFj.screenshot_path || row.screenshot_path || null,
+              worker_id: null,
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+            },
+          }).catch(() => { });
+          markedFailed++;
+        }
       }
     }
 
@@ -3628,12 +3632,19 @@ export async function getPendingUnscannedJobsSummary() {
     // 1. Sync queue with scanned_jobs and failed_jobs first
     await syncQueueWithScannedAndFailedJobs().catch(() => {});
 
-    // 2. Fetch all rows in batch_job_queue with status in ('pending', 'queued')
-    const pendingRows = await request('batch_job_queue', {
-      query: '?select=id,job_url,status,attempt_count&status=in.(pending,queued)&limit=5000',
-    });
+    // 2. Fetch all rows in batch_job_queue needing scan: fresh (pending/queued) or retryable (failed with attempt_count < 3)
+    const [pendingRows, retryRows] = await Promise.all([
+      request('batch_job_queue', {
+        query: '?select=id,job_url,status,attempt_count&status=in.(pending,queued)&limit=5000',
+      }).catch(() => []),
+      request('batch_job_queue', {
+        query: '?select=id,job_url,status,attempt_count&status=eq.failed&attempt_count=lt.3&limit=5000',
+      }).catch(() => []),
+    ]);
 
-    if (!Array.isArray(pendingRows) || pendingRows.length === 0) {
+    const candidateRows = [...(pendingRows || []), ...(retryRows || [])];
+
+    if (!Array.isArray(candidateRows) || candidateRows.length === 0) {
       return { hasPending: false, pendingCount: 0, pendingUrls: [] };
     }
 
@@ -3661,7 +3672,7 @@ export async function getPendingUnscannedJobsSummary() {
     const genuinelyPendingUrls = new Set();
     const rowsToMarkScanned = [];
 
-    for (const row of pendingRows) {
+    for (const row of candidateRows) {
       const rawUrl = String(row.job_url || '').trim();
       if (!rawUrl) continue;
       const k = normUrl(rawUrl);

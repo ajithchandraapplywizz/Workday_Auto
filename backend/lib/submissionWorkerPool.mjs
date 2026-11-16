@@ -84,7 +84,9 @@ export async function resolveInstanceSubmissionWorkerIds() {
   }
 
   // Multi-replica Railway automatic allocation of size workerCount across max cluster workers (2 services * 2 workers = 4 total):
-  const maxTotalSubmitWorkers = Number(process.env.TOTAL_SUBMIT_WORKERS) || 4;
+  const maxTotalSubmitWorkers = (Number(process.env.TOTAL_SUBMIT_WORKERS) && Number(process.env.TOTAL_SUBMIT_WORKERS) <= (workerCount * 2))
+    ? Number(process.env.TOTAL_SUBMIT_WORKERS)
+    : (workerCount * 2);
   const candidateGroups = [];
   for (let offset = 0; offset < maxTotalSubmitWorkers; offset += workerCount) {
     candidateGroups.push(
@@ -479,16 +481,31 @@ export async function claimNextTask(workerId) {
 
   if (controls?.submit?.stop_requested) return null;
 
+  // 1. Strict Single-Task per Worker Guard:
+  // A worker cannot claim another task if it currently has an active 'applying' task
+  try {
+    const { data: existingApplying } = await supabase
+      .from('job_distributions')
+      .select('id, awl_id')
+      .eq('worker_id', workerId)
+      .eq('status', 'applying')
+      .limit(1);
+
+    if (existingApplying && existingApplying.length > 0) {
+      return null;
+    }
+  } catch {}
+
   const now = new Date().toISOString();
 
   // Strictly respect worker count dynamically from env
   const envWorkerCount = getDynamicSubmitWorkerCount();
   const totalServices = Number(process.env.TOTAL_SERVICES) || Number(PIPELINE_CONFIG.totalServices) || 2;
+  const maxClusterSubmitLimit = envWorkerCount * totalServices;
   const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
     Number(process.env.GLOBAL_WORKER_COUNT) ||
     Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
-    Number(process.env.TOTAL_SUBMIT_WORKERS) ||
-    (envWorkerCount * totalServices);
+    (Number(process.env.TOTAL_SUBMIT_WORKERS) && Number(process.env.TOTAL_SUBMIT_WORKERS) <= maxClusterSubmitLimit ? Number(process.env.TOTAL_SUBMIT_WORKERS) : maxClusterSubmitLimit);
 
   // Cluster Concurrency Guard: Strictly at most maxConcurrent rows can be 'applying' across all services and replicas
   try {
@@ -588,10 +605,9 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) {
       let retryQuery1 = supabase
         .from('job_distributions')
-        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
         .eq('is_fully_answered', true)
-        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -613,10 +629,9 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) {
       let retryQuery2 = supabase
         .from('job_distributions')
-        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
         .eq('is_fully_answered', true)
-        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -638,9 +653,8 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) {
       let retryQuery3 = supabase
         .from('job_distributions')
-        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
+        .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
-        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived');
@@ -666,7 +680,6 @@ export async function claimNextTask(workerId) {
         })
         .eq('id', cand.id)
         .eq('status', cand.status)
-        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .select('*');
@@ -812,7 +825,6 @@ export async function reapExpiredLeases(timeoutMinutes = 3) {
         })
         .eq('id', exp.id)
         .eq('status', 'applying')
-        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .select('*');
@@ -1468,111 +1480,22 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-      const isFatalNonRetryable = (
-
-        isZohoNotConnected ||
-
-        /no valid company_email|no company_email|unverified/i.test(rawErrMsg) ||
-
-        /strict auth guard/i.test(failedStep) ||
-
+      const isFatalNonRetryable = Boolean(
         result?.status === 'job_expired' ||
-
-        result?.status === 'invalid_url'
-
+        result?.status === 'invalid_url' ||
+        /dead\/expired|does not exist|error 404/i.test(rawErrMsg)
       );
 
-
-
       if (isZohoNotConnected) {
-
         const cleanAwl = String(task.applywizz_id).replace(/["'\[\]]/g, '').trim().toUpperCase();
-
         const zohoErr = `zoho mail not connected (AWL-ID: ${cleanAwl}, mail: ${task.candidateEmail || ''})`;
-
-        console.log(`❌ [STAGE 3: SUBMITTER] [${workerId}] Zoho mail not connected for ${task.applywizz_id} (${task.candidateEmail || 'no email'}) — marked failed (no retries). Reason: ${zohoErr}`);
-
-
-
-        await updateJobDistributionWithCheck({
-
-          distributionId: task.distribution_id || task.id,
-
-          applywizzId: task.applywizz_id,
-
-          jobUrl: task.job_url,
-
-          workerId,
-
-          patch: {
-
-            status: 'failed',
-
-            error_message: zohoErr,
-
-            application_submitted_screenshot_url: finalShotUrl,
-
-            updated_at: now,
-
-          },
-
-        });
+        console.log(`⚠️ [STAGE 3: SUBMITTER] [${workerId}] Zoho mail not connected for ${task.applywizz_id} (${task.candidateEmail || 'no email'}) on Attempt ${currentAttempt}/3.`);
 
         if (task.candidateEmail) {
-
           const { updateClientZohoStatus } = await import('./supabaseClient.mjs');
-
           await updateClientZohoStatus(task.candidateEmail, { status: 'not_connected', connected: false }).catch(() => {});
-
         }
-
-
-
-        try {
-
-          const { recordFailedJob } = await import('./supabaseClient.mjs');
-
-          await recordFailedJob({
-
-            applywizzId: task.applywizz_id,
-
-            jobId: task.job_id || null,
-
-            jobUrl: task.job_url,
-
-            company: task.company || 'Workday Partner',
-
-            roleTitle: task.role_title || 'Workday Application',
-
-            failureReason: zohoErr,
-
-            failedAtStep: 'Auth Gateway / Zoho Mail Verification',
-
-            screenshotPath: finalShotUrl,
-
-          });
-
-        } catch {}
-
-
-
-        return {
-
-          status: 'zoho_not_connected',
-
-          reason: 'zoho mail not connected',
-
-          error: zohoErr,
-
-          isZohoNotConnected: true,
-
-          stoppedAtStep: 'Auth Gateway / Zoho Mail Verification',
-
-        };
-
       }
-
-
 
       if (currentAttempt < 3 && !isFatalNonRetryable) {
 
@@ -1904,11 +1827,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     }
 
     const isFatalNonRetryable = Boolean(
-      /mailbox_not_connected|zoho.*not.*connected|no valid company_email|no company_email|unverified\/mock credentials|link expired|dead\/expired|does not exist|error 404/i.test(errMsg) ||
-      /strict auth guard/i.test(errMsg) ||
-      prevResult?.isZohoNotConnected ||
-      prevResult?.status === 'zoho_not_connected' ||
-      /zoho.*not.*connected|mailbox.*not.*connected/i.test(String(prevResult?.error || prevResult?.reason || ''))
+      /dead\/expired|does not exist|error 404/i.test(errMsg) ||
+      prevResult?.status === 'job_expired' ||
+      prevResult?.status === 'invalid_url'
     );
 
 

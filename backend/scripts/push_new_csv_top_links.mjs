@@ -17,7 +17,9 @@ if (!isSupabaseConfigured()) {
   process.exit(1);
 }
 
-const csvPath = resolve('Data/new_csv.csv');
+const targetArg = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const ingestAll = process.argv.includes('--all') || (targetArg && targetArg.includes('NewCsv_1'));
+const csvPath = resolve(targetArg || 'Data/new_csv.csv');
 
 if (!existsSync(csvPath)) {
   console.error(`❌ CSV not found at: ${csvPath}`);
@@ -72,7 +74,11 @@ function normalizeUrlKey(url) {
 
 async function run() {
   console.log('═'.repeat(80));
-  console.log('🚀 PUSHING TOP LINKS (task_count > 10) FROM new_csv.csv TO batch_job_queue');
+  if (ingestAll) {
+    console.log('🚀 PUSHING ALL LINKS (COMPLETE CSV INGESTION) TO batch_job_queue');
+  } else {
+    console.log('🚀 PUSHING TOP LINKS (task_count > 10) TO batch_job_queue');
+  }
   console.log(`   Source CSV: ${csvPath}`);
   console.log('═'.repeat(80));
 
@@ -82,13 +88,15 @@ async function run() {
 
   console.log(`📁 Total rows in CSV: ${dataRows.length}`);
 
-  // 1. Filter strictly for task_count > 10
-  const qualifyingRows = dataRows.filter((r) => {
-    const tc = parseInt(r[4], 10);
-    return !isNaN(tc) && tc > 10;
-  });
+  // 1. Filter rows (complete links if ingestAll, else task_count > 10)
+  const qualifyingRows = ingestAll
+    ? dataRows.filter((r) => r[3] && r[3].trim().length > 0)
+    : dataRows.filter((r) => {
+        const tc = parseInt(r[4], 10);
+        return !isNaN(tc) && tc > 10;
+      });
 
-  console.log(`🎯 Rows meeting criteria (task_count > 10): ${qualifyingRows.length}`);
+  console.log(`🎯 Rows meeting criteria (${ingestAll ? 'ALL rows with URLs' : 'task_count > 10'}): ${qualifyingRows.length}`);
 
   // 2. Aggregate into unique links and merge AWLs
   const urlMap = new Map();

@@ -566,29 +566,8 @@ export async function resolveWorkdayVerification(page, {
           screenshotUrl: shotUrl,
         }).catch(() => {});
       }
-      if (distributionId) {
-        await request('job_distributions', {
-          method: 'PATCH',
-          query: `?id=eq.${encodeURIComponent(distributionId)}`,
-          body: {
-            status: 'failed',
-            error_message: zohoReason,
-            application_submitted_screenshot_url: shotUrl,
-            updated_at: now,
-          },
-        }).catch(() => {});
-      } else if (cleanAwlId && jobUrl) {
-        await request('job_distributions', {
-          method: 'PATCH',
-          query: `?applywizz_id=eq.${encodeURIComponent(cleanAwlId)}&job_url=eq.${encodeURIComponent(jobUrl)}`,
-          body: {
-            status: 'failed',
-            error_message: zohoReason,
-            application_submitted_screenshot_url: shotUrl,
-            updated_at: now,
-          },
-        }).catch(() => {});
-      }
+      // Note: State transitions on job_distributions are governed by the worker pool
+      // to strictly preserve the 3-attempt lifecycle before marking failed.
       if (cleanAwlId && jobUrl) {
         await request('batch_job_queue', {
           method: 'PATCH',

@@ -825,7 +825,7 @@ export async function executeWorkerTask({
         unregisterActiveBrowser(browser, workerId);
       await browser.close().catch(() => {});
         if (queueTaskId) {
-          await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
+          await updateQueueTaskStatus(queueTaskId, { status: 'expired', errorMessage: 'job_expired_or_not_found', screenshotPath: expiredShotUrl });
         }
         if (!options.isClusterBlueprint) {
         await upsertSupabaseApplication({
@@ -1141,16 +1141,17 @@ export async function executeWorkerTask({
           if (queueTaskId) await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: failReasonText, screenshotPath: authShotUrl });
 
           const distId = task.distribution_id || task.distributionId || task.id;
-          if (distId) {
+          if (distId && !isDirectSubmission) {
             const { supabase } = await import('./supabaseClient.mjs');
             if (supabase) {
               try {
+                const shouldFail = isFinalAttempt || isLinkExpired;
                 await supabase.from('job_distributions').update({
-                  status: 'failed',
+                  status: shouldFail ? 'failed' : 'ready_for_review',
                   error_message: failReasonText,
                   application_submitted_screenshot_url: authShotUrl,
                   updated_at: new Date().toISOString(),
-                }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+                }).eq('id', distId).neq('status', 'submitted').neq('status', 'completed');
               } catch {}
             }
           }
@@ -1159,8 +1160,8 @@ export async function executeWorkerTask({
             await updateClientZohoStatus(workdayEmail, { status: 'not_connected', connected: false }).catch(() => {});
           }
 
-          // Only write single-row application and failed_jobs if NOT running in cluster blueprint mode
-          if (!options.isClusterBlueprint) {
+          // Only write single-row application and failed_jobs if NOT running in cluster blueprint mode and is final attempt
+          if (!options.isClusterBlueprint && !isDirectSubmission && (isFinalAttempt || isLinkExpired)) {
             await upsertSupabaseApplication({
               applywizzId,
               jobUrl,
@@ -2049,7 +2050,7 @@ export async function executeWorkerTask({
 
     appLog(99, `Task halted: ${fullErrReason}`);
 
-    if (queueTaskId) {
+    if (queueTaskId && !options.isClusterBlueprint) {
       await updateQueueTaskStatus(queueTaskId, { status: 'failed', errorMessage: fullErrReason, screenshotPath: errShotUrl });
     }
     await upsertSupabaseApplication({

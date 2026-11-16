@@ -845,7 +845,7 @@ export async function reconcileOperatorsWithAPI() {
 }
 
 export function getEnvWorkerCounts() {
-  let count = 3;
+  let count = 2;
   if (typeof window !== 'undefined') {
     const custom = window.localStorage.getItem('WORKER_COUNT') || window.localStorage.getItem('VITE_WORKER_COUNT');
     if (custom && parseInt(custom, 10)) {
@@ -1220,24 +1220,27 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return isSub && matchesDay(a);
     }).length;
 
-    // 2. Applying: sync from database status and active worker status across all services (up to 4 workers)
+    // 2. Applying: sync from database status and active worker status across all services (up to configured submit capacity)
+    const now = Date.now();
+    const tenMinutesAgo = new Date(now - 10 * 60 * 1000).toISOString();
     const dbApplying = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
       const isApp = ['in_progress', 'started', 'applying', 'in_flight'].includes(st);
-      return isApp && (isToday || matchesDay(a));
+      const isFresh = !a.updated_at || a.updated_at >= tenMinutesAgo || !a.worker_leased_at || a.worker_leased_at >= tenMinutesAgo;
+      return isApp && (isToday || matchesDay(a)) && isFresh;
     }).length;
 
     let workerApplying = 0;
     try {
       const { data: wsData } = await supabase.from('worker_status').select('state, updated_at, worker_id, stage');
-      const now = Date.now();
       workerApplying = (wsData || []).filter((w) => {
         const last = new Date(w.updated_at || 0).getTime();
         return last && (now - last < 3 * 60 * 1000) && (w.state === 'in_flight' || w.state === 'applying' || w.state === 'busy') && (w.stage === 'submitting' || w.worker_id?.includes('submit'));
       }).length;
     } catch {}
 
-    const applying = Math.max(dbApplying, workerApplying);
+    const { submit: maxSubmitWorkers } = getEnvWorkerCounts();
+    const applying = Math.min(Math.max(dbApplying, workerApplying), maxSubmitWorkers);
 
     // 3. Failed: strictly status === 'failed' within the day's bounds
     const failed = allApps.filter((a) => {
@@ -3211,9 +3214,9 @@ export async function triggerAllParallelStage() {
     if (!sbErr) supabaseSuccess = true;
 
     // 2. Mark both scanning and submitting workers as in_flight
-    const { scan } = getEnvWorkerCounts();
+    const { scan, submit } = getEnvWorkerCounts();
     const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
-    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
+    const submittingWorkerIds = Array.from({ length: submit }, (_, i) => `submitting_worker_${i + 1}`);
 
     await Promise.allSettled([
       supabase
@@ -3243,11 +3246,7 @@ export async function triggerAllParallelStage() {
   const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
   const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3001', 'http://localhost:3002'] : [])];
-  const endpoints = [];
-  for (const b of new Set(baseList)) {
-    endpoints.push(`${b}/api/bot/universal`);
-    endpoints.push(`${b}/api/bot/webhook`);
-  }
+  const endpoints = Array.from(new Set(baseList)).map((b) => `${b}/api/bot/universal`);
 
   await Promise.allSettled(
     endpoints.map((ep) =>

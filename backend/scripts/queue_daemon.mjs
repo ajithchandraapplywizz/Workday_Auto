@@ -271,7 +271,9 @@ console.error = function (...args) {
   routeLogEntry('error', args);
 };
 
-const ALL_CANONICAL_WORKERS = PIPELINE_CONFIG.allWorkerIds || Array.from({ length: 3 }, (_, i) => `submitting_worker_${i + 1}`);
+const ALL_CANONICAL_WORKERS = PIPELINE_CONFIG.allWorkerIds || Array.from({ length: 4 }, (_, i) => `submitting_worker_${i + 1}`);
+const activeSubmittingWorkers = new Set();
+const runningDedicatedWorkerLoops = new Set();
 
 /**
  * Reset all 10 workers in worker_status to idle
@@ -593,7 +595,6 @@ export async function stopAutonomousPool() {
       .from('job_distributions')
       .update({ status: 'ready_for_review', worker_id: null, worker_leased_at: null, updated_at: nowIso })
       .eq('status', 'applying')
-      .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed'),
     supabase
@@ -710,8 +711,10 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
   if (SERVICE_ROLE === 'scanner') {
     return { success: false, refused: true, reason: 'SERVICE_ROLE is scanner' };
   }
-  if (!force && isSubmitLoopExecuting) {
-    console.log(`[DAEMON] Submissions loop is already actively executing.`);
+  // Single-flight re-entrancy lock:
+  // If the submissions loop is already running and has active worker loops, DO NOT launch duplicate loops!
+  if (isSubmitLoopExecuting && runningDedicatedWorkerLoops.size > 0) {
+    console.log(`[DAEMON] Submissions loop is already actively executing (${runningDedicatedWorkerLoops.size} workers active: ${Array.from(runningDedicatedWorkerLoops).join(', ')}).`);
     return { success: true, message: 'Submissions loop already executing.' };
   }
   if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
@@ -786,34 +789,53 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
     active_worker_count: maxConcurrency + (isParallel ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0),
   });
 
-  console.log(`🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${maxConcurrency} workers (${submitWorkers.join(', ')})...`);
+  // Filter for workers that do NOT already have a dedicated loop actively running:
+  const workersToLaunch = submitWorkers.filter((wId) => !runningDedicatedWorkerLoops.has(wId));
+  if (workersToLaunch.length === 0) {
+    console.log(`[DAEMON] All ${submitWorkers.length} configured submit workers are already actively running (${submitWorkers.join(', ')}). No duplicate loops needed.`);
+    return { success: true, message: 'All workers already active.' };
+  }
+
+  console.log(`🚀 [DAEMON] Launching continuous Stage 3 Submissions across ${workersToLaunch.length} workers (${workersToLaunch.join(', ')})...`);
 
   const runDedicatedWorkerLoop = async (workerId) => {
-    while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
-      try {
-        // Verify authoritative DB bot_control state before claiming to guarantee instant stop across devices
+    if (runningDedicatedWorkerLoops.has(workerId)) {
+      console.log(`⚠️ [DAEMON] Worker loop for ${workerId} is already actively running. Skipping duplicate spawn.`);
+      return;
+    }
+    runningDedicatedWorkerLoops.add(workerId);
+    try {
+      while (submitStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isSubmitStopRequested() && !isPoolPaused) {
         try {
-          const bcCheck = await getBotControl().catch(() => null);
-          const isSubmitStopped = Boolean(
-            bcCheck && (
-              bcCheck.stop_requested === true ||
-              bcCheck.submit_stop_requested === true ||
-              ((bcCheck.last_action_requested === 'stop_submit' ||
-                bcCheck.last_action_requested === 'stop' ||
-                bcCheck.last_action_requested === 'stop_all') &&
-                bcCheck.submit_status !== 'running')
-            )
-          );
-          if (isSubmitStopped) {
-            console.log(`🛑 [SUBMISSION WORKER] ${workerId} detected stop signal in bot_control. Halting submission worker loop immediately.`);
-            setSubmitStop(true);
-            try {
-              const { abortWorkerBrowser } = await import('../lib/browserLifecycle.mjs');
-              await abortWorkerBrowser(workerId);
-            } catch {}
-            break;
+          // Verify authoritative DB bot_control state before claiming to guarantee instant stop across devices
+          try {
+            const bcCheck = await getBotControl().catch(() => null);
+            const isSubmitStopped = Boolean(
+              bcCheck && (
+                bcCheck.stop_requested === true ||
+                bcCheck.submit_stop_requested === true ||
+                ((bcCheck.last_action_requested === 'stop_submit' ||
+                  bcCheck.last_action_requested === 'stop' ||
+                  bcCheck.last_action_requested === 'stop_all') &&
+                  bcCheck.submit_status !== 'running')
+              )
+            );
+            if (isSubmitStopped) {
+              console.log(`🛑 [SUBMISSION WORKER] ${workerId} detected stop signal in bot_control. Halting submission worker loop immediately.`);
+              setSubmitStop(true);
+              try {
+                const { abortWorkerBrowser } = await import('../lib/browserLifecycle.mjs');
+                await abortWorkerBrowser(workerId);
+              } catch {}
+              break;
+            }
+          } catch {}
+
+          // If this worker is already in the middle of processing an application, wait before claiming another
+          if (activeSubmittingWorkers.has(workerId)) {
+            await new Promise((r) => setTimeout(r, 2000));
+            continue;
           }
-        } catch {}
 
         const claimedTask = await claimNextTask(workerId);
         if (!claimedTask) {
@@ -937,10 +959,14 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
         await new Promise((r) => setTimeout(r, 3000));
       }
     }
-  };
+  } finally {
+    runningDedicatedWorkerLoops.delete(workerId);
+    activeSubmittingWorkers.delete(workerId);
+  }
+};
 
-  // Run all workers concurrently in independent parallel loops
-  await Promise.allSettled(submitWorkers.map((wId) => runDedicatedWorkerLoop(wId)));
+  // Run newly launched workers concurrently in independent parallel loops
+  await Promise.allSettled(workersToLaunch.map((wId) => runDedicatedWorkerLoop(wId)));
 
   // Await any remaining active submitting workers before terminating (fast-abort if stop requested)
   let waitLoops = 0;
@@ -972,30 +998,32 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
     submissionCycleResults = [];
   }
 
-  submitStatus = 'off';
-  isSubmitLoopExecuting = false;
-  const bcCurrentAtEnd = await getBotControl().catch(() => null);
-  const isScanningStillActive = Boolean(
-    scanStatus === 'running' ||
-    (bcCurrentAtEnd && (bcCurrentAtEnd.scan_status === 'running' || bcCurrentAtEnd.scan_enabled === true || bcCurrentAtEnd.stage === 'scanning' || bcCurrentAtEnd.stage === 'parallel'))
-  );
-  currentMode = isScanningStillActive ? 'scanning' : 'idle';
-  currentStage = isScanningStillActive ? 'scanning' : 'idle';
-  isPoolRunning = isScanningStillActive;
-  await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false, updated_by: 'system_auto_off' }).catch(() => { });
-  for (const workerId of submitWorkers) {
-    await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => { });
+  if (runningDedicatedWorkerLoops.size === 0) {
+    submitStatus = 'off';
+    isSubmitLoopExecuting = false;
+    const bcCurrentAtEnd = await getBotControl().catch(() => null);
+    const isScanningStillActive = Boolean(
+      scanStatus === 'running' ||
+      (bcCurrentAtEnd && (bcCurrentAtEnd.scan_status === 'running' || bcCurrentAtEnd.scan_enabled === true || bcCurrentAtEnd.stage === 'scanning' || bcCurrentAtEnd.stage === 'parallel'))
+    );
+    currentMode = isScanningStillActive ? 'scanning' : 'idle';
+    currentStage = isScanningStillActive ? 'scanning' : 'idle';
+    isPoolRunning = isScanningStillActive;
+    await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false, updated_by: 'system_auto_off' }).catch(() => { });
+    for (const workerId of submitWorkers) {
+      await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null, stage: 'idle' }).catch(() => { });
+    }
+    await syncBotControlState({
+      mode: currentMode,
+      stage: currentStage,
+      submit_enabled: false,
+      submit_status: 'off',
+      submit_stop_requested: false,
+      is_running: isScanningStillActive,
+      current_action: isScanningStillActive ? 'Submissions complete. Scanning continuing...' : 'Submissions complete. Idle.',
+      active_worker_count: isScanningStillActive ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0,
+    });
   }
-  await syncBotControlState({
-    mode: currentMode,
-    stage: currentStage,
-    submit_enabled: false,
-    submit_status: 'off',
-    submit_stop_requested: false,
-    is_running: isScanningStillActive,
-    current_action: isScanningStillActive ? 'Submissions complete. Scanning continuing...' : 'Submissions complete. Idle.',
-    active_worker_count: isScanningStillActive ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0,
-  });
 }
 
 /**
@@ -1006,8 +1034,8 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     console.log(`[DAEMON] Submitter service ignoring scan pipeline request.`);
     return { success: false, refused: true, reason: 'SERVICE_ROLE is submitter' };
   }
-  if (!force && isScanLoopExecuting) {
-    console.log(`[DAEMON] Scan pipeline is already running.`);
+  if (isScanLoopExecuting) {
+    console.log(`[DAEMON] Scan pipeline is already actively running.`);
     return { success: true, message: 'Scan pipeline already running.' };
   }
 
@@ -1029,7 +1057,7 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
   const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
   const initialQueueSummary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
 
-  if (!initialQueueSummary.hasPending || initialQueueSummary.pendingCount === 0) {
+  if (!force && (!initialQueueSummary.hasPending || initialQueueSummary.pendingCount === 0)) {
     console.log(`ℹ️ [SCANNER] 0 pending unscanned jobs in batch_job_queue (queue is empty or all links are already scanned). Remaining strictly idle.`);
     scanStatus = 'off';
     currentStage = 'idle';
@@ -1984,12 +2012,6 @@ const server = http.createServer(async (req, res) => {
       stage: 'parallel',
     }));
     return;
-    res.end(JSON.stringify({
-      success: true,
-      message: 'Universal Parallel Pipeline started: Scanning and Submitting running concurrently.',
-      stage: 'parallel',
-    }));
-    return;
   }
 
   // 4. Start / Trigger Parallel Scan & Resolve (Admin & Developer)
@@ -2158,11 +2180,11 @@ const server = http.createServer(async (req, res) => {
       };
       if (distributionId) {
         try {
-          await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+          await supabase.from('job_distributions').update(applyUpdate).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed');
         } catch {}
       } else if (cleanId && jobUrl) {
         try {
-          await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+          await supabase.from('job_distributions').update(applyUpdate).eq('applywizz_id', cleanId).eq('job_url', jobUrl).neq('status', 'submitted').neq('status', 'completed');
         } catch {}
       }
 
@@ -2198,7 +2220,7 @@ const server = http.createServer(async (req, res) => {
           reviewed_by: 'Career Associate',
           reviewed_at: nowIso,
           updated_at: nowIso,
-        }).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed').is('application_submitted_screenshot_url', null);
+        }).eq('id', distributionId).neq('status', 'submitted').neq('status', 'completed');
       } catch {}
 
       res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2302,8 +2324,8 @@ const server = http.createServer(async (req, res) => {
   res.end(JSON.stringify({ error: 'Endpoint not found' }));
 });
 
-// ── Autonomous 10-Worker Parallel Submission Dispatcher ──
-const activeSubmittingWorkers = new Set();
+// ── Autonomous Parallel Submission Dispatcher ──
+// Note: activeSubmittingWorkers and runningDedicatedWorkerLoops declared at top of module
 let submissionCycleResults = [];
 let totalSubmissionsCompleted = 0;
 

@@ -432,7 +432,7 @@ export async function resetClusterTasksByIds(taskIds = []) {
       for (const jUrl of urls) {
         await queueDbRequest('batch_job_queue', {
           method: 'PATCH',
-          query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
+          query: `?job_url=eq.${encodeURIComponent(jUrl)}&status=neq.expired&status=neq.already_expired&status=neq.reached_review&status=neq.already_reached_review&status=neq.scanned&status=neq.submitted`,
           prefer: 'return=minimal',
           body: {
             status: 'pending',
@@ -446,7 +446,7 @@ export async function resetClusterTasksByIds(taskIds = []) {
       const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
       await queueDbRequest('batch_job_queue', {
         method: 'PATCH',
-        query: `?id=in.(${idFilter})`,
+        query: `?id=in.(${idFilter})&status=neq.expired&status=neq.already_expired&status=neq.reached_review&status=neq.already_reached_review&status=neq.scanned&status=neq.submitted`,
         prefer: 'return=minimal',
         body: {
           status: 'pending',
@@ -476,7 +476,7 @@ export async function resetClusterTasksToPending(taskIds = []) {
       for (const jUrl of urls) {
         await queueDbRequest('batch_job_queue', {
           method: 'PATCH',
-          query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
+          query: `?job_url=eq.${encodeURIComponent(jUrl)}&status=neq.expired&status=neq.already_expired&status=neq.reached_review&status=neq.already_reached_review&status=neq.scanned&status=neq.submitted`,
           prefer: 'return=minimal',
           body: {
             status: 'pending',
@@ -490,7 +490,7 @@ export async function resetClusterTasksToPending(taskIds = []) {
       const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
       await queueDbRequest('batch_job_queue', {
         method: 'PATCH',
-        query: `?id=in.(${idFilter})`,
+        query: `?id=in.(${idFilter})&status=neq.expired&status=neq.already_expired&status=neq.reached_review&status=neq.already_reached_review&status=neq.scanned&status=neq.submitted`,
         prefer: 'return=minimal',
         body: {
           status: 'pending',
@@ -510,9 +510,17 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
   if (!Array.isArray(taskIds) || taskIds.length === 0) return;
   try {
     const isComposite = taskIds.some((id) => String(id).includes(':::'));
-    const isExpired = String(reason).toLowerCase().includes('expired');
+    const isExpired = /expired|does not exist|doesn'?t exist|page not found|404|no longer (?:accepting|available)|closed|filled/i.test(String(reason));
     const isAuthFail = /auth|login|password|credential|zoho/i.test(String(reason));
     const targetStatus = isExpired ? 'expired' : (isAuthFail ? 'auth_failure' : 'failed');
+    const updateBody = {
+      status: targetStatus,
+      locked_at: null,
+      updated_at: new Date().toISOString(),
+    };
+    if (screenshotUrl) {
+      updateBody.screenshot_path = screenshotUrl;
+    }
     if (isComposite) {
       const urls = Array.from(new Set(taskIds.map((cid) => {
         const [, ...rest] = String(cid).split(':::');
@@ -523,12 +531,7 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
           method: 'PATCH',
           query: `?job_url=eq.${encodeURIComponent(jUrl)}`,
           prefer: 'return=minimal',
-          body: {
-            status: targetStatus,
-            screenshot_path: screenshotUrl || null,
-            locked_at: null,
-            updated_at: new Date().toISOString(),
-          },
+          body: updateBody,
         }).catch(() => { });
       }
     } else {
@@ -537,15 +540,10 @@ export async function failClusterTasksByIds(taskIds = [], reason = 'Link expired
         method: 'PATCH',
         query: `?id=in.(${idFilter})`,
         prefer: 'return=minimal',
-        body: {
-          status: targetStatus,
-          screenshot_path: screenshotUrl || null,
-          locked_at: null,
-          updated_at: new Date().toISOString(),
-        },
+        body: updateBody,
       });
     }
-    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} candidate tasks marked status = '${targetStatus}' | reason: ${reason})\n`);
+    console.log(`\n📥 [SUPABASE INGESTION] table: batch_job_queue | action: PATCH (${taskIds.length} candidate tasks marked status = '${targetStatus}' | reason: ${reason} | screenshot: ${screenshotUrl || 'preserved'})\n`);
   } catch (err) {
     console.log(`  ⚠️ Note on failing cluster tasks: ${err.message}`);
   }
@@ -834,7 +832,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     if (deadJob) {
       // RULE C: Expired link -> no retry, direct single-row upsert into failed_jobs
       console.log(`\n❌ [${workerId}] Genuine job expiration confirmed for "${company}" (${jobUrl}). Upserting single row to failed_jobs...`);
-      const { recordFailedJob } = await import('./supabaseClient.mjs');
+      const { recordFailedJob, purgeDeadJobUrlFromQueue } = await import('./supabaseClient.mjs');
       await recordFailedJob({
         applywizzId: allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID,
         clientIds: allSiblingAwlIds,
@@ -848,10 +846,13 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
         screenshotPath: leadProofShot,
       }).catch((e) => console.error(`❌ [${workerId}] failed_jobs write error:`, e.message || e));
 
-      // Mark the queue row failed. All siblings are covered by this one row.
+      // Mark the queue row expired with its proof screenshot. All siblings are covered by this one row.
       if (allTaskIds.length > 0) {
-        await failClusterTasksByIds(allTaskIds, 'expired');
-        console.log(`   ✓ Marked queue row as expired for all ${allSiblingAwlIds.length} candidate(s).`);
+        await failClusterTasksByIds(allTaskIds, 'expired', leadProofShot);
+        console.log(`   ✓ Marked queue row as expired with proof screenshot for all ${allSiblingAwlIds.length} candidate(s).`);
+      }
+      if (jobUrl) {
+        await purgeDeadJobUrlFromQueue(jobUrl, { expiredReason: 'Link expired on Workday', screenshotUrl: leadProofShot }).catch(() => {});
       }
 
       return {
@@ -873,7 +874,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       if (currentAttempts < 2) {
         const nextAttempt = currentAttempts + 1;
         // Attempt 1 or 2 failed -> Re-queue without writing to failed_jobs
-        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
+        console.log(`🔁 [scan] ${company} | ${jobUrl} — attempt ${nextAttempt}/${MAX_ATTEMPTS} failed at "${leadFailStep}": ${leadFailReason}. Screenshot: ${leadProofShot || 'None'}. This link will get retry attempt ${nextAttempt + 1}/${MAX_ATTEMPTS}.`);
         try {
           const urlsToRetry = Array.from(new Set([
             ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
@@ -881,17 +882,21 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
             ...(cluster.rawUrls || []),
           ]));
           for (const u of urlsToRetry) {
+            const retryPatch = {
+              status: 'pending',
+              attempt_count: nextAttempt,
+              worker_id: null,
+              locked_at: null,
+              updated_at: new Date().toISOString(),
+            };
+            if (leadProofShot) {
+              retryPatch.screenshot_path = leadProofShot;
+            }
             await queueDbRequest('batch_job_queue', {
               method: 'PATCH',
               query: `?job_url=eq.${encodeURIComponent(u)}`,
               prefer: 'return=minimal',
-              body: {
-                status: 'pending',
-                attempt_count: nextAttempt,
-                worker_id: null,
-                locked_at: null,
-                updated_at: new Date().toISOString(),
-              },
+              body: retryPatch,
             }).catch(() => {});
           }
         } catch (rqErr) {
@@ -912,7 +917,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           retrying: true,
         };
       } else {
-        // Attempt 10 failed -> Upsert into failed_jobs ONLY if it never reached Review
+        // Attempt 3 failed -> Upsert into failed_jobs ONLY if it never reached Review
         const reachedReview = Boolean(
           String(leadFailStep).toLowerCase().includes('review') ||
           String(leadFailReason).toLowerCase().includes('review')
@@ -935,7 +940,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
           if (allTaskIds.length > 0) {
             await failClusterTasksByIds(allTaskIds, leadFailReason, leadProofShot);
-            console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts.`);
+            console.log(`   ✓ Marked queue row as failed after ${MAX_ATTEMPTS} attempts with failure screenshot.`);
           }
         } else {
           console.log(`ℹ️ [${workerId}] Link reached Review step ("${leadFailStep}"). Marking batch_job_queue as scanned.`);

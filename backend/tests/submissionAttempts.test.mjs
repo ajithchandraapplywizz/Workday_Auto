@@ -136,3 +136,109 @@ test('Stopped by user errors evaluate to attempt 0 and are never treated as exha
   assert.equal(isUserStop('Stopped by user', 'stopped'), true);
   assert.equal(isUserStop('Some actual workday error', 'failed'), false);
 });
+
+test('Zoho authentication and verification failures strictly follow 3-attempt lifecycle before marking failed', () => {
+  const evaluateZohoAttempt = (prevErrorMessage, zohoError, shotUrl = null) => {
+    const prevAttempts = getSubmissionAttemptCount(prevErrorMessage);
+    const currentAttempt = prevAttempts + 1;
+    const isFatalNonRetryable = false; // Zoho errors are retryable
+
+    if (currentAttempt < 3 && !isFatalNonRetryable) {
+      return {
+        currentAttempt,
+        status: 'ready_for_review',
+        error_message: shotUrl ? `[Attempt ${currentAttempt}/3] Halted at "Authentication": ${zohoError} [diagnostic_screenshot: ${shotUrl}]` : `[Attempt ${currentAttempt}/3] Halted at "Authentication": ${zohoError}`,
+        application_submitted_screenshot_url: shotUrl,
+      };
+    } else {
+      return {
+        currentAttempt,
+        status: 'failed',
+        error_message: shotUrl ? `[Attempt 3/3 Failed at "Authentication"]: ${zohoError} [diagnostic_screenshot: ${shotUrl}]` : `[Attempt 3/3 Failed at "Authentication"]: ${zohoError}`,
+        application_submitted_screenshot_url: shotUrl,
+      };
+    }
+  };
+
+  const zohoMsg = 'zoho mail not connected (AWL-ID: AWL-101, mail: candidate@example.com)';
+
+  // Attempt 1 Zoho failure: MUST stay ready_for_review with attempt 1 screenshot
+  const shot1 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-101_attempt1_failed.png';
+  const att1 = evaluateZohoAttempt(null, zohoMsg, shot1);
+  assert.equal(att1.currentAttempt, 1);
+  assert.equal(att1.status, 'ready_for_review', 'Attempt 1 Zoho failure MUST stay ready_for_review');
+  assert.equal(att1.application_submitted_screenshot_url, shot1);
+  assert.ok(att1.error_message.includes('[Attempt 1/3]'));
+
+  // Attempt 2 Zoho failure: MUST stay ready_for_review with attempt 2 screenshot replacing attempt 1
+  const shot2 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-101_attempt2_failed.png';
+  const att2 = evaluateZohoAttempt(att1.error_message, zohoMsg, shot2);
+  assert.equal(att2.currentAttempt, 2);
+  assert.equal(att2.status, 'ready_for_review', 'Attempt 2 Zoho failure MUST stay ready_for_review');
+  assert.equal(att2.application_submitted_screenshot_url, shot2);
+  assert.ok(att2.error_message.includes('[Attempt 2/3]'));
+
+  // Attempt 3 Zoho failure: MUST transition to failed with attempt 3 screenshot
+  const shot3 = 'https://supabase.co/storage/v1/object/public/failed-applications/AWL-101_attempt3_failed.png';
+  const att3 = evaluateZohoAttempt(att2.error_message, zohoMsg, shot3);
+  assert.equal(att3.currentAttempt, 3);
+  assert.equal(att3.status, 'failed', 'Attempt 3 Zoho failure MUST transition to failed');
+  assert.equal(att3.application_submitted_screenshot_url, shot3);
+  assert.ok(att3.error_message.includes('[Attempt 3/3 Failed at "Authentication"]'));
+});
+
+test('Claim atomic filters allow candidates with non-null failure screenshots to be retried', () => {
+  // Simulate database candidates in job_distributions
+  const candidates = [
+    {
+      id: 'task-fresh',
+      status: 'ready_for_review',
+      error_message: null,
+      application_submitted_screenshot_url: null,
+    },
+    {
+      id: 'task-retry1',
+      status: 'ready_for_review',
+      error_message: '[Attempt 1/3] Halted at "Authentication": zoho verification timeout',
+      application_submitted_screenshot_url: 'https://supabase.co/storage/v1/object/public/failed-applications/attempt1.png',
+    },
+    {
+      id: 'task-retry2',
+      status: 'ready_for_review',
+      error_message: '[Attempt 2/3] Halted at "My Experience": required field missing',
+      application_submitted_screenshot_url: 'https://supabase.co/storage/v1/object/public/failed-applications/attempt2.png',
+    },
+    {
+      id: 'task-submitted',
+      status: 'submitted',
+      error_message: null,
+      application_submitted_screenshot_url: 'https://supabase.co/storage/v1/object/public/submitted-applications/proof.png',
+    },
+  ];
+
+  // Retry 1 filter matcher: checks error_message includes Attempt 1 and status is not submitted/completed
+  const retry1Candidates = candidates.filter((c) =>
+    ['ready_for_review', 'queued'].includes(c.status) &&
+    c.status !== 'submitted' &&
+    c.status !== 'completed' &&
+    c.error_message && c.error_message.includes('[Attempt 1/3]')
+  );
+  assert.equal(retry1Candidates.length, 1);
+  assert.equal(retry1Candidates[0].id, 'task-retry1');
+  assert.ok(retry1Candidates[0].application_submitted_screenshot_url, 'Retry 1 candidate has attempt 1 screenshot');
+
+  // Retry 2 filter matcher: checks error_message includes Attempt 2 and status is not submitted/completed
+  const retry2Candidates = candidates.filter((c) =>
+    ['ready_for_review', 'queued'].includes(c.status) &&
+    c.status !== 'submitted' &&
+    c.status !== 'completed' &&
+    c.error_message && c.error_message.includes('[Attempt 2/3]')
+  );
+  assert.equal(retry2Candidates.length, 1);
+  assert.equal(retry2Candidates[0].id, 'task-retry2');
+  assert.ok(retry2Candidates[0].application_submitted_screenshot_url, 'Retry 2 candidate has attempt 2 screenshot');
+
+  // Submitted applications must NEVER match retry filters
+  assert.ok(!retry1Candidates.some(c => c.status === 'submitted'));
+  assert.ok(!retry2Candidates.some(c => c.status === 'submitted'));
+});

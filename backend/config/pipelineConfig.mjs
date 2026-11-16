@@ -55,7 +55,9 @@ export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
 export const TOTAL_SERVICES = Number(process.env.TOTAL_SERVICES) || 2;
 export const TOTAL_SCAN_WORKERS = Number(process.env.TOTAL_SCAN_WORKERS) || (SCAN_WORKER_COUNT * TOTAL_SERVICES);
 export const TOTAL_RESOLVE_WORKERS = Number(process.env.TOTAL_RESOLVE_WORKERS) || (RESOLVE_WORKER_COUNT * TOTAL_SERVICES);
-export const TOTAL_SUBMIT_WORKERS = Number(process.env.TOTAL_SUBMIT_WORKERS) || (SUBMIT_WORKER_COUNT * TOTAL_SERVICES);
+export const TOTAL_SUBMIT_WORKERS = (Number(process.env.TOTAL_SUBMIT_WORKERS) && Number(process.env.TOTAL_SUBMIT_WORKERS) <= (SUBMIT_WORKER_COUNT * TOTAL_SERVICES))
+  ? Number(process.env.TOTAL_SUBMIT_WORKERS)
+  : (SUBMIT_WORKER_COUNT * TOTAL_SERVICES);
 
 export const SCAN_WORKER_IDS = process.env.SCAN_WORKER_IDS
   ? process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
