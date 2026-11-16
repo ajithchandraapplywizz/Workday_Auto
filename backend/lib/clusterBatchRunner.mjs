@@ -95,10 +95,11 @@ export async function isClusterStopRequested() {
       bc?.stop_requested ||
       bc?.scan_stop_requested ||
       bc?.scan_status === 'stopping' ||
-
-
       bc?.last_action_requested === 'stop' ||
-      bc?.last_action_requested === 'stop_scan'
+      bc?.last_action_requested === 'stop_all' ||
+      bc?.last_action_requested === 'stop_scan' ||
+      bc?.last_action_requested === 'stop_pipeline' ||
+      bc?.last_action_requested === 'stop_universal'
     ) {
       return true;
     }

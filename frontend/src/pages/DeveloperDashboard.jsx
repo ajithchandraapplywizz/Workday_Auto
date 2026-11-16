@@ -812,8 +812,8 @@ export default function DeveloperDashboard() {
           isRunning: true,
           isScanning: true,
           isSubmitting: true,
-          state: 'parallel_pipeline',
-          stage: 'parallel_pipeline',
+          state: 'parallel',
+          stage: 'parallel',
         }));
       } else {
         setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch parallel trigger') });
@@ -869,7 +869,7 @@ export default function DeveloperDashboard() {
       isRunning: false,
       isScanning: false,
       isSubmitting: false,
-      state: 'stopped',
+      state: 'idle',
       stage: 'idle',
     }));
     setWorkerPool((prev) => ({

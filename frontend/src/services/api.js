@@ -3210,47 +3210,43 @@ export async function triggerAllParallelStage() {
       .eq('id', 'primary');
     if (!sbErr) supabaseSuccess = true;
 
-    // 3. Mark both scanning and submitting workers as in_flight
+    // 2. Mark both scanning and submitting workers as in_flight
     const { scan } = getEnvWorkerCounts();
     const scanningWorkerIds = Array.from({ length: scan }, (_, i) => `scanning_worker_${i + 1}`);
     const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
 
-    await supabase
-      .from('worker_status')
-      .update({
-        state: 'in_flight',
-        stage: 'scanning',
-        current_application_id: 'Stage 1: Scanning unique job links...',
-        updated_at: now,
-      })
-      .in('worker_id', scanningWorkerIds);
-
-    await supabase
-      .from('worker_status')
-      .update({
-        state: 'in_flight',
-        stage: 'submitting',
-        current_application_id: 'Stage 3: Submitting approved applications...',
-        updated_at: now,
-      })
-      .in('worker_id', submittingWorkerIds);
+    await Promise.allSettled([
+      supabase
+        .from('worker_status')
+        .update({
+          state: 'in_flight',
+          stage: 'scanning',
+          current_application_id: 'Stage 1: Scanning unique job links...',
+          updated_at: now,
+        })
+        .in('worker_id', scanningWorkerIds),
+      supabase
+        .from('worker_status')
+        .update({
+          state: 'in_flight',
+          stage: 'submitting',
+          current_application_id: 'Stage 3: Submitting approved applications...',
+          updated_at: now,
+        })
+        .in('worker_id', submittingWorkerIds),
+    ]);
   } catch (err) {
     console.warn('Supabase bot_control error in triggerAllParallelStage:', err);
   }
 
-  // 4. Dispatch webhook start calls to both services
+  // 3. Fast streamlined webhook dispatch to all service endpoints in parallel
   const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
   const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3001', 'http://localhost:3002'] : [])];
   const endpoints = [];
   for (const b of new Set(baseList)) {
-    endpoints.push(
-      `${b}/api/bot/universal`,
-      `${b}/api/bot/start-all`,
-      `${b}/api/bot/start`,
-      `${b}/api/bot/submit/start`,
-      `${b}/api/bot/webhook`
-    );
+    endpoints.push(`${b}/api/bot/universal`);
+    endpoints.push(`${b}/api/bot/webhook`);
   }
 
   await Promise.allSettled(
@@ -3259,7 +3255,7 @@ export async function triggerAllParallelStage() {
         method: 'POST',
         headers: getStaffAuthHeaders(),
         body: JSON.stringify({ action: 'start_universal', trigger: true, nonce: actionNonce, timestamp: now }),
-        signal: AbortSignal.timeout(2500),
+        signal: AbortSignal.timeout(1500),
       })
     )
   );
@@ -3302,7 +3298,7 @@ export async function stopAllParallelStage() {
     console.warn('Note on updating bot_control for stop all:', bcErr?.message);
   }
 
-  // 3. Mark ALL canonical workers strictly idle in worker_status
+  // 2. Mark ALL canonical workers strictly idle in worker_status
   const allWorkerIds = [
     'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
     'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
@@ -3322,25 +3318,31 @@ export async function stopAllParallelStage() {
     console.warn('Note on resetting all workers to idle:', wErr?.message);
   }
 
-  // 4. Roll back tasks in both batch_job_queue and job_distributions
+  // 3. Roll back in-flight tasks in batch_job_queue and job_distributions
+  // CRITICAL GUARD: Never touch submitted rows
   await Promise.allSettled([
-    supabase.from('batch_job_queue').update({ status: 'pending', worker_id: null, locked_at: null, updated_at: now }).eq('status', 'processing'),
-    supabase.from('job_distributions').update({ status: 'ready_for_review', worker_id: null, worker_leased_at: null, updated_at: now }).eq('status', 'applying'),
+    supabase
+      .from('batch_job_queue')
+      .update({ status: 'pending', worker_id: null, locked_at: null, updated_at: now })
+      .eq('status', 'processing'),
+    supabase
+      .from('job_distributions')
+      .update({ status: 'ready_for_review', worker_id: null, worker_leased_at: null, updated_at: now })
+      .eq('status', 'applying')
+      .is('application_submitted_screenshot_url', null)
+      .neq('status', 'submitted')
+      .neq('status', 'completed'),
   ]);
 
-  // 5. Send HTTP stop to all endpoints across both services
+  // 4. Send HTTP stop to all endpoints across services with fast timeout
   const backendUrls = getBackendBaseUrls();
   const isLocal = isLocalEnvironment();
   const baseList = [...backendUrls, ...(isLocal ? ['http://localhost:3001', 'http://localhost:3002'] : [])];
   const stopEndpoints = [];
   for (const b of new Set(baseList)) {
-    stopEndpoints.push(
-      `${b}/api/bot/stop`,
-      `${b}/api/bot/scan/stop`,
-      `${b}/api/bot/submit/stop`,
-      `${b}/api/bot/controls`,
-      `${b}/api/bot/webhook`
-    );
+    stopEndpoints.push(`${b}/api/bot/universal/stop`);
+    stopEndpoints.push(`${b}/api/bot/stop`);
+    stopEndpoints.push(`${b}/api/bot/webhook`);
   }
 
   await Promise.allSettled(
@@ -3348,7 +3350,7 @@ export async function stopAllParallelStage() {
       fetch(ep, {
         method: 'POST',
         headers: getStaffAuthHeaders(),
-        body: JSON.stringify({ action: 'stop', stop_requested: true, stop: true, nonce: actionNonce, timestamp: now }),
+        body: JSON.stringify({ action: 'stop_all', stop_requested: true, stop: true, nonce: actionNonce, timestamp: now }),
         signal: AbortSignal.timeout(1500),
       })
     )
@@ -3366,53 +3368,34 @@ export async function fetchBotDaemonStatus() {
     const backendBase = getBackendBaseUrl();
     const isLocal = isLocalEnvironment();
 
-    // 1. Probe local port 3001 (Scanner) and port 3002 (Submitter) independently
+    // 1. Concurrent queries: Query Supabase AND probe daemon HTTP endpoints simultaneously (zero blocking latency)
+    const probeEndpoints = [];
     if (isLocal) {
-      try {
-        const res3001 = await fetch('http://localhost:3001/api/bot/status', {
-          headers: { 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(1500),
-        });
-        if (res3001.ok) {
-          const j1 = await res3001.json();
-          scannerApiRunning = Boolean(j1.isRunning || j1.stage === 'scanning' || j1.stage === 'resolving' || j1.scan_status === 'running');
-        }
-      } catch {}
-
-      try {
-        const res3002 = await fetch('http://localhost:3002/api/bot/status', {
-          headers: { 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(1500),
-        });
-        if (res3002.ok) {
-          const j2 = await res3002.json();
-          submitterApiRunning = Boolean(j2.isRunning || j2.stage === 'submitting' || j2.submit_status === 'running');
-        }
-      } catch {}
+      probeEndpoints.push({ url: 'http://localhost:3001/api/bot/status', type: 'scanner' });
+      probeEndpoints.push({ url: 'http://localhost:3002/api/bot/status', type: 'submitter' });
     }
-
     const backendUrls = getBackendBaseUrls();
     for (const bUrl of backendUrls) {
-      try {
-        const resBase = await fetch(`${bUrl}/api/bot/status`, {
-          headers: { 'Accept': 'application/json' },
-          signal: AbortSignal.timeout(2000),
-        });
-        if (resBase.ok) {
-          const jb = await resBase.json();
-          if (jb.isRunning) daemonApiRunning = true;
-          if (jb.stage && jb.stage !== 'idle') daemonApiStage = jb.stage;
-          if (jb.stage === 'scanning' || jb.stage === 'resolving' || jb.scan_status === 'running') scannerApiRunning = true;
-          if (jb.stage === 'submitting' || jb.submit_status === 'running') submitterApiRunning = true;
-          if (jb.stage === 'parallel' || jb.stage === 'parallel_pipeline') {
-            scannerApiRunning = true;
-            submitterApiRunning = true;
-          }
-        }
-      } catch {}
+      probeEndpoints.push({ url: `${bUrl}/api/bot/status`, type: 'backend' });
     }
 
-    const [workersRes, controlRes] = await Promise.all([
+    const probePromise = Promise.allSettled(
+      probeEndpoints.map(async ({ url, type }) => {
+        try {
+          const res = await fetch(url, {
+            headers: { 'Accept': 'application/json' },
+            signal: AbortSignal.timeout(800),
+          });
+          if (res.ok) {
+            const j = await res.json();
+            return { type, data: j };
+          }
+        } catch {}
+        return null;
+      })
+    );
+
+    const supabasePromise = Promise.all([
       supabase
         .from('worker_status')
         .select('*')
@@ -3424,6 +3407,36 @@ export async function fetchBotDaemonStatus() {
         .maybeSingle()
         .catch(() => ({ data: null })),
     ]);
+
+    const [probeResults, [workersRes, controlRes]] = await Promise.all([
+      probePromise,
+      supabasePromise,
+    ]);
+
+    // Process probe results
+    for (const item of probeResults) {
+      if (item.status === 'fulfilled' && item.value?.data) {
+        const j = item.value.data;
+        if (item.value.type === 'scanner') {
+          if (j.isRunning || j.stage === 'scanning' || j.stage === 'resolving' || j.scan_status === 'running') {
+            scannerApiRunning = true;
+          }
+        } else if (item.value.type === 'submitter') {
+          if (j.isRunning || j.stage === 'submitting' || j.submit_status === 'running') {
+            submitterApiRunning = true;
+          }
+        } else if (item.value.type === 'backend') {
+          if (j.isRunning) daemonApiRunning = true;
+          if (j.stage && j.stage !== 'idle') daemonApiStage = j.stage;
+          if (j.stage === 'scanning' || j.stage === 'resolving' || j.scan_status === 'running') scannerApiRunning = true;
+          if (j.stage === 'submitting' || j.submit_status === 'running') submitterApiRunning = true;
+          if (j.stage === 'parallel' || j.stage === 'parallel_pipeline') {
+            scannerApiRunning = true;
+            submitterApiRunning = true;
+          }
+        }
+      }
+    }
 
     const workers = workersRes.data || [];
     const botControl = controlRes?.data || null;

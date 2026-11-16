@@ -1946,22 +1946,48 @@ export async function getBotControl() {
       } else if (dbRow.stage) {
         memoryBotControl.mode = dbRow.stage;
       }
-      // Derive scan/submit status if not explicit
-      if (memoryBotControl.mode === 'scanning') {
-        memoryBotControl.scan_enabled = true;
-        memoryBotControl.scan_status = 'running';
-        memoryBotControl.submit_status = 'off';
-        memoryBotControl.submit_enabled = false;
+      // Derive scan/submit status if not explicit on the row
+      if (dbRow.scan_status !== undefined) {
+        memoryBotControl.scan_status = dbRow.scan_status;
+        memoryBotControl.scan_enabled = dbRow.scan_status === 'running' || dbRow.scan_enabled === true;
+      }
+      if (dbRow.submit_status !== undefined) {
+        memoryBotControl.submit_status = dbRow.submit_status;
+        memoryBotControl.submit_enabled = dbRow.submit_status === 'running' || dbRow.submit_enabled === true;
+      }
+
+      if (memoryBotControl.mode === 'parallel' || memoryBotControl.stage === 'parallel') {
+        memoryBotControl.scan_enabled = memoryBotControl.scan_status !== 'off';
+        memoryBotControl.submit_enabled = memoryBotControl.submit_status !== 'off';
+        if (dbRow.scan_status === undefined) memoryBotControl.scan_status = 'running';
+        if (dbRow.submit_status === undefined) memoryBotControl.submit_status = 'running';
+      } else if (memoryBotControl.mode === 'scanning') {
+        if (dbRow.scan_status === undefined) {
+          memoryBotControl.scan_enabled = true;
+          memoryBotControl.scan_status = 'running';
+        }
+        if (dbRow.submit_status === undefined) {
+          memoryBotControl.submit_status = 'off';
+          memoryBotControl.submit_enabled = false;
+        }
       } else if (memoryBotControl.mode === 'submitting') {
-        memoryBotControl.submit_enabled = true;
-        memoryBotControl.submit_status = 'running';
-        memoryBotControl.scan_status = 'off';
-        memoryBotControl.scan_enabled = false;
+        if (dbRow.submit_status === undefined) {
+          memoryBotControl.submit_enabled = true;
+          memoryBotControl.submit_status = 'running';
+        }
+        if (dbRow.scan_status === undefined) {
+          memoryBotControl.scan_status = 'off';
+          memoryBotControl.scan_enabled = false;
+        }
       } else if (memoryBotControl.mode === 'idle') {
-        if (memoryBotControl.scan_status === 'running') memoryBotControl.scan_status = 'off';
-        if (memoryBotControl.submit_status === 'running') memoryBotControl.submit_status = 'off';
-        memoryBotControl.scan_enabled = false;
-        memoryBotControl.submit_enabled = false;
+        if (dbRow.scan_status === undefined) {
+          memoryBotControl.scan_status = 'off';
+          memoryBotControl.scan_enabled = false;
+        }
+        if (dbRow.submit_status === undefined) {
+          memoryBotControl.submit_status = 'off';
+          memoryBotControl.submit_enabled = false;
+        }
       }
     }
     return { ...memoryBotControl };
