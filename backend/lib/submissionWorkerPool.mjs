@@ -1052,6 +1052,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
+        const resetMatch = String(task.error_message || '').match(/\[password_reset_requested:(\d+)\]/);
+        const passwordResetRequestedAt = resetMatch ? parseInt(resetMatch[1], 10) : null;
+
         const { executeWorkerTask } = await import('./workerPool.mjs');
 
         return await executeWorkerTask({
@@ -1087,6 +1090,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             currentAttempt,
 
             maxAttempts: 3,
+
+            passwordResetRequestedAt,
 
             isFinalAttempt,
 

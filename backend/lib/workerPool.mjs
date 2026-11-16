@@ -630,6 +630,30 @@ export async function executeWorkerTask({
         status = status.status || 'unknown';
       }
     } else {
+      // Check if password reset was previously requested for this application (< 2 hours ago)
+      const resetReqTime = task.passwordResetRequestedAt || null;
+      if (resetReqTime && (Date.now() - resetReqTime < 2 * 60 * 60 * 1000)) {
+        console.log(`   🔑 [${workerId}] Application previously requested password reset at ${new Date(resetReqTime).toLocaleTimeString()}. Checking Zoho Mail for delayed email arrival...`);
+        try {
+          const { checkAndResumeDelayedPasswordReset } = await import('./workdayVerification.mjs');
+          const resumeRes = await checkAndResumeDelayedPasswordReset(page, {
+            email: workdayEmail,
+            password: workdayPassword,
+            company,
+            jobUrl,
+            requestedAt: resetReqTime,
+            applywizzId,
+            distributionId: task.distribution_id || task.distributionId || task.id,
+            taskId: queueTaskId,
+          });
+          if (resumeRes?.success) {
+            console.log(`   🎉 [${workerId}] Successfully resumed and completed password reset via Zoho Mail! Proceeding directly to application.`);
+          }
+        } catch (resumeErr) {
+          console.warn(`   ⚠️ [${workerId}] Note on checking delayed password reset: ${resumeErr.message}`);
+        }
+      }
+
       // Step A: Scan Form
       appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
       console.log(`   [${workerId}] Step 1: Scanning form fields...`);

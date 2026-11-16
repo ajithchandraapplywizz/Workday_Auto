@@ -294,6 +294,8 @@ export async function analyzeClientProfileOnce(profile = {}, opts = {}) {
   return brief;
 }
 
+const inMemoryLlmCache = new Map();
+
 /**
  * Resolves an unknown Workday form question using Claude Haiku 5.5.
  * Strictly adheres to Rule E:
@@ -318,6 +320,31 @@ export async function resolveUnknownWithLlm(questionText, field = {}, opts = {})
   const typeDesc = describeFieldTypeCode(typeCode);
 
   const profile = opts.profile || {};
+
+  // ─── Fast In-Memory Deduplication & Q&A Caching (0 tokens, $0.00) ───────────
+  const tenantKey = opts.tenant || profile?._tenant || 'global';
+  const normQ = normalizeLabel(label);
+  const optSignature = options.slice().sort().join('|');
+  const cacheKey = `${tenantKey}:::${normQ}:::${optSignature}`;
+
+  if (inMemoryLlmCache.has(cacheKey)) {
+    const cached = inMemoryLlmCache.get(cacheKey);
+    console.log(`    ⚡ [Claude Fast Cache Hit] "${label.slice(0, 45)}" ← "${String(cached).slice(0, 35)}" ($0.00 / 0 tokens)`);
+    return cached;
+  }
+
+  // Also check candidate profile resolved answers map if available
+  if (profile?._resolvedAnswersMap instanceof Map && profile._resolvedAnswersMap.has(normQ)) {
+    const fromMap = profile._resolvedAnswersMap.get(normQ);
+    const ans = fromMap?.answer || fromMap;
+    if (ans && (options.length === 0 || options.some((o) => o.toLowerCase() === String(ans).toLowerCase()))) {
+      const match = options.length > 0 ? options.find((o) => o.toLowerCase() === String(ans).toLowerCase()) : ans;
+      inMemoryLlmCache.set(cacheKey, match);
+      console.log(`    ⚡ [Profile Fact Cache Hit] "${label.slice(0, 45)}" ← "${String(match).slice(0, 35)}" ($0.00 / 0 tokens)`);
+      return match;
+    }
+  }
+
   const resumeText = profile._resumeText || profile.resume_text || '';
   const applicant = profile.personal || {};
 
@@ -396,6 +423,10 @@ ${relevantQaText || '(None)'}`;
 
     if (isMissingProfileStatement(answer)) return null;
 
+    if (answer) {
+      inMemoryLlmCache.set(cacheKey, answer);
+    }
+
     return answer;
   } catch (err) {
     console.warn(`    ⚠️ [claudeLlm] Resolution error for "${label}": ${err.message}`);
@@ -414,8 +445,10 @@ export async function pickNearestSelectOption({
   const list = (options || []).map((o) => String(o || '').trim()).filter(Boolean);
   if (!list.length) return preferred || null;
 
-  // Local fast fuzzy match
+  // Fast exact or case-insensitive match for preferred
   if (preferred) {
+    const exact = list.find((o) => o.toLowerCase() === String(preferred).toLowerCase());
+    if (exact) return exact;
     const local = localNearestOption(preferred, list);
     if (local && local.score >= 0.8) return local.option;
   }

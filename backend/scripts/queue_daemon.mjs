@@ -2604,10 +2604,13 @@ export async function initOnStartup() {
 
   // ── Universal Cloud Bridge: Listen to Supabase signals (bot_control + worker_status fallback) ──
   let warnedMissingBotControl = false;
-  setInterval(async () => {
+  let cloudBridgeTimer = null;
+  const pollCloudBridge = async () => {
+    let nextDelay = 800;
     try {
       // Allow explicit bypass only if user deliberately specifies IGNORE_CLOUD_SIGNALS=true
       if (process.env.IGNORE_CLOUD_SIGNALS === 'true') {
+        cloudBridgeTimer = setTimeout(pollCloudBridge, 2000);
         return;
       }
       const [bc, wc] = await Promise.all([
@@ -2973,10 +2976,20 @@ export async function initOnStartup() {
         }
       }
 
+      // Adaptive low-power standby:
+      // When jobs or workers are active or running, poll fast at 800ms.
+      // When completely idle and stopped, poll at 2000ms to save 60% idle CPU and DB calls.
+      const isSystemActive = isPoolRunning || isSustainedRunning || currentStage !== 'idle' || activeSubmittingWorkers.size > 0;
+      nextDelay = isSystemActive ? 800 : 2000;
     } catch {
       // Continue polling silently
+      nextDelay = 2000;
+    } finally {
+      cloudBridgeTimer = setTimeout(pollCloudBridge, nextDelay);
     }
-  }, 800);
+  };
+
+  cloudBridgeTimer = setTimeout(pollCloudBridge, 800);
 
   // ── Phase 3: 6-Minute Lease Reaper Background Interval (runs every 30s) ──
   setInterval(async () => {

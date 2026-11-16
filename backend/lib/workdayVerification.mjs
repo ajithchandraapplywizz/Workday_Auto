@@ -6,7 +6,10 @@
  */
 
 import { extractWorkdayCompanyName, isInNavOrHeader, isWorkdayWizardVisible } from './discovery.mjs';
-import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers, isZohoMailboxConnected } from './zohoMailClient.mjs';
+import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers, isZohoMailboxConnected, extractWorkdayTenant } from './zohoMailClient.mjs';
+
+/** Global in-memory registry tracking recent password reset requests (valid for 2 hours) */
+export const PASSWORD_RESET_TRACKER = new Map();
 
 /**
  * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
@@ -866,16 +869,24 @@ export async function executeWorkdayForgotPassword(page, {
     ].join(', ')).catch(() => null);
   };
 
-  const MAX_FORGOT_HITS = 2;
-  const hitTimeoutMs = Math.min(timeoutMs || 45000, 45000);
+  const cleanAwlId = String(applywizzId || '').replace(/[^a-zA-Z0-9_-]/g, '').trim().toUpperCase();
   const effectiveCompany = company || (page && typeof page.url === 'function' ? extractWorkdayCompanyName(page.url()) : '');
-  let verifResult = null;
+  const tenant = extractWorkdayTenant(jobUrl || (page && typeof page.url === 'function' ? page.url() : ''));
+  const trackerKey = `${cleanAwlId || email}:${tenant || effectiveCompany}`;
 
-  for (let hit = 1; hit <= MAX_FORGOT_HITS; hit++) {
-    console.log(`   📩 [WorkdayBot] Forgot Password Hit ${hit}/${MAX_FORGOT_HITS}: Entering email and submitting reset form...`);
+  // Check if reset was already requested within the active 2-hour window
+  const existingReset = PASSWORD_RESET_TRACKER.get(trackerKey);
+  const isAlreadyRequested = existingReset && (Date.now() - existingReset.requestedAt < 2 * 60 * 60 * 1000);
+  let requestTime = isAlreadyRequested ? existingReset.requestedAt : Date.now();
+  let resetProofShotUrl = existingReset?.screenshotUrl || null;
+
+  if (isAlreadyRequested) {
+    console.log(`   ℹ️ [WorkdayBot] Password reset was ALREADY requested at ${new Date(requestTime).toLocaleTimeString()} (within 2h validity window). Skipping re-click to avoid token invalidation.`);
+  } else {
+    console.log(`   📩 [WorkdayBot] Submitting client email for password reset instructions (strictly single click)...`);
 
     const emailFilled = await fillClientEmail();
-    if (!emailFilled && hit === 1) {
+    if (!emailFilled) {
       console.log('   ⚠️  [WorkdayBot] Could not locate email input on Forgot Password form.');
       return { success: false, reason: 'email_input_not_found' };
     }
@@ -883,134 +894,189 @@ export async function executeWorkdayForgotPassword(page, {
     const submitBtn = await getResetSubmitButton();
     if (!submitBtn || !(await submitBtn.isVisible().catch(() => false))) {
       if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
-        break;
-      }
-      if (hit === 1) {
+        // Page already navigated to reset password set page
+      } else {
         console.log('   ⚠️  [WorkdayBot] Could not locate "Reset Password" submit button.');
         return { success: false, reason: 'submit_button_not_found' };
       }
     } else {
-      console.log(`   📩 [WorkdayBot] Submitting client email for password reset instructions (Hit ${hit}/${MAX_FORGOT_HITS})...`);
       await submitBtn.click({ force: true }).catch(() => submitBtn.evaluate(el => el.click()));
-      await page.waitForTimeout(600).catch(() => {});
+      await page.waitForTimeout(1000).catch(() => {});
       try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
-    }
 
-    const requestTime = Date.now() - 30000;
-    console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader for reset email link (Hit ${hit}/${MAX_FORGOT_HITS}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
-
-    verifResult = await resolveWorkdayVerification(page, {
-      email,
-      password,
-      company: effectiveCompany,
-      startTime: requestTime,
-      timeoutMs: hitTimeoutMs,
-      applywizzId,
-      jobUrl,
-      distributionId,
-      taskId,
-    }).catch((err) => {
-      console.warn(`   ⚠️  [WorkdayBot] Verification poll error: ${err.message}`);
-      return null;
-    });
-
-    // If Zoho mailbox is not connected, stop immediately and close browser
-    if (verifResult?.isZohoNotConnected || verifResult?.reason === 'zoho mail not connected' || verifResult?.reason === 'mailbox_not_connected') {
-      console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is NOT CONNECTED in Zoho Mail Reader — closing browser and returning zoho_not_connected.`);
-      if (page && typeof page.context === 'function') {
-        const browser = page.context()?.browser();
-        if (browser) await browser.close().catch(() => {});
-        else if (typeof page.close === 'function') await page.close().catch(() => {});
+      // MANDATORY SCREENSHOT: Immediately after clicking "Reset Password" once
+      try {
+        const { takeScreenshot } = await import('./reporter.mjs');
+        resetProofShotUrl = await takeScreenshot(page, 'password-reset-requested', {
+          applywizzId: cleanAwlId,
+          taskId,
+          company: effectiveCompany,
+        });
+        console.log(`   📸 [WorkdayBot] Mandatory proof screenshot captured post-reset request: ${resetProofShotUrl || 'Supabase Storage'}`);
+      } catch (shotErr) {
+        console.warn('   ⚠️ [WorkdayBot] Note on password-reset-requested screenshot:', shotErr.message);
       }
-      return {
-        success: false,
-        status: 'zoho_not_connected',
-        reason: 'zoho mail not connected',
-        isZohoNotConnected: true,
-        error: verifResult?.error || `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${email})`,
-      };
     }
 
-    if (verifResult?.success) {
-      console.log(`   ✅ [WorkdayBot] Password reset link retrieved and processed successfully on Hit ${hit}!`);
-      break;
-    }
-
-    if (hit < MAX_FORGOT_HITS) {
-      console.log(`   ⚠️ [WorkdayBot] Password reset link did not arrive after Hit 1. Retrying Hit 2 of ${MAX_FORGOT_HITS}...`);
-      await page.waitForTimeout(2000).catch(() => {});
-    }
+    requestTime = Date.now();
+    PASSWORD_RESET_TRACKER.set(trackerKey, {
+      requestedAt: requestTime,
+      email,
+      company: effectiveCompany,
+      tenant,
+      jobUrl,
+      screenshotUrl: resetProofShotUrl,
+    });
   }
 
-  // If reset link was not retrieved after strictly 2 hits
-  if (!verifResult?.success) {
-    console.log(`   ❌ [WorkdayBot] Forgot Password reset link was not received in Zoho Mail after strictly ${MAX_FORGOT_HITS} hits — link timed out.`);
+  const hitTimeoutMs = Math.min(timeoutMs || 45000, 45000);
+  console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader for reset email link (cutoff: ${new Date(requestTime - 15000).toLocaleTimeString()}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
 
-    // Close browser as explicitly instructed
+  const verifResult = await resolveWorkdayVerification(page, {
+    email,
+    password,
+    company: effectiveCompany,
+    startTime: requestTime - 15000,
+    timeoutMs: hitTimeoutMs,
+    applywizzId,
+    jobUrl,
+    distributionId,
+    taskId,
+  }).catch((err) => {
+    console.warn(`   ⚠️  [WorkdayBot] Verification poll error: ${err.message}`);
+    return null;
+  });
+
+  // If Zoho mailbox is not connected, stop immediately and close browser
+  if (verifResult?.isZohoNotConnected || verifResult?.reason === 'zoho mail not connected' || verifResult?.reason === 'mailbox_not_connected') {
+    console.log(`   ❌ [WorkdayBot] Candidate ${email} mailbox is NOT CONNECTED in Zoho Mail Reader — closing browser and returning zoho_not_connected.`);
     if (page && typeof page.context === 'function') {
       const browser = page.context()?.browser();
       if (browser) await browser.close().catch(() => {});
       else if (typeof page.close === 'function') await page.close().catch(() => {});
     }
-
-    const timeoutReason = 'link timed out';
-
-    // Update database status: 'failed', error_message: 'link timed out'
-    try {
-      const { request } = await import('./supabaseClient.mjs');
-      const now = new Date().toISOString();
-      const cleanAwlId = String(applywizzId || '').replace(/[^a-zA-Z0-9_-]/g, '').trim().toUpperCase();
-      if (distributionId) {
-        await request('job_distributions', {
-          method: 'PATCH',
-          query: `?id=eq.${encodeURIComponent(distributionId)}`,
-          body: {
-            status: 'failed',
-            error_message: timeoutReason,
-            updated_at: now,
-          },
-        }).catch(() => {});
-      } else if (cleanAwlId && jobUrl) {
-        await request('job_distributions', {
-          method: 'PATCH',
-          query: `?applywizz_id=eq.${encodeURIComponent(cleanAwlId)}&job_url=eq.${encodeURIComponent(jobUrl)}`,
-          body: {
-            status: 'failed',
-            error_message: timeoutReason,
-            updated_at: now,
-          },
-        }).catch(() => {});
-      }
-      if (cleanAwlId && jobUrl) {
-        await request('batch_job_queue', {
-          method: 'PATCH',
-          query: `?applywizz_id=ilike.*${encodeURIComponent(cleanAwlId)}*&job_url=eq.${encodeURIComponent(jobUrl)}`,
-          body: {
-            status: 'failed',
-            error_message: timeoutReason,
-            updated_at: now,
-          },
-        }).catch(() => {});
-      }
-    } catch (dbErr) {
-      console.warn(`   ⚠️ [WorkdayBot] Error updating link timeout status in database: ${dbErr.message}`);
-    }
-
     return {
       success: false,
-      reason: timeoutReason,
-      status: 'failed',
-      error: timeoutReason,
+      status: 'zoho_not_connected',
+      reason: 'zoho mail not connected',
+      isZohoNotConnected: true,
+      error: verifResult?.error || `zoho mail not connected (AWL-ID: ${applywizzId}, mail: ${email})`,
     };
   }
 
-  // Safety net: check if page is still on Password Reset Set form
-  if (await isWorkdayPasswordResetSetPage(page)) {
-    console.log('   🔑 [WorkdayBot] Page still on Password Reset form — completing password reset now...');
-    await completeWorkdayPasswordResetForm(page, email, password);
+  if (verifResult?.success) {
+    console.log(`   ✅ [WorkdayBot] Password reset link retrieved and processed successfully!`);
+    PASSWORD_RESET_TRACKER.delete(trackerKey);
+    return verifResult;
   }
 
-  const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
-  console.log(`   ✅ [WorkdayBot] Password reset link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
-  return { success: true, url: verifResult.url, onWizard };
+  // If reset link was not retrieved during initial in-browser poll:
+  // Close browser cleanly to protect container memory and prevent Linux pthread_create (11) thread exhaustion
+  console.log(`   ⏳ [WorkdayBot] Forgot Password reset link has not arrived yet in Zoho Mail. Closing current browser cleanly to free resources.`);
+  if (page && typeof page.context === 'function') {
+    const browser = page.context()?.browser();
+    if (browser) await browser.close().catch(() => {});
+    else if (typeof page.close === 'function') await page.close().catch(() => {});
+  }
+
+  // STRICT GUARD: DO NOT MARK AS FAILED! Keep status = 'ready_for_review' and record reset tracking tag!
+  const resetPendingMsg = `[Attempt 1/3] Halted at "Authentication": [password_reset_requested:${requestTime}] Password reset requested on Workday — awaiting Zoho Mail delivery (valid for 2 hours) [diagnostic_screenshot: ${resetProofShotUrl || 'none'}]`;
+
+  try {
+    const { request } = await import('./supabaseClient.mjs');
+    const now = new Date().toISOString();
+    const patchBody = {
+      status: 'ready_for_review',
+      error_message: resetPendingMsg,
+      worker_id: null,
+      worker_leased_at: null,
+      updated_at: now,
+    };
+    if (resetProofShotUrl) {
+      patchBody.application_submitted_screenshot_url = resetProofShotUrl;
+    }
+    if (distributionId) {
+      await request('job_distributions', {
+        method: 'PATCH',
+        query: `?id=eq.${encodeURIComponent(distributionId)}`,
+        body: patchBody,
+      }).catch(() => {});
+    } else if (cleanAwlId && jobUrl) {
+      await request('job_distributions', {
+        method: 'PATCH',
+        query: `?applywizz_id=eq.${encodeURIComponent(cleanAwlId)}&job_url=eq.${encodeURIComponent(jobUrl)}`,
+        body: patchBody,
+      }).catch(() => {});
+    }
+  } catch (dbErr) {
+    console.warn(`   ⚠️ [WorkdayBot] Note on recording password reset pending state: ${dbErr.message}`);
+  }
+
+  return {
+    success: false,
+    reason: 'password_reset_pending',
+    status: 'ready_for_review',
+    passwordResetPending: true,
+    screenshotUrl: resetProofShotUrl,
+    requestedAt: requestTime,
+  };
+}
+
+/**
+ * Checks Zoho Mail for an already-requested password reset link and completes the password reset.
+ * Used when an application previously requested password reset and is re-attempted 2-10 minutes later.
+ */
+export async function checkAndResumeDelayedPasswordReset(page, {
+  email,
+  password,
+  company = '',
+  jobUrl = '',
+  requestedAt = null,
+  applywizzId = '',
+  distributionId = '',
+  taskId = '',
+} = {}) {
+  const cleanEmail = String(email || '').trim().toLowerCase();
+  const cleanAwlId = String(applywizzId || '').replace(/[^a-zA-Z0-9_-]/g, '').trim().toUpperCase();
+  const effectiveCompany = company || (jobUrl ? extractWorkdayCompanyName(jobUrl) : '');
+  const tenant = extractWorkdayTenant(jobUrl);
+  const trackerKey = `${cleanAwlId || cleanEmail}:${tenant || effectiveCompany}`;
+
+  const triggerTime = requestedAt || PASSWORD_RESET_TRACKER.get(trackerKey)?.requestedAt || (Date.now() - 3600000);
+
+  console.log(`   🔍 [WorkdayBot] Checking Zoho Mail for delayed password reset email for ${cleanEmail} (requested at: ${new Date(triggerTime).toLocaleTimeString()})...`);
+
+  const pollRes = await pollZohoWorkdayAuth({
+    email: cleanEmail,
+    company: effectiveCompany,
+    jobUrl,
+    triggerTime: triggerTime - 15000,
+    timeoutMs: 12000,
+    pollIntervalMs: 2000,
+  }).catch(() => null);
+
+  if (pollRes?.found && pollRes?.verificationLink) {
+    const cleanLink = sanitizeWorkdayUrl(pollRes.verificationLink) || pollRes.verificationLink;
+    console.log(`   🎉 [WorkdayBot] Found authentic password reset link from Zoho Mail: ${cleanLink}`);
+    console.log(`   🌐 [WorkdayBot] Navigating directly to reset password URL in active browser...`);
+
+    if (page && typeof page.goto === 'function') {
+      await page.goto(cleanLink, { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {});
+      await page.waitForTimeout(2000);
+      try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
+
+      const resetSuccess = await completeWorkdayPasswordResetForm(page, cleanEmail, password);
+      PASSWORD_RESET_TRACKER.delete(trackerKey);
+
+      const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
+      return {
+        success: resetSuccess || onWizard,
+        resumed: true,
+        onWizard,
+        verificationLink: cleanLink,
+      };
+    }
+  }
+
+  return { success: false, reason: 'reset_link_not_yet_arrived' };
 }

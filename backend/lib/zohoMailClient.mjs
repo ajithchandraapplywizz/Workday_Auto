@@ -234,6 +234,9 @@ export function isWorkdayCompanyMatch({ from = '', subject = '', body = '', link
     if (cleanLink.includes(`${normTenant}.`) || cleanLink.includes(`/${normTenant}/`) || cleanLink.includes(`/${normTenant}_`)) {
       return true;
     }
+    if (cleanBody.includes(`${normTenant}.`) || cleanBody.includes(`/${normTenant}/`) || cleanBody.includes(`/${normTenant}_`)) {
+      return true;
+    }
     if (cleanFrom.includes(`${normTenant}@`) || cleanFrom.includes(normTenant)) {
       return true;
     }
