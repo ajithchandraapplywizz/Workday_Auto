@@ -118,6 +118,7 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
 
 const activeBrowsers = new Set();
 const activeSlots = new Set();
+const slotAcquiredTimes = new Map();
 const waitingQueue = [];
 
 /**
@@ -183,6 +184,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
 
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
+    slotAcquiredTimes.set(workerId, Date.now());
     return true;
   }
 
@@ -212,42 +214,45 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
 
       // Prune dead/disconnected browser handles
       for (const b of Array.from(activeBrowsers)) {
-        if (typeof b.isConnected === 'function' && !b.isConnected()) {
+        if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
           activeBrowsers.delete(b);
           browserRoles.delete(b);
         }
       }
 
-      // Prune dead slots whose worker contexts are completely absent
+      // Prune dead slots whose worker contexts are completely absent after a 30s launch jitter grace period
+      const now = Date.now();
       for (const slotWorkerId of Array.from(activeSlots)) {
-        if (!activeWorkerContexts.has(slotWorkerId) && slotWorkerId !== workerId) {
-          if (activeBrowsers.size === 0) {
-            activeSlots.delete(slotWorkerId);
-          }
+        const acquiredTime = slotAcquiredTimes.get(slotWorkerId) || 0;
+        if (now - acquiredTime > 30000 && !activeWorkerContexts.has(slotWorkerId) && slotWorkerId !== workerId) {
+          activeSlots.delete(slotWorkerId);
+          slotAcquiredTimes.delete(slotWorkerId);
         }
       }
 
-      // Check timeout (45s default) — prevents 8-minute watchdog deadlocks
+      // Check timeout (default 120s) — self-heal phantom locks and unblock workers immediately
       if (Date.now() - startTime > timeoutMs) {
         cleanup();
         const idx = waitingQueue.indexOf(queueItem);
         if (idx !== -1) waitingQueue.splice(idx, 1);
         // Force prune dead references
         for (const b of Array.from(activeBrowsers)) {
-          if (typeof b.isConnected === 'function' && !b.isConnected()) {
+          if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
             activeBrowsers.delete(b);
             browserRoles.delete(b);
           }
         }
-        // If slot is now open after pruning, grant it!
-        if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
-          activeSlots.add(workerId);
-          console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot after self-healing prune (${activeBrowsers.size + 1}/${effectiveMax})`);
-          resolve(true);
-          return;
+        // If phantom count drift occurred, force clear dead handles and auto-grant slot
+        if (activeBrowsers.size >= effectiveMax) {
+          console.warn(`⚠️ [SLOT GUARD] ${workerId} slot wait timed out after ${Math.round(timeoutMs / 1000)}s with phantom count (${activeBrowsers.size}/${effectiveMax} active). Force purging zombie handles and auto-granting slot.`);
+          activeBrowsers.clear();
+          browserRoles.clear();
         }
-        console.warn(`⚠️ [SLOT GUARD] ${workerId} slot wait timed out after ${Math.round(timeoutMs / 1000)}s (${activeBrowsers.size}/${effectiveMax} active). Yielding turn cleanly.`);
-        reject(new Error(`[SLOT_TIMEOUT] Browser slot busy after ${Math.round(timeoutMs / 1000)}s`));
+        activeSlots.delete(workerId);
+        activeSlots.add(workerId);
+        slotAcquiredTimes.set(workerId, Date.now());
+        console.log(`🔓 [SLOT GUARD] ${workerId} auto-granted browser slot via self-healing reset (${activeBrowsers.size + 1}/${effectiveMax})`);
+        resolve(true);
         return;
       }
 
@@ -256,6 +261,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
         cleanup();
         waitingQueue.shift();
         activeSlots.add(workerId);
+        slotAcquiredTimes.set(workerId, Date.now());
         console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot (${activeBrowsers.size + 1}/${effectiveMax})`);
         resolve(true);
       }
@@ -285,9 +291,10 @@ export function cancelWaitingSlot(workerId) {
  */
 export function releaseBrowserSlot(workerId = 'worker') {
   activeSlots.delete(workerId);
+  slotAcquiredTimes.delete(workerId);
   // Prune any disconnected/closed browser handles
   for (const b of Array.from(activeBrowsers)) {
-    if (typeof b.isConnected === 'function' && !b.isConnected()) {
+    if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
       activeBrowsers.delete(b);
       browserRoles.delete(b);
     }
@@ -300,6 +307,7 @@ export function releaseBrowserSlot(workerId = 'worker') {
       }
       if (typeof next.resolve === 'function') {
         activeSlots.add(next.workerId);
+        slotAcquiredTimes.set(next.workerId, Date.now());
         console.log(`🔓 [SLOT GUARD] Previous browser closed. Handing slot to next worker in service: ${next.workerId}`);
         next.resolve(true);
         break;
