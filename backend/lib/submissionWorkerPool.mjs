@@ -934,9 +934,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-  // B4 Task Watchdog: configurable or 25-minute default per task (prevents runaway browser while allowing multi-step forms)
-  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs
-    || (process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS ? parseInt(process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS, 10) : 25 * 60 * 1000);
+  // B4 Task Watchdog: 8-minute default, clamped to max 10 minutes per task (prevents runaway browser while allowing multi-step forms)
+  const envWatchdog = process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS ? parseInt(process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS, 10) : 8 * 60 * 1000;
+  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs || Math.min(envWatchdog, 10 * 60 * 1000);
   const watchdogMins = Math.round(WATCHDOG_TIMEOUT_MS / 60000);
 
   let watchdogTimer = null;
