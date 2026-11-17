@@ -1751,6 +1751,11 @@ export async function runClusterBatchRunner({
         current_application_id: null,
       }).catch(() => { });
     }
+    try {
+      const { deepCleanWhenZeroActiveInstances } = await import('./browserLifecycle.mjs');
+      deepCleanWhenZeroActiveInstances();
+    } catch {}
+    if (global.gc) { try { global.gc(); } catch {} }
     return { succeeded: 0, failed: 0, total: 0 };
   }
 
@@ -2047,6 +2052,11 @@ export async function runClusterBatchRunner({
         current_application_id: null,
       }).catch(() => { });
     }
+    try {
+      const { deepCleanWhenZeroActiveInstances } = await import('./browserLifecycle.mjs');
+      deepCleanWhenZeroActiveInstances();
+    } catch {}
+    if (global.gc) { try { global.gc(); } catch {} }
     return { succeeded: 0, failed: 0, total: 0 };
   }
 

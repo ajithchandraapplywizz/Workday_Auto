@@ -117,6 +117,8 @@ let isPoolRunning = false;
 let isPoolPaused = false;
 let isScanLoopExecuting = false;
 let isSubmitLoopExecuting = false;
+let isScannerIdle = false;
+let isSubmitterIdle = false;
 let lastStandbyLogTime = 0;
 let lastScanStandbyLogTime = 0;
 let currentStage = 'idle';
@@ -736,7 +738,11 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
 
   const tasksCount = initialCount || 0;
   if (tasksCount === 0) {
-    console.log(`ℹ️ [DAEMON] 0 applications ready right now. Submitter standing by for ready applications in job_distributions...`);
+    isSubmitterIdle = true;
+    console.log(`[SUBMITTER] 0 ready applications in queue. Workers idle, standing by for new applications...`);
+    for (const wId of submitWorkers) {
+      await updateWorkerStatus(wId, { state: 'idle', stage: 'submitting', current_application_id: null }).catch(() => {});
+    }
   }
 
   await syncBotControlState({
@@ -750,8 +756,8 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
     is_running: true,
     current_action: isParallel
       ? `Universal Parallel Pipeline: Scanning & Submissions (${tasksCount} ready) running concurrently across workers`
-      : (tasksCount > 0 ? `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway` : `Submitter standing by across ${maxConcurrency} workers for ready applications`),
-    active_worker_count: maxConcurrency + (isParallel ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0),
+      : (tasksCount > 0 ? `Submitting ${tasksCount} task(s) across ${maxConcurrency} parallel workers on Railway` : `Idle: 0 ready applications in queue (waiting for applications)`),
+    active_worker_count: tasksCount > 0 ? maxConcurrency + (isParallel ? (PIPELINE_CONFIG.scanWorkerIds?.length || 2) : 0) : 0,
   });
 
   // Filter for workers that do NOT already have a dedicated loop actively running:
@@ -805,11 +811,30 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
         const claimedTask = await claimNextTask(workerId);
         if (!claimedTask) {
           activeSubmittingWorkers.delete(workerId);
+
+          // Update worker_status in DB to idle for this worker
+          await updateWorkerStatus(workerId, {
+            state: 'idle',
+            stage: 'submitting',
+            current_application_id: null,
+          }).catch(() => {});
+
+          // If all submitting workers in this service are idle
           if (activeSubmittingWorkers.size === 0) {
-            try {
-              const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
-              deepCleanWhenZeroActiveInstances();
-            } catch {}
+            if (!isSubmitterIdle) {
+              isSubmitterIdle = true;
+              console.log(`[SUBMITTER] 0 ready applications in queue. Workers idle, standing by for new applications...`);
+              await syncBotControlState({
+                active_worker_count: 0,
+                current_action: 'Idle: 0 ready applications in queue (waiting for applications)',
+              }).catch(() => {});
+
+              try {
+                const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+                deepCleanWhenZeroActiveInstances();
+              } catch {}
+              if (global.gc) { try { global.gc(); } catch {} }
+            }
           }
 
           // 1. If sibling workers in this container are still active, wait 3s and retry claiming
@@ -819,17 +844,30 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
           }
 
           // 2. Continuous Standby Polling:
-          // Keep submission workers alive and actively polling while submitStatus === 'running'!
-          // Only halt when an explicit stop signal is requested by user.
-          if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 30000) {
-            lastStandbyLogTime = Date.now();
-            console.log(`⏳ [SUBMISSION WORKER] Submitter active (0 ready applications right now). Standing by for newly resolved applications (polling every 4s)...`);
-          }
-          await new Promise((r) => setTimeout(r, 4000));
+          // Keep submission workers in quiet 10s standby with worker offset to save RAM and avoid DB spikes
+          const workerIndex = submitWorkers.indexOf(workerId);
+          const jitter = workerIndex >= 0 ? workerIndex * 500 : 0;
+          await new Promise((r) => setTimeout(r, 10000 + jitter));
           continue;
         }
 
+        // A task was successfully claimed:
+        if (isSubmitterIdle) {
+          isSubmitterIdle = false;
+          console.log(`[SUBMITTER] New applications detected in queue. Resuming submission workers...`);
+          await syncBotControlState({
+            active_worker_count: maxConcurrency,
+            current_action: `Submitting tasks across ${maxConcurrency} workers`,
+          }).catch(() => {});
+        }
+
         activeSubmittingWorkers.add(workerId);
+        await updateWorkerStatus(workerId, {
+          state: 'busy',
+          stage: 'submitting',
+          current_application_id: claimedTask.id,
+        }).catch(() => {});
+
         console.log(`🚀 [SUBMISSION WORKER] ${workerId} atomically claimed task #${claimedTask.id} (${claimedTask.applywizz_id} @ ${claimedTask.company || 'Workday'})`);
 
         let res = null;
@@ -995,7 +1033,14 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
   const initialQueueSummary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
 
   if (!initialQueueSummary.hasPending || initialQueueSummary.pendingCount === 0) {
-    console.log(`ℹ️ [SCANNER] 0 pending unscanned jobs in batch_job_queue right now. Entering active standby polling...`);
+    isScannerIdle = true;
+    console.log(`[SCANNER] 0 pending links in batch_job_queue. Workers idle, standing by for new applications...`);
+    for (const wId of (PIPELINE_CONFIG.scanWorkerIds || [])) {
+      await updateWorkerStatus(wId, { state: 'idle', stage: 'scanning', current_application_id: null }).catch(() => {});
+    }
+    for (const wId of (PIPELINE_CONFIG.resolveWorkerIds || [])) {
+      await updateWorkerStatus(wId, { state: 'idle', stage: 'resolving', current_application_id: null }).catch(() => {});
+    }
   }
 
   const bcState = await getBotControl().catch(() => null);
@@ -1030,7 +1075,8 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     scan_status: 'running',
     scan_stop_requested: false,
     is_running: true,
-    active_worker_count: scanWorkerCount,
+    active_worker_count: isScannerIdle ? 0 : scanWorkerCount,
+    current_action: isScannerIdle ? 'Idle: 0 pending links in batch_job_queue (waiting for applications)' : `Scanning unique links & resolving candidate answers (Run: ${scanRunId})`,
   });
 
   try {
@@ -1040,7 +1086,6 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
       // Re-verify pending unscanned jobs before launching parallel stage pass
       const iterSummary = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
       if (!iterSummary.hasPending || iterSummary.pendingCount === 0) {
-        console.log(`ℹ️ [SCANNER] All links in batch_job_queue have been scanned (0 pending unscanned links remaining).`);
         // Check remaining unresolved candidate distributions
         const { getRecentBatchJobUrls: getRecentDaemonUrls } = await import('../lib/supabaseClient.mjs');
         const { urls: recentDaemonUrls } = await getRecentDaemonUrls({ windowMinutes: 120 }).catch(() => ({ urls: [] }));
@@ -1056,11 +1101,27 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
         }
 
         if (!hasPendingDist) {
-          if ((Date.now() - (lastScanStandbyLogTime || 0)) > 30000) {
-            lastScanStandbyLogTime = Date.now();
-            console.log(`⏳ [SCANNER] All batch_job_queue links finalized and all distributions reached ready_for_review. Standing by for new links (active, polling every 5s)...`);
+          if (!isScannerIdle) {
+            isScannerIdle = true;
+            console.log(`[SCANNER] 0 pending links in batch_job_queue. Workers idle, standing by for new applications...`);
+            for (const wId of (PIPELINE_CONFIG.scanWorkerIds || [])) {
+              await updateWorkerStatus(wId, { state: 'idle', stage: 'scanning', current_application_id: null }).catch(() => {});
+            }
+            for (const wId of (PIPELINE_CONFIG.resolveWorkerIds || [])) {
+              await updateWorkerStatus(wId, { state: 'idle', stage: 'resolving', current_application_id: null }).catch(() => {});
+            }
+            await syncBotControlState({
+              active_worker_count: 0,
+              current_action: 'Idle: 0 pending links in batch_job_queue (waiting for applications)',
+            }).catch(() => {});
+
+            try {
+              const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+              deepCleanWhenZeroActiveInstances();
+            } catch {}
+            if (global.gc) { try { global.gc(); } catch {} }
           }
-          await new Promise((r) => setTimeout(r, 5000));
+          await new Promise((r) => setTimeout(r, 10000));
           continue;
         }
 
@@ -1071,6 +1132,12 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
         });
         await new Promise((r) => setTimeout(r, 2000));
         continue;
+      }
+
+      // New links detected!
+      if (isScannerIdle) {
+        isScannerIdle = false;
+        console.log(`[SCANNER] New links detected in batch_job_queue (${iterSummary.pendingCount} pending). Resuming scanning workers...`);
       }
 
       await syncBotControlState({
@@ -1130,11 +1197,27 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
       }
 
       if (!hasPendingQueue && !hasPendingDist) {
-        if ((Date.now() - (lastScanStandbyLogTime || 0)) > 30000) {
-          lastScanStandbyLogTime = Date.now();
-          console.log(`⏳ [SCANNER & RESOLVER] Current queue finalized. Standing by for newly imported links in batch_job_queue (active, polling every 5s)...`);
+        if (!isScannerIdle) {
+          isScannerIdle = true;
+          console.log(`[SCANNER] 0 pending links in batch_job_queue. Workers idle, standing by for new applications...`);
+          for (const wId of (PIPELINE_CONFIG.scanWorkerIds || [])) {
+            await updateWorkerStatus(wId, { state: 'idle', stage: 'scanning', current_application_id: null }).catch(() => {});
+          }
+          for (const wId of (PIPELINE_CONFIG.resolveWorkerIds || [])) {
+            await updateWorkerStatus(wId, { state: 'idle', stage: 'resolving', current_application_id: null }).catch(() => {});
+          }
+          await syncBotControlState({
+            active_worker_count: 0,
+            current_action: 'Idle: 0 pending links in batch_job_queue (waiting for applications)',
+          }).catch(() => {});
+
+          try {
+            const { deepCleanWhenZeroActiveInstances } = await import('../lib/browserLifecycle.mjs');
+            deepCleanWhenZeroActiveInstances();
+          } catch {}
+          if (global.gc) { try { global.gc(); } catch {} }
         }
-        await new Promise((r) => setTimeout(r, 5000));
+        await new Promise((r) => setTimeout(r, 10000));
         continue;
       }
 
