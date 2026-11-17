@@ -605,9 +605,27 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     }
 
     try {
-      console.log(`    📎 Uploading resume: ${fileName} (attempt ${attempt}/3)...`);
-      await fileInput.setInputFiles(absPath);
-      const ok = await waitForResumeUploadComplete(page, fileName);
+      const pageTitle = await page.title().catch(() => '');
+      const { buildDocumentFileName } = await import('./fileNameUtils.mjs');
+      const dynamicName = buildDocumentFileName(
+        profile || {},
+        fileName,
+        true,
+        pageTitle || profile?._roleTitle || ''
+      );
+      console.log(`    📎 Uploading resume: ${dynamicName} (source: ${fileName}, attempt ${attempt}/3)...`);
+      try {
+        const fileBuf = await readFile(absPath);
+        await fileInput.setInputFiles({
+          name: dynamicName,
+          mimeType: absPath.endsWith('.docx') ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document' : 'application/pdf',
+          buffer: fileBuf,
+        });
+      } catch (bufErr) {
+        await fileInput.setInputFiles(absPath);
+      }
+      const ok = await waitForResumeUploadComplete(page, dynamicName)
+        || await waitForResumeUploadComplete(page, fileName);
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;
@@ -830,7 +848,6 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
 }
 
 export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
-  console.log('\n  📋 [Step 1: My Information] Automating required form controls...');
   await attachFormMutationObserver(page);
   await discoverWorkdayFields(page);
 
@@ -3460,14 +3477,11 @@ export async function runWorkdayQuestionScanLoop(page, profile, plan = {}, {
 export async function runAdaptiveScanFillLoop(page, profile, plan = {}, { mode = 'signin' } = {}) {
   const maxIterations = 15;
   for (let iter = 0; iter < maxIterations; iter++) {
-    console.log(`\n=== Adaptive Loop iteration ${iter + 1} ===`);
-
     await refreshWorkdayPageOnce(page);
 
     // Check if on Step 1 "My Information"
     const stepName = await detectWorkdayStep(page);
     if (stepName === 'My Information') {
-      console.log('  📍 Detected Step 1: "My Information". Executing dedicated Step 1 handler...');
       await handleStep1MyInformation(page, profile, plan);
       await advanceWorkdayStepWithVerification(page, stepName);
       continue;

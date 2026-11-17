@@ -692,6 +692,9 @@ export async function claimNextTask(workerId) {
 
 
 
+        const resetMatch = String(claimedDist.error_message || '').match(/\[password_reset_requested:(\d+)\]/);
+        const passwordResetRequestedAt = resetMatch ? parseInt(resetMatch[1], 10) : null;
+
         // Format task object for worker execution directly from job_distributions
 
         const claimedTask = {
@@ -717,6 +720,8 @@ export async function claimNextTask(workerId) {
           worker_id: workerId,
 
           started_at: now,
+
+          passwordResetRequestedAt,
 
         };
 
@@ -1363,7 +1368,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     if (isSuccess) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Screenshot: ${finalShotUrl || 'none'}`);
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
 
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,
@@ -1380,7 +1385,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Screenshot: ${finalShotUrl || 'none'}`);
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 
@@ -1461,7 +1466,6 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             worker_id: null,
             worker_leased_at: null,
             error_message: resetShot ? `${resetMsg} [diagnostic_screenshot: ${resetShot}]` : resetMsg,
-            application_submitted_screenshot_url: resetShot || undefined,
             updated_at: now,
           },
         });
@@ -1666,7 +1670,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
 
         const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-        console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'none'}`);
+        console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg?.slice(0, 100)} | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 

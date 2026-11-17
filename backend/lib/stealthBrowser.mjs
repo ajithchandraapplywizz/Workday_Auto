@@ -45,7 +45,7 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disable-backgrounding-occluded-windows', // Do not render occluded windows
     '--disable-breakpad',                       // Disable crash reporter memory overhead
     '--disable-crash-reporter',                 // Disable crash reporter process
-    '--no-crashpad',                            // Completely disable Crashpad handler (prevents spawn_subprocess EAGAIN 11)
+    '--disable-crashpad-for-testing',           // Disable Crashpad handler (prevents spawn_subprocess EAGAIN 11)
     '--disable-component-update',               // Disable background component updates
     '--disable-domain-reliability',             // Disable domain reliability reporting
     '--disable-sync',                           // Disable sync
@@ -146,7 +146,8 @@ function createResilientLauncher(extraLauncher = null) {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
           cleanupOrphanChromeProcesses({ ignoreSlots: true });
         } catch {}
-        await new Promise((r) => setTimeout(r, 1200));
+        // Give host OS process table and init reaper (tini) recovery time
+        await new Promise((r) => setTimeout(r, 4000));
       }
     };
 

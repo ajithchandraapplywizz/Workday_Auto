@@ -91,6 +91,18 @@ test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env an
 
     process.env.MAX_ACTIVE_BROWSERS = '4';
     assert.equal(getDynamicMaxBrowsers(), 4, 'Should respect explicit MAX_ACTIVE_BROWSERS=4');
+
+    // Verify Linux container environment strictly respects MAX_ACTIVE_BROWSERS from env
+    const originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    try {
+      Object.defineProperty(process, 'platform', { value: 'linux' });
+      process.env.MAX_ACTIVE_BROWSERS = '1';
+      assert.equal(getDynamicMaxBrowsers(), 1, 'Linux container strictly respects MAX_ACTIVE_BROWSERS=1');
+      process.env.MAX_ACTIVE_BROWSERS = '2';
+      assert.equal(getDynamicMaxBrowsers(), 2, 'Linux container dynamically scales to MAX_ACTIVE_BROWSERS=2 from env');
+    } finally {
+      if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
+    }
   } finally {
     if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
     else delete process.env.MAX_ACTIVE_BROWSERS;

@@ -63,6 +63,25 @@ export const SCAN_WORKER_IDS = process.env.SCAN_WORKER_IDS
   ? process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
   : Array.from({ length: SCAN_WORKER_COUNT }, (_, i) => `scanning_worker_${i + 1 + WORKER_OFFSET}`);
 
+export function resolveInstanceScanWorkerIds() {
+  if (process.env.SCAN_WORKER_IDS) {
+    return process.env.SCAN_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean);
+  }
+  const workerCount = SCAN_WORKER_COUNT;
+  const baseOffset = Number(process.env.WORKER_OFFSET);
+  if (!Number.isNaN(baseOffset) && process.env.WORKER_OFFSET !== undefined) {
+    return Array.from({ length: workerCount }, (_, i) => `scanning_worker_${i + 1 + baseOffset}`);
+  }
+
+  const replicaIndex = Number(process.env.RAILWAY_REPLICA_INDEX ?? process.env.REPLICA_INDEX);
+  const effectiveOffset = !Number.isNaN(replicaIndex) ? replicaIndex * workerCount : 0;
+  if (!Number.isNaN(replicaIndex)) {
+    return Array.from({ length: workerCount }, (_, i) => `scanning_worker_${i + 1 + effectiveOffset}`);
+  }
+
+  return SCAN_WORKER_IDS;
+}
+
 export const RESOLVE_WORKER_IDS = process.env.RESOLVE_WORKER_IDS
   ? process.env.RESOLVE_WORKER_IDS.split(',').map((s) => s.trim()).filter(Boolean)
   : Array.from({ length: RESOLVE_WORKER_COUNT }, (_, i) => `resolving_worker_${i + 1 + WORKER_OFFSET}`);
@@ -87,9 +106,13 @@ const ALL_CANONICAL_WORKERS = [...new Set([
 ])];
 
 const WORKER_NAMES = {};
-SCAN_WORKER_IDS.forEach((id) => { const n = (id.match(/\d+/) || [1])[0]; WORKER_NAMES[id] = `Scanning Worker ${n}`; });
-RESOLVE_WORKER_IDS.forEach((id) => { const n = (id.match(/\d+/) || [1])[0]; WORKER_NAMES[id] = `Resolving Worker ${n}`; });
-SUBMIT_WORKER_IDS.forEach((id) => { const n = (id.match(/\d+/) || [1])[0]; WORKER_NAMES[id] = `Submitting Worker ${n}`; });
+ALL_CANONICAL_WORKERS.forEach((id) => {
+  const n = (id.match(/\d+/) || [1])[0];
+  if (id.startsWith('scanning')) WORKER_NAMES[id] = `Scanning Worker ${n}`;
+  else if (id.startsWith('resolving')) WORKER_NAMES[id] = `Resolving Worker ${n}`;
+  else if (id.startsWith('submitting')) WORKER_NAMES[id] = `Submitting Worker ${n}`;
+  else WORKER_NAMES[id] = `Worker ${n}`;
+});
 
 export const PIPELINE_CONFIG = {
   stages: {

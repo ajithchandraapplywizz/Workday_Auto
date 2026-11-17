@@ -19,7 +19,7 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-breakpad',
   '--disable-crash-reporter',
-  '--no-crashpad',
+  '--disable-crashpad-for-testing',
   '--disable-component-update',
   '--disable-infobars',
   '--window-size=1280,900',
@@ -47,7 +47,7 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
   }
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || true', () => {});
+      exec('pkill -9 -f "crashpad_handler"; pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
       exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
     } catch {}
   }
@@ -81,7 +81,7 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
   if (process.platform === 'linux') {
     try {
       // 1. Force kill all detached or zombie Chromium, Chrome, and crashpad processes
-      exec('pkill -9 -f "chrome.*(playwright|user-data-dir|crashpad)" || pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || true', () => {});
+      exec('pkill -9 -f "chrome.*(playwright|user-data-dir|crashpad)"; pkill -9 -f "crashpad_handler"; pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
 
       // 2. Wipe all temporary Playwright browser profiles, core dumps, and crashpad caches from /tmp and /dev/shm
       exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* /tmp/core.* /tmp/.org.chromium.Chromium.* /tmp/.com.google.Chrome.* /dev/shm/.org.chromium.* || true', () => {});
@@ -123,14 +123,9 @@ export function getDynamicMaxBrowsers() {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
   if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
-  // In Linux container environments (Railway / Docker cgroups), strictly enforce MAX_ACTIVE_BROWSERS = 1
-  // per container to prevent Linux pthread_create (errno 11) & spawn EAGAIN resource exhaustion.
-  // Concurrency is scaled horizontally across container replicas (Scanner_Resolver_1/2, Submitting_1/2).
-  if (process.platform === 'linux') {
-    return 1;
-  }
-
-  const envWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
+  const envWorkers = Number(process.env.SCAN_WORKER_COUNT) ||
+    Number(process.env.SCAN_WORKERS) ||
+    Number(process.env.SUBMIT_WORKER_COUNT) ||
     Number(process.env.SUBMIT_WORKERS) ||
     Number(process.env.SUBMISSION_WORKER_COUNT) ||
     Number(process.env.WORKER_COUNT) ||
@@ -142,7 +137,7 @@ export function getDynamicMaxBrowsers() {
     return Math.floor(envWorkers);
   }
 
-  // Default to 2 concurrent active browsers per container on local/Windows development
+  // Default to 2 concurrent active browsers per container service across all platforms (Linux/Windows)
   return 2;
 }
 

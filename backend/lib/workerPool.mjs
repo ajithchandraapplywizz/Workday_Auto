@@ -555,9 +555,9 @@ export async function executeWorkerTask({
     }
   }
 
-  // 5. Launch isolated Playwright browser context (dynamically sized to match active workers and env)
-  cleanupOrphanChromeProcesses();
+  // 5. Acquire single-browser slot lease, then clean up any dead zombie processes before launching
   await acquireBrowserSlot(workerId);
+  cleanupOrphanChromeProcesses({ ignoreSlots: true });
   let browser = null;
   let context = null;
   let page = null;
@@ -581,7 +581,7 @@ export async function executeWorkerTask({
         console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
         cleanupOrphanChromeProcesses({ ignoreSlots: true });
         if (launchAttempt < 3) {
-          const retryDelay = isHostResourceError ? (3000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
+          const retryDelay = isHostResourceError ? (4000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
           await new Promise((r) => setTimeout(r, retryDelay));
         } else {
           throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
@@ -605,6 +605,31 @@ export async function executeWorkerTask({
     }).catch(() => {});
     page = await context.newPage();
     registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
+
+    // Check if password reset was previously requested for this application (< 2 hours ago)
+    const resetReqTime = task.passwordResetRequestedAt || profile._passwordResetRequestedAt || null;
+    if (resetReqTime) profile._passwordResetRequestedAt = resetReqTime;
+    if (resetReqTime && (Date.now() - resetReqTime < 2 * 60 * 60 * 1000)) {
+      console.log(`   🔑 [${workerId}] Application previously requested password reset at ${new Date(resetReqTime).toLocaleTimeString()}. Checking Zoho Mail for delayed email arrival...`);
+      try {
+        const { checkAndResumeDelayedPasswordReset } = await import('./workdayVerification.mjs');
+        const resumeRes = await checkAndResumeDelayedPasswordReset(page, {
+          email: workdayEmail,
+          password: workdayPassword,
+          company,
+          jobUrl,
+          requestedAt: resetReqTime,
+          applywizzId,
+          distributionId: task.distribution_id || task.distributionId || task.id,
+          taskId: queueTaskId,
+        });
+        if (resumeRes?.success) {
+          console.log(`   🎉 [${workerId}] Successfully resumed and completed password reset via Zoho Mail! Proceeding directly to application.`);
+        }
+      } catch (resumeErr) {
+        console.warn(`   ⚠️ [${workerId}] Note on checking delayed password reset: ${resumeErr.message}`);
+      }
+    }
 
     // Direct submission is strictly forbidden during scan / blueprint tasks (Stage 1)
     const directSubmit = isDirectSubmission && !isScanTask;
@@ -674,30 +699,6 @@ export async function executeWorkerTask({
         status = status.status || 'unknown';
       }
     } else {
-      // Check if password reset was previously requested for this application (< 2 hours ago)
-      const resetReqTime = task.passwordResetRequestedAt || null;
-      if (resetReqTime && (Date.now() - resetReqTime < 2 * 60 * 60 * 1000)) {
-        console.log(`   🔑 [${workerId}] Application previously requested password reset at ${new Date(resetReqTime).toLocaleTimeString()}. Checking Zoho Mail for delayed email arrival...`);
-        try {
-          const { checkAndResumeDelayedPasswordReset } = await import('./workdayVerification.mjs');
-          const resumeRes = await checkAndResumeDelayedPasswordReset(page, {
-            email: workdayEmail,
-            password: workdayPassword,
-            company,
-            jobUrl,
-            requestedAt: resetReqTime,
-            applywizzId,
-            distributionId: task.distribution_id || task.distributionId || task.id,
-            taskId: queueTaskId,
-          });
-          if (resumeRes?.success) {
-            console.log(`   🎉 [${workerId}] Successfully resumed and completed password reset via Zoho Mail! Proceeding directly to application.`);
-          }
-        } catch (resumeErr) {
-          console.warn(`   ⚠️ [${workerId}] Note on checking delayed password reset: ${resumeErr.message}`);
-        }
-      }
-
       // Step A: Scan Form
       appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
       console.log(`   [${workerId}] Step 1: Scanning form fields...`);
@@ -2062,12 +2063,10 @@ export async function executeWorkerTask({
     }
 
     if (options.isClusterBlueprint || options.isScanOnly) {
-      console.log(`   🔒 [${workerId}] Blueprint scan completed — closing browser instance.`);
       unregisterActiveBrowser(browser, workerId);
       await browser.close().catch(() => {});
     }
 
-    console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
     return {
       status,
       cacheHit,

@@ -809,6 +809,8 @@ export async function executeWorkdayForgotPassword(page, {
   jobUrl = '',
   distributionId = '',
   taskId = '',
+  passwordResetRequestedAt = null,
+  requestedAt = null,
 } = {}) {
   console.log(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
 
@@ -887,10 +889,12 @@ export async function executeWorkdayForgotPassword(page, {
   const tenant = extractWorkdayTenant(jobUrl || (page && typeof page.url === 'function' ? page.url() : ''));
   const trackerKey = `${cleanAwlId || email}:${tenant || effectiveCompany}`;
 
-  // Check if reset was already requested within the active 2-hour window
+  // Check if reset was already requested within the active 2-hour window (checks in-memory tracker AND persistent database timestamp)
   const existingReset = PASSWORD_RESET_TRACKER.get(trackerKey);
-  const isAlreadyRequested = existingReset && (Date.now() - existingReset.requestedAt < 2 * 60 * 60 * 1000);
-  let requestTime = isAlreadyRequested ? existingReset.requestedAt : Date.now();
+  const dbRequestedAt = passwordResetRequestedAt || requestedAt || null;
+  const effectiveRequestedAt = existingReset?.requestedAt || (dbRequestedAt ? Number(dbRequestedAt) : null);
+  const isAlreadyRequested = effectiveRequestedAt && (Date.now() - effectiveRequestedAt < 2 * 60 * 60 * 1000);
+  let requestTime = isAlreadyRequested ? effectiveRequestedAt : Date.now();
   let resetProofShotUrl = existingReset?.screenshotUrl || null;
 
   if (isAlreadyRequested) {
@@ -1024,9 +1028,6 @@ export async function executeWorkdayForgotPassword(page, {
       worker_leased_at: null,
       updated_at: now,
     };
-    if (resetProofShotUrl) {
-      patchBody.application_submitted_screenshot_url = resetProofShotUrl;
-    }
     if (distributionId) {
       await request('job_distributions', {
         method: 'PATCH',

@@ -3,6 +3,9 @@ FROM mcr.microsoft.com/playwright:v1.64.1-noble
 
 WORKDIR /app
 
+# Install tini for proper PID 1 zombie process reaping and procps for process management
+RUN apt-get update && apt-get install -y --no-install-recommends tini procps && rm -rf /var/lib/apt/lists/*
+
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_CHROMIUM_CHANNEL=chromium
@@ -22,4 +25,8 @@ RUN mkdir -p /app/backend && ln -sf /app/scripts /app/backend/scripts && ln -sf 
 ENV PORT=8080
 EXPOSE 8080
 
+# Use tini as PID 1 init process to reap zombie Chromium child processes
+ENTRYPOINT ["/usr/bin/tini", "--"]
+
 CMD ["node", "scripts/queue_daemon.mjs"]
+
