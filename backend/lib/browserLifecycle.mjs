@@ -20,6 +20,8 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-breakpad',
   '--disable-crash-reporter',
   '--disable-crashpad-for-testing',
+  '--no-crashpad',
+  '--crash-dumps-dir=/dev/null',
   '--disable-component-update',
   '--disable-infobars',
   '--window-size=1280,900',
@@ -153,7 +155,7 @@ let submitStopRequested = false;
  * default 2 per container, to work simultaneously without serializing).
  * If dynamic slot limit is reached, pauses execution asynchronously until an active browser exits.
  */
-export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
+export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, timeoutMs = 45000) {
   if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: stop requested`);
   }
@@ -163,7 +165,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
   }
 
   // Prune any disconnected/closed browser handles
-  for (const b of activeBrowsers) {
+  for (const b of Array.from(activeBrowsers)) {
     if (typeof b.isConnected === 'function' && !b.isConnected()) {
       activeBrowsers.delete(b);
       browserRoles.delete(b);
@@ -181,6 +183,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
 
   console.log(`⏳ [SLOT GUARD] ${workerId} waiting for active browser slot in this service (${activeBrowsers.size}/${effectiveMax} active, queue depth: ${waitingQueue.length + 1})...`);
 
+  const startTime = Date.now();
   return new Promise((resolve, reject) => {
     let checkTimer = null;
     const cleanup = () => {
@@ -189,7 +192,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
         checkTimer = null;
       }
     };
-    const queueItem = { workerId, resolve, reject, cleanup };
+    const queueItem = { workerId, resolve, reject, cleanup, createdAt: startTime };
     waitingQueue.push(queueItem);
 
     // Periodic check to self-heal against dead browsers and unblock on stop signals
@@ -203,11 +206,44 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
       }
 
       // Prune dead/disconnected browser handles
-      for (const b of activeBrowsers) {
+      for (const b of Array.from(activeBrowsers)) {
         if (typeof b.isConnected === 'function' && !b.isConnected()) {
           activeBrowsers.delete(b);
           browserRoles.delete(b);
         }
+      }
+
+      // Prune dead slots whose worker contexts are completely absent
+      for (const slotWorkerId of Array.from(activeSlots)) {
+        if (!activeWorkerContexts.has(slotWorkerId) && slotWorkerId !== workerId) {
+          if (activeBrowsers.size === 0) {
+            activeSlots.delete(slotWorkerId);
+          }
+        }
+      }
+
+      // Check timeout (45s default) — prevents 8-minute watchdog deadlocks
+      if (Date.now() - startTime > timeoutMs) {
+        cleanup();
+        const idx = waitingQueue.indexOf(queueItem);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+        // Force prune dead references
+        for (const b of Array.from(activeBrowsers)) {
+          if (typeof b.isConnected === 'function' && !b.isConnected()) {
+            activeBrowsers.delete(b);
+            browserRoles.delete(b);
+          }
+        }
+        // If slot is now open after pruning, grant it!
+        if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
+          activeSlots.add(workerId);
+          console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot after self-healing prune (${activeBrowsers.size + 1}/${effectiveMax})`);
+          resolve(true);
+          return;
+        }
+        console.warn(`⚠️ [SLOT GUARD] ${workerId} slot wait timed out after ${Math.round(timeoutMs / 1000)}s (${activeBrowsers.size}/${effectiveMax} active). Yielding turn cleanly.`);
+        reject(new Error(`[SLOT_TIMEOUT] Browser slot busy after ${Math.round(timeoutMs / 1000)}s`));
+        return;
       }
 
       // If slot freed up and this worker is next in line
@@ -227,18 +263,31 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
 }
 
 /**
+ * Remove any pending slot requests for a worker from the waiting queue.
+ */
+export function cancelWaitingSlot(workerId) {
+  if (!workerId) return;
+  for (let i = waitingQueue.length - 1; i >= 0; i--) {
+    if (waitingQueue[i].workerId === workerId) {
+      if (typeof waitingQueue[i].cleanup === 'function') waitingQueue[i].cleanup();
+      waitingQueue.splice(i, 1);
+    }
+  }
+}
+
+/**
  * Release an active browser slot and immediately wake up the next queued worker in this service.
  */
 export function releaseBrowserSlot(workerId = 'worker') {
   activeSlots.delete(workerId);
   // Prune any disconnected/closed browser handles
-  for (const b of activeBrowsers) {
+  for (const b of Array.from(activeBrowsers)) {
     if (typeof b.isConnected === 'function' && !b.isConnected()) {
       activeBrowsers.delete(b);
       browserRoles.delete(b);
     }
   }
-  if (waitingQueue.length > 0) {
+  while (waitingQueue.length > 0) {
     const next = waitingQueue.shift();
     if (next) {
       if (typeof next.cleanup === 'function') {
@@ -248,6 +297,7 @@ export function releaseBrowserSlot(workerId = 'worker') {
         activeSlots.add(next.workerId);
         console.log(`🔓 [SLOT GUARD] Previous browser closed. Handing slot to next worker in service: ${next.workerId}`);
         next.resolve(true);
+        break;
       }
     }
   }
@@ -373,7 +423,14 @@ export async function abortScanBrowsers() {
  */
 export async function abortWorkerBrowser(workerId) {
   if (!workerId) return;
+  cancelWaitingSlot(workerId);
   const ctx = activeWorkerContexts.get(workerId);
+  if (ctx?.page && !ctx.page.isClosed()) {
+    try { await ctx.page.close().catch(() => {}); } catch {}
+  }
+  if (ctx?.context) {
+    try { await ctx.context.close().catch(() => {}); } catch {}
+  }
   if (ctx?.browser) {
     try {
       await ctx.browser.close().catch(() => {});

@@ -1198,16 +1198,14 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           }
 
-          if (ctx?.browser) {
-
-            await ctx.browser.close().catch(() => { });
-
-          }
-
+          // Forcefully abort worker browser, close contexts, and cancel any pending slot requests
+          try {
+            const { abortWorkerBrowser, cancelWaitingSlot } = await import('./browserLifecycle.mjs');
+            cancelWaitingSlot(workerId);
+            await abortWorkerBrowser(workerId);
+          } catch {}
         } catch (wShotErr) {
-
           console.warn(`[${workerId}] Watchdog screenshot error:`, wShotErr.message);
-
         }
 
 
@@ -1995,13 +1993,10 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     if (watchdogTimer) clearTimeout(watchdogTimer);
 
     try {
-
-      const { releaseBrowserSlot, unregisterWorkerContext } = await import('./browserLifecycle.mjs');
-
+      const { releaseBrowserSlot, unregisterWorkerContext, abortWorkerBrowser } = await import('./browserLifecycle.mjs');
+      await abortWorkerBrowser(workerId);
       releaseBrowserSlot(workerId);
-
       unregisterWorkerContext(workerId);
-
     } catch { }
 
     // Release worker back to idle

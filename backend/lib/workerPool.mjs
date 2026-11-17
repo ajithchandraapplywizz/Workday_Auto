@@ -557,13 +557,13 @@ export async function executeWorkerTask({
 
   // 5. Acquire single-browser slot lease, then clean up any dead zombie processes before launching
   await acquireBrowserSlot(workerId);
-  cleanupOrphanChromeProcesses({ ignoreSlots: true });
   let browser = null;
   let context = null;
   let page = null;
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
+    cleanupOrphanChromeProcesses({ ignoreSlots: true });
     const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
     await new Promise((r) => setTimeout(r, launchJitterMs));
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
@@ -574,6 +574,7 @@ export async function executeWorkerTask({
           headless: Boolean(headless),
           channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
           args: LEAN_CHROMIUM_ARGS,
+          timeout: 30000,
         });
         break;
       } catch (launchErr) {
