@@ -816,23 +816,47 @@ export async function resolveClientAnswer(field = {}, profile = {}, opts = {}) {
   }
 
   logResolution(`    🤖 [Tier 6 LLM] Playwright DOM → "${label.slice(0, 50)}" (${fieldType || 'input'}, ${options.length} option(s))`);
-  const llmAnswer = await resolveUnknownWithLlm(label, {
-    ...enriched,
-    fieldType,
-    type: fieldType,
-    field_type_code: code,
-    required,
-    options,
-  }, {
-    page: opts.page || null,
-    profile,
-    tenant: opts.tenant || profile._tenant || '',
-    company: opts.company || profile._company || '',
-    step: opts.step || '',
-    resumePath: opts.resumePath || profile._resumePath,
-    fieldTypeCode: code,
-    preferred: isProceedQuestion(label) ? 'Yes' : '',
-  });
+
+  // ── Ultra-Low Token Judge LLM for Complex / Dropdown / Screening Questions ────────
+  let llmAnswer = null;
+  const isHardQuestion = options.length > 1 || /prior|affiliat|contractor|relocat|clearance|shift|overtime|travel|felony|convict|conflict|conduct|background/i.test(label);
+
+  if (isHardQuestion) {
+    try {
+      const { judgeAndResolveHardQuestion } = await import('./judgeLlm.mjs');
+      const judged = await judgeAndResolveHardQuestion({
+        question: label,
+        options,
+        profile,
+        jobUrl: opts.jobUrl || profile._jobUrl || '',
+      });
+      if (judged?.answer) {
+        llmAnswer = judged.answer;
+      }
+    } catch (jErr) {
+      logResolution(`    ⚠️ [Judge Notice] ${jErr.message?.slice(0, 60)}`);
+    }
+  }
+
+  if (!llmAnswer) {
+    llmAnswer = await resolveUnknownWithLlm(label, {
+      ...enriched,
+      fieldType,
+      type: fieldType,
+      field_type_code: code,
+      required,
+      options,
+    }, {
+      page: opts.page || null,
+      profile,
+      tenant: opts.tenant || profile._tenant || '',
+      company: opts.company || profile._company || '',
+      step: opts.step || '',
+      resumePath: opts.resumePath || profile._resumePath,
+      fieldTypeCode: code,
+      preferred: isProceedQuestion(label) ? 'Yes' : '',
+    });
+  }
 
   // Check if LLM answer contradicts a stored profile fact (for free-text inputs)
   if (llmAnswer) {

@@ -184,16 +184,48 @@ export async function fillCheckboxGroup(page, field, resolvedValues, options = {
 
     let checkedCount = 0;
     const matchedLabels = [];
+    const isSingleSelect = targets.length === 1;
 
-    for (const target of targets) {
+    if (isSingleSelect) {
+      const target = targets[0];
       const match = findBestOptionMatch(target, checkboxData, threshold);
       if (match.matched && match.option) {
         matchedLabels.push(match.bestMatch);
+        // 1. Ensure the single winning checkbox is checked
         if (!match.option.isChecked) {
           await match.option.locator.scrollIntoViewIfNeeded().catch(() => {});
           await match.option.locator.click({ timeout: 2000, force: true }).catch(() => {});
           match.option.isChecked = true;
           checkedCount++;
+        }
+        // 2. STRICT SINGLE-SELECT: Uncheck all other checkboxes in this group
+        for (const other of checkboxData) {
+          if (other !== match.option && other.isChecked) {
+            await other.locator.scrollIntoViewIfNeeded().catch(() => {});
+            await other.locator.click({ timeout: 2000, force: true }).catch(() => {});
+            other.isChecked = false;
+          }
+        }
+      }
+    } else {
+      for (const target of targets) {
+        const match = findBestOptionMatch(target, checkboxData, threshold);
+        if (match.matched && match.option) {
+          matchedLabels.push(match.bestMatch);
+          if (!match.option.isChecked) {
+            await match.option.locator.scrollIntoViewIfNeeded().catch(() => {});
+            await match.option.locator.click({ timeout: 2000, force: true }).catch(() => {});
+            match.option.isChecked = true;
+            checkedCount++;
+          }
+        }
+      }
+      // Uncheck any box not in matchedLabels
+      for (const other of checkboxData) {
+        if (!matchedLabels.includes(other.text) && other.isChecked) {
+          await other.locator.scrollIntoViewIfNeeded().catch(() => {});
+          await other.locator.click({ timeout: 2000, force: true }).catch(() => {});
+          other.isChecked = false;
         }
       }
     }

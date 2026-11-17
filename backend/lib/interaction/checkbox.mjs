@@ -38,9 +38,23 @@ export async function fillCheckbox(page, field, answer, ctx = {}) {
     const ok = await delegateExistingFill(page, field, 'No', ctx.profile);
     return ok ? okResult(field, 'No', 1) : failResult(field, 'checkbox_uncheck_unverified', { recoverable: true });
   }
-  if (isAffirmative || isAgreementLabel || (field.required && !isNegative) || (field.label && (ansStr.toLowerCase().includes(field.label.toLowerCase().slice(0, 30)) || field.label.toLowerCase().includes(ansStr.toLowerCase().slice(0, 30))))) {
+
+  // Never check non-agreement checkboxes just because field.required is true.
+  // In a checkbox group, each individual box may be marked required, but only ONE must be checked!
+  const matchesAnswer = Boolean(
+    ansStr && (
+      ansStr.toLowerCase() === (field.label || '').toLowerCase() ||
+      (ansStr.length > 3 && field.label && field.label.toLowerCase().includes(ansStr.toLowerCase())) ||
+      (field.label && field.label.length > 3 && ansStr.toLowerCase().includes(field.label.toLowerCase()))
+    )
+  );
+
+  if (isAffirmative || isAgreementLabel || matchesAnswer) {
     const ok = await delegateExistingFill(page, field, 'Yes', ctx.profile);
     return ok ? okResult(field, 'Yes', 1) : failResult(field, 'checkbox_check_unverified', { recoverable: true });
   }
-  return failResult(field, 'checkbox_unsafe_answer', { recoverable: false });
+
+  // STRICT SINGLE-CHECKBOX ENFORCEMENT: If this box does not match the candidate's chosen answer, uncheck it!
+  const ok = await delegateExistingFill(page, field, 'No', ctx.profile);
+  return ok ? okResult(field, 'No', 1) : failResult(field, 'checkbox_uncheck_unverified', { recoverable: true });
 }
