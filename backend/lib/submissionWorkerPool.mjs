@@ -1470,6 +1470,29 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         return { status: 'ready_for_review', reason: 'password_reset_pending' };
       }
 
+      const isSlotTimeout = Boolean(
+        /SLOT_TIMEOUT|Browser slot busy/i.test(rawErrMsg)
+      );
+
+      if (isSlotTimeout) {
+        console.warn(`\n⏳ [STAGE 3: SUBMITTER] [${workerId}] Browser slot busy. Preserving task #${task.distribution_id || task.id} in ready_for_review WITHOUT burning attempt count.`);
+        await updateJobDistributionWithCheck({
+          distributionId: task.distribution_id || task.id,
+          applywizzId: task.applywizz_id,
+          jobUrl: task.job_url,
+          workerId,
+          patch: {
+            status: 'ready_for_review',
+            worker_id: null,
+            worker_leased_at: null,
+            error_message: 'Browser slot busy — retrying when worker opens slot',
+            updated_at: now,
+          },
+        });
+        await new Promise((r) => setTimeout(r, 5000));
+        return { status: 'slot_busy', error: rawErrMsg };
+      }
+
       const isHostResourceError = Boolean(
         /spawn.*EAGAIN|browserType\.launch|Failed to launch|HOST_RESOURCE_EXHAUSTION|ENOMEM|EACCES/i.test(rawErrMsg)
       );

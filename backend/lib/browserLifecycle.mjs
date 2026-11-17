@@ -155,7 +155,7 @@ let submitStopRequested = false;
  * default 2 per container, to work simultaneously without serializing).
  * If dynamic slot limit is reached, pauses execution asynchronously until an active browser exits.
  */
-export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, timeoutMs = 45000) {
+export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, timeoutMs = 120000) {
   if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: stop requested`);
   }

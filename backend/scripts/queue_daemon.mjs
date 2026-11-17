@@ -263,6 +263,16 @@ async function syncBotControlState(patch = {}) {
     currentBc = await getBotControl().catch(() => null);
   } catch {}
 
+  const isExplicitStopPatch = Boolean(
+    patch.is_running === false ||
+    patch.stop_requested === true ||
+    patch.scan_stop_requested === true ||
+    patch.submit_stop_requested === true ||
+    patch.stage === 'idle' ||
+    patch.mode === 'idle' ||
+    isGlobalStopRequested()
+  );
+
   if (SERVICE_ROLE === 'submitter') {
     delete sanitizedPatch.scan_status;
     delete sanitizedPatch.scan_enabled;
@@ -270,14 +280,16 @@ async function syncBotControlState(patch = {}) {
     delete sanitizedPatch.scan_run_id;
     delete sanitizedPatch.scan_run_started_at;
 
-    // Multi-service guard: Submitter going idle or stopping must NEVER overwrite is_running=false or stage=idle if Scanner is active
-    const isScanActive = Boolean(currentBc && (currentBc.scan_status === 'running' || currentBc.scan_enabled === true || currentBc.stage === 'scanning' || currentBc.stage === 'parallel'));
-    if (isScanActive && (sanitizedPatch.submit_status === 'off' || patch.is_running === false)) {
-      sanitizedPatch.is_running = true;
-      sanitizedPatch.stage = 'scanning';
-      sanitizedPatch.mode = 'scanning';
-      if (sanitizedPatch.active_worker_count === 0 && currentBc?.active_worker_count) {
-        delete sanitizedPatch.active_worker_count;
+    // Multi-service guard ONLY applies during normal idle transitions, NEVER when an explicit stop is requested!
+    if (!isExplicitStopPatch) {
+      const isScanActive = Boolean(currentBc && (currentBc.scan_status === 'running' || currentBc.scan_enabled === true || currentBc.stage === 'scanning' || currentBc.stage === 'parallel'));
+      if (isScanActive && (sanitizedPatch.submit_status === 'off' || patch.is_running === false)) {
+        sanitizedPatch.is_running = true;
+        sanitizedPatch.stage = 'scanning';
+        sanitizedPatch.mode = 'scanning';
+        if (sanitizedPatch.active_worker_count === 0 && currentBc?.active_worker_count) {
+          delete sanitizedPatch.active_worker_count;
+        }
       }
     }
   } else if (SERVICE_ROLE === 'scanner') {
@@ -285,14 +297,16 @@ async function syncBotControlState(patch = {}) {
     delete sanitizedPatch.submit_enabled;
     delete sanitizedPatch.submit_stop_requested;
 
-    // Multi-service guard: Scanner going idle or stopping must NEVER overwrite is_running=false or stage=idle if Submitter is active
-    const isSubmitActive = Boolean(currentBc && (currentBc.submit_status === 'running' || currentBc.submit_enabled === true || currentBc.stage === 'submitting' || currentBc.stage === 'parallel'));
-    if (isSubmitActive && (sanitizedPatch.scan_status === 'off' || patch.is_running === false)) {
-      sanitizedPatch.is_running = true;
-      sanitizedPatch.stage = 'submitting';
-      sanitizedPatch.mode = 'submitting';
-      if (sanitizedPatch.active_worker_count === 0 && currentBc?.active_worker_count) {
-        delete sanitizedPatch.active_worker_count;
+    // Multi-service guard ONLY applies during normal idle transitions, NEVER when an explicit stop is requested!
+    if (!isExplicitStopPatch) {
+      const isSubmitActive = Boolean(currentBc && (currentBc.submit_status === 'running' || currentBc.submit_enabled === true || currentBc.stage === 'submitting' || currentBc.stage === 'parallel'));
+      if (isSubmitActive && (sanitizedPatch.scan_status === 'off' || patch.is_running === false)) {
+        sanitizedPatch.is_running = true;
+        sanitizedPatch.stage = 'submitting';
+        sanitizedPatch.mode = 'submitting';
+        if (sanitizedPatch.active_worker_count === 0 && currentBc?.active_worker_count) {
+          delete sanitizedPatch.active_worker_count;
+        }
       }
     }
   }
@@ -2480,16 +2494,18 @@ export async function initOnStartup() {
     await reapExpiredLeases(10).catch(() => { });
     console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
 
-    // Autonomous startup trigger: dedicated submitter container or explicit flag
-    if (SERVICE_ROLE === 'submitter' || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
+    // Autonomous startup trigger: ONLY if explicitly requested via flag or environment variable
+    if ((args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
       const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
       const pendingStartupCount = await getRemainingReadyForReviewCount();
       if (pendingStartupCount > 0) {
-        console.log(`[DAEMON] Submitter startup detected ${pendingStartupCount} ready_for_review application(s): initiating Stage 3 Submissions across workers...`);
+        console.log(`[DAEMON] Explicit submit startup trigger detected (${pendingStartupCount} pending): initiating Stage 3 Submissions across workers...`);
         runStage3Submissions().catch(console.error);
       } else {
         console.log(`[DAEMON] Submitter startup: 0 ready_for_review tasks pending. Standing by in idle mode awaiting applications.`);
       }
+    } else {
+      console.log(`[DAEMON] Worker container (${SERVICE_ROLE.toUpperCase()}) initialized in idle standby. Awaiting user start trigger.`);
     }
 
     // Only trigger immediate scanning on startup if explicitly requested via flag
@@ -2532,13 +2548,41 @@ export async function initOnStartup() {
       const scanCtrl = wc?.scan;
       const submitCtrl = wc?.submit;
 
-      // 1. Primary Stop Signal from Supabase (TAKES ABSOLUTE PRECEDENCE OVER ANY START)
-      const hasGlobalStopSignal = Boolean(
+      // 1. Check for active Start Trigger
+      const isStartTriggered = Boolean(
+        bc?.trigger_requested === true ||
+        bc?.last_action_requested === 'start_universal' ||
+        bc?.last_action_requested === 'start_submit' ||
+        bc?.last_action_requested === 'start_scan' ||
+        bc?.last_action_requested === 'start' ||
+        bc?.last_action_requested === 'start_pipeline'
+      );
+
+      // If user triggered any start, clear in-memory stop state immediately to accept the command
+      if (isStartTriggered) {
+        if (isGlobalStopRequested() || isScanStopRequested() || isSubmitStopRequested() || isPoolPaused) {
+          console.log(`\n⚡ [DAEMON (${SERVICE_ROLE.toUpperCase()})] Fresh start signal detected ("${bc?.last_action_requested || 'triggered'}") — clearing in-memory stop flags.`);
+          setGlobalStop(false);
+          setScanStop(false);
+          setSubmitStop(false);
+          setClusterStop(false);
+          isPoolPaused = false;
+        }
+      }
+
+      // 2. Stop Signals from Supabase (TAKES ABSOLUTE PRECEDENCE OVER ROUTINE RUNNING)
+      const isExplicitGlobalStop = Boolean(
         bc?.stop_requested === true ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_all' ||
         bc?.last_action_requested === 'stop_pipeline'
       );
+
+      const isIdleStopSignal = Boolean(
+        bc && bc.is_running === false && (bc.stage === 'idle' || bc.mode === 'idle') && !isStartTriggered
+      );
+
+      const hasGlobalStopSignal = isExplicitGlobalStop || isIdleStopSignal;
 
       const hasScanStopSignal = hasGlobalStopSignal || Boolean(
         bc?.scan_stop_requested === true ||
@@ -2564,6 +2608,14 @@ export async function initOnStartup() {
 
         if (isPoolRunning || isScanActive || isSubmitActive || scanStatus === 'running' || submitStatus === 'running' || activeSubmittingWorkers.size > 0 || activeBCount > 0) {
           console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Global stop signal detected in Supabase! Halting all workers and active browsers immediately...`);
+          setGlobalStop(true);
+          setScanStop(true);
+          setSubmitStop(true);
+          isPoolPaused = true;
+          try {
+            const { abortAllActiveBrowsers } = await import('../lib/browserLifecycle.mjs');
+            await abortAllActiveBrowsers({ force: true });
+          } catch {}
           await stopAutonomousPool();
           if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
           if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
@@ -2590,6 +2642,7 @@ export async function initOnStartup() {
       let handledScanStop = false;
       if (SERVICE_ROLE !== 'submitter' && hasScanStopSignal && (scanStatus === 'running' || isScanActive)) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop scan signal detected in Supabase! Stopping scanning workers...`);
+        setScanStop(true);
         await stopScanPool();
         if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
         await syncBotControlState({
@@ -2604,6 +2657,7 @@ export async function initOnStartup() {
       let handledSubmitStop = false;
       if (SERVICE_ROLE !== 'scanner' && hasSubmitStopSignal && (submitStatus === 'running' || isSubmitActive)) {
         console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop submit signal detected in Supabase! Stopping submission workers...`);
+        setSubmitStop(true);
         await stopSubmitPool();
         if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
         await syncBotControlState({
@@ -2618,37 +2672,15 @@ export async function initOnStartup() {
       if (handledScanStop && !isSubmitActive) return;
       if (handledSubmitStop && !isScanActive) return;
 
-      // 2. Start Signals from Supabase (Gated strictly: ONLY when NO stop is requested)
-      const isStartTriggered = Boolean(
-        bc?.trigger_requested === true ||
-        bc?.last_action_requested === 'start_universal' ||
-        bc?.last_action_requested === 'start_submit' ||
-        bc?.last_action_requested === 'start_scan' ||
-        bc?.last_action_requested === 'start' ||
-        bc?.last_action_requested === 'start_pipeline'
-      );
-
-      // If user triggered any start, clear in-memory stop state immediately to accept the command
-      if (isStartTriggered) {
-        if (isGlobalStopRequested() || isScanStopRequested() || isSubmitStopRequested() || isPoolPaused) {
-          console.log(`\n⚡ [DAEMON (${SERVICE_ROLE.toUpperCase()})] Fresh start signal detected ("${bc?.last_action_requested || 'triggered'}") — clearing in-memory stop flags.`);
-          setGlobalStop(false);
-          setScanStop(false);
-          setSubmitStop(false);
-          setClusterStop(false);
-          isPoolPaused = false;
-        }
-      }
-
       const isScanRunning = scanStatus === 'running';
       const isSubmitRunning = submitStatus === 'running';
 
       const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (
-        isStartTriggered || bc?.scan_status === 'running' || bc?.scan_enabled === true
+        isStartTriggered || (Boolean(bc?.is_running) && (bc?.scan_status === 'running' || bc?.scan_enabled === true))
       );
 
       const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (
-        isStartTriggered || bc?.submit_status === 'running' || bc?.submit_enabled === true
+        isStartTriggered || (Boolean(bc?.is_running) && (bc?.submit_status === 'running' || bc?.submit_enabled === true))
       );
 
       if (isScanStartRequested) {
@@ -2790,8 +2822,12 @@ export async function initOnStartup() {
         Boolean(bc && bc.is_running && (bc.submit_status === 'running' || bc.stage === 'parallel' || bc.mode === 'parallel'))
       ) {
         const isExplicitStop = Boolean(
+          isGlobalStopRequested() ||
+          isSubmitStopRequested() ||
+          hasGlobalStopSignal ||
           bc?.stop_requested ||
           bc?.submit_stop_requested ||
+          bc?.last_action_requested === 'stop' ||
           bc?.last_action_requested === 'stop_all' ||
           bc?.last_action_requested === 'stop_submit' ||
           submitCtrl?.stop_requested
