@@ -53,7 +53,6 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disk-cache-size=33554432',               // Cap disk cache to 32MB
     '--media-cache-size=1',                     // Disable media cache
     // ── Linux Thread & Process Exhaustion Prevention (pthread_create 11 & EAGAIN) ──
-    '--no-zygote',                              // Disable zygote process to prevent Linux cgroup process limits
     '--in-process-gpu',                         // In-process GPU to eliminate external GPU sub-processes
     '--renderer-process-limit=1',               // Strict limit: 1 renderer process per browser instance
     '--num-raster-threads=1',                   // Strict limit: 1 raster thread (saves dozens of OS threads)
@@ -131,8 +130,8 @@ function createResilientLauncher(extraLauncher = null) {
 
   return async function resilientLaunch(baseOptions = {}) {
     const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-      console.warn(`[BROWSER GUARD] 🛑 Local browser launch blocked: Workday Auto is running in Railway cloud. Local system browser launch prevented.`);
+    if (!isProduction && baseOptions.headless !== false && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+      console.warn(`[BROWSER GUARD] 🛑 Local background headless worker blocked: Workday Auto is running in Railway cloud. (Set RUN_LOCAL_WORKERS=true, run headed with headless:false, or pass --run-local-workers to execute locally).`);
       throw new Error(`[LOCAL_EXECUTION_BLOCKED] Browser launch blocked on local system. Automation runs in Railway cloud. (Set RUN_LOCAL_WORKERS=true or pass --run-local-workers to override).`);
     }
 

@@ -286,8 +286,8 @@ export async function executeWorkerTask({
   }
 
   const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. Local browser launch prevented.`);
+  if (!isProduction && headless !== false && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. Local browser launch prevented. (Set RUN_LOCAL_WORKERS=true or run headed to execute locally).`);
     return { status: 'skipped', error: 'Local execution blocked to protect Railway workers' };
   }
 

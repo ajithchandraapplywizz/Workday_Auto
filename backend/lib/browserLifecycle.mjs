@@ -6,7 +6,6 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--disable-software-rasterizer',
-  '--no-zygote',
   '--renderer-process-limit=1',
   '--js-flags=--max-old-space-size=384',
   '--disable-extensions',
@@ -39,6 +38,12 @@ export const LEAN_CHROMIUM_ARGS = [
  * STRICT GUARD: Never reap processes if any active browser context is currently alive, unless forced.
  */
 export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = false } = {}) {
+  if (process.platform === 'linux') {
+    try {
+      // Always safely reap detached crashpad handlers to prevent Linux fork/PID exhaustion (Resource temporarily unavailable 11)
+      exec('pkill -9 -f "crashpad_handler" || true', () => {});
+    } catch {}
+  }
   if (!force) {
     if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0) {
       return;
@@ -49,7 +54,7 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
   }
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "crashpad_handler"; pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
+      exec('pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
       exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
     } catch {}
   }
