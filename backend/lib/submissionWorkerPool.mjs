@@ -467,9 +467,10 @@ export async function getRemainingReadyForReviewCount() {
 export async function claimNextTask(workerId) {
   if (!workerId || !supabase) return null;
 
-  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running
+  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running unless explicitly authorized
   const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+  const isHeadedExplicit = process.env.HEADLESS === 'false' || process.argv.includes('--headed') || process.argv.includes('--headful');
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers') && !isHeadedExplicit) {
     return null;
   }
 
@@ -1859,7 +1860,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const failedStep = 'Execution Exception';
 
     const isHostResourceError = Boolean(
-      /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|browserType\.launch|Target page, context or browser has been closed|Failed to launch|ENOMEM|EACCES/i.test(errMsg)
+      /SLOT_TIMEOUT|Browser slot busy|slot wait timed out|HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|browserType\.launch|Target page, context or browser has been closed|Failed to launch|ENOMEM|EACCES/i.test(errMsg)
     );
 
     if (isHostResourceError) {

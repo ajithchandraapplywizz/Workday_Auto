@@ -475,7 +475,6 @@ export async function executeWorkerTask({
       const cachedResume = await getResumePathForApply(profile, {});
       if (cachedResume) {
         profile._resumePath = cachedResume;
-        console.log(`   📎 [${workerId}] Loaded authentic candidate resume: ${basename(cachedResume)}`);
       }
     } catch {}
   }
@@ -485,8 +484,6 @@ export async function executeWorkerTask({
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
   const skillsCount = profile.skills?.length || 0;
   appLog(2, `Supabase Profile: Loaded candidate record for ${applywizzId} (${workdayEmail}). Indexed ${expCount} job experiences, ${skillsCount} verified skills.`);
-
-  console.log(`   📧 [${workerId}] Using candidate credentials: ${workdayEmail} (Universal Password: ${workdayPassword}) for ${applywizzId}`);
 
   // Immediately notify Supabase & Frontend dashboard of Active / In-Progress status
   await updateWorkerStatus(workerId, { state: 'in_flight' }).catch(() => {});
@@ -516,9 +513,7 @@ export async function executeWorkerTask({
   const queuePreResolved = task.resolved_answers || task.resolvedAnswers || task.pre_resolved_answers || task.preResolvedAnswers;
   if (queuePreResolved && (Array.isArray(queuePreResolved) ? queuePreResolved.length > 0 : (typeof queuePreResolved === 'object' && Object.keys(queuePreResolved).length > 0))) {
     cacheHit = true;
-    const loadedCount = indexResolvedAnswers(profile, queuePreResolved);
-    appLog(3, `Pre-Resolved JSON HIT: Loaded ${loadedCount} answers from job_distributions for instant fill.`);
-    console.log(`   ⚡ [${workerId}] Pre-Resolved JSON Hit: ${loadedCount} answers loaded from job_distributions for instant fill.`);
+    indexResolvedAnswers(profile, queuePreResolved);
   } else {
     // Also load pre-resolved answers from job_distributions table
     try {
@@ -563,9 +558,10 @@ export async function executeWorkerTask({
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
-    cleanupOrphanChromeProcesses({ ignoreSlots: true });
+    cleanupOrphanChromeProcesses();
     const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
     await new Promise((r) => setTimeout(r, launchJitterMs));
+    console.log(`   🚀 [${workerId}] Launching Playwright browser (${headless ? 'headless stealth' : 'headed'})...`);
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
 
     for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
@@ -580,7 +576,7 @@ export async function executeWorkerTask({
       } catch (launchErr) {
         const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
         console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
-        cleanupOrphanChromeProcesses({ ignoreSlots: true });
+        cleanupOrphanChromeProcesses();
         if (launchAttempt < 3) {
           const retryDelay = isHostResourceError ? (4000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
           await new Promise((r) => setTimeout(r, retryDelay));
@@ -593,6 +589,7 @@ export async function executeWorkerTask({
       role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
       workerId,
     });
+    console.log(`   🌐 [${workerId}] Browser active. Initializing context and navigating...`);
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -639,11 +636,7 @@ export async function executeWorkerTask({
     let completionShotUrl = profile?._submissionScreenshotUrl || null;
 
     if (directSubmit) {
-      appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
-      console.log(`   ⚡ [${workerId}] Direct Submission Mode: Skipping scanForm & generatePlan. Filling directly from pre-resolved answers.`);
-
       // Pick authentic candidate resume (clients.resume_url -> cached PDF)
-      console.log(`   [${workerId}] Preparing authentic candidate resume...`);
       let resumePath = profile._resumePath || null;
       if (!resumePath) {
         const { getResumePathForApply } = await import('./resumeParser.mjs');
@@ -678,8 +671,6 @@ export async function executeWorkerTask({
       profile._isClusterBlueprint = false;
 
       // Step D: Fill & Submit directly
-      appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
-      console.log(`   [${workerId}] Step 4: Filling application...`);
       status = await fillForm(jobUrl, plan, {
         browser,
         context,

@@ -212,14 +212,12 @@ async function fetchResumeFromSupabaseStorage(supabase, clientAwlId, destPath) {
   const candidateNames = [`_${clientAwlId}_.pdf`, `${clientAwlId}.pdf`];
   for (const fname of candidateNames) {
     try {
-      console.log(`  📥 [Cloud Storage] Fetching authentic resume from Supabase: ${fname}...`);
       const { data, error } = await supabase.storage.from('client-resumes').download(fname);
       if (data && !error) {
         const buf = Buffer.from(await data.arrayBuffer());
         if (buf && buf.length > 500) {
           await mkdir(dirname(destPath), { recursive: true });
           await writeFile(destPath, buf);
-          console.log(`  ✅ Resume cached from Supabase Storage: ${fname}`);
           return true;
         }
       }
@@ -237,7 +235,6 @@ async function fetchResumeFromSupabaseStorage(supabase, clientAwlId, destPath) {
           if (buf && buf.length > 500) {
             await mkdir(dirname(destPath), { recursive: true });
             await writeFile(destPath, buf);
-            console.log(`  ✅ Resume cached from Supabase Storage: ${match.name}`);
             return true;
           }
         }
@@ -297,7 +294,6 @@ export async function parseClientResumeText(profile = {}) {
   if (text) {
     profile._resumeText = text;
     profile._resumeParsed = true;
-    console.log(`  ✓ Resume parsed (${text.length} chars) from Apply Wizz file`);
   }
   return text;
 }

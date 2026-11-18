@@ -864,7 +864,6 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
                 };
                 cachedAnswers = snapshot.answers || [];
                 loadedFromSupabase = true;
-                console.log(`  ✓ Supabase client cache loaded for ${id} (${snapshot.answers.length} answers)`);
 
                 // Also fetch Apply Wizz API in parallel — Supabase clients table does NOT store address/state/zip.
                 // Merge API address/contact fields as base; non-empty Supabase values always win.
@@ -939,9 +938,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
                   qaIndex[row.question_normalized] = String(row.answer);
                 }
               }
-              console.log(`  ✓ Supabase answer memory loaded: ${storedAnswers.length} answer(s)`);
             } catch (err) {
-              console.log(`  ⚠️  Supabase answer load skipped: ${err.message?.slice(0, 100) || err}`);
             }
           }
           const entry = {
@@ -956,7 +953,6 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
             degreeClassification,
           };
           clientCaches.set(id, entry);
-          console.log(`  ✓ Apply Wizz loaded: ${overlay.personal?.first_name || ''} ${overlay.personal?.last_name || ''} | ${Object.keys(qaIndex).length} Q&A keys`);
           return entry;
         })().finally(() => {
           hydrateInFlightMap.delete(id);
@@ -1058,16 +1054,14 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
         workTo: experience.currently_working ? '' : (experience.to_date || ''),
       });
       if (clientCache?.apiQaIndex) {
-        const saved = await upsertSupabaseAnswers(profile._applyWizzId, Object.entries(clientCache.apiQaIndex).map(([questionNormalized, answer]) => ({
+        await upsertSupabaseAnswers(profile._applyWizzId, Object.entries(clientCache.apiQaIndex).map(([questionNormalized, answer]) => ({
           question: questionNormalized,
           questionNormalized,
           answer,
           source: 'applywizz',
         })));
-        if (saved) console.log(`  ✓ Supabase API answers stored for ${profile._applyWizzId}`);
       }
     } catch (err) {
-      console.log(`  ⚠️  Supabase client/API answer save skipped: ${err.message?.slice(0, 160) || err}`);
     }
   }
 
@@ -1116,8 +1110,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
     if (isSupabaseConfigured() && opts?.dryRun !== true) {
       const resumeEntries = buildResumeAnswerEntries(parsed);
       if (resumeEntries.length) {
-        const saved = await upsertSupabaseAnswers(profile._applyWizzId, resumeEntries);
-        if (saved) console.log(`  ✓ Supabase resume facts stored for ${profile._applyWizzId} (${resumeEntries.length} rows)`);
+        await upsertSupabaseAnswers(profile._applyWizzId, resumeEntries);
       }
     }
     if (isSupabaseConfigured() && opts?.dryRun !== true) {
@@ -1148,9 +1141,7 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
           workFrom: experience.from_date || '',
           workTo: experience.currently_working ? '' : (experience.to_date || ''),
         });
-        console.log(`  ✓ Supabase client profile stored for ${profile._applyWizzId}`);
       } catch (err) {
-        console.log(`  ⚠️  Supabase resume save skipped: ${err.message?.slice(0, 160) || err}`);
       }
     }
     // ─── Temp-file cleanup: remove the downloaded PDF immediately after parsing ───

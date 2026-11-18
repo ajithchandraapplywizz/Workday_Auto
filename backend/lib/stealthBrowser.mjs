@@ -53,8 +53,6 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disk-cache-size=33554432',               // Cap disk cache to 32MB
     '--media-cache-size=1',                     // Disable media cache
     // ── Linux Thread & Process Exhaustion Prevention (pthread_create 11 & EAGAIN) ──
-    '--in-process-gpu',                         // In-process GPU to eliminate external GPU sub-processes
-    '--renderer-process-limit=1',               // Strict limit: 1 renderer process per browser instance
     '--num-raster-threads=1',                   // Strict limit: 1 raster thread (saves dozens of OS threads)
     '--disable-threaded-animation',             // Disable threaded animation to reduce OS thread count
     '--disable-threaded-scrolling',             // Disable threaded scrolling to reduce OS thread count
@@ -121,6 +119,18 @@ function wrapBrowserInstance(browser) {
   return browser;
 }
 
+async function launchWithTimeout(launchFn, options, timeoutMs = 25000) {
+  let timer = null;
+  const timeoutPromise = new Promise((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`Chromium launch exceeded ${Math.round(timeoutMs / 1000)}s timeout`)), timeoutMs);
+  });
+  try {
+    return await Promise.race([launchFn(options), timeoutPromise]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 /**
  * Creates a multi-tier resilient launch wrapper around any Playwright Chromium launcher.
  */
@@ -143,7 +153,7 @@ function createResilientLauncher(extraLauncher = null) {
       if (isRes) {
         try {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-          cleanupOrphanChromeProcesses({ ignoreSlots: true });
+          cleanupOrphanChromeProcesses();
         } catch {}
         // Give host OS process table and init reaper (tini) recovery time
         await new Promise((r) => setTimeout(r, 4000));
@@ -153,10 +163,10 @@ function createResilientLauncher(extraLauncher = null) {
     // Tier 1: Stealth launcher with full Chromium channel ("new headless" - avoids chrome-headless-shell SIGTRAP)
     if (origExtraLaunch) {
       try {
-        const browser = await origExtraLaunch({
+        const browser = await launchWithTimeout(origExtraLaunch, {
           ...prepared,
           channel: preferredChannel,
-        });
+        }, 25000);
         return wrapBrowserInstance(browser);
       } catch (err1) {
         console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}). Retrying stealth without channel...`);
@@ -164,7 +174,7 @@ function createResilientLauncher(extraLauncher = null) {
         // Tier 2: Stealth launcher with default headless shell
         try {
           const { channel: _, ...withoutChannel } = prepared;
-          const browser = await origExtraLaunch(withoutChannel);
+          const browser = await launchWithTimeout(origExtraLaunch, withoutChannel, 25000);
           return wrapBrowserInstance(browser);
         } catch (err2) {
           console.warn(`[STEALTH] Stealth launch failed (${err2?.message}), falling back to standard Chromium.`);
@@ -175,10 +185,10 @@ function createResilientLauncher(extraLauncher = null) {
 
     // Tier 3: Standard Chromium with full Chromium channel ("new headless")
     try {
-      const browser = await origStandardLaunch({
+      const browser = await launchWithTimeout(origStandardLaunch, {
         ...prepared,
         channel: preferredChannel,
-      });
+      }, 25000);
       return wrapBrowserInstance(browser);
     } catch (err3) {
       console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}). Retrying standard without channel...`);
@@ -188,7 +198,7 @@ function createResilientLauncher(extraLauncher = null) {
     // Tier 4: Standard Chromium with default binary and hardened container args
     try {
       const { channel: _, ...withoutChannel } = prepared;
-      const browser = await origStandardLaunch(withoutChannel);
+      const browser = await launchWithTimeout(origStandardLaunch, withoutChannel, 25000);
       return wrapBrowserInstance(browser);
     } catch (err4) {
       console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}). Attempting minimal safe container launch...`);
@@ -197,7 +207,7 @@ function createResilientLauncher(extraLauncher = null) {
 
     // Tier 5: Minimal emergency container launch
     try {
-      const browser = await origStandardLaunch({
+      const browser = await launchWithTimeout(origStandardLaunch, {
         headless: true,
         args: [
           '--no-sandbox',
@@ -205,7 +215,7 @@ function createResilientLauncher(extraLauncher = null) {
           '--disable-dev-shm-usage',
           '--disable-gpu',
         ],
-      });
+      }, 25000);
       console.log('[BROWSER] Minimal emergency Chromium instance launched successfully.');
       return wrapBrowserInstance(browser);
     } catch (finalErr) {

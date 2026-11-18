@@ -6,7 +6,6 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--disable-software-rasterizer',
-  '--renderer-process-limit=1',
   '--js-flags=--max-old-space-size=384',
   '--disable-extensions',
   '--disable-default-apps',
@@ -26,7 +25,6 @@ export const LEAN_CHROMIUM_ARGS = [
   '--window-size=1280,900',
   '--disk-cache-size=33554432',
   '--media-cache-size=1',
-  '--in-process-gpu',
   '--num-raster-threads=1',
   '--disable-features=AudioServiceOutOfProcess,OptimizationHints,Translate,PaintHolding,DialMediaRouteProvider',
   '--disable-threaded-animation',
@@ -35,7 +33,7 @@ export const LEAN_CHROMIUM_ARGS = [
 
 /**
  * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID / pthread_create limit exhaustion.
- * STRICT GUARD: Never reap processes if any active browser context is currently alive, unless forced.
+ * STRICT GUARD: Never reap processes if any active browser context or claimed slot is alive, unless forced.
  */
 export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = false } = {}) {
   if (process.platform === 'linux') {
@@ -45,10 +43,7 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
     } catch {}
   }
   if (!force) {
-    if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0) {
-      return;
-    }
-    if (!ignoreSlots && activeSlots.size > 0) {
+    if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0 || activeSlots.size > 0) {
       return;
     }
   }

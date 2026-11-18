@@ -86,8 +86,8 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const args = process.argv.slice(2);
 const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
 // In production (Railway) and background daemons, HEADLESS is strictly enforced (true).
-// Headed mode is ONLY activated if --headed or --headful is explicitly passed in CLI args.
-const HEADLESS = isProduction ? true : (args.includes('--headful') || args.includes('--headed') ? false : true);
+// Headed mode is activated if --headed / --headful CLI args are passed, or HEADLESS=false in .env.
+const HEADLESS = isProduction ? true : (args.includes('--headful') || args.includes('--headed') || process.env.HEADLESS === 'false' ? false : true);
 const TEST_MODE = args.includes('--test');
 
 let envRole = (process.env.SERVICE_ROLE || '').toLowerCase();
@@ -2548,29 +2548,39 @@ export async function initOnStartup() {
     await resetAllWorkersIdle();
     if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true') {
       console.log(`[DAEMON] 🛡️ Local development environment detected — strictly preserving production cloud bot_control and worker states.`);
-    } else if (SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
-      await syncBotControlState({
-        mode: 'idle',
-        stage: 'idle',
-        is_running: false,
-        is_paused: false,
-        stop_requested: false,
-        scan_enabled: false,
-        scan_status: 'off',
-        scan_stop_requested: false,
-        submit_enabled: false,
-        submit_status: 'off',
-        submit_stop_requested: false,
-        trigger_requested: false,
-        last_action_requested: null,
-        current_action: 'Idle — Ready for user trigger',
-        active_worker_count: 0,
-      });
-      await updateWorkerControl('scan', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
-      await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
-      console.log(`[DAEMON] bot_control initialized: workers set to off/idle. Awaiting user trigger.`);
     } else {
-      console.log(`[DAEMON] Dedicated worker container (${SERVICE_ROLE.toUpperCase()}) initialized — preserving global bot_control stage.`);
+      // In production cloud (Railway), inspect current bot_control state on boot
+      const { data: bc } = await supabase.from('bot_control').select('*').eq('id', 'primary').maybeSingle();
+      const hasActiveUserTrigger = Boolean(
+        bc?.trigger_requested === true ||
+        (bc?.last_action_requested && typeof bc.last_action_requested === 'string' && bc.last_action_requested.startsWith('start'))
+      );
+
+      if (!hasActiveUserTrigger) {
+        // No fresh user trigger is pending on boot: ensure bot_control and workers are reset to clean idle state so newly deployed containers do not auto-run!
+        await syncBotControlState({
+          mode: 'idle',
+          stage: 'idle',
+          is_running: false,
+          is_paused: false,
+          stop_requested: false,
+          scan_enabled: false,
+          scan_status: 'off',
+          scan_stop_requested: false,
+          submit_enabled: false,
+          submit_status: 'off',
+          submit_stop_requested: false,
+          trigger_requested: false,
+          last_action_requested: null,
+          current_action: 'Idle — Ready for user trigger',
+          active_worker_count: 0,
+        });
+        await updateWorkerControl('scan', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
+        await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
+        console.log(`[DAEMON] Container (${SERVICE_ROLE.toUpperCase()}) initialized in idle standby: bot_control reset to idle. Awaiting user start trigger.`);
+      } else {
+        console.log(`[DAEMON] Dedicated worker container (${SERVICE_ROLE.toUpperCase()}) initialized — active user trigger "${bc?.last_action_requested || 'trigger_requested'}" detected and preserved.`);
+      }
     }
     await recoverInterruptedSubmissionTasks();
     const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');
@@ -2758,13 +2768,28 @@ export async function initOnStartup() {
       const isScanRunning = scanStatus === 'running';
       const isSubmitRunning = submitStatus === 'running';
 
-      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (
-        isStartTriggered || (Boolean(bc?.is_running) && (bc?.scan_status === 'running' || bc?.scan_enabled === true))
+      // Workers must ONLY start when an explicit user trigger is active (trigger_requested or start_* action)
+      const isScanAction = Boolean(
+        bc?.last_action_requested === 'start_scan' ||
+        bc?.last_action_requested === 'start_universal' ||
+        bc?.last_action_requested === 'start_parallel' ||
+        bc?.last_action_requested === 'start' ||
+        bc?.last_action_requested === 'start_pipeline' ||
+        (bc?.trigger_requested && (bc?.scan_status === 'running' || bc?.stage === 'scanning' || bc?.stage === 'parallel'))
       );
 
-      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (
-        isStartTriggered || (Boolean(bc?.is_running) && (bc?.submit_status === 'running' || bc?.submit_enabled === true))
+      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && isStartTriggered && isScanAction;
+
+      const isSubmitAction = Boolean(
+        bc?.last_action_requested === 'start_submit' ||
+        bc?.last_action_requested === 'start_universal' ||
+        bc?.last_action_requested === 'start_parallel' ||
+        bc?.last_action_requested === 'start' ||
+        bc?.last_action_requested === 'start_pipeline' ||
+        (bc?.trigger_requested && (bc?.submit_status === 'running' || bc?.stage === 'submitting' || bc?.stage === 'parallel'))
       );
+
+      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && isStartTriggered && isSubmitAction;
 
       if (isScanStartRequested) {
         if (SERVICE_ROLE === 'submitter') {
@@ -2896,12 +2921,13 @@ export async function initOnStartup() {
         return;
       }
 
-      // 3b. Autonomous Stage 3 Continuation: ONLY if user has actively started the bot (is_running && submit_status=running/parallel)
+      // 3b. Autonomous Stage 3 Continuation: ONLY if user has actively started the bot in this session AND it is already in submitting/parallel stage
       if (
         SERVICE_ROLE !== 'scanner' &&
         !isPoolRunning &&
         submitStatus !== 'running' &&
         activeSubmittingWorkers.size === 0 &&
+        (currentStage === 'submitting' || currentStage === 'parallel') &&
         Boolean(bc && bc.is_running && (bc.submit_status === 'running' || bc.stage === 'parallel' || bc.mode === 'parallel'))
       ) {
         const isExplicitStop = Boolean(

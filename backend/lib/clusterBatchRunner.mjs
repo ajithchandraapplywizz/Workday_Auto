@@ -1789,21 +1789,17 @@ export async function runClusterBatchRunner({
     });
 
     const baseOffset = Number(process.env.WORKER_OFFSET) || 0;
-    let clusterIndex = baseOffset % Math.max(1, clusters.length);
-    let attemptsCount = 0;
-    const maxAttempts = clusters.length;
+    let clusterIndex = 0;
 
     async function workerLoop(slot) {
       const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + baseOffset}`;
       const workerDisplay = PIPELINE_CONFIG.workerNames?.[workerId] || `Scanning Worker ${workerId.match(/\d+/)?.[0] || slot}`;
-      while (attemptsCount < maxAttempts) {
+      while (clusterIndex < clusters.length) {
         if (await isClusterStopRequested()) {
           console.log(`🛑 [${workerId}] Stop flag active! Halting cluster loop.`);
           break;
         }
-        const myIndex = clusterIndex;
-        clusterIndex = (clusterIndex + 1) % clusters.length;
-        attemptsCount++;
+        const myIndex = clusterIndex++;
         const cluster = clusters[myIndex];
         if (!cluster) break;
 
@@ -1907,11 +1903,11 @@ export async function runClusterBatchRunner({
           }
 
           const isHostResourceError = Boolean(
-            /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM|EACCES/i.test(err?.message || '')
+            /SLOT_TIMEOUT|Browser slot busy|slot wait timed out|slot busy|HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM|EACCES/i.test(err?.message || '')
           );
 
           if (isHostResourceError) {
-            console.warn(`\n⚠️ [${workerDisplay}] Host resource limitation caught on batch #${myIndex + 1} (${errorUrl}): ${err.message}. Safely resetting task(s) to pending for automatic retry.`);
+            console.warn(`\n⚠️ [${workerDisplay}] Capacity/resource limitation caught on batch #${myIndex + 1} (${errorUrl}): ${err.message}. Safely resetting task(s) to pending for automatic retry.`);
             try {
               if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
                 const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
@@ -1924,37 +1920,67 @@ export async function runClusterBatchRunner({
             }
             try {
               const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-              cleanupOrphanChromeProcesses({ ignoreSlots: true });
+              cleanupOrphanChromeProcesses();
             } catch {}
             await new Promise((r) => setTimeout(r, 6000 + Math.floor(Math.random() * 4000)));
             continue;
           }
 
-          console.error(`❌ [${workerDisplay}] Error on batch #${myIndex + 1} (${errorUrl}): ${err.message}`);
-          try {
-            const { recordFailedJob } = await import('./supabaseClient.mjs');
-            const firstTask = cluster.tasks?.[0];
-            if (firstTask) {
-              await recordFailedJob({
-                applywizzId: firstTask.applywizz_id,
-                clientIds: Array.from(new Set(cluster.tasks.map((t) => t.applywizz_id).filter(Boolean))),
-                clientCount: cluster.clientCount || 1,
-                jobId: firstTask.job_id || cluster.reqId || null,
-                jobUrl: errorUrl,
-                company: cluster.company,
-                roleTitle: cluster.roleTitle,
-                failureReason: `Worker error: ${err.message?.slice(0, 300)}`,
-                failedAtStep: 'Worker Process',
-                screenshotPath: null,
-              }).catch(() => {});
-            }
-            if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
-              const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
-              if (taskIds.length > 0) {
-                await failClusterTasksByIds(taskIds, `Worker error: ${err.message?.slice(0, 150)}`).catch(() => {});
+          const currentAttempts = Number(cluster.attemptCount || 0);
+          const nextAttempt = currentAttempts + 1;
+          const isPermanentFailure = currentAttempts >= 2;
+
+          if (!isPermanentFailure) {
+            console.warn(`\n🔁 [${workerDisplay}] Exception on batch #${myIndex + 1} (${errorUrl}) [Attempt ${nextAttempt}/3]: ${err.message}. Re-queuing to pending for retry.`);
+            try {
+              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+                if (taskIds.length > 0) {
+                  const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
+                  await queueDbRequest('batch_job_queue', {
+                    method: 'PATCH',
+                    query: `?id=in.(${idFilter})`,
+                    prefer: 'return=minimal',
+                    body: {
+                      status: 'pending',
+                      attempt_count: nextAttempt,
+                      worker_id: null,
+                      locked_at: null,
+                      updated_at: new Date().toISOString(),
+                    },
+                  }).catch(() => {});
+                }
               }
+            } catch (retryErr) {
+              console.warn(`[RETRY ROLLBACK ERROR]`, retryErr.message);
             }
-          } catch {}
+          } else {
+            console.error(`❌ [${workerDisplay}] Error on batch #${myIndex + 1} (${errorUrl}) [Attempt 3/3 exhausted]: ${err.message}`);
+            try {
+              const { recordFailedJob } = await import('./supabaseClient.mjs');
+              const firstTask = cluster.tasks?.[0];
+              if (firstTask) {
+                await recordFailedJob({
+                  applywizzId: firstTask.applywizz_id,
+                  clientIds: Array.from(new Set(cluster.tasks.map((t) => t.applywizz_id).filter(Boolean))),
+                  clientCount: cluster.clientCount || 1,
+                  jobId: firstTask.job_id || cluster.reqId || null,
+                  jobUrl: errorUrl,
+                  company: cluster.company,
+                  roleTitle: cluster.roleTitle,
+                  failureReason: `Worker error: ${err.message?.slice(0, 300)} (Attempt 3/3 exhausted)`,
+                  failedAtStep: 'Worker Process',
+                  screenshotPath: null,
+                }).catch(() => {});
+              }
+              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+                if (taskIds.length > 0) {
+                  await failClusterTasksByIds(taskIds, `Worker error: ${err.message?.slice(0, 150)} (Attempt 3/3 exhausted)`).catch(() => {});
+                }
+              }
+            } catch {}
+          }
           res = {
             workerId,
             jobUrl: errorUrl,

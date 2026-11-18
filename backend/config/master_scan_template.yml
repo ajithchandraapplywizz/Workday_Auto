@@ -2,8 +2,8 @@ title: Workday Auto Master Question & Answer Reference Bank
 description: Consolidated, deduplicated form questions, types, and sample
   answers captured by Blueprint Workers
 version: 1.0.0
-last_updated: 2026-11-10T20:53:35.247Z
-total_unique_questions: 160
+last_updated: 2026-11-17T22:09:02.447Z
+total_unique_questions: 180
 questions:
   are you legally authorized to work in the united states:
     question: Are you legally authorized to work in the United States?
@@ -408,7 +408,11 @@ questions:
     question: Country / Territory Phone Code
     field_type: phone
     step: Review
-    options: []
+    options:
+      - United States of America (+1)
+      - Canada (+1)
+      - United Kingdom (+44)
+      - India (+91)
     sample_answer: United States of America (+1)
     source: scan_placeholder
     tenant: global
@@ -422,7 +426,14 @@ questions:
     field_type: dropdown
     step: Review
     options:
-      - Asian (Not Hispanic or Latino) (United States of America)
+      - Decline to self-identify
+      - White
+      - Black or African American
+      - Hispanic or Latino
+      - Asian
+      - American Indian or Alaska Native
+      - Native Hawaiian or Other Pacific Islander
+      - Two or More Races
     sample_answer: Asian (Not Hispanic or Latino) (United States of America)
     source: scan_placeholder
     tenant: global
@@ -436,7 +447,9 @@ questions:
     field_type: dropdown
     step: Review
     options:
-      - Not currently serving and not a veteran
+      - I am not a protected veteran
+      - I identify as one or more of the classifications of protected veteran
+      - I do not wish to self-identify
     sample_answer: Not currently serving and not a veteran
     source: scan_placeholder
     tenant: global
@@ -2331,3 +2344,311 @@ questions:
     first_seen_role: Developer
     mock_client_id: AWL-1568
     created_at: 2026-11-10T20:53:35.247Z
+  have you ever been employed by fannie mae interned for or provided services to fannie mae as a contractor or contingent worker note if you are a current fannie mae employee please apply via the employee portal:
+    question: Have you ever been employed by Fannie Mae, interned for, or provided
+      services to Fannie Mae as a contractor or contingent worker? *Note if you
+      are a current Fannie Mae employee, please apply via the Employee Portal.**
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: N/A
+    source: manual
+    tenant: fanniemae
+    first_seen_company: Fannie Mae
+    first_seen_role: Search All Jobs
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T21:56:35.097Z
+  do you have any family members employed by fannie mae “family members” refers to spouse domestic partner child grandchild uncle aunt cousin niece nephew parent brother sister grandparent or in-law including all such relatives that are “half” or “step” persons who have acquired such relationships through marriage or common law and any person other than a tenant or employee who shares your household and/or is financially dependent on you:
+    question: Do you have any family members employed by Fannie Mae? *“Family
+      Members” refers to spouse, domestic partner, child, grandchild, uncle,
+      aunt, cousin, niece, nephew, parent, brother, sister, grandparent, or
+      in-law (including all such relatives that are “half” or “step”), persons
+      who have acquired such relationships through marriage or common law, and
+      any person (other than a tenant or employee) who shares your household
+      and/or is financially dependent on you.**
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: N/A
+    source: manual
+    tenant: fanniemae
+    first_seen_company: Fannie Mae
+    first_seen_role: Search All Jobs
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T21:56:36.742Z
+  do you have any employment obligations owed to your current or former employers including any non-compete agreements non-solicitation agreements other restrictive covenants or government regulations that may impact or restrict your ability to perform services for fannie mae:
+    question: Do you have any employment obligations, owed to your current or former
+      employers, including any non-compete agreements, non-solicitation
+      agreements, other restrictive covenants, or government regulations that
+      may impact or restrict your ability to perform services for Fannie Mae?*
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: N/A
+    source: manual
+    tenant: fanniemae
+    first_seen_company: Fannie Mae
+    first_seen_role: Search All Jobs
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T21:56:38.383Z
+  if you are offered and accept employment with fannie mae upon starting with our organization will you maintain any commitments to another employer or be engaged in any other outside employment for the purposes of this question outside employment is defined as any employment business relationship or activity other than fannie mae including self-employment for which you receive compensation any ownership interest in business including but not limited to a proprietorship limited liability company or limited liability partnership or the provision of personal services as an officer director agent attorney consultant contractor general partner trustee teacher speaker or writer:
+    question: If you are offered and accept employment with Fannie Mae, upon
+      starting with our organization, will you maintain any commitments to
+      another employer, or be engaged in any other outside employment? For the
+      purposes of this question, outside employment is defined as any
+      employment, business relationship, or activity other than Fannie Mae
+      (including self-employment) for which you receive compensation, any
+      ownership interest in business, including, but not limited to a
+      proprietorship, limited liability company, or limited liability
+      partnership, or the provision of personal services as an officer,
+      director, agent, attorney, consultant, contractor, general partner,
+      trustee, teacher, speaker, or writer.**
+    field_type: custom-dropdown
+    step: Application Questions
+    options:
+      - Yes
+      - No
+    sample_answer: "80000"
+    source: manual
+    tenant: fanniemae
+    first_seen_company: Fannie Mae
+    first_seen_role: Search All Jobs
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T21:56:40.875Z
+  have you previously worked for this organization:
+    question: Have you previously worked for this organization?*
+    field_type: radio
+    step: My Information
+    options:
+      - Yes
+      - No
+    sample_answer: No
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  17afff41-b967-4040-b330-fb67ce88a323:
+    question: 17afff41-b967-4040-b330-fb67ce88a323
+    field_type: text
+    step: My Information
+    options: []
+    sample_answer: United States of America (+1)
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  linkedin:
+    question: LinkedIn
+    field_type: text
+    step: Application Questions
+    options: []
+    sample_answer: null
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  are you authorized to work in the united states:
+    question: Are you authorized to work in the United States?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Texas
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  do you now or will you in the future require sponsorship for employment:
+    question: Do you now or will you in the future require sponsorship for employment?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  are you at least 18 years old:
+    question: Are you at least 18 years old?*
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  if you are not within commutable distance of an office location listed in the job description are you willing to relocate to be within commutable distance please note that relocation assistance may not be provided:
+    question: If you are not within commutable distance of an office location listed
+      in the job description, are you willing to relocate to be within
+      commutable distance? * Please note that relocation assistance may not be
+      provided.**
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Yes
+      - No
+    sample_answer: Yes
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  i verify that all of the information i have provided is true and accurate and i understand that any falsification or omission of information may disqualify me from further consideration for employment or if hired may result in termination by typing your legal name in the box below you are affirming that you agree to this statement:
+    question: I verify that all of the information I have provided is true and
+      accurate, and I understand that any falsification or omission of
+      information may disqualify me from further consideration for employment
+      or, if hired, may result in termination. (By typing your **legal** name in
+      the box below you are affirming that you agree to this statement.)*
+    field_type: textarea
+    step: Voluntary Disclosures
+    options: []
+    sample_answer: Texas
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  sex:
+    question: Sex
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Female
+      - Male
+    sample_answer: Female
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  race and ethnicity:
+    question: Race and Ethnicity
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - Decline to self-identify
+      - White
+      - Black or African American
+      - Hispanic or Latino
+      - Asian
+      - American Indian or Alaska Native
+      - Native Hawaiian or Other Pacific Islander
+      - Two or More Races
+    sample_answer: austin
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  are you a veteran a person who served in the active military naval or air service and who was discharged or released under conditions other than dishonorable:
+    question: Are you a veteran? A person who served in the active military, naval,
+      or air service and who was discharged or released under conditions other
+      than dishonorable.
+    field_type: dropdown
+    step: Voluntary Disclosures
+    options:
+      - I identify as a Veteran
+      - I do not identify as a Veteran
+      - I do not wish to identify
+    sample_answer: I do not wish to identify
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  current value is 11/17/2026:
+    question: current value is 11/17/2026
+    field_type: date
+    step: Self Identify
+    options: []
+    sample_answer: 11/17/2026
+    source: manual
+    tenant: global
+    first_seen_company: Fannie Mae
+    first_seen_role: Lead Data Scientist – Corporate Risk, Single Family
+    mock_client_id: AWL-31424
+    created_at: 2026-11-17T22:00:12.783Z
+  do you have a high school diploma ged or country specific school equivalent:
+    question: Do you have a high school diploma, GED or country specific school
+      equivalent?*
+    field_type: dropdown
+    step: 3
+    options: []
+    sample_answer: No
+    source: manual
+    tenant: huntington
+    first_seen_company: Workday Partner
+    first_seen_role: Application
+    mock_client_id: AWL-25015
+    created_at: 2026-11-17T22:08:50.194Z
+  do you have any relatives or close personal relationships with persons who are employed or are a contractor/regulator at huntington relatives include family members that are related to you by either current or past marriages ex ex-spouse or ex-spouses children close personal relationships include close friendships romantic relationships current and past and individuals who share a household including former roommates regulator includes examiner or auditor:
+    question: "Do you have any relatives or close personal relationships with
+      persons who are employed or are a contractor/regulator at Huntington?
+      Relatives include family members that are related to you by either current
+      or past marriages (ex: ex-spouse or ex-spouse's children). Close personal
+      relationships include close friendships, romantic relationships (current
+      and past) and individuals who share a household including former
+      roommates. Regulator includes examiner or auditor.*"
+    field_type: custom-dropdown
+    step: Application Questions
+    options: []
+    sample_answer: No
+    source: manual
+    tenant: huntington
+    first_seen_company: Huntington National Bank
+    first_seen_role: Treasury Liquidity Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T22:08:51.569Z
+  please provide agency name assignment dates and supervisor:
+    question: Please provide Agency name, Assignment Date(s) and Supervisor*
+    field_type: textarea
+    step: Application Questions
+    options: []
+    sample_answer: 11/18/2026
+    source: manual
+    tenant: huntington
+    first_seen_company: Huntington National Bank
+    first_seen_role: Treasury Liquidity Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T22:08:55.965Z
+  please describe the potential conflict of interest:
+    question: Please describe the potential conflict of interest.*
+    field_type: textarea
+    step: Application Questions
+    options: []
+    sample_answer: N/A
+    source: manual
+    tenant: huntington
+    first_seen_company: Huntington National Bank
+    first_seen_role: Treasury Liquidity Data Analyst
+    mock_client_id: AWL-1568
+    created_at: 2026-11-17T22:09:02.447Z

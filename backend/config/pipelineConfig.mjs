@@ -9,6 +9,8 @@
  * - Explicit comma-separated IDs: SCAN_WORKER_IDS, RESOLVE_WORKER_IDS, SUBMIT_WORKER_IDS / SUBMISSION_WORKER_IDS
  */
 
+import 'dotenv/config';
+
 function parsePositiveInt(val, fallback) {
   const num = Number(val);
   return Number.isFinite(num) && num > 0 ? Math.floor(num) : fallback;
