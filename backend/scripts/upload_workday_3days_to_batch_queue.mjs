@@ -29,7 +29,7 @@ if (minIdx !== -1 && args[minIdx + 1]) {
 }
 
 const fileArg = args.find((a) => !a.startsWith('--') && isNaN(parseInt(a, 10)));
-const defaultCsvPath = "C:\\Users\\ajith\\OneDrive\\Desktop\\New_Auto_Workday\\data\\workday_New_jobs_tasks_in_3_days_202610121601.csv";
+const defaultCsvPath = process.env.CSV_PATH || resolve(process.cwd(), 'data', 'workday_New_jobs_tasks_in_3_days_202610121601.csv');
 const csvPath = resolve(fileArg || defaultCsvPath);
 
 if (!existsSync(csvPath)) {

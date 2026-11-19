@@ -264,7 +264,6 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
       jobUrl: page.url(),
       distributionId: profile?._distributionId || '',
-      passwordResetRequestedAt: profile?._passwordResetRequestedAt || profile?.passwordResetRequestedAt || null,
     });
 
     if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
@@ -328,7 +327,6 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
       applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
       jobUrl: page.url(),
       distributionId: profile?._distributionId || '',
-      passwordResetRequestedAt: profile?._passwordResetRequestedAt || profile?.passwordResetRequestedAt || null,
     }).catch(() => null);
 
     if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
@@ -400,7 +398,6 @@ async function fallbackCreateAccountAndLogin(page, { email, password, mode = 'si
     applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
     jobUrl: page.url(),
     distributionId: profile?._distributionId || '',
-    passwordResetRequestedAt: profile?._passwordResetRequestedAt || profile?.passwordResetRequestedAt || null,
   }).catch(() => null);
 
   if (finalForgot?.reason === 'mailbox_not_connected' || finalForgot?.reason === 'zoho mail not connected' || finalForgot?.isZohoNotConnected) {
@@ -925,7 +922,6 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
           applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
           jobUrl: page.url(),
           distributionId: profile?._distributionId || '',
-          passwordResetRequestedAt: profile?._passwordResetRequestedAt || profile?.passwordResetRequestedAt || null,
         });
 
         if (forgotResult?.reason === 'mailbox_not_connected' || forgotResult?.reason === 'zoho mail not connected' || forgotResult?.isZohoNotConnected) {
@@ -1076,10 +1072,6 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
             password: newPassword,
             company,
             timeoutMs: 75000,
-            applywizzId: profile?._applyWizzId || profile?.applywizz_id || '',
-            jobUrl: page.url(),
-            distributionId: profile?._distributionId || '',
-            passwordResetRequestedAt: profile?._passwordResetRequestedAt || profile?.passwordResetRequestedAt || null,
           });
 
           if (forgotSuccess?.reason === 'mailbox_not_connected' || forgotSuccess?.reason === 'zoho mail not connected' || forgotSuccess?.isZohoNotConnected) {

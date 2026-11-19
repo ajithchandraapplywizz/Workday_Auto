@@ -457,6 +457,7 @@ export async function persistClientAddressToSupabase(profile = {}) {
 
     if (entries.length > 0) {
       await upsertSupabaseAnswers(applywizzId, entries).catch(() => {});
+      console.log(`    💾 Saved ${entries.length} address/contact field(s) to Supabase for ${applywizzId}`);
     }
 
     const loc = [p.city, p.state, p.country].filter(Boolean).join(', ');

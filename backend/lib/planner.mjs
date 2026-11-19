@@ -212,7 +212,7 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
   if (applywizzId) {
     profile._applyWizzId = applywizzId;
   }
-  // Profile mode: API-only (Apply Wizz -> resume -> LLM). Local YAML/Q&A DB disabled.
+  console.log('  🌐 Profile mode: API-only (Apply Wizz → resume → LLM). Local YAML/Q&A DB disabled.');
   await hydrateProfileFromApplyWizz(profile, { applywizzId });
   if (!profile._applyWizzHydrated && !isApplyWizzConfigured()) {
     console.warn('  ⚠️  Apply Wizz not configured — set APPLYWIZZ_ID in .env; using resume + LLM only.');

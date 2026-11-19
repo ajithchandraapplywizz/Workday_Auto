@@ -26,6 +26,8 @@ import { getWorkerContext, isGlobalStopRequested, isSubmitStopRequested } from '
 
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 
+export const getSubmissionServiceName = () => process.env.RAILWAY_SERVICE_NAME || ((Number(process.env.WORKER_OFFSET) || 0) > 0 ? 'Submitting_2' : 'Submitting_1');
+
 
 
 loadLocalEnvOnce();
@@ -447,7 +449,7 @@ export async function getRemainingReadyForReviewCount() {
     const { count, error } = await supabase
       .from('job_distributions')
       .select('*', { count: 'exact', head: true })
-      .in('status', ['ready_for_review', 'ready_to_review', 'queued', 'applying'])
+      .in('status', ['ready_for_review', 'applying'])
       .eq('is_fully_answered', true)
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
@@ -467,10 +469,9 @@ export async function getRemainingReadyForReviewCount() {
 export async function claimNextTask(workerId) {
   if (!workerId || !supabase) return null;
 
-  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running unless explicitly authorized
+  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running
   const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  const isHeadedExplicit = process.env.HEADLESS === 'false' || process.argv.includes('--headed') || process.argv.includes('--headful');
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers') && !isHeadedExplicit) {
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
     return null;
   }
 
@@ -548,11 +549,11 @@ export async function claimNextTask(workerId) {
 
     // Stage 3 Progressive Priority Policy (Max 3 Attempts):
     // 1. First claim unattempted 0th attempt applications (error_message is null or has not failed any attempt, OR was stopped by user)
-    // Exclude tasks in resource cooldown to prevent tight re-claim loops during EAGAIN
+    // Strictly pick ONLY ready_for_review rows!
     let candQuery = supabase
       .from('job_distributions')
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
-      .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+      .eq('status', 'ready_for_review')
       .eq('is_fully_answered', true)
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
@@ -577,7 +578,7 @@ export async function claimNextTask(workerId) {
       let fallback0Query = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
-        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
@@ -607,8 +608,9 @@ export async function claimNextTask(workerId) {
       let retryQuery1 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
-        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
+        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -631,8 +633,9 @@ export async function claimNextTask(workerId) {
       let retryQuery2 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
-        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
+        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -655,10 +658,13 @@ export async function claimNextTask(workerId) {
       let retryQuery3 = supabase
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
-        .in('status', ['ready_for_review', 'ready_to_review', 'queued'])
+        .eq('status', 'ready_for_review')
+        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
-        .neq('status', 'archived');
+        .neq('status', 'archived')
+        .not('error_message', 'ilike', '%[Attempt 3/3%')
+        .not('error_message', 'ilike', '%Attempt 3/3 Failed%');
 
       const { data: retryCandidates3, error: r3Err } = await retryQuery3
         .order('updated_at', { ascending: true })
@@ -670,7 +676,8 @@ export async function claimNextTask(workerId) {
     if (!candidates || candidates.length === 0) return null;
 
     for (const cand of candidates) {
-      // Atomic claim directly on job_distributions row
+      // Atomic CAS claim directly on job_distributions row:
+      // Strictly claims ONLY IF status is currently 'ready_for_review' and screenshot is null
       const { data: claimed, error: claimErr } = await supabase
         .from('job_distributions')
         .update({
@@ -680,7 +687,8 @@ export async function claimNextTask(workerId) {
           updated_at: now,
         })
         .eq('id', cand.id)
-        .eq('status', cand.status)
+        .eq('status', 'ready_for_review')
+        .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .select('*');
@@ -692,9 +700,6 @@ export async function claimNextTask(workerId) {
         const claimedDist = claimed[0];
 
 
-
-        const resetMatch = String(claimedDist.error_message || '').match(/\[password_reset_requested:(\d+)\]/);
-        const passwordResetRequestedAt = resetMatch ? parseInt(resetMatch[1], 10) : null;
 
         // Format task object for worker execution directly from job_distributions
 
@@ -721,8 +726,6 @@ export async function claimNextTask(workerId) {
           worker_id: workerId,
 
           started_at: now,
-
-          passwordResetRequestedAt,
 
         };
 
@@ -806,16 +809,30 @@ export async function reapExpiredLeases(timeoutMinutes = 3) {
 
 
 
-    const { data: expired, error: selErr } = await supabase
+    const { data: expiredByTime } = await supabase
       .from('job_distributions')
-      .select('id, worker_id, applywizz_id')
+      .select('id, worker_id, applywizz_id, application_submitted_screenshot_url')
       .eq('status', 'applying')
-      .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed')
-      .or(`worker_leased_at.lt.${cutoff},worker_leased_at.is.null`);
+      .lt('worker_leased_at', cutoff);
 
-    if (selErr || !expired || expired.length === 0) return [];
+    const { data: expiredByNull } = await supabase
+      .from('job_distributions')
+      .select('id, worker_id, applywizz_id, application_submitted_screenshot_url')
+      .eq('status', 'applying')
+      .neq('status', 'submitted')
+      .neq('status', 'completed')
+      .is('worker_leased_at', null);
+
+    const seen = new Set();
+    const expired = [...(expiredByTime || []), ...(expiredByNull || [])].filter((row) => {
+      if (!row?.id || seen.has(row.id)) return false;
+      seen.add(row.id);
+      return true;
+    });
+
+    if (!expired || expired.length === 0) return [];
 
     const reapedRows = [];
     for (const exp of expired) {
@@ -893,7 +910,8 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-  console.log(`[${task.applywizz_id}] | Company: ${task.company || 'Workday'} | Status: submitting | Screenshot: none`);
+  const serviceName = getSubmissionServiceName();
+  console.log(`[${serviceName}] [${workerId}] [${task.applywizz_id}] | Company: ${task.company || 'Workday'} | Status: submitting | Screenshot: none`);
 
 
 
@@ -935,9 +953,9 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
 
 
-  // B4 Task Watchdog: 8-minute default, clamped to max 10 minutes per task (prevents runaway browser while allowing multi-step forms)
-  const envWatchdog = process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS ? parseInt(process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS, 10) : 8 * 60 * 1000;
-  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs || Math.min(envWatchdog, 10 * 60 * 1000);
+  // B4 Task Watchdog: configurable or 25-minute default per task (prevents runaway browser while allowing multi-step forms)
+  const WATCHDOG_TIMEOUT_MS = options?.watchdogTimeoutMs
+    || (process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS ? parseInt(process.env.SUBMISSION_WATCHDOG_TIMEOUT_MS, 10) : 25 * 60 * 1000);
   const watchdogMins = Math.round(WATCHDOG_TIMEOUT_MS / 60000);
 
   let watchdogTimer = null;
@@ -1199,14 +1217,16 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
           }
 
-          // Forcefully abort worker browser, close contexts, and cancel any pending slot requests
-          try {
-            const { abortWorkerBrowser, cancelWaitingSlot } = await import('./browserLifecycle.mjs');
-            cancelWaitingSlot(workerId);
-            await abortWorkerBrowser(workerId);
-          } catch {}
+          if (ctx?.browser) {
+
+            await ctx.browser.close().catch(() => { });
+
+          }
+
         } catch (wShotErr) {
+
           console.warn(`[${workerId}] Watchdog screenshot error:`, wShotErr.message);
+
         }
 
 
@@ -1367,7 +1387,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     if (isSuccess) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Screenshot: ${finalShotUrl || 'none'}`);
 
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,
@@ -1384,7 +1404,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
 
     } else if (isAlreadyApplied) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 
@@ -1465,33 +1485,11 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
             worker_id: null,
             worker_leased_at: null,
             error_message: resetShot ? `${resetMsg} [diagnostic_screenshot: ${resetShot}]` : resetMsg,
+            application_submitted_screenshot_url: resetShot || undefined,
             updated_at: now,
           },
         });
         return { status: 'ready_for_review', reason: 'password_reset_pending' };
-      }
-
-      const isSlotTimeout = Boolean(
-        /SLOT_TIMEOUT|Browser slot busy/i.test(rawErrMsg)
-      );
-
-      if (isSlotTimeout) {
-        console.warn(`\n⏳ [STAGE 3: SUBMITTER] [${workerId}] Browser slot busy. Preserving task #${task.distribution_id || task.id} in ready_for_review WITHOUT burning attempt count.`);
-        await updateJobDistributionWithCheck({
-          distributionId: task.distribution_id || task.id,
-          applywizzId: task.applywizz_id,
-          jobUrl: task.job_url,
-          workerId,
-          patch: {
-            status: 'ready_for_review',
-            worker_id: null,
-            worker_leased_at: null,
-            error_message: 'Browser slot busy — retrying when worker opens slot',
-            updated_at: now,
-          },
-        });
-        await new Promise((r) => setTimeout(r, 5000));
-        return { status: 'slot_busy', error: rawErrMsg };
       }
 
       const isHostResourceError = Boolean(
@@ -1692,20 +1690,17 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
         const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${rawErrMsg}`;
 
         const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-        console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg?.slice(0, 100)} | Application: ${task.job_url || 'Unknown'} | Screenshot: ${finalShotUrl || 'none'}`);
+        console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: failed | Reason: ${rawErrMsg} | Screenshot: ${finalShotUrl || 'none'}`);
 
 
 
         const failPatch = {
-
           status: 'failed',
-
+          worker_id: null,
+          worker_leased_at: null,
           error_message: finalShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${finalShotUrl}]` : finalFailMsg,
-
           application_submitted_screenshot_url: finalShotUrl,
-
           updated_at: now,
-
         };
 
 
@@ -1860,7 +1855,7 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     const failedStep = 'Execution Exception';
 
     const isHostResourceError = Boolean(
-      /SLOT_TIMEOUT|Browser slot busy|slot wait timed out|HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|browserType\.launch|Target page, context or browser has been closed|Failed to launch|ENOMEM|EACCES/i.test(errMsg)
+      /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|browserType\.launch|Target page, context or browser has been closed|Failed to launch|ENOMEM|EACCES/i.test(errMsg)
     );
 
     if (isHostResourceError) {
@@ -1949,15 +1944,12 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
       const finalFailMsg = `[Attempt 3/3 Failed at "${failedStep}"]: ${errMsg}`;
 
       const failPatch = {
-
         status: 'failed',
-
+        worker_id: null,
+        worker_leased_at: null,
         error_message: errShotUrl ? `${finalFailMsg} [diagnostic_screenshot: ${errShotUrl}]` : finalFailMsg,
-
         application_submitted_screenshot_url: errShotUrl,
-
         updated_at: now,
-
       };
 
 
@@ -2017,10 +2009,13 @@ export async function processClaimedTask({ task, workerId, headless = true, runn
     if (watchdogTimer) clearTimeout(watchdogTimer);
 
     try {
-      const { releaseBrowserSlot, unregisterWorkerContext, abortWorkerBrowser } = await import('./browserLifecycle.mjs');
-      await abortWorkerBrowser(workerId);
+
+      const { releaseBrowserSlot, unregisterWorkerContext } = await import('./browserLifecycle.mjs');
+
       releaseBrowserSlot(workerId);
+
       unregisterWorkerContext(workerId);
+
     } catch { }
 
     // Release worker back to idle

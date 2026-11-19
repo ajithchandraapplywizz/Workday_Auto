@@ -31,6 +31,7 @@ import { handleWorkday, isWorkdayLogin } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
 import { peekClientAnswer } from './clientAnswer.mjs';
 import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
+import { buildDocumentFileName } from './fileNameUtils.mjs';
 import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
@@ -605,9 +606,22 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     }
 
     try {
-      console.log(`    📎 Uploading resume: ${fileName} (attempt ${attempt}/3)...`);
-      await fileInput.setInputFiles(absPath);
-      const ok = await waitForResumeUploadComplete(page, fileName);
+      const pageTitle = await page.title().catch(() => '');
+      const dynamicFileName = buildDocumentFileName(profile, fileName, true, pageTitle);
+      console.log(`    📎 Uploading resume as "${dynamicFileName}" (source: ${fileName}, attempt ${attempt}/3)...`);
+      try {
+        const fileBuf = await readFile(absPath);
+        const mime = dynamicFileName.endsWith('.docx')
+          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+          : dynamicFileName.endsWith('.doc')
+            ? 'application/msword'
+            : 'application/pdf';
+        await fileInput.setInputFiles({ name: dynamicFileName, mimeType: mime, buffer: fileBuf });
+      } catch (bufErr) {
+        // Fallback to absolute file path if buffer upload is rejected by Playwright
+        await fileInput.setInputFiles(absPath);
+      }
+      const ok = await waitForResumeUploadComplete(page, dynamicFileName) || await waitForResumeUploadComplete(page, fileName);
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;
@@ -2849,8 +2863,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     await tryUsePreviousApplication(page, profile).catch(() => false);
   }
 
-  const maxSteps = 10;
-  const maxNoProgress = 2;
+  const maxSteps = 12;
+  const maxNoProgress = 4;
   let currentIteration = 0;
   let lastFingerprint = '';
   let noProgressCount = 0;

@@ -286,8 +286,8 @@ export async function executeWorkerTask({
   }
 
   const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && headless !== false && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. Local browser launch prevented. (Set RUN_LOCAL_WORKERS=true or run headed to execute locally).`);
+  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. Local browser launch prevented.`);
     return { status: 'skipped', error: 'Local execution blocked to protect Railway workers' };
   }
 
@@ -475,6 +475,7 @@ export async function executeWorkerTask({
       const cachedResume = await getResumePathForApply(profile, {});
       if (cachedResume) {
         profile._resumePath = cachedResume;
+        console.log(`   📎 [${workerId}] Loaded authentic candidate resume: ${basename(cachedResume)}`);
       }
     } catch {}
   }
@@ -484,6 +485,8 @@ export async function executeWorkerTask({
   const expCount = profile.experience?.length || profile.work_experience?.length || 0;
   const skillsCount = profile.skills?.length || 0;
   appLog(2, `Supabase Profile: Loaded candidate record for ${applywizzId} (${workdayEmail}). Indexed ${expCount} job experiences, ${skillsCount} verified skills.`);
+
+  console.log(`   📧 [${workerId}] Using candidate credentials: ${workdayEmail} (Universal Password: ${workdayPassword}) for ${applywizzId}`);
 
   // Immediately notify Supabase & Frontend dashboard of Active / In-Progress status
   await updateWorkerStatus(workerId, { state: 'in_flight' }).catch(() => {});
@@ -513,7 +516,9 @@ export async function executeWorkerTask({
   const queuePreResolved = task.resolved_answers || task.resolvedAnswers || task.pre_resolved_answers || task.preResolvedAnswers;
   if (queuePreResolved && (Array.isArray(queuePreResolved) ? queuePreResolved.length > 0 : (typeof queuePreResolved === 'object' && Object.keys(queuePreResolved).length > 0))) {
     cacheHit = true;
-    indexResolvedAnswers(profile, queuePreResolved);
+    const loadedCount = indexResolvedAnswers(profile, queuePreResolved);
+    appLog(3, `Pre-Resolved JSON HIT: Loaded ${loadedCount} answers from job_distributions for instant fill.`);
+    console.log(`   ⚡ [${workerId}] Pre-Resolved JSON Hit: ${loadedCount} answers loaded from job_distributions for instant fill.`);
   } else {
     // Also load pre-resolved answers from job_distributions table
     try {
@@ -550,7 +555,8 @@ export async function executeWorkerTask({
     }
   }
 
-  // 5. Acquire single-browser slot lease, then clean up any dead zombie processes before launching
+  // 5. Launch isolated Playwright browser context (dynamically sized to match active workers and env)
+  cleanupOrphanChromeProcesses();
   await acquireBrowserSlot(workerId);
   let browser = null;
   let context = null;
@@ -558,10 +564,8 @@ export async function executeWorkerTask({
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
-    cleanupOrphanChromeProcesses();
     const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
     await new Promise((r) => setTimeout(r, launchJitterMs));
-    console.log(`   🚀 [${workerId}] Launching Playwright browser (${headless ? 'headless stealth' : 'headed'})...`);
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
 
     for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
@@ -570,15 +574,14 @@ export async function executeWorkerTask({
           headless: Boolean(headless),
           channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
           args: LEAN_CHROMIUM_ARGS,
-          timeout: 30000,
         });
         break;
       } catch (launchErr) {
         const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
         console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
-        cleanupOrphanChromeProcesses();
+        cleanupOrphanChromeProcesses({ ignoreSlots: true });
         if (launchAttempt < 3) {
-          const retryDelay = isHostResourceError ? (4000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
+          const retryDelay = isHostResourceError ? (3000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
           await new Promise((r) => setTimeout(r, retryDelay));
         } else {
           throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
@@ -589,7 +592,6 @@ export async function executeWorkerTask({
       role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
       workerId,
     });
-    console.log(`   🌐 [${workerId}] Browser active. Initializing context and navigating...`);
     context = await browser.newContext({
       viewport: { width: 1280, height: 900 },
       userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -604,31 +606,6 @@ export async function executeWorkerTask({
     page = await context.newPage();
     registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
 
-    // Check if password reset was previously requested for this application (< 2 hours ago)
-    const resetReqTime = task.passwordResetRequestedAt || profile._passwordResetRequestedAt || null;
-    if (resetReqTime) profile._passwordResetRequestedAt = resetReqTime;
-    if (resetReqTime && (Date.now() - resetReqTime < 2 * 60 * 60 * 1000)) {
-      console.log(`   🔑 [${workerId}] Application previously requested password reset at ${new Date(resetReqTime).toLocaleTimeString()}. Checking Zoho Mail for delayed email arrival...`);
-      try {
-        const { checkAndResumeDelayedPasswordReset } = await import('./workdayVerification.mjs');
-        const resumeRes = await checkAndResumeDelayedPasswordReset(page, {
-          email: workdayEmail,
-          password: workdayPassword,
-          company,
-          jobUrl,
-          requestedAt: resetReqTime,
-          applywizzId,
-          distributionId: task.distribution_id || task.distributionId || task.id,
-          taskId: queueTaskId,
-        });
-        if (resumeRes?.success) {
-          console.log(`   🎉 [${workerId}] Successfully resumed and completed password reset via Zoho Mail! Proceeding directly to application.`);
-        }
-      } catch (resumeErr) {
-        console.warn(`   ⚠️ [${workerId}] Note on checking delayed password reset: ${resumeErr.message}`);
-      }
-    }
-
     // Direct submission is strictly forbidden during scan / blueprint tasks (Stage 1)
     const directSubmit = isDirectSubmission && !isScanTask;
     let status;
@@ -636,7 +613,11 @@ export async function executeWorkerTask({
     let completionShotUrl = profile?._submissionScreenshotUrl || null;
 
     if (directSubmit) {
+      appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
+      console.log(`   ⚡ [${workerId}] Direct Submission Mode: Skipping scanForm & generatePlan. Filling directly from pre-resolved answers.`);
+
       // Pick authentic candidate resume (clients.resume_url -> cached PDF)
+      console.log(`   [${workerId}] Preparing authentic candidate resume...`);
       let resumePath = profile._resumePath || null;
       if (!resumePath) {
         const { getResumePathForApply } = await import('./resumeParser.mjs');
@@ -671,6 +652,8 @@ export async function executeWorkerTask({
       profile._isClusterBlueprint = false;
 
       // Step D: Fill & Submit directly
+      appLog(8, `Workday Wizard: Auto-filling application form steps 1–4 (${company || 'Workday'})...`);
+      console.log(`   [${workerId}] Step 4: Filling application...`);
       status = await fillForm(jobUrl, plan, {
         browser,
         context,
@@ -691,6 +674,30 @@ export async function executeWorkerTask({
         status = status.status || 'unknown';
       }
     } else {
+      // Check if password reset was previously requested for this application (< 2 hours ago)
+      const resetReqTime = task.passwordResetRequestedAt || null;
+      if (resetReqTime && (Date.now() - resetReqTime < 2 * 60 * 60 * 1000)) {
+        console.log(`   🔑 [${workerId}] Application previously requested password reset at ${new Date(resetReqTime).toLocaleTimeString()}. Checking Zoho Mail for delayed email arrival...`);
+        try {
+          const { checkAndResumeDelayedPasswordReset } = await import('./workdayVerification.mjs');
+          const resumeRes = await checkAndResumeDelayedPasswordReset(page, {
+            email: workdayEmail,
+            password: workdayPassword,
+            company,
+            jobUrl,
+            requestedAt: resetReqTime,
+            applywizzId,
+            distributionId: task.distribution_id || task.distributionId || task.id,
+            taskId: queueTaskId,
+          });
+          if (resumeRes?.success) {
+            console.log(`   🎉 [${workerId}] Successfully resumed and completed password reset via Zoho Mail! Proceeding directly to application.`);
+          }
+        } catch (resumeErr) {
+          console.warn(`   ⚠️ [${workerId}] Note on checking delayed password reset: ${resumeErr.message}`);
+        }
+      }
+
       // Step A: Scan Form
       appLog(5, `Playwright: Navigated to ${jobUrl.slice(0, 60)}... Scanning DOM inputs, questions, and auth state.`);
       console.log(`   [${workerId}] Step 1: Scanning form fields...`);
@@ -2055,10 +2062,12 @@ export async function executeWorkerTask({
     }
 
     if (options.isClusterBlueprint || options.isScanOnly) {
+      console.log(`   🔒 [${workerId}] Blueprint scan completed — closing browser instance.`);
       unregisterActiveBrowser(browser, workerId);
       await browser.close().catch(() => {});
     }
 
+    console.log(`   ✅ [${workerId}] Finished task for ${applywizzId} with status: "${status}"`);
     return {
       status,
       cacheHit,

@@ -45,7 +45,7 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disable-backgrounding-occluded-windows', // Do not render occluded windows
     '--disable-breakpad',                       // Disable crash reporter memory overhead
     '--disable-crash-reporter',                 // Disable crash reporter process
-    '--disable-crashpad-for-testing',           // Disable Crashpad handler (prevents spawn_subprocess EAGAIN 11)
+    '--no-crashpad',                            // Completely disable Crashpad handler (prevents spawn_subprocess EAGAIN 11)
     '--disable-component-update',               // Disable background component updates
     '--disable-domain-reliability',             // Disable domain reliability reporting
     '--disable-sync',                           // Disable sync
@@ -53,6 +53,9 @@ function prepareLaunchOptions(baseOptions = {}) {
     '--disk-cache-size=33554432',               // Cap disk cache to 32MB
     '--media-cache-size=1',                     // Disable media cache
     // ── Linux Thread & Process Exhaustion Prevention (pthread_create 11 & EAGAIN) ──
+    '--no-zygote',                              // Disable zygote process to prevent Linux cgroup process limits
+    '--in-process-gpu',                         // In-process GPU to eliminate external GPU sub-processes
+    '--renderer-process-limit=1',               // Strict limit: 1 renderer process per browser instance
     '--num-raster-threads=1',                   // Strict limit: 1 raster thread (saves dozens of OS threads)
     '--disable-threaded-animation',             // Disable threaded animation to reduce OS thread count
     '--disable-threaded-scrolling',             // Disable threaded scrolling to reduce OS thread count
@@ -89,6 +92,11 @@ function prepareLaunchOptions(baseOptions = {}) {
     ...baseOptions,
     headless: isHeadless,
     args: finalArgs,
+    env: {
+      ...process.env,
+      ...(baseOptions.env || {}),
+      MALLOC_ARENA_MAX: '2',
+    },
   };
 }
 
@@ -119,18 +127,6 @@ function wrapBrowserInstance(browser) {
   return browser;
 }
 
-async function launchWithTimeout(launchFn, options, timeoutMs = 25000) {
-  let timer = null;
-  const timeoutPromise = new Promise((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`Chromium launch exceeded ${Math.round(timeoutMs / 1000)}s timeout`)), timeoutMs);
-  });
-  try {
-    return await Promise.race([launchFn(options), timeoutPromise]);
-  } finally {
-    if (timer) clearTimeout(timer);
-  }
-}
-
 /**
  * Creates a multi-tier resilient launch wrapper around any Playwright Chromium launcher.
  */
@@ -140,8 +136,8 @@ function createResilientLauncher(extraLauncher = null) {
 
   return async function resilientLaunch(baseOptions = {}) {
     const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-    if (!isProduction && baseOptions.headless !== false && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-      console.warn(`[BROWSER GUARD] 🛑 Local background headless worker blocked: Workday Auto is running in Railway cloud. (Set RUN_LOCAL_WORKERS=true, run headed with headless:false, or pass --run-local-workers to execute locally).`);
+    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+      console.warn(`[BROWSER GUARD] 🛑 Local browser launch blocked: Workday Auto is running in Railway cloud. Local system browser launch prevented.`);
       throw new Error(`[LOCAL_EXECUTION_BLOCKED] Browser launch blocked on local system. Automation runs in Railway cloud. (Set RUN_LOCAL_WORKERS=true or pass --run-local-workers to override).`);
     }
 
@@ -153,20 +149,19 @@ function createResilientLauncher(extraLauncher = null) {
       if (isRes) {
         try {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-          cleanupOrphanChromeProcesses();
+          cleanupOrphanChromeProcesses({ ignoreSlots: true });
         } catch {}
-        // Give host OS process table and init reaper (tini) recovery time
-        await new Promise((r) => setTimeout(r, 4000));
+        await new Promise((r) => setTimeout(r, 1200));
       }
     };
 
     // Tier 1: Stealth launcher with full Chromium channel ("new headless" - avoids chrome-headless-shell SIGTRAP)
     if (origExtraLaunch) {
       try {
-        const browser = await launchWithTimeout(origExtraLaunch, {
+        const browser = await origExtraLaunch({
           ...prepared,
           channel: preferredChannel,
-        }, 25000);
+        });
         return wrapBrowserInstance(browser);
       } catch (err1) {
         console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}). Retrying stealth without channel...`);
@@ -174,7 +169,7 @@ function createResilientLauncher(extraLauncher = null) {
         // Tier 2: Stealth launcher with default headless shell
         try {
           const { channel: _, ...withoutChannel } = prepared;
-          const browser = await launchWithTimeout(origExtraLaunch, withoutChannel, 25000);
+          const browser = await origExtraLaunch(withoutChannel);
           return wrapBrowserInstance(browser);
         } catch (err2) {
           console.warn(`[STEALTH] Stealth launch failed (${err2?.message}), falling back to standard Chromium.`);
@@ -185,10 +180,10 @@ function createResilientLauncher(extraLauncher = null) {
 
     // Tier 3: Standard Chromium with full Chromium channel ("new headless")
     try {
-      const browser = await launchWithTimeout(origStandardLaunch, {
+      const browser = await origStandardLaunch({
         ...prepared,
         channel: preferredChannel,
-      }, 25000);
+      });
       return wrapBrowserInstance(browser);
     } catch (err3) {
       console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}). Retrying standard without channel...`);
@@ -198,7 +193,7 @@ function createResilientLauncher(extraLauncher = null) {
     // Tier 4: Standard Chromium with default binary and hardened container args
     try {
       const { channel: _, ...withoutChannel } = prepared;
-      const browser = await launchWithTimeout(origStandardLaunch, withoutChannel, 25000);
+      const browser = await origStandardLaunch(withoutChannel);
       return wrapBrowserInstance(browser);
     } catch (err4) {
       console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}). Attempting minimal safe container launch...`);
@@ -207,7 +202,7 @@ function createResilientLauncher(extraLauncher = null) {
 
     // Tier 5: Minimal emergency container launch
     try {
-      const browser = await launchWithTimeout(origStandardLaunch, {
+      const browser = await origStandardLaunch({
         headless: true,
         args: [
           '--no-sandbox',
@@ -215,7 +210,7 @@ function createResilientLauncher(extraLauncher = null) {
           '--disable-dev-shm-usage',
           '--disable-gpu',
         ],
-      }, 25000);
+      });
       console.log('[BROWSER] Minimal emergency Chromium instance launched successfully.');
       return wrapBrowserInstance(browser);
     } catch (finalErr) {

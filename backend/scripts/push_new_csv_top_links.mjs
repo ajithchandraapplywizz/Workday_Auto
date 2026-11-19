@@ -102,7 +102,7 @@ async function run() {
   const urlMap = new Map();
 
   for (const r of qualifyingRows) {
-    const jobId = r[0] ? r[0].replace(/^\ufeff/, '').trim() : null;
+    const jobId = r[0] ? r[0].trim() : null;
     const company = r[1] ? r[1].trim() : '';
     const roleTitle = r[2] ? r[2].trim() : '';
     const jobUrl = r[3] ? r[3].trim() : '';
@@ -186,10 +186,9 @@ async function run() {
     if (
       existing?.status === 'already_reached_review' ||
       existing?.status === 'reached_review' ||
-      existing?.status === 'already_scanned' ||
       matchedSj
     ) {
-      initialStatus = existing?.status === 'already_scanned' ? 'already_scanned' : 'already_reached_review';
+      initialStatus = 'already_reached_review';
       scannedId = matchedSj?.id || existing?.scanned_job_id || null;
       screenshotPath = matchedSj?.screenshot_path || existing?.screenshot_path || null;
     } else if (

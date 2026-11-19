@@ -37,6 +37,8 @@ import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './bro
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 import { parseCandidateAwlIds } from './candidateParser.mjs';
 
+export const getServiceName = () => process.env.RAILWAY_SERVICE_NAME || (process.env.SERVICE_ROLE === 'scanner' ? ((Number(process.env.WORKER_OFFSET) || 0) > 0 ? 'Scanner_Resolver_2' : 'Scanner_Resolver_1') : ((Number(process.env.WORKER_OFFSET) || 0) > 0 ? 'Submitting_2' : 'Submitting_1'));
+
 export function getCleanSupabaseEnv() {
   let rawUrl = String(process.env.SUPABASE_URL || '').trim();
   let rawKey = String(
@@ -301,26 +303,11 @@ export async function fetchQueueClusters({ minClients = 1, limit = 3, scanRunId 
   const clusterMap = new Map();
 
   for (const row of rows) {
-    if (
-      row.status === 'submitted' ||
-      row.status === 'pre_resolved' ||
-      row.status === 'reached_review' ||
-      row.status === 'already_reached_review' ||
-      row.status === 'already_scanned' ||
-      row.status === 'scanned' ||
-      row.status === 'failed' ||
-      row.status === 'already_expired' ||
-      row.status === 'expired'
-    ) continue;
-
-    // Filter out jobs actively being processed by another replica whose lease is active (<15 min)
-    if (
-      row.status === 'processing' &&
-      row.locked_at &&
-      Date.now() - new Date(row.locked_at).getTime() < 15 * 60 * 1000
-    ) {
-      continue;
-    }
+    // STRICT STAGE 1 POLICY: Only rows strictly in 'pending' status can be picked by scanning workers!
+    // Skip any row that is already 'scanning', 'processing', 'in_flight', 'scanned', 'already_scanned', 'submitted', 'failed', 'expired'.
+    // Also skip if worker_id is already assigned (claimed by another replica/service worker).
+    if (row.status !== 'pending') continue;
+    if (row.worker_id) continue;
     const rawUrl = String(row.job_url || '').trim();
     if (targetUrl && !rawUrl.toLowerCase().includes(String(targetUrl).toLowerCase().trim())) continue;
     if (!rawUrl) continue;
@@ -468,29 +455,6 @@ export async function resetClusterTasksByIds(taskIds = []) {
   } catch (err) {
     console.log(`  ⚠️ Note on queue reset: ${err.message}`);
   }
-}
-
-/**
- * Reclaim stale/interrupted processing leases in batch_job_queue (>15 min old).
- */
-export async function reapExpiredScanningLeases() {
-  const expiredCutoff = new Date(Date.now() - 15 * 60 * 1000).toISOString();
-  try {
-    const res = await queueDbRequest('batch_job_queue', {
-      method: 'PATCH',
-      query: `?status=eq.processing&or=(locked_at.is.null,locked_at.lt.${encodeURIComponent(expiredCutoff)})`,
-      prefer: 'return=representation',
-      body: {
-        status: 'pending',
-        worker_id: null,
-        locked_at: null,
-        updated_at: new Date().toISOString(),
-      },
-    }).catch(() => null);
-    if (Array.isArray(res) && res.length > 0) {
-      console.log(`🧹 [SCANNER] Reclaimed ${res.length} expired processing lease(s) in batch_job_queue.`);
-    }
-  } catch {}
 }
 
 /**
@@ -686,12 +650,9 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
   const role = cluster.roleTitle;
   const allTasks = cluster.tasks;
   const allTaskIds = allTasks.map((t) => t.id);
+  const serviceName = getServiceName();
 
-  console.log(`[SCANNER] [${workerId}] Assigned cluster: ${company} — ${role} (${cluster.clientCount} clients)`);
-
-  // Clean reset all candidate tasks in this cluster
-  await resetClusterTasksByIds(allTaskIds);
-
+  console.log(`[SCANNER] [${serviceName}] [${workerId}] Assigned cluster: ${company} — ${role} (${cluster.clientCount} clients)`);
 
   // Active tasks to actually run in the browser (respecting limitPerLink if specified)
   const activeTasks = limitPerLink ? allTasks.slice(0, limitPerLink) : allTasks;
@@ -738,7 +699,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       candidateEmail: null,
     };
 
-    console.log(`[${candidateAwlId}] | Company: ${company} | Status: scanning | Application: ${jobUrl} | Screenshot: none`);
+    console.log(`[${serviceName}] [${workerId}] [${candidateAwlId}] | Company: ${company} | Status: scanning | Screenshot: none`);
 
     const result = await executeWorkerTask({
       task: candidateTask,
@@ -968,7 +929,7 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
           String(leadFailReason).toLowerCase().includes('review')
         );
         if (!reachedReview) {
-          console.log(`[${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] | Company: ${company} | Status: failed | Reason: ${leadFailReason?.slice(0, 100) || 'Scan incomplete'} | Application: ${jobUrl} | Screenshot: ${leadProofShot || 'none'}`);
+          console.log(`[SCANNER] [${workerId}] [${allSiblingAwlIds[0] || MOCK_SCAN_CLIENT_ID}] Company: ${company} | Status: pending | Reason: ${leadFailReason} | Screenshot: ${leadProofShot || 'None'}`);
           // USER STRICT RULE: In Stage 1 scanning, do NOT update status as failed if not expired!
           // Save proof screenshot to screenshot_path and retain status as 'pending' for retry / inspection.
           if (allTaskIds.length > 0) {
@@ -1048,10 +1009,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       answersMap: blueprintResult?.answersMap || {},
       timestamp: new Date().toISOString()
     }, null, 2));
+    console.log(`💾 [${workerId}] Dumped temporary question cache to ${workerCachePath}`);
   } catch (cErr) {
     // non-fatal
   }
 
+  console.log(`[SCANNER] [${workerId}] [${blueprintTask.applywizz_id}] Company: ${company} | Status: scanning completed | Screenshot: ${reviewShotUrl || 'Uploaded to Supabase'}`);
   try {
     const { saveMasterYamlTemplate } = await import('./masterYamlManager.mjs');
     await saveMasterYamlTemplate(harvestedQuestions, {
@@ -1064,6 +1027,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     console.warn(`[SCANNER] [${workerId}] Non-critical: Failed to save master YAML template:`, yamlErr?.message || yamlErr);
   }
 
+  // PHASE 2: Dump row into scanned_jobs with Candidate 1's AWL ID, review screenshot, and total client count!
+  console.log(`📍 [${workerId}] PHASE 2: Inserting unique job blueprint into scanned_jobs table...`);
   let scannedJobId = null;
   const leadAnswers = [];
   if (Array.isArray(blueprintResult?.resolvedAnswers) && blueprintResult.resolvedAnswers.length > 0) {
@@ -1168,7 +1133,15 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     try {
       const { unlink } = await import('fs/promises');
       await unlink(workerCachePath).catch(() => {});
+      console.log(`🧹 [${workerId}] Cleaned up temporary worker cache file: ${workerCachePath}`);
     } catch {}
+
+    console.log(`\n💾 [UPSERT → scanned_jobs]`);
+    console.log(`   ID: ${scannedJobId}`);
+    console.log(`   Company: ${company} | Role: ${role}`);
+    console.log(`   Questions Harvested: ${harvestedQuestions.length} fields (mandatory)`);
+    console.log(`   Blueprint Candidate: ${blueprintTask.applywizz_id}`);
+    console.log(`   Scan Status: completed ✓\n`);
   } catch (scanSaveErr) {
     console.error(`❌ [${workerId}] ERROR: Exception saving scanned_jobs: ${scanSaveErr.message}\n`);
     return {
@@ -1217,7 +1190,10 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
   }
 
-  // Distribute to job_distributions table in PARALLEL for ALL clients
+  // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!
+  console.log(`📍 [${workerId}] PHASE 3: Resolving answers & distributing into job_distributions table in PARALLEL...`);
+  console.log(`   Target: ${allSiblingAwlIds.length} candidate(s) allotted to this unique link`);
+
   const { loadProfile } = await import('./planner.mjs');
   const { preResolveClientAnswersDetailed } = await import('./jobFormCache.mjs');
 
@@ -1499,6 +1475,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       const isFullyAnswered = true;
       const clientStatus = 'ready_to_review';
 
+      console.log(`[${awlId}] | Company: ${company} | Status: scanned | Screenshot: ${reviewShotUrl || 'none'}`);
+
       return {
         taskId: task.id,
         applywizzId: awlId,
@@ -1536,11 +1514,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
       status: 'distributed',
       clients: distributionRows,
     });
-    const leadAwlClean = String(blueprintTask?.applywizz_id || MOCK_SCAN_CLIENT_ID).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-    console.log(`[${leadAwlClean}] | Company: ${company} | Status: scanned | Application: ${jobUrl} | Screenshot: ${reviewShotUrl || 'none'}`);
-    if (distributionRows.length > 1) {
-      console.log(`[DISTRIBUTION] [${company}] ${distributionRows.length} candidates ready_for_review | Application: ${jobUrl}`);
-    }
+    const readyCount = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review').length;
+    console.log(`[DISTRIBUTION] ${distributionRows.length} candidates distributed to job_distributions (${readyCount} ready_for_review)`);
 
     // Also update scanned_jobs row with Candidate 1's resolved_answers
     const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
@@ -1729,7 +1704,6 @@ export async function runClusterBatchRunner({
   // Step 1: Dynamically synchronize batch_job_queue with completed scanned_jobs and failed_jobs
   const { syncQueueWithScannedAndFailedJobs } = await import('./supabaseClient.mjs');
   await syncQueueWithScannedAndFailedJobs().catch(() => {});
-  await reapExpiredScanningLeases().catch(() => {});
 
   // Pre-check: If 0 pending unscanned links exist, remain strictly idle without launching workers or logging banners
   const freshClustersPreCheck = await fetchQueueClusters({ minClients: 1, limit: topLinks, scanRunId, attemptPhase: 'fresh', targetUrl });
@@ -1741,21 +1715,14 @@ export async function runClusterBatchRunner({
   if (freshClustersPreCheck.length === 0 && retryClustersPreCheck.length === 0) {
     console.log(`ℹ️ [CLUSTER] 0 pending unscanned links in batch_job_queue. Scanning workers remaining idle.`);
     const workerLimit = Number(workers) || 2;
-    const baseOffset = Number(process.env.WORKER_OFFSET) || 0;
     for (let slot = 1; slot <= workerLimit; slot++) {
-      const wId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + baseOffset}`;
-      await updateWorkerStatus(wId, {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: PIPELINE_CONFIG.workerNames?.[wId] || `Scanning Worker ${wId.match(/\d+/)?.[0] || slot}`,
+        bot_name: `Scanning Worker ${slot}`,
         current_application_id: null,
       }).catch(() => { });
     }
-    try {
-      const { deepCleanWhenZeroActiveInstances } = await import('./browserLifecycle.mjs');
-      deepCleanWhenZeroActiveInstances();
-    } catch {}
-    if (global.gc) { try { global.gc(); } catch {} }
     return { succeeded: 0, failed: 0, total: 0 };
   }
 
@@ -1788,15 +1755,13 @@ export async function runClusterBatchRunner({
       console.log(`   Job #${idx + 1}: ${c.jobUrl} | Clients: ${c.clientCount} | Attempt: ${c.attemptCount || 0}`);
     });
 
-    const baseOffset = Number(process.env.WORKER_OFFSET) || 0;
     let clusterIndex = 0;
 
     async function workerLoop(slot) {
-      const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + baseOffset}`;
-      const workerDisplay = PIPELINE_CONFIG.workerNames?.[workerId] || `Scanning Worker ${workerId.match(/\d+/)?.[0] || slot}`;
+      const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
       while (clusterIndex < clusters.length) {
         if (await isClusterStopRequested()) {
-          console.log(`🛑 [${workerId}] Stop flag active! Halting cluster loop.`);
+          console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);
           break;
         }
         const myIndex = clusterIndex++;
@@ -1835,10 +1800,10 @@ export async function runClusterBatchRunner({
         for (const u of urlsToClaim) {
           const claimed = await queueDbRequest('batch_job_queue', {
             method: 'PATCH',
-            query: `?job_url=eq.${encodeURIComponent(u)}&status=in.(pending,queued,failed)`,
+            query: `?job_url=eq.${encodeURIComponent(u)}&status=eq.pending`,
             prefer: 'return=representation',
             body: {
-              status: 'processing',
+              status: 'scanning',
               worker_id: workerId,
               locked_at: new Date().toISOString(),
               updated_at: new Date().toISOString(),
@@ -1848,18 +1813,19 @@ export async function runClusterBatchRunner({
         }
 
         if (claimedCount === 0) {
-          console.log(`⚡ [${workerId}] Skipping "${cluster.jobUrl}" — already claimed by another replica/worker or completed.`);
+          console.log(`⚡ [${workerId}] Skipping "${cluster.jobUrl}" — already claimed by another replica/worker (status: scanning) or completed.`);
           continue;
         }
 
+        const serviceName = getServiceName();
         await updateWorkerStatus(workerId, {
           state: 'in_flight',
           current_application_id: cluster.jobUrl, // Strictly identify by URL in worker_status
           stage: 'scanning',
-          bot_name: workerDisplay,
+          bot_name: PIPELINE_CONFIG.workerNames?.[workerId] || `Scanning Worker ${slot}`,
         }).catch(() => { });
 
-        console.log(`\n▶️ [${workerDisplay}] [${phaseTitle}] [Batch #${myIndex + 1}/${clusters.length}] Assigned Job URL: ${cluster.jobUrl}`);
+        console.log(`\n▶️ [${serviceName}] [${workerId}] [${phaseTitle}] [Batch #${myIndex + 1}/${clusters.length}] Assigned Job URL: ${cluster.jobUrl}`);
         console.log(`   Job Metadata: ${cluster.company} — ${cluster.roleTitle} (${cluster.clientCount} clients, Current Attempt: ${(cluster.attemptCount || 0) + 1}/3)`);
 
         let res = null;
@@ -1876,7 +1842,7 @@ export async function runClusterBatchRunner({
           const isStop = await isClusterStopRequested();
 
           if (isStop) {
-            console.log(`🛑 [${workerDisplay}] User HALT / STOP detected on batch #${myIndex + 1} (${errorUrl}). Safely resetting task(s) to pending.`);
+            console.log(`🛑 [Scanning Worker ${slot}] User HALT / STOP detected on batch #${myIndex + 1} (${errorUrl}). Safely resetting task(s) to pending.`);
             try {
               if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
                 const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
@@ -1903,11 +1869,11 @@ export async function runClusterBatchRunner({
           }
 
           const isHostResourceError = Boolean(
-            /SLOT_TIMEOUT|Browser slot busy|slot wait timed out|slot busy|HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM|EACCES/i.test(err?.message || '')
+            /HOST_RESOURCE_EXHAUSTION|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM|EACCES/i.test(err?.message || '')
           );
 
           if (isHostResourceError) {
-            console.warn(`\n⚠️ [${workerDisplay}] Capacity/resource limitation caught on batch #${myIndex + 1} (${errorUrl}): ${err.message}. Safely resetting task(s) to pending for automatic retry.`);
+            console.warn(`\n⚠️ [Scanning Worker ${slot}] Host resource limitation caught on batch #${myIndex + 1} (${errorUrl}): ${err.message}. Safely resetting task(s) to pending for automatic retry.`);
             try {
               if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
                 const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
@@ -1920,67 +1886,37 @@ export async function runClusterBatchRunner({
             }
             try {
               const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-              cleanupOrphanChromeProcesses();
+              cleanupOrphanChromeProcesses({ ignoreSlots: true });
             } catch {}
             await new Promise((r) => setTimeout(r, 6000 + Math.floor(Math.random() * 4000)));
             continue;
           }
 
-          const currentAttempts = Number(cluster.attemptCount || 0);
-          const nextAttempt = currentAttempts + 1;
-          const isPermanentFailure = currentAttempts >= 2;
-
-          if (!isPermanentFailure) {
-            console.warn(`\n🔁 [${workerDisplay}] Exception on batch #${myIndex + 1} (${errorUrl}) [Attempt ${nextAttempt}/3]: ${err.message}. Re-queuing to pending for retry.`);
-            try {
-              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
-                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
-                if (taskIds.length > 0) {
-                  const idFilter = taskIds.map((id) => encodeURIComponent(String(id).trim())).join(',');
-                  await queueDbRequest('batch_job_queue', {
-                    method: 'PATCH',
-                    query: `?id=in.(${idFilter})`,
-                    prefer: 'return=minimal',
-                    body: {
-                      status: 'pending',
-                      attempt_count: nextAttempt,
-                      worker_id: null,
-                      locked_at: null,
-                      updated_at: new Date().toISOString(),
-                    },
-                  }).catch(() => {});
-                }
-              }
-            } catch (retryErr) {
-              console.warn(`[RETRY ROLLBACK ERROR]`, retryErr.message);
+          console.error(`❌ [Scanning Worker ${slot}] Error on batch #${myIndex + 1} (${errorUrl}): ${err.message}`);
+          try {
+            const { recordFailedJob } = await import('./supabaseClient.mjs');
+            const firstTask = cluster.tasks?.[0];
+            if (firstTask) {
+              await recordFailedJob({
+                applywizzId: firstTask.applywizz_id,
+                clientIds: Array.from(new Set(cluster.tasks.map((t) => t.applywizz_id).filter(Boolean))),
+                clientCount: cluster.clientCount || 1,
+                jobId: firstTask.job_id || cluster.reqId || null,
+                jobUrl: errorUrl,
+                company: cluster.company,
+                roleTitle: cluster.roleTitle,
+                failureReason: `Worker error: ${err.message?.slice(0, 300)}`,
+                failedAtStep: 'Worker Process',
+                screenshotPath: null,
+              }).catch(() => {});
             }
-          } else {
-            console.error(`❌ [${workerDisplay}] Error on batch #${myIndex + 1} (${errorUrl}) [Attempt 3/3 exhausted]: ${err.message}`);
-            try {
-              const { recordFailedJob } = await import('./supabaseClient.mjs');
-              const firstTask = cluster.tasks?.[0];
-              if (firstTask) {
-                await recordFailedJob({
-                  applywizzId: firstTask.applywizz_id,
-                  clientIds: Array.from(new Set(cluster.tasks.map((t) => t.applywizz_id).filter(Boolean))),
-                  clientCount: cluster.clientCount || 1,
-                  jobId: firstTask.job_id || cluster.reqId || null,
-                  jobUrl: errorUrl,
-                  company: cluster.company,
-                  roleTitle: cluster.roleTitle,
-                  failureReason: `Worker error: ${err.message?.slice(0, 300)} (Attempt 3/3 exhausted)`,
-                  failedAtStep: 'Worker Process',
-                  screenshotPath: null,
-                }).catch(() => {});
+            if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
+              const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
+              if (taskIds.length > 0) {
+                await failClusterTasksByIds(taskIds, `Worker error: ${err.message?.slice(0, 150)}`).catch(() => {});
               }
-              if (Array.isArray(cluster.tasks) && cluster.tasks.length > 0) {
-                const taskIds = cluster.tasks.map((t) => t.id).filter(Boolean);
-                if (taskIds.length > 0) {
-                  await failClusterTasksByIds(taskIds, `Worker error: ${err.message?.slice(0, 150)} (Attempt 3/3 exhausted)`).catch(() => {});
-                }
-              }
-            } catch {}
-          }
+            }
+          } catch {}
           res = {
             workerId,
             jobUrl: errorUrl,
@@ -2018,7 +1954,7 @@ export async function runClusterBatchRunner({
         state: 'idle',
         current_application_id: null,
         stage: 'scanning',
-        bot_name: workerDisplay,
+        bot_name: `Scanning Worker ${slot}`,
       }).catch(() => { });
     }
 
@@ -2068,21 +2004,14 @@ export async function runClusterBatchRunner({
   if (clusterResults.length === 0) {
     console.log(`ℹ️ [CLUSTER] 0 active tasks were processed in batch_job_queue. Workers remaining idle.`);
     const workerLimit = Number(workers) || 2;
-    const baseOffset = Number(process.env.WORKER_OFFSET) || 0;
     for (let slot = 1; slot <= workerLimit; slot++) {
-      const wId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + baseOffset}`;
-      await updateWorkerStatus(wId, {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: PIPELINE_CONFIG.workerNames?.[wId] || `Scanning Worker ${wId.match(/\d+/)?.[0] || slot}`,
+        bot_name: `Scanning Worker ${slot}`,
         current_application_id: null,
       }).catch(() => { });
     }
-    try {
-      const { deepCleanWhenZeroActiveInstances } = await import('./browserLifecycle.mjs');
-      deepCleanWhenZeroActiveInstances();
-    } catch {}
-    if (global.gc) { try { global.gc(); } catch {} }
     return { succeeded: 0, failed: 0, total: 0 };
   }
 
@@ -2105,23 +2034,20 @@ export async function runClusterBatchRunner({
   // Return scanning workers to idle if stopped, or keep in standing-by state if still running
   const isHalted = await isClusterStopRequested();
   const workerLimit = Number(workers) || 2;
-  const baseOffset = Number(process.env.WORKER_OFFSET) || 0;
-  for (let slot = 1; slot <= workerLimit; slot++) {
-    const wId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + baseOffset}`;
-    const botName = PIPELINE_CONFIG.workerNames?.[wId] || `Scanning Worker ${wId.match(/\d+/)?.[0] || slot}`;
-    if (!isHalted) {
-      await updateWorkerStatus(wId, {
+  for (let slot = 1; slot <= 10; slot++) {
+    if (slot <= workerLimit && !isHalted) {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
         state: 'running',
         current_application_id: 'Batch complete. Standing by for next batch...',
         stage: 'scanning',
-        bot_name: botName,
+        bot_name: `Scanning Worker ${slot}`,
       }).catch(() => { });
     } else {
-      await updateWorkerStatus(wId, {
+      await updateWorkerStatus(`scanning_worker_${slot}`, {
         state: 'idle',
         current_application_id: null,
         stage: 'scanning',
-        bot_name: botName,
+        bot_name: `Scanning Worker ${slot}`,
       }).catch(() => { });
     }
   }

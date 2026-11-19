@@ -132,10 +132,12 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
     const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
     const fromStore = await ensureClientResumeFromApplyWizz(profile);
     if (fromStore) {
+      console.log(`    📎 Candidate authentic resume resolved: ${basename(fromStore)}`);
       if (profile) profile._resumePath = fromStore;
       return fromStore;
     }
   } catch (err) {
+    console.warn(`    ⚠️ Candidate resume resolution notice: ${err.message}`);
   }
 
   // 2. Direct local check in data/client-resumes/
@@ -149,6 +151,7 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
       ];
       for (const cand of candidates) {
         if (existsSync(cand)) {
+          console.log(`    📎 Candidate authentic resume found on disk: ${basename(cand)}`);
           if (profile) profile._resumePath = cand;
           return cand;
         }

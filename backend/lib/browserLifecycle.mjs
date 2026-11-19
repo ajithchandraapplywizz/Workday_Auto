@@ -6,6 +6,8 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-dev-shm-usage',
   '--disable-gpu',
   '--disable-software-rasterizer',
+  '--no-zygote',
+  '--renderer-process-limit=1',
   '--js-flags=--max-old-space-size=384',
   '--disable-extensions',
   '--disable-default-apps',
@@ -17,14 +19,13 @@ export const LEAN_CHROMIUM_ARGS = [
   '--disable-backgrounding-occluded-windows',
   '--disable-breakpad',
   '--disable-crash-reporter',
-  '--disable-crashpad-for-testing',
   '--no-crashpad',
-  '--crash-dumps-dir=/dev/null',
   '--disable-component-update',
   '--disable-infobars',
   '--window-size=1280,900',
   '--disk-cache-size=33554432',
   '--media-cache-size=1',
+  '--in-process-gpu',
   '--num-raster-threads=1',
   '--disable-features=AudioServiceOutOfProcess,OptimizationHints,Translate,PaintHolding,DialMediaRouteProvider',
   '--disable-threaded-animation',
@@ -33,23 +34,20 @@ export const LEAN_CHROMIUM_ARGS = [
 
 /**
  * Reaps orphan/zombie chromium processes on Linux to prevent EAGAIN / PID / pthread_create limit exhaustion.
- * STRICT GUARD: Never reap processes if any active browser context or claimed slot is alive, unless forced.
+ * STRICT GUARD: Never reap processes if any active browser context is currently alive, unless forced.
  */
 export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = false } = {}) {
-  if (process.platform === 'linux') {
-    try {
-      // Always safely reap detached crashpad handlers to prevent Linux fork/PID exhaustion (Resource temporarily unavailable 11)
-      exec('pkill -9 -f "crashpad_handler" || true', () => {});
-    } catch {}
-  }
   if (!force) {
-    if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0 || activeSlots.size > 0) {
+    if (activeBrowsers.size > 0 || activeWorkerContexts.size > 0) {
+      return;
+    }
+    if (!ignoreSlots && activeSlots.size > 0) {
       return;
     }
   }
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
+      exec('pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || true', () => {});
       exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
     } catch {}
   }
@@ -83,7 +81,7 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
   if (process.platform === 'linux') {
     try {
       // 1. Force kill all detached or zombie Chromium, Chrome, and crashpad processes
-      exec('pkill -9 -f "chrome.*(playwright|user-data-dir|crashpad)"; pkill -9 -f "crashpad_handler"; pkill -9 -f "chrome-headless-shell"; pkill -9 -f "chromium"; pkill -9 -f "chrome"; true', () => {});
+      exec('pkill -9 -f "chrome.*(playwright|user-data-dir|crashpad)" || pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || true', () => {});
 
       // 2. Wipe all temporary Playwright browser profiles, core dumps, and crashpad caches from /tmp and /dev/shm
       exec('rm -rf /tmp/playwright_chromiumdev_profile-* /tmp/playwright-artifacts-* /tmp/core.* /tmp/.org.chromium.Chromium.* /tmp/.com.google.Chrome.* /dev/shm/.org.chromium.* || true', () => {});
@@ -113,7 +111,6 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
 
 const activeBrowsers = new Set();
 const activeSlots = new Set();
-const slotAcquiredTimes = new Map();
 const waitingQueue = [];
 
 /**
@@ -126,9 +123,7 @@ export function getDynamicMaxBrowsers() {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
   if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
-  const envWorkers = Number(process.env.SCAN_WORKER_COUNT) ||
-    Number(process.env.SCAN_WORKERS) ||
-    Number(process.env.SUBMIT_WORKER_COUNT) ||
+  const envWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
     Number(process.env.SUBMIT_WORKERS) ||
     Number(process.env.SUBMISSION_WORKER_COUNT) ||
     Number(process.env.WORKER_COUNT) ||
@@ -140,7 +135,7 @@ export function getDynamicMaxBrowsers() {
     return Math.floor(envWorkers);
   }
 
-  // Default to 2 concurrent active browsers per container service across all platforms (Linux/Windows)
+  // Default to 2 concurrent active browsers per container/service
   return 2;
 }
 
@@ -156,7 +151,7 @@ let submitStopRequested = false;
  * default 2 per container, to work simultaneously without serializing).
  * If dynamic slot limit is reached, pauses execution asynchronously until an active browser exits.
  */
-export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, timeoutMs = 120000) {
+export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
   if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
     throw new Error(`[LIFECYCLE] Cannot acquire browser slot: stop requested`);
   }
@@ -166,7 +161,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
   }
 
   // Prune any disconnected/closed browser handles
-  for (const b of Array.from(activeBrowsers)) {
+  for (const b of activeBrowsers) {
     if (typeof b.isConnected === 'function' && !b.isConnected()) {
       activeBrowsers.delete(b);
       browserRoles.delete(b);
@@ -179,13 +174,11 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
 
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
-    slotAcquiredTimes.set(workerId, Date.now());
     return true;
   }
 
   console.log(`⏳ [SLOT GUARD] ${workerId} waiting for active browser slot in this service (${activeBrowsers.size}/${effectiveMax} active, queue depth: ${waitingQueue.length + 1})...`);
 
-  const startTime = Date.now();
   return new Promise((resolve, reject) => {
     let checkTimer = null;
     const cleanup = () => {
@@ -194,10 +187,10 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
         checkTimer = null;
       }
     };
-    const queueItem = { workerId, resolve, reject, cleanup, createdAt: startTime };
+    const queueItem = { workerId, resolve, reject, cleanup };
     waitingQueue.push(queueItem);
 
-    // Periodic check to self-heal against dead browsers and unblock on stop signals
+    // Rapid check (30ms) to unblock immediately when a slot frees up or on stop signals
     checkTimer = setInterval(() => {
       if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
         cleanup();
@@ -208,47 +201,11 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
       }
 
       // Prune dead/disconnected browser handles
-      for (const b of Array.from(activeBrowsers)) {
-        if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
+      for (const b of activeBrowsers) {
+        if (typeof b.isConnected === 'function' && !b.isConnected()) {
           activeBrowsers.delete(b);
           browserRoles.delete(b);
         }
-      }
-
-      // Prune dead slots whose worker contexts are completely absent after a 30s launch jitter grace period
-      const now = Date.now();
-      for (const slotWorkerId of Array.from(activeSlots)) {
-        const acquiredTime = slotAcquiredTimes.get(slotWorkerId) || 0;
-        if (now - acquiredTime > 30000 && !activeWorkerContexts.has(slotWorkerId) && slotWorkerId !== workerId) {
-          activeSlots.delete(slotWorkerId);
-          slotAcquiredTimes.delete(slotWorkerId);
-        }
-      }
-
-      // Check timeout (default 120s) — self-heal phantom locks and unblock workers immediately
-      if (Date.now() - startTime > timeoutMs) {
-        cleanup();
-        const idx = waitingQueue.indexOf(queueItem);
-        if (idx !== -1) waitingQueue.splice(idx, 1);
-        // Force prune dead references
-        for (const b of Array.from(activeBrowsers)) {
-          if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
-            activeBrowsers.delete(b);
-            browserRoles.delete(b);
-          }
-        }
-        // If phantom count drift occurred, force clear dead handles and auto-grant slot
-        if (activeBrowsers.size >= effectiveMax) {
-          console.warn(`⚠️ [SLOT GUARD] ${workerId} slot wait timed out after ${Math.round(timeoutMs / 1000)}s with phantom count (${activeBrowsers.size}/${effectiveMax} active). Force purging zombie handles and auto-granting slot.`);
-          activeBrowsers.clear();
-          browserRoles.clear();
-        }
-        activeSlots.delete(workerId);
-        activeSlots.add(workerId);
-        slotAcquiredTimes.set(workerId, Date.now());
-        console.log(`🔓 [SLOT GUARD] ${workerId} auto-granted browser slot via self-healing reset (${activeBrowsers.size + 1}/${effectiveMax})`);
-        resolve(true);
-        return;
       }
 
       // If slot freed up and this worker is next in line
@@ -256,11 +213,10 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
         cleanup();
         waitingQueue.shift();
         activeSlots.add(workerId);
-        slotAcquiredTimes.set(workerId, Date.now());
-        console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot (${activeBrowsers.size + 1}/${effectiveMax})`);
+        console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot immediately (${activeBrowsers.size + 1}/${effectiveMax})`);
         resolve(true);
       }
-    }, 500);
+    }, 30);
 
     if (checkTimer && typeof checkTimer.unref === 'function') {
       checkTimer.unref();
@@ -269,43 +225,28 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null, t
 }
 
 /**
- * Remove any pending slot requests for a worker from the waiting queue.
- */
-export function cancelWaitingSlot(workerId) {
-  if (!workerId) return;
-  for (let i = waitingQueue.length - 1; i >= 0; i--) {
-    if (waitingQueue[i].workerId === workerId) {
-      if (typeof waitingQueue[i].cleanup === 'function') waitingQueue[i].cleanup();
-      waitingQueue.splice(i, 1);
-    }
-  }
-}
-
-/**
  * Release an active browser slot and immediately wake up the next queued worker in this service.
  */
 export function releaseBrowserSlot(workerId = 'worker') {
   activeSlots.delete(workerId);
-  slotAcquiredTimes.delete(workerId);
   // Prune any disconnected/closed browser handles
-  for (const b of Array.from(activeBrowsers)) {
-    if (!b || (typeof b.isConnected === 'function' && !b.isConnected())) {
+  for (const b of activeBrowsers) {
+    if (typeof b.isConnected === 'function' && !b.isConnected()) {
       activeBrowsers.delete(b);
       browserRoles.delete(b);
     }
   }
-  while (waitingQueue.length > 0) {
+  const effectiveMax = getDynamicMaxBrowsers();
+  while (waitingQueue.length > 0 && activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     const next = waitingQueue.shift();
     if (next) {
       if (typeof next.cleanup === 'function') {
         next.cleanup();
       }
+      activeSlots.add(next.workerId);
+      console.log(`🔓 [SLOT GUARD] Browser slot released. Handing immediately to waiting worker: ${next.workerId} (${activeSlots.size}/${effectiveMax} active)`);
       if (typeof next.resolve === 'function') {
-        activeSlots.add(next.workerId);
-        slotAcquiredTimes.set(next.workerId, Date.now());
-        console.log(`🔓 [SLOT GUARD] Previous browser closed. Handing slot to next worker in service: ${next.workerId}`);
         next.resolve(true);
-        break;
       }
     }
   }
@@ -431,14 +372,7 @@ export async function abortScanBrowsers() {
  */
 export async function abortWorkerBrowser(workerId) {
   if (!workerId) return;
-  cancelWaitingSlot(workerId);
   const ctx = activeWorkerContexts.get(workerId);
-  if (ctx?.page && !ctx.page.isClosed()) {
-    try { await ctx.page.close().catch(() => {}); } catch {}
-  }
-  if (ctx?.context) {
-    try { await ctx.context.close().catch(() => {}); } catch {}
-  }
   if (ctx?.browser) {
     try {
       await ctx.browser.close().catch(() => {});
