@@ -8,8 +8,10 @@
 import { sanitizeWorkdayUrl } from './workdayVerification.mjs';
 export { sanitizeWorkdayUrl };
 
-const ZOHO_BASE_URL = process.env.ZOHO_MAIL_READER_URL || 'https://zoho-mail-reader.onrender.com';
+const ZOHO_BASE_URL = process.env.ZOHO_MAIL_READER_HOST || process.env.ZOHO_MAIL_READER_URL || 'https://zoho-mail-reader.onrender.com';
 const BASE_UI_URL = `${ZOHO_BASE_URL}/api/zoho/ui`;
+
+let adminCookies = '';
 
 let usersCache = null;
 let usersCacheTime = 0;
@@ -43,9 +45,16 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 export async function getJson(url, retries = 2) {
   for (let i = 0; i <= retries; i++) {
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(70000) });
+      const headers = { 'Accept': 'application/json' };
+      if (adminCookies) {
+        headers['Cookie'] = adminCookies;
+      }
+      const res = await fetch(url, { headers, signal: AbortSignal.timeout(70000) });
       if (res.status === 401 || res.status === 403) {
-        await ensureZohoAdminLogin();
+        const loggedIn = await ensureZohoAdminLogin();
+        if (loggedIn && i < retries) {
+          continue;
+        }
       }
       if (!res.ok) {
         const err = new Error(`HTTP ${res.status} for ${url}`);
@@ -56,7 +65,7 @@ export async function getJson(url, retries = 2) {
       return await res.json();
     } catch (err) {
       if (err.status === 400 || err.status === 404 || i === retries) throw err;
-      await sleep(3000);
+      await sleep(2000);
     }
   }
 }
@@ -84,13 +93,16 @@ export function extractLinks(html, text) {
     for (const m of String(html).matchAll(/href\s*=\s*["']([^"']+)["']/gi)) {
       links.push(decodeEntities(m[1]));
     }
+    for (const m of String(html).matchAll(/https?:\/\/[^\s<>"')]+/gi)) {
+      links.push(decodeEntities(m[0]));
+    }
   }
-  if (!links.length && text) {
+  if (text) {
     for (const m of String(text).matchAll(/https?:\/\/[^\s<>"')]+/gi)) {
       links.push(decodeEntities(m[0]));
     }
   }
-  return links.filter((l) => /^https?:\/\//i.test(l));
+  return [...new Set(links)].filter((l) => /^https?:\/\//i.test(l));
 }
 
 /**
@@ -168,6 +180,10 @@ export async function ensureZohoAdminLogin() {
       signal: AbortSignal.timeout(20000),
     });
     if (res.ok) {
+      const setCookie = res.headers.get('set-cookie');
+      if (setCookie) {
+        adminCookies = setCookie.split(';')[0];
+      }
       console.log(`   ✓ [ZohoMail] Logged into Zoho Mail Reader as admin (${username})`);
       return true;
     }
@@ -227,12 +243,24 @@ export function extractWorkdayTenant(url = '') {
   if (!url || typeof url !== 'string') return '';
   try {
     const raw = url.startsWith('http') ? url : `https://${url}`;
-    const host = new URL(raw).hostname.toLowerCase();
+    const parsed = new URL(raw);
+    const host = parsed.hostname.toLowerCase();
     const match = host.match(/^([a-z0-9_-]+)\.wd[0-9]*\.myworkday/i);
     if (match) return match[1].toLowerCase();
     const parts = host.split('.');
     if (parts.length >= 3 && host.includes('workday')) {
-      return parts[0].toLowerCase();
+      const p0 = parts[0].toLowerCase();
+      if (!/^wd[0-9]+$/i.test(p0)) {
+        return p0;
+      }
+      // If host is wd1.myworkdayjobs.com, extract tenant from pathname
+      const pathParts = parsed.pathname.split('/').filter(Boolean);
+      for (const seg of pathParts) {
+        const segLower = seg.toLowerCase().replace(/_careers|_external|careers|external/i, '');
+        if (segLower && !['en-us', 'login', 'apply', 'job', 'jobs', 'auth', 'activate', 'reset', 'passwordreset', 'forgotpassword'].includes(segLower)) {
+          return segLower;
+        }
+      }
     }
   } catch {}
   return '';
@@ -299,16 +327,18 @@ export async function getVerificationLink({
   senderIncludes = '',
   subjectIncludes = ['verify', 'confirm', 'activate', 'workday', 'welcome', 'reset', 'password'],
   limit = 10,
-  intervalMs = 2500,
+  intervalMs = 1500,
   timeoutMs = 90000,
+  isReset = false,
 } = {}) {
   const enc = encodeURIComponent(email);
   const tenant = extractWorkdayTenant(jobUrl);
-  const effectiveCutoff = triggerTime ? (Number(triggerTime) - 15000) : (Date.now() - 300000);
+  // Generous 5-minute lookback cutoff prevents dropping emails due to cloud server clock skew
+  const effectiveCutoff = triggerTime ? (Number(triggerTime) - 300000) : (Date.now() - 600000);
 
   // Step 1: Check mailbox connection status in Zoho
   const users = await listZohoUsers();
-  if (Array.isArray(users)) {
+  if (Array.isArray(users) && users.length > 0) {
     const user = users.find((u) => u.email?.toLowerCase() === email.toLowerCase());
     if (!user) {
       throw new Error(`Mailbox not found in users list: ${email}`);
@@ -316,7 +346,7 @@ export async function getVerificationLink({
     if (user.connected === false || user.status === 'not_connected' || user.status === 'disconnected') {
       throw new Error(`Mailbox is disconnected in Zoho: ${email}`);
     }
-  } else {
+  } else if (!users) {
     const probe = await getJson(`${BASE_UI_URL}/inbox?email=${enc}&limit=1`, 0).catch(() => null);
     if (!probe?.accountId) {
       throw new Error(`Mailbox not found in users list: ${email}`);
@@ -333,15 +363,27 @@ export async function getVerificationLink({
     const inbox = await getJson(`${BASE_UI_URL}/inbox?email=${enc}&limit=${limit}`, 0).catch(() => null);
     const messages = Array.isArray(inbox?.messages) ? inbox.messages : [];
 
+    const isResetTarget = Boolean(isReset || subjectIncludes.some((s) => /reset|password/i.test(s)));
+
     const validCandidates = messages
       .filter((m) => Number(m.receivedTime) >= effectiveCutoff)
       .filter((m) => !senderIncludes || (m.from || '').toLowerCase().includes(senderIncludes.toLowerCase()))
       .filter(
         (m) =>
           !subjectIncludes.length ||
-          subjectIncludes.some((k) => (m.subject || '').toLowerCase().includes(k.toLowerCase()))
+          subjectIncludes.some((k) => (m.subject || '').toLowerCase().includes(k.toLowerCase())) ||
+          /workday|password|reset|verify|activate/i.test(`${m.from || ''} ${m.subject || ''}`)
       )
-      .sort((a, b) => Number(b.receivedTime) - Number(a.receivedTime));
+      .sort((a, b) => {
+        // When looking for password reset, prioritize emails mentioning reset/password in subject
+        if (isResetTarget) {
+          const aReset = /password|reset/i.test(a.subject || '');
+          const bReset = /password|reset/i.test(b.subject || '');
+          if (aReset && !bReset) return -1;
+          if (!aReset && bReset) return 1;
+        }
+        return Number(b.receivedTime) - Number(a.receivedTime);
+      });
 
     for (const match of validCandidates) {
       // Step 3: Fetch full message
@@ -362,17 +404,18 @@ export async function getVerificationLink({
         tenant,
       });
 
-      if (!isMatch && (company || tenant)) {
-        // Skip emails from other companies!
-        continue;
-      }
-
       // Step 4: Extract and decode authentic Workday auth link
       const authDetails = extractWorkdayAuthDetails(htmlContent, textContent, match.subject, {
         company,
         tenant,
         jobUrl,
+        isReset: isResetTarget,
       });
+
+      if (!isMatch && !authDetails.found && (company || tenant)) {
+        // Skip emails from other companies only if no authentic auth link was found!
+        continue;
+      }
 
       if (authDetails.found && authDetails.verificationLink) {
         const cleanLink = sanitizeWorkdayUrl(authDetails.verificationLink) || authDetails.verificationLink;
@@ -385,7 +428,7 @@ export async function getVerificationLink({
       const filtered = links
         .map((l) => sanitizeWorkdayUrl(l) || l)
         .filter((l) => !/privacy|terms|legal|cookie|unsubscribe|preferences|static\/|\.(png|jpg|jpeg|svg|gif|ico)/i.test(l))
-        .filter((l) => /activate|verification|verify|passwordreset|resetpassword|token=/i.test(l));
+        .filter((l) => /activate|verification|verify|passwordreset|resetpassword|forgotpassword|password_reset|password-reset|token=/i.test(l));
 
       if (filtered.length > 0) {
         const bestLink = (tenant ? filtered.find(l => l.toLowerCase().includes(tenant)) : null) || filtered[0];
@@ -419,6 +462,8 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '', op
     );
   };
 
+  const isTopicReset = Boolean(options.isReset || /password|reset/i.test(subject));
+
   const scored = [];
   for (const rawUrl of allCandidates) {
     const cleanUrl = sanitizeWorkdayUrl(rawUrl);
@@ -430,18 +475,25 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '', op
     let score = 0;
     let type = 'link';
 
-    if (/activate|verification|verify/i.test(lower)) {
+    const isResetPattern = /resetpassword|passwordreset|\/reset\/|forgotpassword|forgot-password|forgot_password|password_reset|password-reset|password\/reset|changepassword|change-password|setpassword|resettoken|passwordresettoken/i.test(lower);
+
+    if (isResetPattern) {
+      score += 220;
+      type = 'reset';
+    } else if (/activate|verification|verify/i.test(lower)) {
       score += 160;
       type = 'link';
-    } else if (/resetpassword|passwordreset|\/reset\//i.test(lower)) {
-      score += 150;
-      type = 'reset';
     } else if (lower.includes('token=')) {
-      score += 130;
-      type = 'link';
+      score += 140;
+      type = isTopicReset ? 'reset' : 'link';
     } else if (lower.includes('/auth/') || lower.includes('/login') || lower.includes('/apply/')) {
       score += 70;
-      type = 'link';
+      type = isTopicReset ? 'reset' : 'link';
+    }
+
+    if (isTopicReset && (isResetPattern || lower.includes('token=') || lower.includes('reset') || lower.includes('password'))) {
+      score += 150;
+      type = 'reset';
     }
 
     // Tenant / Company scoring alignment
@@ -450,7 +502,7 @@ export function extractWorkdayAuthDetails(html = '', text = '', subject = '', op
         score += 300; // Exact tenant match boost
       } else {
         const linkTenant = extractWorkdayTenant(cleanUrl);
-        if (linkTenant && linkTenant !== tenant) {
+        if (linkTenant && linkTenant !== tenant && !/^wd[0-9]+$/i.test(linkTenant)) {
           score -= 400; // Penalize link from different company tenant
         }
       }
@@ -501,7 +553,8 @@ export async function pollZohoWorkdayAuth({
   cutoffTime = null,
   triggerTime = null,
   timeoutMs = 90000,
-  pollIntervalMs = 1500,
+  pollIntervalMs = 1200,
+  isReset = false,
 } = {}) {
   const cleanEmail = String(email || '').trim().toLowerCase();
   if (!cleanEmail) return { found: false, reason: 'missing_email' };
@@ -509,14 +562,15 @@ export async function pollZohoWorkdayAuth({
   warmupZohoMailReader();
 
   const tenant = extractWorkdayTenant(jobUrl);
-  const effectiveTriggerTime = triggerTime || cutoffTime || (Date.now() - 300000);
-  const cutoff = effectiveTriggerTime ? (Number(effectiveTriggerTime) - 15000) : (Date.now() - 300000);
+  // 5-minute lookback cutoff prevents dropping emails due to clock skew
+  const effectiveTriggerTime = triggerTime || cutoffTime || (Date.now() - 600000);
+  const cutoff = effectiveTriggerTime ? (Number(effectiveTriggerTime) - 300000) : (Date.now() - 600000);
 
   console.log(`   📧 [ZohoMail] Polling Zoho Mail Reader for ${cleanEmail}${company ? ` (${company})` : ''}${tenant ? ` [tenant: ${tenant}]` : ''} (cutoff: ${new Date(cutoff).toLocaleTimeString()})...`);
 
   // Fast check: verify user in users list
   const users = await listZohoUsers();
-  if (Array.isArray(users)) {
+  if (Array.isArray(users) && users.length > 0) {
     const user = users.find((u) => u.email?.toLowerCase() === cleanEmail);
     if (!user) {
       console.log(`   ❌ [ZohoMail] Candidate ${cleanEmail} is NOT listed in Zoho Mail Reader (mailbox not connected)!`);
@@ -527,7 +581,7 @@ export async function pollZohoWorkdayAuth({
       console.log(`   ❌ [ZohoMail] Candidate mailbox is marked disconnected in Zoho!`);
       return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };
     }
-  } else {
+  } else if (!users) {
     // Fallback only if users list failed to fetch
     const probeInbox = await getZohoInbox(cleanEmail, { limit: 1, silent: true });
     if (!probeInbox?.accountId) {
@@ -536,48 +590,57 @@ export async function pollZohoWorkdayAuth({
     }
   }
 
-  // Try direct getVerificationLink engine first (with full 90s window for Workday SMTP transit)
+  const subjectIncludes = isReset
+    ? ['reset', 'password', 'workday', 'recovery']
+    : ['verify', 'confirm', 'activate', 'workday', 'welcome', 'reset', 'password'];
+
+  // Try direct getVerificationLink engine first (checks link and code)
   try {
     const directLink = await getVerificationLink({
       email: cleanEmail,
       company,
       jobUrl,
       triggerTime: effectiveTriggerTime,
-      timeoutMs: Math.max(timeoutMs, 90000),
-      intervalMs: Math.max(pollIntervalMs, 2500),
+      timeoutMs: timeoutMs || 90000,
+      intervalMs: Math.max(pollIntervalMs, 1200),
+      subjectIncludes,
+      isReset,
     });
     if (directLink) {
       return {
         found: true,
-        type: 'link',
+        type: isReset ? 'reset' : 'link',
         verificationLink: directLink,
       };
     }
   } catch (directErr) {
-    if (directErr.message?.includes('Mailbox not found in users list')) {
+    if (directErr.message?.includes('Mailbox not found in users list') || directErr.message?.includes('is disconnected')) {
       return { found: false, reason: 'mailbox_not_connected', isZohoNotConnected: true };
     }
   }
 
-  // Fallback to message-by-message evaluation loop
-  const deadline = Date.now() + timeoutMs;
+  // Fallback to message-by-message evaluation loop for OTP codes or alternate subjects
+  const deadline = Date.now() + Math.min(timeoutMs, 30000);
   while (Date.now() < deadline) {
     try {
-      const inboxData = await getZohoInbox(cleanEmail, { limit: 5, start: 1 });
+      const inboxData = await getZohoInbox(cleanEmail, { limit: 10, start: 1 });
       if (inboxData?.messages) {
         const accountId = inboxData.accountId;
         for (const msg of inboxData.messages) {
           const received = Number(msg.receivedTime) || 0;
           if (received && received < cutoff) continue;
 
-          // Company/tenant filtering on envelope
+          // Check if message is relevant: sender/subject matches Workday/auth patterns OR company/tenant match
+          const cleanFrom = String(msg.from || '').toLowerCase();
+          const cleanSub = String(msg.subject || '').toLowerCase();
+          const isAuthTopic = /workday|myworkday|password|reset|verify|verification|activate|code|security|welcome/i.test(`${cleanFrom} ${cleanSub}`);
           const isEnvMatch = isWorkdayCompanyMatch({
             from: msg.from,
             subject: msg.subject,
             company,
             tenant,
           });
-          if (!isEnvMatch && (company || tenant)) continue;
+          if (!isAuthTopic && !isEnvMatch && (company || tenant)) continue;
 
           const msgDetails = await getZohoMessage(cleanEmail, {
             accountId,
@@ -591,6 +654,7 @@ export async function pollZohoWorkdayAuth({
               company,
               tenant,
               jobUrl,
+              isReset,
             });
             if (authDetails.found) {
               return {

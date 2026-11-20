@@ -24,7 +24,10 @@
     "backend:dev": "node backend/cli.mjs",
     "frontend:dev": "npm --prefix frontend start",
     "build": "npm --prefix frontend run build",
-    "dev": "node node_modules/vite/bin/vite.js frontend",
+    "dev": "node index.js",
+    "dev:submitter": "node backend/scripts/queue_daemon.mjs submitter",
+    "dev:scanner": "node backend/scripts/queue_daemon.mjs scanner",
+    "dev:frontend": "npm --prefix frontend start",
     "lint": "eslint . --ext .js,.mjs",
     "typecheck": "node --check backend/cli.mjs"
   },

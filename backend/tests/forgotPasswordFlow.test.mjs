@@ -139,11 +139,49 @@ test('4. executeWorkdayForgotPassword: fills email, avoids honeypot, clicks rese
   // Mock global fetch for Zoho Mail API
   const originalFetch = global.fetch;
   global.fetch = async (url) => {
+    const u = String(url);
+    if (u.includes('/api/zoho/ui/users')) {
+      return {
+        ok: true,
+        json: async () => ({
+          users: [{ email: 'candidate@applywizard.ai', accountId: 'acc_target_123', connected: true, status: 'active' }],
+        }),
+      };
+    }
+    if (u.includes('/api/zoho/ui/inbox')) {
+      return {
+        ok: true,
+        json: async () => ({
+          accountId: 'acc_target_123',
+          messages: [
+            {
+              folderId: 'fld_reset',
+              messageId: 'msg_reset_999',
+              receivedTime: Date.now(),
+              from: 'myworkday@myworkday.com',
+              subject: 'Reset your password for Target Careers',
+            },
+          ],
+        }),
+      };
+    }
+    if (u.includes('/api/zoho/ui/message')) {
+      return {
+        ok: true,
+        json: async () => ({
+          message: {
+            subject: 'Reset your password for Target Careers',
+            htmlContent: '<p>Click below to reset password:</p><a href="https://target.wd5.myworkdayjobs.com/target/resetPassword?token=reset-password-test">Reset Your Password</a>',
+            textContent: 'https://target.wd5.myworkdayjobs.com/target/resetPassword?token=reset-password-test',
+          },
+        }),
+      };
+    }
     return {
       ok: true,
       json: async () => ({
         found: true,
-        verificationLink: 'https://target.wd5.myworkdayjobs.com/reset-password-test',
+        verificationLink: 'https://target.wd5.myworkdayjobs.com/target/resetPassword?token=reset-password-test',
         subject: 'Reset your password',
       }),
     };

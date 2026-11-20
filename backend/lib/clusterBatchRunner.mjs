@@ -33,6 +33,7 @@ import { resolve } from 'path';
 import { executeWorkerTask } from './workerPool.mjs';
 import { httpsJsonWithRetry } from './httpClient.mjs';
 import { updateWorkerStatus } from './supabaseClient.mjs';
+import { canExecuteWorkers } from '../config/envConfig.mjs';
 import { isGlobalStopRequested, setGlobalStop, isScanStopRequested } from './browserLifecycle.mjs';
 import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 import { parseCandidateAwlIds } from './candidateParser.mjs';
@@ -639,9 +640,8 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     scanRunId = null,
   } = options;
 
-  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-    console.warn(`[CLUSTER GUARD] 🛑 Local cluster worker blocked: Running in Railway cloud. Local system scanning disabled.`);
+  if (!canExecuteWorkers()) {
+    console.warn(`[CLUSTER GUARD] 🛑 Local cluster worker blocked: Running in Railway cloud. (Set RUN_LOCAL_WORKERS=true in .env.development to enable).`);
     return;
   }
 

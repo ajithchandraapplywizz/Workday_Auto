@@ -13,21 +13,14 @@ import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
 import { parseCandidateAwlIds } from './candidateParser.mjs';
 import { createClient } from '@supabase/supabase-js';
 
+import { loadEnvConfiguration, isProduction } from '../config/envConfig.mjs';
+
 let envLoaded = false;
 
 export function loadLocalEnvOnce() {
   if (envLoaded) return;
   envLoaded = true;
-  const moduleDir = dirname(fileURLToPath(import.meta.url));
-  const candidates = [resolve(process.cwd(), '.env'), resolve(moduleDir, '..', '.env')];
-  const envPath = candidates.find((path) => existsSync(path));
-  if (envPath) {
-    for (const line of readFileSync(envPath, 'utf8').split(/\r?\n/)) {
-      const match = line.trim().match(/^([A-Za-z0-9_]+)\s*=\s*(.*)$/);
-      if (!match || process.env[match[1]]) continue;
-      process.env[match[1]] = match[2].trim().replace(/^['"](.*)['"]$/, '$1');
-    }
-  }
+  loadEnvConfiguration();
 
   // Fail-fast security: No hardcoded fallback secrets or keys allowed.
   // Required variables (SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, etc.) must come from environment.

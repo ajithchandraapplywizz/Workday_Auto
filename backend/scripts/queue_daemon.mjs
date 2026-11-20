@@ -21,6 +21,7 @@
  */
 
 import http from 'node:http';
+import net from 'node:net';
 import '../lib/polyfills.mjs';
 import {
   loadLocalEnvOnce,
@@ -35,6 +36,13 @@ import {
   getWorkerControls,
   updateWorkerControl,
 } from '../lib/supabaseClient.mjs';
+import {
+  isProduction as isProductionEnv,
+  canExecuteWorkers,
+  isHeadless,
+  shouldAutoStartOnBoot,
+  shouldIgnoreCloudSignals,
+} from '../config/envConfig.mjs';
 import { PIPELINE_CONFIG, WORKER_COUNT } from '../config/pipelineConfig.mjs';
 import {
   setGlobalStop,
@@ -84,10 +92,10 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 
 // Configuration
 const args = process.argv.slice(2);
-const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
+const isProduction = isProductionEnv();
 // In production (Railway) and background daemons, HEADLESS is strictly enforced (true).
-// Headed mode is ONLY activated if --headed or --headful is explicitly passed in CLI args.
-const HEADLESS = isProduction ? true : (args.includes('--headful') || args.includes('--headed') ? false : true);
+// In local development, respects HEADLESS setting or --headful / --headed CLI flags.
+const HEADLESS = isHeadless(args);
 const TEST_MODE = args.includes('--test');
 
 let envRole = (process.env.SERVICE_ROLE || '').toLowerCase();
@@ -110,7 +118,45 @@ let defaultPort = 3001;
 if (SERVICE_ROLE === 'submitter') {
   defaultPort = 3002;
 }
-const PORT = Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || defaultPort;
+
+const portArgIndex = args.findIndex((a) => a === '--port' || a === '-p');
+const portArg = portArgIndex !== -1 && args[portArgIndex + 1] ? Number(args[portArgIndex + 1]) : null;
+const portInlineArg = (args.find((a) => a.startsWith('--port=')) || '').split('=')[1];
+const explicitPortArg = portArg || (portInlineArg ? Number(portInlineArg) : null);
+const isDynamicPortRequested = args.includes('--dynamic-port') || process.env.DYNAMIC_PORT === 'true';
+
+export let PORT = explicitPortArg ?? (Number(process.env.PORT) || Number(process.env.DAEMON_PORT) || defaultPort);
+
+/**
+ * findAvailablePort — Finds the first available, unoccupied port starting from preferredPort.
+ * Tests sequentially starting from preferredPort (e.g. 3001 -> 3002 -> 3003...) to ensure standard developer port ranges.
+ * Handles occupied ports (EADDRINUSE / EACCES) seamlessly by testing sequentially.
+ */
+export async function findAvailablePort(preferredPort = 3001, host = '0.0.0.0') {
+  let portToTry = preferredPort > 0 ? preferredPort : (SERVICE_ROLE === 'submitter' ? 3002 : 3001);
+  const maxPort = 65535;
+
+  while (portToTry <= maxPort) {
+    const isAvailable = await new Promise((resolve) => {
+      const tester = net.createServer();
+      tester.unref();
+      tester.once('error', () => {
+        resolve(false);
+      });
+      tester.once('listening', () => {
+        tester.close(() => resolve(true));
+      });
+      tester.listen(portToTry, host);
+    });
+
+    if (isAvailable) {
+      return portToTry;
+    }
+    portToTry++;
+  }
+
+  return 3001;
+}
 
 if (TEST_MODE) {
   console.log('[DAEMON] ⚠️  TEST MODE: Only 1 cluster / 1 client will be processed per Stage 1 run.');
@@ -720,7 +766,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
     console.log(`[DAEMON] Submissions loop is already actively executing (${runningDedicatedWorkerLoops.size} workers active: ${Array.from(runningDedicatedWorkerLoops).join(', ')}).`);
     return { success: true, message: 'Submissions loop already executing.' };
   }
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
+  if (!canExecuteWorkers(args)) {
     console.log(`[DAEMON] 🛡️ Cloud Protection Active: Local workers disabled to prevent stealing tasks from Railway. Railway cloud workers handle all submissions.`);
     return { success: false, reason: 'Local worker execution disabled. Railway cloud runs all submissions.' };
   }
@@ -1049,7 +1095,7 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
     return { success: false, refused: true, reason: canScan.reason };
   }
 
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
+  if (!canExecuteWorkers(args)) {
     console.log(`[DAEMON] 🛡️ Cloud Protection Active: Local workers disabled to prevent stealing tasks from Railway. Railway cloud workers handle all scanning.`);
     return { success: false, reason: 'Local worker execution disabled. Railway cloud runs all scanning.' };
   }
@@ -2355,8 +2401,8 @@ export async function dispatchQueuedSubmissions() {
     // Scanner service strictly ignores submission dispatching
     return;
   }
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !args.includes('--run-local-workers')) {
-    return; // Local daemon never claims tasks when running in Railway
+  if (!canExecuteWorkers(args)) {
+    return; // Local daemon never claims tasks when local execution is disabled
   }
   if (isGlobalStopRequested() || isPoolPaused || isSubmitStopRequested()) return;
   // R11: Submit runs only when Developer turns Submit toggle ON
@@ -2505,15 +2551,41 @@ export async function initOnStartup() {
   console.log(`${'═'.repeat(72)}\n`);
 
   if (!server.listening) {
-    server.on('error', (err) => {
+    if (!isProduction || isDynamicPortRequested || PORT === 0) {
+      const targetPort = PORT === 0 ? defaultPort : PORT;
+      const freePort = await findAvailablePort(targetPort, '0.0.0.0');
+      if (freePort !== PORT) {
+        console.log(`[DAEMON] ⚠️ Port ${PORT} occupied or dynamic requested. Automatically selected available port: ${freePort}`);
+        PORT = freePort;
+      }
+    }
+
+    server.on('error', async (err) => {
       if (err.code === 'EADDRINUSE') {
-        console.warn(`[DAEMON WEBHOOK SERVER] Port ${PORT} already in use — standing by...`);
+        if (!isProduction) {
+          console.warn(`[DAEMON WEBHOOK SERVER] Port ${PORT} already in use — auto-switching to next available port...`);
+          try {
+            const nextFree = await findAvailablePort(PORT + 1, '0.0.0.0');
+            PORT = nextFree;
+            server.listen(PORT, '0.0.0.0');
+          } catch (listenErr) {
+            console.error(`[DAEMON WEBHOOK SERVER] Failed to bind dynamic port:`, listenErr.message);
+          }
+        } else {
+          console.warn(`[DAEMON WEBHOOK SERVER] Port ${PORT} already in use — standing by...`);
+        }
       } else {
         console.error(`[DAEMON WEBHOOK SERVER] Server error:`, err.message);
       }
     });
+
     server.listen(PORT, '0.0.0.0', () => {
+      const boundAddress = server.address();
+      if (boundAddress && typeof boundAddress === 'object') {
+        PORT = boundAddress.port;
+      }
       console.log(`[DAEMON WEBHOOK SERVER] Listening on http://0.0.0.0:${PORT}`);
+      console.log(`[DAEMON] 🎯 PORT ASSIGNED: ${PORT}`);
       if (SERVICE_ROLE === 'scanner') {
         console.log(`[DAEMON] Active workers: ${PIPELINE_CONFIG.scanWorkerIds.length} scanning (${PIPELINE_CONFIG.scanWorkerIds.join(', ')}), ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving (${PIPELINE_CONFIG.resolveWorkerIds.join(', ')}).`);
       } else if (SERVICE_ROLE === 'submitter') {
@@ -2540,7 +2612,7 @@ export async function initOnStartup() {
 
     await ensureCanonicalWorkers();
     await resetAllWorkersIdle();
-    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true') {
+    if (!isProduction && !canExecuteWorkers(args)) {
       console.log(`[DAEMON] 🛡️ Local development environment detected — strictly preserving production cloud bot_control and worker states.`);
     } else if (SERVICE_ROLE === 'main' || SERVICE_ROLE === 'all') {
       await syncBotControlState({
@@ -2572,7 +2644,10 @@ export async function initOnStartup() {
     console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
 
     // Autonomous startup trigger: dedicated submitter container or explicit flag
-    if (SERVICE_ROLE === 'submitter' || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
+    const shouldAutoSubmit = shouldAutoStartOnBoot() || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true';
+    if (SERVICE_ROLE === 'submitter' && !shouldAutoSubmit) {
+      console.log(`[DAEMON] Submitter startup: Local development mode (AUTO_START_ON_BOOT=false). Standing by in idle mode awaiting local trigger.`);
+    } else if (SERVICE_ROLE === 'submitter' || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true') {
       const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
       const pendingStartupCount = await getRemainingReadyForReviewCount();
       if (pendingStartupCount > 0) {
@@ -2608,11 +2683,11 @@ export async function initOnStartup() {
   let warnedMissingBotControl = false;
   let cloudBridgeTimer = null;
   const pollCloudBridge = async () => {
-    let nextDelay = 800;
+    let nextDelay = 500;
     try {
-      // Allow explicit bypass only if user deliberately specifies IGNORE_CLOUD_SIGNALS=true
-      if (process.env.IGNORE_CLOUD_SIGNALS === 'true') {
-        cloudBridgeTimer = setTimeout(pollCloudBridge, 2000);
+      // Allow explicit bypass if configured or in local development
+      if (shouldIgnoreCloudSignals() || process.env.IGNORE_CLOUD_SIGNALS === 'true') {
+        cloudBridgeTimer = setTimeout(pollCloudBridge, 1000);
         return;
       }
       const [bc, wc] = await Promise.all([
@@ -2623,67 +2698,17 @@ export async function initOnStartup() {
       const scanCtrl = wc?.scan;
       const submitCtrl = wc?.submit;
 
-      // 1. Primary Stop Signal from Supabase (scoped strictly by stage and role)
-      const isScanActive = scanStatus === 'running' || (isPoolRunning && (currentStage === 'scanning' || currentStage === 'parallel'));
-      const isSubmitActive = submitStatus === 'running' || (isPoolRunning && (currentStage === 'submitting' || currentStage === 'parallel')) || activeSubmittingWorkers.size > 0;
-
-      // 1. Primary Stop & Start Signal Detection from Supabase
-      const isSustainedRunning = Boolean(
-        bc && (bc.is_running || bc.scan_status === 'running' || bc.submit_status === 'running')
-      );
-
-      // Start signal takes precedence so user start commands are never blocked by stale stop flags
-      const isStartSignal = Boolean(
-        bc?.last_action_requested === 'start_universal' ||
-        bc?.last_action_requested === 'start_submit' ||
-        bc?.last_action_requested === 'start_scan' ||
-        bc?.last_action_requested === 'start' ||
-        bc?.last_action_requested === 'start_pipeline' ||
-        bc?.last_action_requested === 'submit_approved' ||
-        (bc?.trigger_requested && (bc?.is_running || bc?.scan_status === 'running' || bc?.submit_status === 'running')) ||
-        (isSustainedRunning && !bc?.stop_requested && !bc?.scan_stop_requested && !bc?.submit_stop_requested)
-      );
-
-      const isExplicitStop = !isStartSignal && Boolean(
-        bc?.stop_requested ||
+      // ── 1. GLOBAL STOP SWITCH (Strict Instant Shutdown for All Services) ──
+      const isGlobalStop = Boolean(
+        bc?.stop_requested === true ||
         bc?.last_action_requested === 'stop' ||
         bc?.last_action_requested === 'stop_all' ||
         bc?.last_action_requested === 'stop_pipeline'
       );
 
-      // If user triggered any start, clear in-memory stop state immediately to accept the command
-      if (isStartSignal) {
-        if (isGlobalStopRequested() || isScanStopRequested() || isSubmitStopRequested() || isPoolPaused) {
-          console.log(`\n⚡ [DAEMON (${SERVICE_ROLE.toUpperCase()})] Fresh start signal detected ("${bc?.last_action_requested || 'sustained_running'}") — clearing in-memory stop flags.`);
-          setGlobalStop(false);
-          setScanStop(false);
-          setSubmitStop(false);
-          setClusterStop(false);
-          isPoolPaused = false;
-        }
-      }
-
-      const hasScanStopSignal = !isStartSignal && Boolean(
-        bc?.scan_stop_requested ||
-        bc?.last_action_requested === 'stop_scan' ||
-        scanCtrl?.stop_requested
-      );
-      const hasSubmitStopSignal = !isStartSignal && Boolean(
-        bc?.submit_stop_requested ||
-        bc?.last_action_requested === 'stop_submit' ||
-        submitCtrl?.stop_requested
-      );
-      const hasGlobalStopSignal = isExplicitStop || (!isStartSignal && bc?.stop_requested === true);
-
-      if (hasGlobalStopSignal) {
-        let activeBCount = 0;
-        try {
-          const { getActiveBrowserCount } = await import('../lib/browserLifecycle.mjs');
-          activeBCount = getActiveBrowserCount();
-        } catch {}
-
-        if (isPoolRunning || isScanActive || isSubmitActive || scanStatus === 'running' || submitStatus === 'running' || activeSubmittingWorkers.size > 0 || activeBCount > 0) {
-          console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Global stop signal detected in Supabase! Stopping all workers and active browsers...`);
+      if (isGlobalStop) {
+        if (isPoolRunning || scanStatus === 'running' || submitStatus === 'running' || activeSubmittingWorkers.size > 0 || isScanLoopExecuting || isSubmitLoopExecuting) {
+          console.log(`\n🛑 [SWITCH] Global STOP switch detected in bot_control! Stopping all workers and active browsers instantly...`);
           await stopAutonomousPool();
           if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
           if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
@@ -2701,251 +2726,100 @@ export async function initOnStartup() {
             current_action: 'Idle (Stopped by user)',
           }).catch(() => { });
         }
+        cloudBridgeTimer = setTimeout(pollCloudBridge, 500);
         return;
       }
 
-      let handledScanStop = false;
-      if (SERVICE_ROLE !== 'submitter' && hasScanStopSignal) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping scanning workers...`);
-        await stopScanPool();
-        if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
-        await syncBotControlState({
-          scan_status: 'off',
-          scan_enabled: false,
-        }).catch(() => { });
-        handledScanStop = true;
-      }
+      // ── 2. SERVICE 1: SCANNER SWITCH (Direct ON / OFF from bot_control) ──
+      if (SERVICE_ROLE !== 'submitter') {
+        const isScanTurnOff = Boolean(
+          bc?.scan_status === 'off' ||
+          bc?.scan_enabled === false ||
+          bc?.scan_stop_requested === true ||
+          bc?.last_action_requested === 'stop_scan' ||
+          scanCtrl?.stop_requested
+        );
 
-      let handledSubmitStop = false;
-      if (SERVICE_ROLE !== 'scanner' && hasSubmitStopSignal) {
-        console.log(`\n🛑 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Stop signal detected in Supabase! Stopping submission workers...`);
-        await stopSubmitPool();
-        if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
-        await syncBotControlState({
-          submit_status: 'off',
-          submit_enabled: false,
-        }).catch(() => { });
-        handledSubmitStop = true;
-      }
+        const isScanTurnOn = !isScanTurnOff && Boolean(
+          bc?.scan_status === 'running' ||
+          bc?.scan_enabled === true ||
+          bc?.last_action_requested === 'start_scan' ||
+          bc?.last_action_requested === 'start_universal' ||
+          (bc?.trigger_requested && (bc?.stage === 'scanning' || bc?.stage === 'parallel')) ||
+          (scanCtrl && (scanCtrl.enabled === true || scanCtrl.status === 'running') && !scanCtrl.stop_requested)
+        );
 
-      if (handledScanStop && !isSubmitActive) return;
-      if (handledSubmitStop && !isScanActive) return;
-
-      // 2. Start Signals from Supabase (Gated strictly: never trigger if stop is active or requested)
-      const isScanRunning = scanStatus === 'running';
-      const isSubmitRunning = submitStatus === 'running';
-
-      const isScanStartRequested = (!isScanRunning) && (!hasScanStopSignal) && (!hasGlobalStopSignal) && (
-        isStartSignal || (!bc?.stop_requested && !bc?.scan_stop_requested)
-      ) && (
-        (bc && (bc.is_running !== false || isStartSignal || bc.scan_status === 'running') && (
-          bc.last_action_requested === 'start' ||
-          bc.last_action_requested === 'start_scan' ||
-          bc.last_action_requested === 'start_pipeline' ||
-          bc.last_action_requested === 'start_universal' ||
-          (bc.trigger_requested && (bc.stage === 'scanning' || bc.stage === 'parallel' || bc.stage === 'universal_parallel')) ||
-          (bc.scan_status === 'running' || bc.scan_enabled === true)
-        )) ||
-        (scanCtrl && (scanCtrl.enabled === true || scanCtrl.status === 'running') && !scanCtrl.stop_requested)
-      );
-
-      const isSubmitStartRequested = (!isSubmitRunning) && (!hasSubmitStopSignal) && (!hasGlobalStopSignal) && (
-        isStartSignal || (!bc?.stop_requested && !bc?.submit_stop_requested)
-      ) && (
-        (bc && (bc.is_running !== false || isStartSignal || bc.submit_status === 'running') && (
-          bc.last_action_requested === 'submit_approved' ||
-          bc.last_action_requested === 'start_submit' ||
-          bc.last_action_requested === 'start_universal' ||
-          (bc.trigger_requested && (bc.stage === 'submitting' || bc.stage === 'parallel')) ||
-          (bc.submit_status === 'running' || bc.submit_enabled === true)
-        )) ||
-        (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested)
-      );
-
-      if (isScanStartRequested) {
-        if (SERVICE_ROLE === 'submitter') {
-          // Submitter service strictly ignores scan triggers
-        } else if (SERVICE_ROLE === 'main') {
-          const isUniversal = bc?.last_action_requested === 'start_universal' || bc?.stage === 'parallel';
-          if (isUniversal) {
-            console.log(`\n⚡ [MAIN APP] Start universal signal detected. Forwarding to both Scanner and Submitter Services via Supabase.`);
+        if (isScanTurnOff) {
+          if (scanStatus === 'running' || isScanLoopExecuting) {
+            console.log(`\n🛑 [SWITCH (SCANNER)] Turn OFF detected in bot_control! Halting scanner workers & closing browsers instantly...`);
+            await stopScanPool();
+            if (scanCtrl?.stop_requested) await updateWorkerControl('scan', { stop_requested: false }).catch(() => { });
             await syncBotControlState({
-              last_action_requested: 'start_universal',
-              trigger_requested: true,
-              is_running: true,
-              stage: 'parallel',
-              mode: 'parallel',
-              scan_status: 'running',
-              scan_enabled: true,
-              scan_stop_requested: false,
-              submit_status: 'running',
-              submit_enabled: true,
-              submit_stop_requested: false,
-              stop_requested: false,
-              current_action: 'Universal Parallel Pipeline: Scanning & Submissions running concurrently across all workers...',
-            });
-            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: true, status: 'running' }).catch(() => { });
-            if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: true, status: 'running' }).catch(() => { });
-            return;
-          }
-          console.log(`\n⚡ [MAIN APP] Start scan signal detected. Forwarding to dedicated Scanner Service via Supabase (0 workers spawned in main app).`);
-          const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
-          await syncBotControlState({
-            last_action_requested: null,
-            trigger_requested: false,
-            is_running: true,
-            stage: targetStage,
-            mode: targetStage,
-            scan_status: 'running',
-            scan_enabled: true,
-            stop_requested: false,
-            scan_stop_requested: false
-          });
-          if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
-          return;
-        } else if (process.env.SCANNER_RUN === 'false' || process.env.RUN === 'false') {
-          console.log(`\n⏸️ [SCANNER SERVICE] Scan signal received, but SCANNER_RUN is explicitly disabled in environment. Remaining safely idle.`);
-        } else {
-          const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
-          const preCheck = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false, pendingCount: 0 }));
-          if (!preCheck.hasPending || preCheck.pendingCount === 0) {
-            console.log(`ℹ️ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Scan signal received, but 0 pending unscanned links in batch_job_queue. Remaining completely idle.`);
-            await syncBotControlState({
-              last_action_requested: null,
-              trigger_requested: false,
               scan_status: 'off',
               scan_enabled: false,
-              stage: 'idle',
-              mode: 'idle',
-              is_running: false,
-              current_action: 'Idle — 0 pending unscanned links in queue',
-              active_worker_count: 0
-            });
-            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'off' }).catch(() => { });
-            if (!isSubmitStartRequested) return;
-          } else {
-            console.log(`\n⚡ [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start scan signal! Launching ${PIPELINE_CONFIG.workersCount}-worker scanning cluster...`);
-            const isUniversalSignal = bc?.last_action_requested === 'start_universal' || bc?.stage === 'parallel' || bc?.mode === 'parallel';
-            const targetStage = (submitStatus === 'running' || bc?.submit_status === 'running') ? 'parallel' : 'scanning';
-            const isBothRunningSoon = targetStage === 'parallel';
-            await syncBotControlState({
-              last_action_requested: isUniversalSignal ? (isBothRunningSoon ? null : 'start_universal') : (bc?.last_action_requested === 'start_scan' ? null : bc?.last_action_requested),
-              trigger_requested: isUniversalSignal && !isBothRunningSoon,
-              is_running: true,
-              stage: targetStage,
-              mode: targetStage,
-              scan_status: 'running',
-              scan_enabled: true,
-              stop_requested: false,
-              scan_stop_requested: false
-            });
-            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: false, status: 'running' }).catch(() => { });
+              scan_stop_requested: false,
+              last_action_requested: (bc?.last_action_requested === 'stop_scan' ? null : bc?.last_action_requested),
+            }).catch(() => { });
+          }
+        } else if (isScanTurnOn) {
+          if (scanStatus !== 'running' && !isScanLoopExecuting) {
+            const dynamicScanCount = Number(process.env.SCAN_WORKER_COUNT) || Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.scanWorkerIds?.length || 2;
+            console.log(`\n⚡ [SWITCH (SCANNER)] Turn ON detected in bot_control! Launching ${dynamicScanCount} scanning workers in parallel...`);
+            setScanStop(false);
+            setClusterStop(false);
+            scanStatus = 'running';
+            scanStopRequested = false;
+            if (scanCtrl?.enabled) await updateWorkerControl('scan', { enabled: true, status: 'running' }).catch(() => { });
             runScanAndResolveParallel({ force: true }).catch(console.error);
-            if (!isSubmitStartRequested) {
-              return;
-            }
           }
         }
       }
 
-      // 3. Submissions Start Signal from Supabase
-      if (isSubmitStartRequested) {
-        if (SERVICE_ROLE === 'scanner') {
-          // Dedicated scanner service ignores submit signals
-          return;
-        }
-
-        // R3: Sequence and Mode lock check - submissions can only run after Stage 1 completion
-        const stage1Check = await checkStage1Completion();
-        if (!stage1Check.allowed) {
-          console.warn(`[DAEMON] Submit start rejected: ${stage1Check.reason}`);
-          submitRefusalReason = stage1Check.reason;
-          await syncBotControlState({ refusal_reason: submitRefusalReason, last_action_requested: null, trigger_requested: false });
-          if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false }).catch(() => { });
-          return;
-        }
-
-        if (SERVICE_ROLE === 'main') {
-          console.log(`\n🚀 [MAIN APP] Start submit signal detected. Forwarding to dedicated Submitter Service via Supabase (0 workers spawned in main app).`);
-          await syncBotControlState({
-            last_action_requested: 'start_submit',
-            trigger_requested: true,
-            is_running: true,
-            stage: 'submitting',
-            mode: 'submitting',
-            submit_status: 'running',
-            submit_enabled: true,
-            stop_requested: false,
-            current_action: 'Submitting approved applications across 2 workers in parallel on Submitter Service',
-          });
-          if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: true, status: 'running' }).catch(() => { });
-          return;
-        }
-        if (process.env.SUBMIT_RUN === 'false' || process.env.RUN === 'false') {
-          console.log(`\n⏸️ [SUBMITTER SERVICE] Submit signal received, but SUBMIT_RUN is explicitly disabled in environment. Remaining safely idle.`);
-          return;
-        }
-        const isParallelSignal = scanStatus === 'running' || bc?.stage === 'parallel' || bc?.mode === 'parallel' || bc?.last_action_requested === 'start_universal';
-        const targetSubmitStage = isParallelSignal ? 'parallel' : 'submitting';
-        const isBothRunningSoon = targetSubmitStage === 'parallel' && (scanStatus === 'running' || bc?.scan_status === 'running');
-        console.log(`\n🚀 [DAEMON SUPABASE TRIGGER (${SERVICE_ROLE.toUpperCase()})] Detected start submit signal! Launching ${PIPELINE_CONFIG.workersCount}-worker parallel submissions (stage: ${targetSubmitStage})...`);
-        await syncBotControlState({
-          last_action_requested: isParallelSignal ? (isBothRunningSoon ? null : 'start_universal') : (bc?.last_action_requested === 'start_submit' ? null : bc?.last_action_requested),
-          trigger_requested: isParallelSignal && !isBothRunningSoon,
-          is_running: true,
-          stage: targetSubmitStage,
-          mode: targetSubmitStage,
-          submit_status: 'running',
-          submit_enabled: true,
-          stop_requested: false,
-          submit_stop_requested: false
-        });
-        if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: false, status: 'running' }).catch(() => { });
-        isPoolRunning = true;
-        currentStage = targetSubmitStage;
-        currentMode = targetSubmitStage;
-        submitStatus = 'running';
-        runStage3Submissions({ isStreaming: isParallelSignal, force: true }).catch(console.error);
-        return;
-      }
-
-      // 3b. Autonomous Stage 3 Trigger: Auto-start submissions on ready_for_review without any manual trigger
-      if (
-        SERVICE_ROLE !== 'scanner' &&
-        !isPoolRunning &&
-        submitStatus !== 'running' &&
-        activeSubmittingWorkers.size === 0
-      ) {
-        const isExplicitStop = Boolean(
-          bc?.stop_requested ||
-          bc?.submit_stop_requested ||
-          bc?.last_action_requested === 'stop_all' ||
+      // ── 3. SERVICE 2: SUBMITTER SWITCH (Direct ON / OFF from bot_control) ──
+      if (SERVICE_ROLE !== 'scanner') {
+        const isSubmitTurnOff = Boolean(
+          bc?.submit_status === 'off' ||
+          bc?.submit_enabled === false ||
+          bc?.submit_stop_requested === true ||
           bc?.last_action_requested === 'stop_submit' ||
           submitCtrl?.stop_requested
         );
 
-        if (!isExplicitStop && (process.env.SUBMIT_RUN !== 'false' && process.env.RUN !== 'false')) {
-          const { getRemainingReadyForReviewCount } = await import('../lib/submissionWorkerPool.mjs');
-          const pendingCount = await getRemainingReadyForReviewCount();
-          if (pendingCount > 0) {
-            console.log(`\n🚀 [AUTONOMOUS SUBMIT TRIGGER (${SERVICE_ROLE.toUpperCase()})] Found ${pendingCount} ready_for_review application(s)! Auto-starting Stage 3 Submissions across ${PIPELINE_CONFIG.submitWorkersCount || 2} workers immediately...`);
-            isPoolRunning = true;
-            currentStage = 'submitting';
-            currentMode = 'submitting';
-            submitStatus = 'running';
+        const isSubmitTurnOn = !isSubmitTurnOff && Boolean(
+          bc?.submit_status === 'running' ||
+          bc?.submit_enabled === true ||
+          bc?.last_action_requested === 'start_submit' ||
+          bc?.last_action_requested === 'start_universal' ||
+          (bc?.trigger_requested && (bc?.stage === 'submitting' || bc?.stage === 'parallel')) ||
+          (submitCtrl && (submitCtrl.enabled === true || submitCtrl.status === 'running') && !submitCtrl.stop_requested)
+        );
+
+        if (isSubmitTurnOff) {
+          if (submitStatus === 'running' || isSubmitLoopExecuting || activeSubmittingWorkers.size > 0) {
+            console.log(`\n🛑 [SWITCH (SUBMITTER)] Turn OFF detected in bot_control! Halting submitter workers & closing browsers instantly...`);
+            await stopSubmitPool();
+            if (submitCtrl?.stop_requested) await updateWorkerControl('submit', { stop_requested: false }).catch(() => { });
             await syncBotControlState({
-              is_running: true,
-              stage: 'submitting',
-              mode: 'submitting',
-              submit_status: 'running',
-              submit_enabled: true,
-              stop_requested: false,
+              submit_status: 'off',
+              submit_enabled: false,
               submit_stop_requested: false,
-              current_action: `Autonomous Submissions: running ${pendingCount} ready_for_review application(s)`,
-              active_worker_count: PIPELINE_CONFIG.submitWorkersCount || 2,
-            }).catch(() => {});
-            runStage3Submissions().catch(console.error);
-            return;
+              last_action_requested: (bc?.last_action_requested === 'stop_submit' ? null : bc?.last_action_requested),
+            }).catch(() => { });
+          }
+        } else if (isSubmitTurnOn) {
+          if (submitStatus !== 'running' && !isSubmitLoopExecuting) {
+            const { resolveInstanceSubmissionWorkerIds, SUBMISSION_WORKER_IDS } = await import('../lib/submissionWorkerPool.mjs');
+            const submitWorkers = typeof resolveInstanceSubmissionWorkerIds === 'function'
+              ? await resolveInstanceSubmissionWorkerIds().catch(() => SUBMISSION_WORKER_IDS)
+              : SUBMISSION_WORKER_IDS;
+            const dynamicSubmitCount = submitWorkers?.length || Number(process.env.WORKER_COUNT) || 2;
+            console.log(`\n🚀 [SWITCH (SUBMITTER)] Turn ON detected in bot_control! Launching ${dynamicSubmitCount} submitter workers in parallel...`);
+            setSubmitStop(false);
+            setGlobalStop(false);
+            submitStatus = 'running';
+            submitStopRequested = false;
+            if (submitCtrl?.enabled) await updateWorkerControl('submit', { enabled: true, status: 'running' }).catch(() => { });
+            runStage3Submissions({ force: true }).catch(console.error);
           }
         }
       }
@@ -2981,17 +2855,16 @@ export async function initOnStartup() {
       // Adaptive low-power standby:
       // When jobs or workers are active or running, poll fast at 800ms.
       // When completely idle and stopped, poll at 2000ms to save 60% idle CPU and DB calls.
-      const isSystemActive = isPoolRunning || isSustainedRunning || currentStage !== 'idle' || activeSubmittingWorkers.size > 0;
-      nextDelay = isSystemActive ? 800 : 2000;
+      nextDelay = 500;
     } catch {
       // Continue polling silently
-      nextDelay = 2000;
+      nextDelay = 1000;
     } finally {
       cloudBridgeTimer = setTimeout(pollCloudBridge, nextDelay);
     }
   };
 
-  cloudBridgeTimer = setTimeout(pollCloudBridge, 800);
+  cloudBridgeTimer = setTimeout(pollCloudBridge, 500);
 
   // ── Phase 3: 6-Minute Lease Reaper Background Interval (runs every 30s) ──
   setInterval(async () => {

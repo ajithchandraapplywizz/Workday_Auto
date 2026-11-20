@@ -11,7 +11,7 @@
 import { chromium } from './stealthBrowser.mjs';
 import { readFile, writeFile } from 'fs/promises';
 import { resolve, basename } from 'path';
-import { existsSync } from 'fs';
+import { existsSync, readFileSync } from 'fs';
 import {
   discoverApplicationForm,
   detectATS,
@@ -562,7 +562,13 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     return false;
   }
 
-  const fileName = basename(absPath);
+  const diskFileName = basename(absPath);
+  let uploadFileName = diskFileName;
+  try {
+    const { buildDocumentFileName } = await import('./fileNameUtils.mjs');
+    const pageTitle = typeof page.title === 'function' ? await page.title().catch(() => '') : '';
+    uploadFileName = buildDocumentFileName(profile, diskFileName, true, pageTitle);
+  } catch {}
 
   const already = await page.evaluate((needle) => {
     const item = document.querySelector(
@@ -578,7 +584,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     if (deleteBtn && needle && text.includes(needle)) return needle;
     if (deleteBtn && /\.pdf\b/i.test(text)) return 'uploaded file';
     return '';
-  }, fileName.replace(/\.[^.]+$/, '').slice(0, 24).toLowerCase()).catch(() => '');
+  }, uploadFileName.replace(/\.[^.]+$/, '').slice(0, 24).toLowerCase()).catch(() => '');
 
   if (already) {
     console.log(`    📎 Resume already uploaded: "${already}"`);
@@ -606,6 +612,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     }
 
     try {
+<<<<<<< HEAD
       const pageTitle = await page.title().catch(() => '');
       const dynamicFileName = buildDocumentFileName(profile, fileName, true, pageTitle);
       console.log(`    📎 Uploading resume as "${dynamicFileName}" (source: ${fileName}, attempt ${attempt}/3)...`);
@@ -622,6 +629,16 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
         await fileInput.setInputFiles(absPath);
       }
       const ok = await waitForResumeUploadComplete(page, dynamicFileName) || await waitForResumeUploadComplete(page, fileName);
+=======
+      console.log(`    📎 Uploading resume as "${uploadFileName}" (source: ${diskFileName}) (attempt ${attempt}/3)...`);
+      const fileBuffer = readFileSync(absPath);
+      await fileInput.setInputFiles({
+        name: uploadFileName,
+        mimeType: 'application/pdf',
+        buffer: fileBuffer,
+      });
+      const ok = await waitForResumeUploadComplete(page, uploadFileName);
+>>>>>>> 8c2712e (all listed issues resolved)
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;

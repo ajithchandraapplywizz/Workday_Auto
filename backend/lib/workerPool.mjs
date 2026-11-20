@@ -26,6 +26,7 @@ import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolve
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
 import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot, cleanupOrphanChromeProcesses, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
 import { isSkippableUnimportantLabel, hasRequiredSignal } from './scanFieldFilter.mjs';
+import { canExecuteWorkers } from '../config/envConfig.mjs';
 import { createClient } from '@supabase/supabase-js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -259,7 +260,7 @@ export async function executeWorkerTask({
   options = {},
 }) {
   const {
-    headless = true,
+    headless = (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT) ? true : (process.env.HEADLESS !== 'false'),
     dryRun = false,
     confirmSubmit = !dryRun,
     defaultPassword = process.env.WORKDAY_PASSWORD || '',
@@ -285,9 +286,8 @@ export async function executeWorkerTask({
     console.log(`[${workerId}] [${taskIndex}/${totalTasks}] Task for ${applywizzId} @ ${company}`);
   }
 
-  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
-    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. Local browser launch prevented.`);
+  if (!canExecuteWorkers()) {
+    console.warn(`   🛑 [${workerId}] Local execution blocked: Railway is running in production. (Set RUN_LOCAL_WORKERS=true in .env.development to enable).`);
     return { status: 'skipped', error: 'Local execution blocked to protect Railway workers' };
   }
 
@@ -2227,22 +2227,31 @@ export async function executeWorkerTask({
   } finally {
     try { unregisterWorkerContext(workerId); } catch {}
     try { await updateWorkerStatus(workerId, { state: 'idle', current_application_id: null }); } catch {}
+    try { if (page && !page.isClosed()) await page.close().catch(() => {}); } catch {}
+    try { if (context) await context.close().catch(() => {}); } catch {}
     try {
       if (browser) {
         unregisterActiveBrowser(browser, workerId);
+        const childProc = typeof browser.process === 'function' ? browser.process() : null;
         await browser.close().catch(() => {});
+        if (childProc && !childProc.killed && typeof childProc.kill === 'function') {
+          try { childProc.kill('SIGKILL'); } catch {}
+        }
       }
     } catch {}
     try { releaseBrowserSlot(workerId); } catch {}
     try { cleanupOrphanChromeProcesses(); } catch {}
+    if (typeof global.gc === 'function' && Math.random() < 0.2) {
+      try { global.gc(); } catch {}
+    }
   }
 }
 
 /**
- * Run tasks using a pool of N concurrent workers (default 1).
+ * Run tasks using a pool of N concurrent workers (dynamically from env).
  */
 export async function runWorkerPool(tasks = [], {
-  concurrency = 1,
+  concurrency = (Number(process.env.WORKER_COUNT) || Number(process.env.WORKERS) || 2),
   headless = true,
   confirmSubmit = false,
   dryRun = false,

@@ -1,5 +1,8 @@
 import { exec } from 'node:child_process';
 
+if (!process.env.MALLOC_ARENA_MAX) process.env.MALLOC_ARENA_MAX = '2';
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '64';
+
 export const LEAN_CHROMIUM_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',

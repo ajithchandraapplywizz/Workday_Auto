@@ -21,6 +21,15 @@ const targetArg = process.argv.slice(2).find((a) => !a.startsWith('--'));
 const ingestAll = process.argv.includes('--all') || (targetArg && targetArg.includes('NewCsv_1'));
 const csvPath = resolve(targetArg || 'Data/new_csv.csv');
 
+let minCount = 10;
+const minIdx = process.argv.indexOf('--min-count');
+if (minIdx !== -1 && process.argv[minIdx + 1]) {
+  minCount = parseInt(process.argv[minIdx + 1], 10) || 10;
+} else if (targetArg && targetArg.includes('2026-11-20')) {
+  minCount = 2;
+}
+const cleanupUnqualified = process.argv.includes('--cleanup-unqualified');
+
 if (!existsSync(csvPath)) {
   console.error(`❌ CSV not found at: ${csvPath}`);
   process.exit(1);
@@ -77,7 +86,7 @@ async function run() {
   if (ingestAll) {
     console.log('🚀 PUSHING ALL LINKS (COMPLETE CSV INGESTION) TO batch_job_queue');
   } else {
-    console.log('🚀 PUSHING TOP LINKS (task_count > 10) TO batch_job_queue');
+    console.log(`🚀 PUSHING TOP LINKS (task_count >= ${minCount}) TO batch_job_queue`);
   }
   console.log(`   Source CSV: ${csvPath}`);
   console.log('═'.repeat(80));
@@ -88,15 +97,15 @@ async function run() {
 
   console.log(`📁 Total rows in CSV: ${dataRows.length}`);
 
-  // 1. Filter rows (complete links if ingestAll, else task_count > 10)
+  // 1. Filter rows (complete links if ingestAll, else task_count >= minCount)
   const qualifyingRows = ingestAll
     ? dataRows.filter((r) => r[3] && r[3].trim().length > 0)
     : dataRows.filter((r) => {
         const tc = parseInt(r[4], 10);
-        return !isNaN(tc) && tc > 10;
+        return !isNaN(tc) && tc >= minCount;
       });
 
-  console.log(`🎯 Rows meeting criteria (${ingestAll ? 'ALL rows with URLs' : 'task_count > 10'}): ${qualifyingRows.length}`);
+  console.log(`🎯 Rows meeting criteria (${ingestAll ? 'ALL rows with URLs' : `task_count >= ${minCount}`}): ${qualifyingRows.length}`);
 
   // 2. Aggregate into unique links and merge AWLs
   const urlMap = new Map();
@@ -289,6 +298,34 @@ async function run() {
         body: u.patch,
       });
       console.log(`   ✅ Updated existing link id=${u.id} (${u.company}) with ${u.awlCount} candidates.`);
+    }
+  }
+
+  // 5b. Optional Cleanup of Unqualified Links (e.g. task_count < minCount with status pending)
+  if (cleanupUnqualified) {
+    const unqualifiedUrls = dataRows
+      .filter((r) => {
+        const tc = parseInt(r[4], 10);
+        return isNaN(tc) || tc < minCount;
+      })
+      .map((r) => r[3])
+      .filter(Boolean);
+
+    const normUnqualified = new Set(unqualifiedUrls.map(normalizeUrlKey));
+    const toDeleteIds = [];
+    for (const [key, eq] of existingQueueMap.entries()) {
+      if (normUnqualified.has(key) && !urlMap.has(key) && eq.status === 'pending') {
+        toDeleteIds.push(eq.id);
+      }
+    }
+
+    if (toDeleteIds.length > 0) {
+      console.log(`\n🧹 Cleaning up ${toDeleteIds.length} unqualified pending links (task_count < ${minCount})...`);
+      for (let i = 0; i < toDeleteIds.length; i += 25) {
+        const chunk = toDeleteIds.slice(i, i + 25);
+        await supabase.from('batch_job_queue').delete().in('id', chunk);
+      }
+      console.log(`   ✅ Removed ${toDeleteIds.length} unqualified links from batch_job_queue.`);
     }
   }
 

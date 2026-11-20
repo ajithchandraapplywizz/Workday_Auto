@@ -6,6 +6,8 @@ WORKDIR /app
 ENV NODE_ENV=production
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_CHROMIUM_CHANNEL=chromium
+ENV MALLOC_ARENA_MAX=2
+ENV UV_THREADPOOL_SIZE=64
 
 # 1. Copy dependency manifests first for layer caching
 COPY package*.json ./

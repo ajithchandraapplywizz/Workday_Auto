@@ -17,6 +17,7 @@
 
 
 import { loadLocalEnvOnce, updateWorkerStatus, getWorkerControls } from './supabaseClient.mjs';
+import { canExecuteWorkers } from '../config/envConfig.mjs';
 
 import { createClient } from '@supabase/supabase-js';
 
@@ -469,9 +470,8 @@ export async function getRemainingReadyForReviewCount() {
 export async function claimNextTask(workerId) {
   if (!workerId || !supabase) return null;
 
-  // Cloud Protection Guard: Local development machines NEVER claim tasks when Railway is running
-  const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-  if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+  // Cloud Protection Guard: Local development machines NEVER claim tasks unless local workers are enabled
+  if (!canExecuteWorkers()) {
     return null;
   }
 
@@ -896,7 +896,7 @@ export async function reapExpiredLeases(timeoutMinutes = 3) {
 
  */
 
-export async function processClaimedTask({ task, workerId, headless = true, runnerFn = null, options = {} }) {
+export async function processClaimedTask({ task, workerId, headless = (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT) ? true : (process.env.HEADLESS !== 'false'), runnerFn = null, options = {} }) {
 
   if (!task || !workerId) return { success: false, error: 'Invalid task or workerId' };
 

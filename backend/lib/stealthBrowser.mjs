@@ -14,6 +14,7 @@
 
 import { chromium as standardChromium } from 'playwright';
 import { setupResourceBlocker } from './resourceBlocker.mjs';
+import { canExecuteWorkers } from '../config/envConfig.mjs';
 
 let chromium = standardChromium;
 let stealth = null;
@@ -24,7 +25,9 @@ let stealth = null;
  * Optimized for minimal RAM, CPU, and network consumption.
  */
 function prepareLaunchOptions(baseOptions = {}) {
-  const isHeadless = baseOptions.headless !== false;
+  const isHeadless = baseOptions.headless !== undefined
+    ? Boolean(baseOptions.headless)
+    : (process.env.NODE_ENV === 'production' || process.env.RAILWAY_ENVIRONMENT ? true : (process.env.HEADLESS !== 'false'));
 
   const defaultContainerArgs = [
     '--no-sandbox',
@@ -135,10 +138,9 @@ function createResilientLauncher(extraLauncher = null) {
   const origStandardLaunch = standardChromium.launch.bind(standardChromium);
 
   return async function resilientLaunch(baseOptions = {}) {
-    const isProduction = process.env.NODE_ENV === 'production' || Boolean(process.env.RAILWAY_ENVIRONMENT) || Boolean(process.env.RAILWAY_STATIC_URL);
-    if (!isProduction && process.env.RUN_LOCAL_WORKERS !== 'true' && !process.argv.includes('--run-local-workers')) {
+    if (!canExecuteWorkers()) {
       console.warn(`[BROWSER GUARD] 🛑 Local browser launch blocked: Workday Auto is running in Railway cloud. Local system browser launch prevented.`);
-      throw new Error(`[LOCAL_EXECUTION_BLOCKED] Browser launch blocked on local system. Automation runs in Railway cloud. (Set RUN_LOCAL_WORKERS=true or pass --run-local-workers to override).`);
+      throw new Error(`[LOCAL_EXECUTION_BLOCKED] Browser launch blocked on local system. (Set RUN_LOCAL_WORKERS=true in .env.development or pass --run-local-workers to override).`);
     }
 
     const prepared = prepareLaunchOptions(baseOptions);
