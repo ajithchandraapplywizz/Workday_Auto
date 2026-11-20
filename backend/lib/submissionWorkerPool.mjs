@@ -274,6 +274,12 @@ export async function updateJobDistributionWithCheck({
     delete cleanPatch.application_submitted_screenshot_url;
   }
 
+  // STRICT ATTEMPT 3 FAILURE POLICY: Any application that reaches or exhausts Attempt 3 is permanently marked 'failed'!
+  const errText = String(cleanPatch.error_message || '');
+  if (/\[Attempt 3\/3|Attempt 3\/3 Failed/i.test(errText)) {
+    cleanPatch.status = 'failed';
+  }
+
   // STRICT IMMUTABILITY GUARD: If row is already 'submitted' or possesses authentic confirmation proof,
   // permanently refuse any downgrades to 'ready_for_review', 'failed', or 'applying'!
   if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
@@ -452,7 +458,8 @@ export async function getRemainingReadyForReviewCount() {
       .select('*', { count: 'exact', head: true })
       .in('status', ['ready_for_review', 'applying'])
       .eq('is_fully_answered', true)
-      .is('application_submitted_screenshot_url', null)
+      .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
+      .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
       .neq('status', 'submitted')
       .neq('status', 'completed')
       .neq('status', 'archived');
@@ -610,7 +617,7 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -635,7 +642,7 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -659,12 +666,11 @@ export async function claimNextTask(workerId) {
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
-        .not('error_message', 'ilike', '%[Attempt 3/3%')
-        .not('error_message', 'ilike', '%Attempt 3/3 Failed%');
+        .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%');
 
       const { data: retryCandidates3, error: r3Err } = await retryQuery3
         .order('updated_at', { ascending: true })

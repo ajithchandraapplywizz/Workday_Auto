@@ -912,7 +912,11 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
           const remaining = await getRemainingReadyForReviewCount();
           if (remaining > 0) {
             // Unprocessed or in-flight applications still exist — keep worker alive until every application is completed
-            await new Promise((r) => setTimeout(r, 2000));
+            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 20000) {
+              lastStandbyLogTime = Date.now();
+              console.log(`⏳ [SUBMITTER] Standing by — ${remaining} task(s) currently awaiting retry cooldown or being claimed across workers.`);
+            }
+            await new Promise((r) => setTimeout(r, 2500));
             continue;
           }
 
