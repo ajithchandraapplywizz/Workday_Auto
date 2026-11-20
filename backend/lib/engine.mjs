@@ -612,24 +612,6 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     }
 
     try {
-<<<<<<< HEAD
-      const pageTitle = await page.title().catch(() => '');
-      const dynamicFileName = buildDocumentFileName(profile, fileName, true, pageTitle);
-      console.log(`    📎 Uploading resume as "${dynamicFileName}" (source: ${fileName}, attempt ${attempt}/3)...`);
-      try {
-        const fileBuf = await readFile(absPath);
-        const mime = dynamicFileName.endsWith('.docx')
-          ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-          : dynamicFileName.endsWith('.doc')
-            ? 'application/msword'
-            : 'application/pdf';
-        await fileInput.setInputFiles({ name: dynamicFileName, mimeType: mime, buffer: fileBuf });
-      } catch (bufErr) {
-        // Fallback to absolute file path if buffer upload is rejected by Playwright
-        await fileInput.setInputFiles(absPath);
-      }
-      const ok = await waitForResumeUploadComplete(page, dynamicFileName) || await waitForResumeUploadComplete(page, fileName);
-=======
       console.log(`    📎 Uploading resume as "${uploadFileName}" (source: ${diskFileName}) (attempt ${attempt}/3)...`);
       const fileBuffer = readFileSync(absPath);
       await fileInput.setInputFiles({
@@ -638,7 +620,6 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
         buffer: fileBuffer,
       });
       const ok = await waitForResumeUploadComplete(page, uploadFileName);
->>>>>>> 8c2712e (all listed issues resolved)
       if (ok) {
         if (profile) profile._resumePath = absPath;
         return true;
