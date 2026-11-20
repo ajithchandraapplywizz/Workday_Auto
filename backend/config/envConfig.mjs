@@ -153,7 +153,6 @@ export function canExecuteWorkers(cliArgs = []) {
  * Local Development: Configurable via AUTO_START_ON_BOOT in .env.development (default: false).
  */
 export function shouldAutoStartOnBoot() {
-  if (isProduction()) return true;
   return process.env.AUTO_START_ON_BOOT === 'true';
 }
 

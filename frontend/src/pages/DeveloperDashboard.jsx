@@ -105,21 +105,8 @@ export default function DeveloperDashboard() {
   const [managerFilter, setManagerFilter] = useState('All');
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
-  const [botStatus, setBotStatus] = useState(() => {
-    try {
-      const cached = sessionStorage.getItem('workday_bot_status') || localStorage.getItem('workday_bot_status');
-      if (cached) return JSON.parse(cached);
-    } catch {}
-    return { isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false, isScanning: false };
-  });
-
-  // Keep local and session storage in sync for zero-flicker toggle rendering across reloads and mobile tabs
-  useEffect(() => {
-    try {
-      sessionStorage.setItem('workday_bot_status', JSON.stringify(botStatus));
-      localStorage.setItem('workday_bot_status', JSON.stringify(botStatus));
-    } catch {}
-  }, [botStatus]);
+  // Authoritative Single Source of Truth: Driven by Supabase bot_control across all devices & sessions
+  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false, isScanning: false });
 
   const syncStatus = useCallback(() => {
     fetchBotDaemonStatus().then((res) => {
@@ -206,8 +193,24 @@ export default function DeveloperDashboard() {
       ?.on(
         'postgres_changes',
         { event: '*', schema: 'public', table: 'bot_control' },
-        () => {
+        (payload) => {
           if (!isMounted) return;
+          const bc = payload.new;
+          if (bc) {
+            const isScanRunning = Boolean(bc.scan_status === 'running' || bc.scan_enabled === true);
+            const isSubmitRunning = Boolean(bc.submit_status === 'running' || bc.submit_enabled === true);
+            const isRunning = Boolean(bc.is_running && (isScanRunning || isSubmitRunning));
+            setBotStatus((prev) => ({
+              ...prev,
+              success: true,
+              isRunning,
+              isScanning: isScanRunning,
+              isSubmitting: isSubmitRunning,
+              stage: bc.stage || (isScanRunning && isSubmitRunning ? 'parallel' : isSubmitRunning ? 'submitting' : isScanRunning ? 'scanning' : 'idle'),
+              mode: bc.mode || 'idle',
+              botControl: bc,
+            }));
+          }
           syncStatusRef.current?.();
         }
       )
@@ -225,10 +228,10 @@ export default function DeveloperDashboard() {
         }
       });
 
-    // High-frequency polling across devices (1.8s) so toggle state syncs instantly
+    // High-frequency polling across devices (1s) so toggle state syncs instantly across mobile & desktop
     const interval = setInterval(() => {
       syncStatusRef.current?.();
-    }, 1800);
+    }, 1000);
 
     // Immediate multi-device & multi-tab fallback listeners
     const handleStorage = (e) => {

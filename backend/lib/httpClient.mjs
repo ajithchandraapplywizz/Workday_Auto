@@ -43,7 +43,8 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
       port: target.port || 443,
       path: `${target.pathname}${target.search}`,
       method,
-      family: 4,
+      autoSelectFamily: true,
+      autoSelectFamilyAttemptTimeout: 250,
       rejectUnauthorized,
       headers: {
         Accept: 'application/json',
