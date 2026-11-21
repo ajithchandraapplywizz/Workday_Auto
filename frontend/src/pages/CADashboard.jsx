@@ -103,26 +103,33 @@ export default function CADashboard() {
   const [selectedAppForDrawer, setSelectedAppForDrawer] = useState(null);
   const [dashboardScreenshot, setDashboardScreenshot] = useState(null);
 
-  // Monitor worker_status table live so CA can see real-time execution & stop at will
+  // Monitor bot_control & worker_status live so CA sees synchronized real-time execution across mobile & laptop
   useEffect(() => {
     let isMounted = true;
     async function checkWorkerStatus() {
       try {
-        const { data } = await supabase.from('worker_status').select('*');
+        const [workerRes, controlRes] = await Promise.all([
+          supabase.from('worker_status').select('*'),
+          supabase.from('bot_control').select('is_running, submit_status, scan_status, universal_status, stage').eq('id', 'primary').maybeSingle(),
+        ]);
         if (!isMounted) return;
-        if (data && data.length > 0) {
-          const anyActive = data.some(
-            (r) => (r.state === 'in_flight' || r.state === 'busy' || r.state === 'running')
-          );
-          setWorkerState(anyActive ? 'running' : 'stopped');
-        }
+        const bc = controlRes?.data;
+        const data = workerRes?.data || [];
+        const isDbRunning = Boolean(
+          bc?.is_running &&
+          (bc?.submit_status === 'running' || bc?.scan_status === 'running' || bc?.universal_status === 'running' || bc?.stage === 'submitting' || bc?.stage === 'scanning' || bc?.stage === 'parallel')
+        );
+        const anyActive = isDbRunning || (data.length > 0 && data.some(
+          (r) => (r.state === 'in_flight' || r.state === 'busy' || r.state === 'running')
+        ));
+        setWorkerState(anyActive ? 'running' : 'stopped');
       } catch {}
     }
     checkWorkerStatus();
     const interval = setInterval(() => {
       if (typeof document !== 'undefined' && document.hidden) return;
       checkWorkerStatus();
-    }, 12000);
+    }, 2000);
     return () => { isMounted = false; clearInterval(interval); };
   }, []);
 

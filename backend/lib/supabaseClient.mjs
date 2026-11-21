@@ -2072,8 +2072,8 @@ const memoryWorkerControls = {
 /**
  * Fetch all worker controls (scan and submit) synced with R11 state.
  */
-export async function getWorkerControls() {
-  const bc = await getBotControl().catch(() => null);
+export async function getWorkerControls(existingBc = null) {
+  const bc = existingBc || await getBotControl().catch(() => null);
   return {
     scan: {
       key: 'scan',

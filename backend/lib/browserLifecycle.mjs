@@ -2,7 +2,30 @@ import { exec } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
 export const browserLifecycleEvents = new EventEmitter();
-browserLifecycleEvents.setMaxListeners(100);
+browserLifecycleEvents.setMaxListeners(0);
+
+/**
+ * Cleanly waits for either a slot_released event or a timeout without leaking EventEmitters.
+ * Guarantees that the event listener is always removed if the timeout triggers first.
+ */
+export function waitForSlotReleaseOrTimeout(timeoutMs = 100) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const onRelease = () => {
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      resolve(true);
+    };
+    browserLifecycleEvents.once('slot_released', onRelease);
+    timer = setTimeout(() => {
+      timer = null;
+      browserLifecycleEvents.off('slot_released', onRelease);
+      resolve(false);
+    }, timeoutMs);
+  });
+}
 
 if (!process.env.MALLOC_ARENA_MAX) process.env.MALLOC_ARENA_MAX = '2';
 if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '64';

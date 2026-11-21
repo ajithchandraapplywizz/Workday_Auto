@@ -761,22 +761,31 @@ export default function DeveloperDashboard() {
     setIsTriggering(true);
     try {
       setTriggerToast({ type: 'info', text: '⚡ Dispatching 3-Worker Pipeline trigger (Scan & Resolve)...' });
+      setBotStatus((prev) => ({
+        ...prev,
+        isRunning: true,
+        isScanning: true,
+        state: prev.isSubmitting ? 'parallel' : 'scanning',
+        stage: prev.isSubmitting ? 'parallel' : 'scanning',
+        botControl: {
+          ...(prev?.botControl || {}),
+          is_running: true,
+          scan_status: 'running',
+          scan_enabled: true,
+          scan_stop_requested: false,
+          stage: prev.isSubmitting ? 'parallel' : 'scanning',
+        },
+      }));
       const res = await triggerAutonomousBot();
       if (res.success) {
         setTriggerToast({
           type: 'success',
-          text: '✓ Autonomous 3-Worker Pipeline Triggered! 3 dedicated workers are actively scanning links and pre-resolving questions.',
+          text: '✓ Autonomous 3-Worker Pipeline Triggered! Dedicated workers are actively scanning links and pre-resolving questions.',
         });
-        setBotStatus((prev) => ({
-          ...prev,
-          isRunning: true,
-          isScanning: true,
-          state: prev.isSubmitting ? 'submitting' : 'scanning',
-          stage: prev.isSubmitting ? 'submitting' : 'scanning',
-        }));
       } else {
         setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch signal') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Trigger error: ' + err.message });
     } finally {
@@ -796,6 +805,14 @@ export default function DeveloperDashboard() {
       isScanning: false,
       isRunning: prev.isSubmitting,
       state: prev.isSubmitting ? 'submitting' : 'stopped',
+      botControl: {
+        ...(prev?.botControl || {}),
+        scan_status: 'off',
+        scan_enabled: false,
+        scan_stop_requested: true,
+        is_running: prev.isSubmitting,
+        stage: prev.isSubmitting ? 'submitting' : 'idle',
+      },
     }));
     setWorkerPool((prev) => ({
       ...prev,
@@ -828,6 +845,7 @@ export default function DeveloperDashboard() {
       } else {
         setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop workers') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
     } finally {
@@ -842,23 +860,36 @@ export default function DeveloperDashboard() {
     setIsSubmitTriggering(true);
     try {
       setTriggerToast({ type: 'info', text: '⚡ Launching Universal Parallel Pipeline (Scanning & Submitting)...' });
+      setBotStatus((prev) => ({
+        ...prev,
+        isRunning: true,
+        isScanning: true,
+        isSubmitting: true,
+        isUniversalRunning: true,
+        state: 'parallel',
+        stage: 'parallel',
+        botControl: {
+          ...(prev?.botControl || {}),
+          is_running: true,
+          universal_status: 'running',
+          universal_enabled: true,
+          scan_status: 'running',
+          scan_enabled: true,
+          submit_status: 'running',
+          submit_enabled: true,
+          stage: 'parallel',
+        },
+      }));
       const res = await triggerAllParallelStage();
       if (res.success) {
         setTriggerToast({
           type: 'success',
           text: '✓ Universal Parallel Pipeline Triggered! Both Scanning and Submitting workers are running concurrently.',
         });
-        setBotStatus((prev) => ({
-          ...prev,
-          isRunning: true,
-          isScanning: true,
-          isSubmitting: true,
-          state: 'parallel',
-          stage: 'parallel',
-        }));
       } else {
         setTriggerToast({ type: 'error', text: 'Trigger error: ' + (res.error || 'Failed to dispatch parallel trigger') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Trigger error: ' + err.message });
     } finally {
@@ -872,24 +903,33 @@ export default function DeveloperDashboard() {
   const handleTriggerSubmissions = async () => {
     setIsSubmitTriggering(true);
     try {
-      setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across 3 dedicated workers...' });
+      setTriggerToast({ type: 'info', text: '🚀 Launching Submissions across dedicated workers...' });
+      setBotStatus((prev) => ({
+        ...prev,
+        isRunning: true,
+        isSubmitting: true,
+        state: prev.isScanning ? 'parallel' : 'submitting',
+        stage: prev.isScanning ? 'parallel' : 'submitting',
+        botControl: {
+          ...(prev?.botControl || {}),
+          is_running: true,
+          submit_status: 'running',
+          submit_enabled: true,
+          submit_stop_requested: false,
+          stage: prev.isScanning ? 'parallel' : 'submitting',
+        },
+      }));
+      setActiveBatchView('submitting');
       const res = await triggerSubmissionStage();
       if (res.success) {
         setTriggerToast({
           type: 'success',
           text: '✓ Submissions Pipeline Triggered! Submitting approved applications across dedicated workers.',
         });
-        setActiveBatchView('submitting');
-        setBotStatus((prev) => ({
-          ...prev,
-          isRunning: true,
-          isSubmitting: true,
-          state: 'submitting',
-          stage: 'submitting',
-        }));
       } else {
         setTriggerToast({ type: 'error', text: 'Submission trigger error: ' + (res.error || 'Failed to launch submissions') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Submission trigger error: ' + err.message });
     } finally {
@@ -910,29 +950,29 @@ export default function DeveloperDashboard() {
       isRunning: false,
       isScanning: false,
       isSubmitting: false,
+      isUniversalRunning: false,
       state: 'idle',
       stage: 'idle',
+      botControl: {
+        ...(prev?.botControl || {}),
+        is_running: false,
+        universal_status: 'off',
+        universal_enabled: false,
+        universal_stop_requested: true,
+        scan_status: 'off',
+        scan_enabled: false,
+        scan_stop_requested: true,
+        submit_status: 'off',
+        submit_enabled: false,
+        submit_stop_requested: true,
+        stage: 'idle',
+      },
     }));
     setWorkerPool((prev) => ({
       ...prev,
       inFlight: 0,
       scanningActive: 0,
       resolvingActive: 0,
-      submittingActive: 0,
-    }));
-
-    const stopEntry = {
-      id: 'stop-all-' + Date.now(),
-      ts: new Date().toISOString(),
-      step_index: 0,
-      message: '🛑 [STOPPED] All background workers TERMINATED immediately by user. Active browser contexts aborted and workers set to idle in database.',
-      level: 'warn',
-    };
-    setBatchLogs((prev) => ({
-      ...prev,
-      scanning: [stopEntry, ...(prev.scanning || [])],
-      resolving: [stopEntry, ...(prev.resolving || [])],
-      submitting: [stopEntry, ...(prev.submitting || [])],
     }));
 
     try {
@@ -942,9 +982,8 @@ export default function DeveloperDashboard() {
           type: 'success',
           text: '✓ All workers STOPPED immediately. All browser contexts closed and database status reset to idle.',
         });
-      } else {
-        setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop all workers') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
     } finally {
@@ -954,17 +993,26 @@ export default function DeveloperDashboard() {
     }
   };
 
-  // Handle hard stopping submission pipeline
+  // Handle stopping submissions pipeline
   const handleStopSubmissions = async () => {
     setIsSubmitTriggering(true);
-    setTriggerToast({ type: 'info', text: '🛑 Halting all submission workers and active browsers immediately...' });
-
-    // Immediately reflect stopped state in UI without waiting
+    setTriggerToast({ type: 'info', text: '🛑 Halting all submission workers immediately...' });
+    
+    // Immediately reflect stopped state in UI
     setBotStatus((prev) => ({
       ...prev,
       isSubmitting: false,
       isRunning: prev.isScanning,
-      state: prev.isScanning ? 'scanning' : 'stopped',
+      state: prev.isScanning ? 'scanning' : 'idle',
+      stage: prev.isScanning ? 'scanning' : 'idle',
+      botControl: {
+        ...(prev?.botControl || {}),
+        submit_status: 'off',
+        submit_enabled: false,
+        submit_stop_requested: true,
+        is_running: prev.isScanning,
+        stage: prev.isScanning ? 'scanning' : 'idle',
+      },
     }));
     setWorkerPool((prev) => ({
       ...prev,
@@ -995,6 +1043,7 @@ export default function DeveloperDashboard() {
       } else {
         setTriggerToast({ type: 'error', text: 'Stop error: ' + (res.error || 'Failed to stop submissions') });
       }
+      await syncStatusRef.current?.();
     } catch (err) {
       setTriggerToast({ type: 'error', text: 'Stop error: ' + err.message });
     } finally {
@@ -1081,7 +1130,7 @@ export default function DeveloperDashboard() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           {/* Universal Parallel Pipeline Trigger */}
-          {(isUniversalActive || isScanActive || isSubmitActive) ? (
+          {(isUniversalActive || (isScanActive && isSubmitActive)) ? (
             <button
               type="button"
               onClick={handleStopAllParallel}
@@ -1485,18 +1534,20 @@ export default function DeveloperDashboard() {
                 fontSize: '0.75rem',
                 fontWeight: 700,
                 letterSpacing: '0.03em',
-                background: backendPingStatus === 'connected' ? 'rgba(34, 197, 94, 0.15)' : 'rgba(239, 68, 68, 0.15)',
-                color: backendPingStatus === 'connected' ? '#4ade80' : '#f87171',
-                border: `1px solid ${backendPingStatus === 'connected' ? 'rgba(34, 197, 94, 0.3)' : 'rgba(239, 68, 68, 0.3)'}`,
+                background: (backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning) ? 'rgba(34, 197, 94, 0.15)' : 'rgba(148, 163, 184, 0.15)',
+                color: (backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning) ? '#4ade80' : '#94a3b8',
+                border: `1px solid ${(backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning) ? 'rgba(34, 197, 94, 0.3)' : 'rgba(148, 163, 184, 0.3)'}`,
               }}>
                 <span style={{
                   width: 8,
                   height: 8,
                   borderRadius: '50%',
-                  background: backendPingStatus === 'connected' ? '#22c55e' : '#ef4444',
-                  boxShadow: backendPingStatus === 'connected' ? '0 0 8px #22c55e' : '0 0 8px #ef4444',
+                  background: (backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning) ? '#22c55e' : '#94a3b8',
+                  boxShadow: (backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning) ? '0 0 8px #22c55e' : 'none',
                 }} />
-                {backendPingStatus === 'connected' ? 'LIVE BACKEND CONNECTED' : 'DAEMON OFFLINE / DETACHED'}
+                {(backendPingStatus === 'connected' || isAnyPipelineActive || botStatus.isRunning)
+                  ? (isAnyPipelineActive ? 'LIVE CLOUD CLUSTER RUNNING' : 'LIVE BACKEND CONNECTED')
+                  : 'DAEMON STANDBY (READY FOR CSV)'}
               </span>
               <span style={{ color: '#94a3b8', fontSize: '0.8rem' }}>
                 Backend Target: <strong style={{ color: '#e2e8f0', fontFamily: 'monospace' }}>{backendUrl || '(Direct Relative / Same Domain)'}</strong>

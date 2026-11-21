@@ -182,3 +182,17 @@ test('browserLifecycleEvents emits slot_released on releaseBrowserSlot', async (
     browserLifecycleEvents.off('slot_released', handler);
   }
 });
+
+test('waitForSlotReleaseOrTimeout leaves 0 active listeners after multiple calls (zero memory leak)', async () => {
+  const { browserLifecycleEvents, waitForSlotReleaseOrTimeout } = await import('../lib/browserLifecycle.mjs');
+
+  const initialListeners = browserLifecycleEvents.listenerCount('slot_released');
+
+  // Perform 120 rapid timeout cycles (exceeding standard 100 listener leak threshold)
+  for (let i = 0; i < 120; i++) {
+    await waitForSlotReleaseOrTimeout(1);
+  }
+
+  const finalListeners = browserLifecycleEvents.listenerCount('slot_released');
+  assert.equal(finalListeners, initialListeners, 'Must have zero accumulated listeners after 120 cycles (no memory leak)');
+});

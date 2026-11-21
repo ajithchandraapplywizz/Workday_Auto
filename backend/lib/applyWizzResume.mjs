@@ -113,6 +113,90 @@ function downloadBinary(url, destPath, { rejectUnauthorized = true } = {}) {
 }
 
 /**
+ * Verifies whether extracted resume text authentically belongs to the candidate.
+ * Multi-factor verification:
+ * 1. Email match (candidate company or personal email in resume text)
+ * 2. Phone match (candidate mobile/phone number digits in resume text)
+ * 3. Name tokens match (at least one significant name token, e.g. first, middle, or last name, in text)
+ * 4. Full name or last name substring match
+ */
+export function isResumeAuthenticForCandidate(resumeText, profile = {}) {
+  if (!resumeText || typeof resumeText !== 'string' || resumeText.length < 50) {
+    return false;
+  }
+  const txt = resumeText.toLowerCase();
+
+  // Factor 1: Email Match (company_email, personal_email, or email username prefix)
+  const candidateEmail = String(
+    profile.personal?.email
+    || profile._dbClient?.company_email
+    || profile._dbClient?.personal_email
+    || ''
+  ).trim().toLowerCase();
+  if (candidateEmail && candidateEmail.includes('@')) {
+    const emailPrefix = candidateEmail.split('@')[0];
+    if (txt.includes(candidateEmail) || (emailPrefix.length >= 4 && txt.includes(emailPrefix))) {
+      return true;
+    }
+  }
+
+  // Factor 2: Phone Number Match (last 7 or 10 digits)
+  const candidatePhone = String(
+    profile.personal?.phone_number
+    || profile.personal?.mobile_number
+    || profile._dbClient?.callable_phone
+    || profile._dbClient?.mobile_number
+    || ''
+  ).replace(/\D+/g, '');
+  if (candidatePhone.length >= 7) {
+    const last7 = candidatePhone.slice(-7);
+    const cleanedDigits = txt.replace(/\D+/g, '');
+    if (cleanedDigits.includes(last7)) {
+      return true;
+    }
+  }
+
+  // Factor 3: Name Tokens Match (checks first, middle, last name tokens independently)
+  const rawFullName = String(
+    profile.client_name
+    || profile._clientName
+    || profile._dbClient?.client_name
+    || [profile.personal?.first_name, profile.personal?.last_name].filter(Boolean).join(' ')
+    || ''
+  ).trim().toLowerCase();
+
+  const candLastName = String(profile.personal?.last_name || profile.lastName || '').trim().toLowerCase();
+  const candFirstName = String(profile.personal?.first_name || profile.firstName || '').trim().toLowerCase();
+
+  const tokens = new Set();
+  for (const part of rawFullName.split(/\s+/)) {
+    const clean = part.replace(/[^a-z]/g, '');
+    if (clean.length >= 3) tokens.add(clean);
+  }
+  for (const part of candLastName.split(/\s+/)) {
+    const clean = part.replace(/[^a-z]/g, '');
+    if (clean.length >= 3) tokens.add(clean);
+  }
+  for (const part of candFirstName.split(/\s+/)) {
+    const clean = part.replace(/[^a-z]/g, '');
+    if (clean.length >= 3) tokens.add(clean);
+  }
+
+  if (tokens.size > 0) {
+    for (const token of tokens) {
+      if (txt.includes(token)) {
+        return true;
+      }
+    }
+    // None of the name tokens, email, or phone matched in resume text!
+    return false;
+  }
+
+  // If no name facts available on profile, accept existing file
+  return true;
+}
+
+/**
  * Download resume PDF from Apply Wizz when URL is on file; cache under data/client-resumes/.
  * @param {object} profile
  * @returns {Promise<string|null>} absolute path to PDF
@@ -136,21 +220,20 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   if (existsSync(cached)) {
     try {
       if (statSync(cached).size > 2048) {
-        // Verify authenticity against candidate's name to avoid stale cross-contamination
-        const candLastName = String(profile.personal?.last_name || profile.lastName || profile.client_name?.split(' ').pop() || '').trim().toLowerCase();
+        // Multi-factor verification against candidate's name, email, and phone to avoid cross-contamination
         let valid = true;
-        if (candLastName && candLastName.length > 2) {
-          try {
-            const { loadResumeText } = await import('./resumeParser.mjs');
-            const txt = (await loadResumeText(cached)) || '';
-            if (txt && !txt.toLowerCase().includes(candLastName)) {
-              console.warn(`  ⚠️ Cached resume at ${basename(cached)} did NOT contain candidate name "${candLastName}" — purging corrupted cache.`);
-              const { unlink } = await import('fs/promises');
-              await unlink(cached).catch(() => {});
-              valid = false;
-            }
-          } catch {}
-        }
+        try {
+          const { loadResumeText } = await import('./resumeParser.mjs');
+          const txt = (await loadResumeText(cached)) || '';
+          if (txt && !isResumeAuthenticForCandidate(txt, profile)) {
+            const candName = String(profile.client_name || profile.personal?.last_name || profile.lastName || '').trim();
+            console.warn(`  ⚠️ Cached resume at ${basename(cached)} did NOT match candidate identity "${candName}" — purging corrupted cache.`);
+            const { unlink } = await import('fs/promises');
+            await unlink(cached).catch(() => {});
+            valid = false;
+          }
+        } catch {}
+
         if (valid && existsSync(cached)) {
           profile._resumePath = cached;
           profile._resumeDownloadedForApplication = true;

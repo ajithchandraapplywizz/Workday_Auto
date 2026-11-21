@@ -7,6 +7,23 @@
 
 import https from 'node:https';
 
+const defaultKeepAliveAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  keepAliveMsecs: 15000,
+  timeout: 30000,
+});
+
+const insecureKeepAliveAgent = new https.Agent({
+  keepAlive: true,
+  maxSockets: 64,
+  maxFreeSockets: 16,
+  keepAliveMsecs: 15000,
+  timeout: 30000,
+  rejectUnauthorized: false,
+});
+
 /**
  * @param {Error} err
  * @returns {string}
@@ -43,6 +60,7 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
       port: target.port || 443,
       path: `${target.pathname}${target.search}`,
       method,
+      agent: rejectUnauthorized ? defaultKeepAliveAgent : insecureKeepAliveAgent,
       autoSelectFamily: true,
       autoSelectFamilyAttemptTimeout: 250,
       rejectUnauthorized,

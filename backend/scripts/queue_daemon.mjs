@@ -55,6 +55,7 @@ import {
   setSubmitStop,
   isSubmitStopRequested,
   browserLifecycleEvents,
+  waitForSlotReleaseOrTimeout,
 } from '../lib/browserLifecycle.mjs';
 import { setClusterStop } from '../lib/clusterBatchRunner.mjs';
 import { createClient } from '@supabase/supabase-js';
@@ -908,6 +909,16 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
             continue;
           }
 
+          // In local development, if worker execution is disabled, sleep cleanly without tight spin-loops
+          if (!canExecuteWorkers()) {
+            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 30000) {
+              lastStandbyLogTime = Date.now();
+              console.log(`🛡️ [DAEMON] Local worker execution paused (canExecuteWorkers = false). Standing by without claiming cloud tasks...`);
+            }
+            await new Promise((r) => setTimeout(r, 4000));
+            continue;
+          }
+
         const claimedTask = await claimNextTask(workerId);
         if (!claimedTask) {
           activeSubmittingWorkers.delete(workerId);
@@ -918,15 +929,9 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
             } catch {}
           }
 
-          // 1. If sibling workers in this container are still active, retry quickly with event wakeup (60ms max)
+          // 1. If sibling workers in this container are still active, retry quickly with event wakeup (up to 300ms max)
           if (activeSubmittingWorkers.size > 0) {
-            await new Promise((resolve) => {
-              const t = setTimeout(resolve, 60);
-              browserLifecycleEvents.once('slot_released', () => {
-                clearTimeout(t);
-                resolve();
-              });
-            });
+            await waitForSlotReleaseOrTimeout(300);
             continue;
           }
 
@@ -939,13 +944,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
               lastStandbyLogTime = Date.now();
               console.log(`⏳ [SUBMITTER] Standing by — ${remaining === -1 ? 'checking queue' : remaining} task(s) currently awaiting retry cooldown or being claimed across workers.`);
             }
-            await new Promise((resolve) => {
-              const t = setTimeout(resolve, 80);
-              browserLifecycleEvents.once('slot_released', () => {
-                clearTimeout(t);
-                resolve();
-              });
-            });
+            await new Promise((r) => setTimeout(r, 2000));
             continue;
           }
 
@@ -969,7 +968,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
                 lastStandbyLogTime = Date.now();
                 console.log(`⏳ [SUBMISSION WORKER] Stage 1 is actively scanning links (${queueCheck.pendingCount || 'active'} pending). Standing by for newly resolved applications...`);
               }
-              await new Promise((r) => setTimeout(r, 400));
+              await new Promise((r) => setTimeout(r, 1500));
               continue;
             }
           }
@@ -989,13 +988,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
               lastStandbyLogTime = Date.now();
               console.log(`⏳ [SUBMISSION WORKER] ${workerId}: Standing by for new ready_for_review applications (Submit switch is ON). Checking queue...`);
             }
-            await new Promise((resolve) => {
-              const t = setTimeout(resolve, 350);
-              browserLifecycleEvents.once('slot_released', () => {
-                clearTimeout(t);
-                resolve();
-              });
-            });
+            await new Promise((r) => setTimeout(r, 2500));
             continue;
           }
 
@@ -2703,6 +2696,12 @@ export async function initOnStartup() {
       .catch((e) => console.warn('[DAEMON DAILY SYNC] Error:', e.message));
   }, 4 * 60 * 60 * 1000);
 
+  // Diagnostic heartbeat monitor: logs memory usage every 60s
+  setInterval(() => {
+    const m = process.memoryUsage();
+    console.log(`[DAEMON HEARTBEAT] Heap: ${Math.round(m.heapUsed / 1024 / 1024)}MB / ${Math.round(m.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(m.rss / 1024 / 1024)}MB | Uptime: ${Math.round(process.uptime())}s`);
+  }, 60000);
+
   // ── Universal Cloud Bridge: Listen to Supabase signals (bot_control + worker_status fallback) ──
   let warnedMissingBotControl = false;
   let cloudBridgeTimer = null;
@@ -2714,10 +2713,8 @@ export async function initOnStartup() {
         cloudBridgeTimer = setTimeout(pollCloudBridge, 1000);
         return;
       }
-      const [bc, wc] = await Promise.all([
-        getBotControl().catch(() => null),
-        getWorkerControls().catch(() => null),
-      ]);
+      const bc = await getBotControl().catch(() => null);
+      const wc = await getWorkerControls(bc).catch(() => null);
 
       const scanCtrl = wc?.scan;
       const submitCtrl = wc?.submit;
@@ -2892,8 +2889,14 @@ export async function initOnStartup() {
 
       // Adaptive low-power standby:
       // When jobs or workers are active or running, poll fast at 800ms.
-      // When completely idle and stopped, poll at 2000ms to save 60% idle CPU and DB calls.
-      nextDelay = 500;
+      // When completely idle and stopped, poll at 2500ms to save 80% idle CPU and DB calls.
+      const isSystemActive = isPoolRunning ||
+        scanStatus === 'running' ||
+        submitStatus === 'running' ||
+        activeSubmittingWorkers.size > 0 ||
+        isScanLoopExecuting ||
+        isSubmitLoopExecuting;
+      nextDelay = isSystemActive ? 800 : 2500;
     } catch {
       // Continue polling silently
       nextDelay = 1000;

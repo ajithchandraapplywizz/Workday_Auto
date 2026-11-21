@@ -1426,20 +1426,26 @@ export function getBackendBaseUrls() {
     // If dashboard is accessed on laptop (localhost) or mobile/LAN IP (e.g. 172.16.0.84),
     // automatically attach to the backend daemon running on the paired dynamic port
     const host = window.location.hostname || 'localhost';
-    if (window.location.port) {
-      const p = Number(window.location.port);
-      if (p > 1000) {
-        add(`http://${host}:${p - 1}`);
-        add(`http://localhost:${p - 1}`);
+    const isHttps = window.location.protocol === 'https:';
+    if (!isHttps) {
+      if (window.location.port) {
+        const p = Number(window.location.port);
+        if (p > 1000) {
+          add(`http://${host}:${p - 1}`);
+          add(`http://localhost:${p - 1}`);
+        }
       }
+      // 3. Active dynamic port and local ports (only probe unencrypted http on local http hosts)
+      add(`http://${host}:63496`);
+      add(`http://localhost:63496`);
+      add(`http://${host}:3001`);
+      add(`http://${host}:3002`);
+      add(`http://localhost:3001`);
+      add(`http://localhost:3002`);
+    } else {
+      // In production HTTPS, use same-origin relative API to avoid Mixed Content browser blocks
+      add(window.location.origin);
     }
-    // 3. Active dynamic port and local ports
-    add(`http://${host}:63496`);
-    add(`http://localhost:63496`);
-    add(`http://${host}:3001`);
-    add(`http://${host}:3002`);
-    add(`http://localhost:3001`);
-    add(`http://localhost:3002`);
   }
   if (typeof import.meta !== 'undefined' && import.meta.env) {
     add(import.meta.env.VITE_BACKEND_URL);
@@ -3549,30 +3555,32 @@ export async function fetchBotDaemonStatus() {
       botControl?.last_action_requested === 'stop' ||
       botControl?.last_action_requested === 'stop_all' ||
       botControl?.last_action_requested === 'stop_pipeline' ||
-      (botControl && botControl.is_running === false && botControl.scan_status !== 'running' && botControl.submit_status !== 'running')
+      (botControl && botControl.is_running === false && botControl.scan_status !== 'running' && botControl.submit_status !== 'running' && botControl.universal_status !== 'running')
     );
 
-    // Single source of truth from bot_control and active workers
-    const isScanning = !isGlobalStopped && !isScanExplicitlyStopped && Boolean(
-      botControl?.scan_status === 'running' ||
-      (botControl?.scan_enabled === true && botControl?.is_running) ||
-      (botControl?.is_running && (hasActiveScanWorkers || scannerApiRunning || botControl?.stage === 'scanning' || botControl?.stage === 'parallel'))
-    );
-
-    const isSubmitting = !isGlobalStopped && !isSubmitExplicitlyStopped && Boolean(
-      botControl?.submit_status === 'running' ||
-      (botControl?.submit_enabled === true && botControl?.is_running) ||
-      (botControl?.is_running && (hasActiveSubmitWorkers || submitterApiRunning || botControl?.stage === 'submitting' || botControl?.stage === 'parallel'))
-    );
-
+    // Cloud-Authoritative Single Source of Truth: Unified across Mobile & Laptop
     const isUniversalRunning = !isGlobalStopped && Boolean(
       botControl?.universal_status === 'running' ||
       botControl?.universal_enabled === true ||
       (botControl?.stage === 'parallel' && botControl?.is_running) ||
-      (isScanning && isSubmitting)
+      (botControl?.scan_status === 'running' && botControl?.submit_status === 'running')
     );
 
-    const isRunning = !isGlobalStopped && (isScanning || isSubmitting || isUniversalRunning || Boolean(botControl?.is_running));
+    const isScanning = !isGlobalStopped && !isScanExplicitlyStopped && Boolean(
+      isUniversalRunning ||
+      botControl?.scan_status === 'running' ||
+      botControl?.scan_enabled === true ||
+      (botControl?.is_running && (botControl?.stage === 'scanning' || botControl?.stage === 'parallel' || hasActiveScanWorkers || scannerApiRunning))
+    );
+
+    const isSubmitting = !isGlobalStopped && !isSubmitExplicitlyStopped && Boolean(
+      isUniversalRunning ||
+      botControl?.submit_status === 'running' ||
+      botControl?.submit_enabled === true ||
+      (botControl?.is_running && (botControl?.stage === 'submitting' || botControl?.stage === 'parallel' || hasActiveSubmitWorkers || submitterApiRunning))
+    );
+
+    const isRunning = !isGlobalStopped && (isUniversalRunning || isScanning || isSubmitting || Boolean(botControl?.is_running));
     let currentStage = 'idle';
     if (isScanning && isSubmitting) currentStage = 'parallel';
     else if (isSubmitting) currentStage = 'submitting';
