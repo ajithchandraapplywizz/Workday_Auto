@@ -197,7 +197,7 @@ function parseHourlyMid(range = '') {
   return '';
 }
 
-function parseAddress(fullAddress = '') {
+export function parseAddress(fullAddress = '') {
   const parts = String(fullAddress || '').split(',').map((p) => p.trim()).filter(Boolean);
   if (!parts.length) {
     return {
@@ -243,14 +243,22 @@ function parseAddress(fullAddress = '') {
     }
   }
 
+  // If next element is a County (e.g. 'Johnson County'), do not confuse with City
+  if (list.length > 0 && /county\b/i.test(list[list.length - 1])) {
+    list.pop();
+  }
+
   if (list.length > 0) {
     city = list.pop();
   }
 
   if (list.length >= 2 && /^\d+[a-zA-Z0-9\-\/]*$/.test(list[0])) {
     address_line1 = `${list[0]} ${list[1]}`;
+    if (list.length > 2) {
+      address_line1 += ', ' + list.slice(2).join(', ');
+    }
   } else if (list.length > 0) {
-    address_line1 = list[0];
+    address_line1 = list.join(', ');
   }
 
   return {
@@ -791,6 +799,10 @@ export function buildResumeAnswerEntries(parsed = {}) {
   add('resume work experience location', experience.location || experience.city);
   add('resume work experience from', experience.from_date);
   add('resume work experience to', experience.to_date);
+  if (experience.description) {
+    add('role description', experience.description, 'textarea');
+    add('resume work experience description', experience.description, 'textarea');
+  }
   if (experience.currently_working != null) {
     add('resume work experience currently working', experience.currently_working ? 'Yes' : 'No', 'checkbox');
   }
@@ -1102,15 +1114,23 @@ export async function hydrateProfileFromApplyWizz(profile = {}, opts = {}) {
       profile.experience = { ...(profile.experience || {}), ...parsed.experience };
     }
     // Normalize existing phone (strip non-digits, remove US country code prefix)
-    if (profile.personal?.phone) profile.personal.phone = String(profile.personal.phone).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
-    // If API did not provide a phone number, attempt to extract one from resume text
-    if (!profile.personal?.phone && profile._resumeText) {
+    if (profile.personal?.phone) {
+      const d = String(profile.personal.phone).replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+      profile.personal.phone = (d.length >= 7 && d !== '5102662606') ? d : '';
+    }
+    // If API did not provide a valid phone number, extract authentic number from resume text
+    const curDigits = String(profile.personal?.phone || '').replace(/\D/g, '');
+    if ((!curDigits || curDigits.length < 7 || curDigits === '5102662606') && profile._resumeText) {
       const { inferAnswerFromResume } = await import('./resumeParser.mjs');
-      const phoneFromResume = inferAnswerFromResume('phone number', profile._resumeText, {});
-      if (phoneFromResume) {
+      const { extractContactFromResumeText } = await import('./clientContact.mjs');
+      const contact = extractContactFromResumeText(profile._resumeText);
+      const phoneFromResume = contact?.phone || inferAnswerFromResume('phone number', profile._resumeText, {});
+      const cleanPhone = String(phoneFromResume || '').replace(/\D/g, '');
+      if (cleanPhone.length >= 7 && cleanPhone !== '5102662606') {
         profile.personal = profile.personal || {};
-        profile.personal.phone = phoneFromResume;
-        console.log(`  📞 Phone extracted from resume for ${profile._applyWizzId}: ${phoneFromResume}`);
+        profile.personal.phone = cleanPhone.slice(-10);
+        profile.personal.mobile_number = profile.personal.phone;
+        console.log(`  📞 Phone extracted from authentic resume for ${profile._applyWizzId}: ${profile.personal.phone}`);
       }
     }
     if (isSupabaseConfigured() && opts?.dryRun !== true) {

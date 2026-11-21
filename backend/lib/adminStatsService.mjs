@@ -243,11 +243,13 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
 
   const windowTasks = windowTasksRes.data || [];
   let submitted = 0;
+  let already_applied = 0;
   let failed = 0;
 
   for (const t of windowTasks) {
-    if (t.status === 'submitted' || t.status === 'already_applied') submitted++;
-    if (t.status === 'failed') failed++;
+    if (t.status === 'submitted') submitted++;
+    else if (t.status === 'already_applied') already_applied++;
+    else if (t.status === 'failed') failed++;
   }
 
   let pooled0 = 0;
@@ -328,7 +330,9 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
   };
 
   return {
-    submitted,
+    submitted: submitted + already_applied,
+    submitted_only: submitted,
+    already_applied,
     failed,
     running,
     queued,
@@ -352,6 +356,8 @@ export async function handleAdminStatsRequest(req, res, queryParams) {
 
     const responsePayload = {
       submitted: subStats.submitted,
+      submitted_only: subStats.submitted_only ?? subStats.submitted,
+      already_applied: subStats.already_applied ?? 0,
       failed: subStats.failed,
       running: subStats.running,
       queued: subStats.queued,

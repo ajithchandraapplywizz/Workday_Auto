@@ -244,7 +244,7 @@ function deterministicSpecial(field, profile) {
   }
 
   if (intent === 'identity_phone' || isPhoneRelatedField(label, field) || /phone|mobile|tel\b/i.test(label)) {
-    const raw = profile?.personal?.phone
+    let raw = profile?.personal?.phone
       || profile?.personal?.mobile_number
       || profile?.phone
       || profile?._dbClient?.mobile_number
@@ -252,10 +252,18 @@ function deterministicSpecial(field, profile) {
       || profile?._applyWizzClientContext?.additional_information?.primary_phone
       || profile?._applyWizzClientContext?.client?.callable_phone
       || profile?._applyWizzClientContext?.client?.phone
-      || '5102662606';
-    const digits = String(raw).replace(/\D/g, '').slice(-10);
-    const phone = digits.length >= 7 ? digits : '5102662606';
-    return finish(field, 'identity_phone', phone, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
+      || '';
+    let digits = String(raw).replace(/\D/g, '').slice(-10);
+    if ((!digits || digits.length < 7) && profile._resumeText) {
+      const match = String(profile._resumeText).match(/(?:\+?1[-.\s]?)?\(?([2-9]\d{2})\)?[-.\s]?(\d{3})[-.\s]?(\d{4})/);
+      if (match) {
+        digits = `${match[1]}${match[2]}${match[3]}`;
+      }
+    }
+    if (!digits || digits.length < 7) {
+      digits = '5102662606';
+    }
+    return finish(field, 'identity_phone', digits, SOURCE.APPLYWIZZ, REASON.EXPLICIT_PROFILE_MATCH, 0.99);
   }
 
   if (intent === 'commute_ability') {

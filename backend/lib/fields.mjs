@@ -190,6 +190,12 @@ export async function repairBrokenLabelForAttributes(page) {
 
 export async function findField(page, entry) {
   const { selector, id, name, label, automationId } = entry;
+  // STRICT NO-TOUCH POLICY: Country Phone Code is auto-bound to Country selection at top
+  const isCountryCode = /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(entry.label || '')
+    || /countryphonecode|country-phone-code/i.test(entry.automationId || entry.id || '');
+  if (isCountryCode) {
+    return null;
+  }
   await repairBrokenLabelForAttributes(page).catch(() => {});
   const strategies = [
     // 1. data-automation-id (Workday highest-priority locator)
@@ -267,7 +273,23 @@ export async function findField(page, entry) {
   for (const strategy of strategies) {
     try {
       const el = await strategy();
-      if (el) return await resolveEditableControl(el);
+      if (el) {
+        const resolved = await resolveEditableControl(el);
+        if (resolved) {
+          const isCountryElement = await resolved.evaluate((node) => {
+            const blob = `${node.id || ''} ${node.name || ''} ${node.getAttribute('data-automation-id') || ''} ${node.getAttribute('aria-label') || ''} ${node.getAttribute('placeholder') || ''}`.toLowerCase();
+            if (blob.includes('countryphonecode') || blob.includes('country-phone-code') || (blob.includes('country') && blob.includes('code'))) return true;
+            const parent = node.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || node.parentElement;
+            const parentText = (parent?.textContent || '').toLowerCase();
+            return /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(parentText);
+          }).catch(() => false);
+          if (isCountryElement) {
+            console.log(`    ⏭️ [No-Touch Country Code Policy] findField rejected country phone code control for "${label}".`);
+            continue;
+          }
+        }
+        return resolved;
+      }
     } catch { /* try next */ }
   }
   return null;
@@ -645,7 +667,7 @@ export async function typeAndClickOption(page, fieldLoc, searchText) {
       const q = String(n || '').toLowerCase();
       return Array.from(document.querySelectorAll('[role="option"], [data-automation-id="promptOption"], [role="treeitem"]'))
         .some((el) => (el.textContent || '').toLowerCase().includes(q) && (el.offsetParent !== null || el.getClientRects().length > 0));
-    }, needle, { timeout: 1500 });
+    }, needle, { timeout: 600 });
   } catch { /* list may still be open */ }
 
   let selected = await clickVisiblePromptOption(page, [needle]);
@@ -655,7 +677,7 @@ export async function typeAndClickOption(page, fieldLoc, searchText) {
     const opt = page.locator('[role="option"], [data-automation-id="promptOption"], [role="treeitem"]')
       .filter({ hasText: re })
       .first();
-    if (await opt.isVisible({ timeout: 1500 }).catch(() => false)) {
+    if (await opt.isVisible({ timeout: 600 }).catch(() => false)) {
       selected = (await opt.innerText().catch(() => needle)).replace(/\s+/g, ' ').trim() || needle;
       await opt.click({ force: true }).catch(() => opt.evaluate((el) => el.click()));
     } else {

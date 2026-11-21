@@ -48,7 +48,7 @@ export const FIELD_MAP = [
   [/^(full\s*)?name$/i, 'personal.full_name'],  // resolved as first + last
   [/date\s*of\s*birth|birth\s*date|\bdob\b|birthday/i, 'personal.date_of_birth'],
   [/^email/i, 'personal.email'],
-  [/phone\s*device\s*type/i, '_static.Mobile'],
+  [/phone\s*device\s*type/i, 'personal.phone_device_type'],
   [/are\s*you\s*bilingual\?/i, '_static.No'],
   [/do\s*you\s*have\s*any\s*relatives\s*that\s*are\s*currently\s*employed\s*by\s*abc\s*fitness\?/i, '_static.No'],
   [/are\s*you\s*currently\s*or\s*have\s*you\s*ever\s*worked\s*at\s*an\s*abc\s*customer\s*site\?/i, '_static.No'],
@@ -69,13 +69,13 @@ export const FIELD_MAP = [
   [/do\s*you\s*possess\s*a\s*bachelor['’]?s\s*degree\s*or\s*higher/i, '_static.Yes'],
   [/do\s*you\s*have\s*a\s*minimum\s*of\s*ten\s*\(10\)\s*years.*sourcing.*procurement.*logistics.*supply\s*chain.*engineering.*manufacturing/i, '_static.Yes'],
   [/do\s*you\s*have\s*experience\s*in\s*procurement.*molding\s*suppliers/i, '_static.Yes'],
-  [/please\s*select\s*your\s*sex|^sex$/i, '_static.Male'],
-  [/^gender$|^sex$/i, 'eeo.gender'],
+  [/please\s*select\s*your\s*gender|^gender$/i, 'eeo.gender'],
+  [/please\s*select\s*your\s*sex|^sex$/i, 'eeo.gender'],
   [/hispanic\s*or\s*latino|^hispanic$/i, 'eeo.hispanic_latino'],
   [/race\/ethnicity|^race ethnicity$|^race$|^ethnicity$/i, 'eeo.race'],
   [/^veteran status$/i, 'eeo.veteran_status'],
-  [/please\s*select\s*your\s*race-ethnicity/i, '_static.Asian \(United States of America\)'],
-  [/please\s*indicate\s*whether\s*you\s*are\s*in\s*one\s*or\s*more\s*of\s*the\s*protected\s*veteran\s*categories/i, '_static.I am not a protected veteran.'],
+  [/please\s*select\s*your\s*race-ethnicity/i, 'eeo.race'],
+  [/please\s*indicate\s*whether\s*you\s*are\s*in\s*one\s*or\s*more\s*of\s*the\s*protected\s*veteran\s*categories/i, 'eeo.veteran_status'],
   [/i confirm that i understand and agree.*privacy statement/i, '_static.Yes'],
   [/yes,\s*i\s*have\s*read\s*and\s*consent\s*to\s*the\s*terms\s*and\s*conditions/i, '_static.Yes'],
   [/i\s*certify\s*that\s*i\s*have\s*read.*foregoing\s*statement/i, '_static.Yes'],
@@ -123,14 +123,14 @@ export const FIELD_MAP = [
   [/work\s*types?|employment\s*types?|what.*schedule|shift\s*preference|available\s*for|^full[-\s]?time$/i, '_static.Full-time'],
 
   // EEO & Disclosures
-  [/please\s*select\s*your\s*gender/i, '_static.Male'],
-  [/please\s*select\s*your\s*sex/i, '_static.Male'],
+  [/please\s*select\s*your\s*gender/i, 'eeo.gender'],
+  [/please\s*select\s*your\s*sex/i, 'eeo.gender'],
   [/please\s*select\s*your\s*race-ethnicity/i, 'eeo.race'],
   [/ethnicity\s*single\s*selection/i, 'eeo.race'],
   [/yes,\s*i\s*have\s*read\s*and\s*consent\s*to\s*the\s*terms\s*and\s*conditions/i, '_static.Yes'],
-  [/please\s*select\s*yes\s*if\s*hispanic/i, '_static.No'],
+  [/please\s*select\s*yes\s*if\s*hispanic/i, 'eeo.hispanic_latino'],
   [/minimum\s*educational\s*requirements/i, '_static.Yes'],
-  [/highest\s*level\s*of\s*education\s*completed/i, '_static.Bachelor\'s Degree'],
+  [/highest\s*level\s*of\s*education\s*completed/i, 'education.degree'],
   [/please\s*select\s*the\s*veteran\s*status\s*which\s*most\s*accurately/i, 'eeo.veteran_status'],
   [/please\s*select\s*the\s*race\s*which\s*most\s*accurately/i, 'eeo.race'],
   [/^gender\s*$/i, 'eeo.gender'],
@@ -231,6 +231,7 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
         p.last_name = p.last_name || dbClient.last_name || dbClient.client_name?.split(' ').slice(1).join(' ') || '';
         p.full_name = p.full_name || dbClient.client_name || [p.first_name, p.last_name].filter(Boolean).join(' ');
         p.email = p.email || dbClient.company_email || dbClient.email || '';
+        p.company_email = dbClient.company_email || p.company_email || '';
         p.phone = p.phone || dbClient.mobile_number || dbClient.phone || '';
         p.mobile_number = p.mobile_number || dbClient.mobile_number || '';
         p.address_line1 = p.address_line1 || dbClient.address_line1 || dbClient.address || '';
@@ -238,6 +239,22 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
         p.state = p.state || dbClient.state || '';
         p.postal_code = p.postal_code || dbClient.postal_code || dbClient.zip || '';
         p.date_of_birth = p.date_of_birth || dbClient.date_of_birth || dbClient.dob || '';
+
+        // Guard against dummy names (e.g. 'Tsy Tsy' or 'Tsy')
+        const isDummyName = !p.first_name || p.first_name.toLowerCase() === p.last_name.toLowerCase() || p.first_name.length <= 3;
+        if (isDummyName) {
+          const { deriveNameFromCompanyEmail, deriveNameFromResumeFilename } = await import('./personName.mjs');
+          const rawResumeUrl = dbClient.raw_profile_json?.additional_information?.resume_url || dbClient.resume_url;
+          const fromResume = deriveNameFromResumeFilename(rawResumeUrl);
+          const fromEmail = deriveNameFromCompanyEmail(p.email || dbClient.company_email);
+          const legit = fromResume || fromEmail;
+          if (legit) {
+            p.first_name = legit.first_name;
+            p.last_name = legit.last_name;
+            p.full_name = legit.full_name;
+            console.log(`  🛡️ [IDENTITY GUARD] Sanitized candidate identity for ${cleanAwl}: "${legit.full_name}" (derived from ${fromResume ? 'resume' : 'company email'})`);
+          }
+        }
 
         const exp = profile.experience = profile.experience || {};
         exp.current_company = exp.current_company || dbClient.latest_company || dbClient.company || '';
@@ -254,12 +271,16 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
         edu.to_year = edu.to_year || dbClient.graduation_year || '';
         edu.gpa = edu.gpa || dbClient.gpa || '';
 
+        const raw = typeof dbClient.raw_profile_json === 'string' ? JSON.parse(dbClient.raw_profile_json) : (dbClient.raw_profile_json || {});
+        const rawInfo = raw?.additional_information || {};
+
         const eeo = profile.eeo = profile.eeo || {};
-        eeo.gender = eeo.gender || dbClient.gender || '';
-        eeo.race = eeo.race || dbClient.race || 'Asian';
-        eeo.veteran_status = eeo.veteran_status || dbClient.veteran_status || 'I am not a protected veteran';
-        eeo.disability_status = eeo.disability_status || dbClient.disability_status || 'No, I do not have a disability';
-        eeo.hispanic_latino = eeo.hispanic_latino || dbClient.hispanic_latino || 'No';
+        eeo.gender = eeo.gender || dbClient.gender || rawInfo.gender || raw?.client?.gender || '';
+        profile.gender = eeo.gender;
+        eeo.race = eeo.race || dbClient.race || rawInfo.race_ethnicity || 'Asian';
+        eeo.veteran_status = eeo.veteran_status || dbClient.veteran_status || rawInfo.veteran_status || 'I am not a protected veteran';
+        eeo.disability_status = eeo.disability_status || dbClient.disability_status || rawInfo.disability_status || 'No, I do not have a disability';
+        eeo.hispanic_latino = eeo.hispanic_latino || dbClient.hispanic_latino || rawInfo.is_hispanic_latino || 'No';
 
         const w = profile.work_auth = profile.work_auth || {};
         w.authorized_us = w.authorized_us ?? (dbClient.authorized_us ?? true);
@@ -268,7 +289,6 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
 
         if (dbClient.raw_profile_json) {
           try {
-            const raw = typeof dbClient.raw_profile_json === 'string' ? JSON.parse(dbClient.raw_profile_json) : dbClient.raw_profile_json;
             if (raw?.resume_text && !profile._resumeText) {
               profile._resumeText = raw.resume_text;
             }
@@ -280,7 +300,12 @@ async function loadProfileFromApiOnly({ applywizzId = '' } = {}) {
       console.warn(`  ⚠️  Supabase candidate hydration note: ${dbErr.message}`);
     }
   }
-  if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
+  if (profile.personal) {
+    profile.personal = normalizePersonalNames(profile.personal, {
+      company_email: profile.personal.email || profile._dbClient?.company_email,
+      resume_url: profile._dbClient?.raw_profile_json?.additional_information?.resume_url || profile._dbClient?.resume_url,
+    });
+  }
   await ensureUsWorkdayContact(profile);
   profile._mandatoryOnlyFill = true;
   profile._resumePath = await getResumePathForApply(profile).catch(() => null);
@@ -324,7 +349,12 @@ export async function loadProfile(profilePath, { applywizzId = '' } = {}) {
 
   mergeWorkdayDefaultAnswers(profile);
   await hydrateProfileFromApplyWizz(profile, { applywizzId });
-  if (profile.personal) profile.personal = normalizePersonalNames(profile.personal);
+  if (profile.personal) {
+    profile.personal = normalizePersonalNames(profile.personal, {
+      company_email: profile.personal.email || profile._dbClient?.company_email,
+      resume_url: profile._dbClient?.raw_profile_json?.additional_information?.resume_url || profile._dbClient?.resume_url,
+    });
+  }
   await ensureUsWorkdayContact(profile);
 
   // Default: only fill mandatory (*) fields unless profile explicitly opts in

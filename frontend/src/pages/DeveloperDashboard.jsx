@@ -73,11 +73,14 @@ export default function DeveloperDashboard() {
   const [scanWorkerFilter, setScanWorkerFilter] = useState('all');
   const [resolveWorkerFilter, setResolveWorkerFilter] = useState('all');
   const [submitWorkerFilter, setSubmitWorkerFilter] = useState('all');
+  const [scanServiceFilter, setScanServiceFilter] = useState('all'); // 'all' | 'Scanner_Resolver_1' | 'Scanner_Resolver_2'
+  const [submitServiceFilter, setSubmitServiceFilter] = useState('all'); // 'all' | 'Submitting_1' | 'Submitting_2'
   const [autoScrollLogs, setAutoScrollLogs] = useState(true);
   
   // Real dynamic states from Supabase & backend
   const [kpis, setKpis] = useState({
     submitted: 0,
+    alreadyApplied: 0,
     applying: 0,
     failed: 0,
     queued: 0,
@@ -106,11 +109,39 @@ export default function DeveloperDashboard() {
   const [updatingOpId, setUpdatingOpId] = useState(null);
   const [loading, setLoading] = useState(false);
   // Authoritative Single Source of Truth: Driven by Supabase bot_control across all devices & sessions
-  const [botStatus, setBotStatus] = useState({ isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false, isScanning: false });
+  // Initialized from localStorage to guarantee zero-flicker on browser refresh
+  const [botStatus, setBotStatus] = useState(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const cached = localStorage.getItem('workday_bot_status');
+        if (cached) {
+          const parsed = JSON.parse(cached);
+          if (parsed && typeof parsed === 'object') return parsed;
+        }
+      } catch {}
+    }
+    return { isRunning: false, state: 'idle', workersAssigned: 9, isSubmitting: false, isScanning: false };
+  });
+
+  // Always keep localStorage synchronized with the latest botStatus
+  useEffect(() => {
+    if (typeof window !== 'undefined' && botStatus) {
+      try {
+        localStorage.setItem('workday_bot_status', JSON.stringify(botStatus));
+      } catch {}
+    }
+  }, [botStatus]);
 
   const syncStatus = useCallback(() => {
     fetchBotDaemonStatus().then((res) => {
-      if (res?.success) setBotStatus(res);
+      if (res?.success) {
+        setBotStatus(res);
+        try {
+          if (typeof window !== 'undefined') {
+            localStorage.setItem('workday_bot_status', JSON.stringify(res));
+          }
+        } catch {}
+      }
     }).catch(() => {});
   }, []);
 
@@ -142,7 +173,7 @@ export default function DeveloperDashboard() {
       }
 
       if (kpiRes.success) {
-        // Disconnect already_applied from Dev Dashboard: strictly count authentic submitted applications
+        // Authentic submitted applications strictly without already_applied
         const authenticSubmitted = (kpiRes.submittedOnly !== undefined)
           ? kpiRes.submittedOnly
           : (appsRes.applications || []).filter((a) => {
@@ -152,6 +183,7 @@ export default function DeveloperDashboard() {
 
         setKpis({
           submitted: authenticSubmitted,
+          alreadyApplied: kpiRes.alreadyApplied || 0,
           applying: kpiRes.applying,
           failed: kpiRes.failed,
           queued: kpiRes.queued,
@@ -160,11 +192,8 @@ export default function DeveloperDashboard() {
       }
 
       if (appsRes.success) {
-        // Remove already_applied and its connection from Dev Dashboard applications
-        const cleanApps = (appsRes.applications || []).filter(
-          (a) => (a.status || '').toLowerCase() !== 'already_applied'
-        );
-        setApplications(cleanApps);
+        // Keep all applications including already_applied and failed so they can be audited in Runs and Errors
+        setApplications(appsRes.applications || []);
       }
 
       if (queueRes.success) {
@@ -197,15 +226,17 @@ export default function DeveloperDashboard() {
           if (!isMounted) return;
           const bc = payload.new;
           if (bc) {
-            const isScanRunning = Boolean(bc.scan_status === 'running' || bc.scan_enabled === true);
-            const isSubmitRunning = Boolean(bc.submit_status === 'running' || bc.submit_enabled === true);
-            const isRunning = Boolean(bc.is_running && (isScanRunning || isSubmitRunning));
+            const isUniversalRunning = Boolean(bc.universal_status === 'running' || bc.universal_enabled === true || bc.stage === 'parallel');
+            const isScanRunning = Boolean(bc.scan_status === 'running' || bc.scan_enabled === true || isUniversalRunning);
+            const isSubmitRunning = Boolean(bc.submit_status === 'running' || bc.submit_enabled === true || isUniversalRunning);
+            const isRunning = Boolean(bc.is_running && (isScanRunning || isSubmitRunning || isUniversalRunning));
             setBotStatus((prev) => ({
               ...prev,
               success: true,
               isRunning,
               isScanning: isScanRunning,
               isSubmitting: isSubmitRunning,
+              isUniversalRunning,
               stage: bc.stage || (isScanRunning && isSubmitRunning ? 'parallel' : isSubmitRunning ? 'submitting' : isScanRunning ? 'scanning' : 'idle'),
               mode: bc.mode || 'idle',
               botControl: bc,
@@ -289,10 +320,17 @@ export default function DeveloperDashboard() {
     return 'Today';
   }, [timeframe]);
 
-  // Active states for the two separate triggers
-  const isScanActive = Boolean(botStatus.isScanning);
-  const isSubmitActive = Boolean(botStatus.isSubmitting);
-  const isAnyPipelineActive = isScanActive || isSubmitActive;
+  // Authoritative active states driven by Supabase bot_control across all devices
+  const isUniversalActive = Boolean(
+    botStatus.isUniversalRunning ||
+    botStatus.botControl?.universal_status === 'running' ||
+    botStatus.botControl?.universal_enabled === true ||
+    (botStatus.isScanning && botStatus.isSubmitting) ||
+    botStatus.stage === 'parallel'
+  );
+  const isScanActive = Boolean(botStatus.isScanning || isUniversalActive);
+  const isSubmitActive = Boolean(botStatus.isSubmitting || isUniversalActive);
+  const isAnyPipelineActive = isScanActive || isSubmitActive || isUniversalActive;
 
   // Periodic Backend Ping to check connectivity
   useEffect(() => {
@@ -445,9 +483,9 @@ export default function DeveloperDashboard() {
   const filteredRuns = useMemo(() => {
     return applications.filter((app) => {
       const st = (app.status || '').toLowerCase();
-      if (st === 'already_applied') return false;
       if (statusFilter === 'All') return true;
       const s = statusFilter.toLowerCase();
+      if (s === 'already_applied') return st === 'already_applied';
       if (s === 'submitted') return st === 'submitted' || st === 'completed';
       if (s === 'applying' || s === 'in_progress') return ['applying', 'in_flight', 'in_progress', 'started'].includes(st);
       if (s === 'ready_for_review' || s === 'queued') return (st === 'ready_for_review' || st === 'ready_to_review') && app.is_fully_answered === true;
@@ -1043,7 +1081,7 @@ export default function DeveloperDashboard() {
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '0.75rem', flexWrap: 'wrap' }}>
           {/* Universal Parallel Pipeline Trigger */}
-          {(isScanActive || isSubmitActive) ? (
+          {(isUniversalActive || isScanActive || isSubmitActive) ? (
             <button
               type="button"
               onClick={handleStopAllParallel}
@@ -1142,6 +1180,46 @@ export default function DeveloperDashboard() {
               <span>⚡ Trigger Scanning & Resolving (3 Workers)</span>
             </button>
           )}
+
+          {/* Extra Feature: Active Scanning Workers Live Count Button / Badge */}
+          <button
+            type="button"
+            onClick={() => setActiveTab('Worker Logs')}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              padding: '0.65rem 1.15rem',
+              borderRadius: '6px',
+              border: (isScanActive && (workerPool.scanningActive || 0) > 0)
+                ? '1px solid rgba(56, 189, 248, 0.6)'
+                : '1px solid rgba(148, 163, 184, 0.3)',
+              background: (isScanActive && (workerPool.scanningActive || 0) > 0)
+                ? 'rgba(56, 189, 248, 0.18)'
+                : 'rgba(15, 23, 42, 0.6)',
+              color: (isScanActive && (workerPool.scanningActive || 0) > 0) ? '#38bdf8' : '#94a3b8',
+              fontSize: '0.88rem',
+              fontWeight: 700,
+              cursor: 'pointer',
+              transition: 'all 0.15s ease',
+              boxShadow: (isScanActive && (workerPool.scanningActive || 0) > 0) ? '0 0 12px rgba(56, 189, 248, 0.35)' : 'none',
+            }}
+            title="Click to view Scanning Worker logs and live cluster status in Worker Logs"
+          >
+            <span
+              style={{
+                display: 'inline-block',
+                width: '8px',
+                height: '8px',
+                borderRadius: '50%',
+                background: (isScanActive && (workerPool.scanningActive || 0) > 0) ? '#38bdf8' : '#64748b',
+                boxShadow: (isScanActive && (workerPool.scanningActive || 0) > 0) ? '0 0 8px #38bdf8' : 'none',
+              }}
+            />
+            <span>
+              {isScanActive ? (workerPool.scanningActive || 0) : 0} Scanning Active
+            </span>
+          </button>
 
           {/* Stage 2: Trigger / Stop Submissions (3 Workers) */}
           {isSubmitActive ? (
@@ -1285,6 +1363,12 @@ export default function DeveloperDashboard() {
             <div className="video-kpi-box">
               <span className="vkpi-label">READY FOR REVIEW (IN QUEUE)</span>
               <span className="vkpi-val">{kpis.queued}</span>
+            </div>
+
+            {/* Tile 6: Already Applied */}
+            <div className="video-kpi-box">
+              <span className="vkpi-label">ALREADY APPLIED</span>
+              <span className="vkpi-val" style={{ color: '#a78bfa' }}>{kpis.alreadyApplied || 0}</span>
             </div>
           </div>
 
@@ -1858,31 +1942,61 @@ export default function DeveloperDashboard() {
                   </div>
 
                   {/* Worker Sub-Filter */}
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {[
-                      { id: 'all', label: 'All Scanning (W1-3)' },
-                      { id: 'scanning_worker_1', label: 'Worker 1' },
-                      { id: 'scanning_worker_2', label: 'Worker 2' },
-                      { id: 'scanning_worker_3', label: 'Worker 3' },
-                    ].map((w) => (
-                      <button
-                        key={w.id}
-                        type="button"
-                        onClick={() => setScanWorkerFilter(w.id)}
-                        style={{
-                          padding: '3px 8px',
-                          fontSize: '0.72rem',
-                          borderRadius: '3px',
-                          border: '1px solid #334155',
-                          cursor: 'pointer',
-                          background: scanWorkerFilter === w.id ? '#0284c7' : '#1e293b',
-                          color: '#fff',
-                          fontWeight: scanWorkerFilter === w.id ? 'bold' : 'normal',
-                        }}
-                      >
-                        {w.label}
-                      </button>
-                    ))}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                    {/* Separate Service Selector */}
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { id: 'all', label: 'All Services' },
+                        { id: 'Scanner_Resolver_1', label: 'Scanner 1 (W1-2)' },
+                        { id: 'Scanner_Resolver_2', label: 'Scanner 2 (W3-4)' },
+                      ].map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => setScanServiceFilter(s.id)}
+                          style={{
+                            padding: '2px 7px',
+                            fontSize: '0.68rem',
+                            borderRadius: '3px',
+                            border: '1px solid #334155',
+                            cursor: 'pointer',
+                            background: scanServiceFilter === s.id ? '#0284c7' : '#0f172a',
+                            color: '#fff',
+                            fontWeight: scanServiceFilter === s.id ? 'bold' : 'normal',
+                          }}
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Worker Sub-Filter */}
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { id: 'all', label: 'All Workers (W1-4)' },
+                        { id: 'scanning_worker_1', label: 'Worker 1' },
+                        { id: 'scanning_worker_2', label: 'Worker 2' },
+                        { id: 'scanning_worker_3', label: 'Worker 3' },
+                        { id: 'scanning_worker_4', label: 'Worker 4' },
+                      ].map((w) => (
+                        <button
+                          key={w.id}
+                          type="button"
+                          onClick={() => setScanWorkerFilter(w.id)}
+                          style={{
+                            padding: '3px 8px',
+                            fontSize: '0.72rem',
+                            borderRadius: '3px',
+                            border: '1px solid #334155',
+                            cursor: 'pointer',
+                            background: scanWorkerFilter === w.id ? '#0284c7' : '#1e293b',
+                            color: '#fff',
+                            fontWeight: scanWorkerFilter === w.id ? 'bold' : 'normal',
+                          }}
+                        >
+                          {w.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -1900,6 +2014,13 @@ export default function DeveloperDashboard() {
                 }}>
                   {(() => {
                     const logs = (batchLogs.scanning || []).filter((l) => {
+                      if (scanServiceFilter !== 'all') {
+                        if (l.service_name && l.service_name !== scanServiceFilter) return false;
+                        if (!l.service_name) {
+                          if (scanServiceFilter === 'Scanner_Resolver_1' && (l.worker_num === 3 || l.worker_num === 4 || l.worker_id?.includes('worker_3') || l.worker_id?.includes('worker_4'))) return false;
+                          if (scanServiceFilter === 'Scanner_Resolver_2' && (l.worker_num === 1 || l.worker_num === 2 || l.worker_id?.includes('worker_1') || l.worker_id?.includes('worker_2'))) return false;
+                        }
+                      }
                       if (scanWorkerFilter === 'all') return true;
                       const num = scanWorkerFilter.match(/\d+$/)?.[0];
                       if (l.worker_num && num && String(l.worker_num) === num) return true;
@@ -2006,33 +2127,61 @@ export default function DeveloperDashboard() {
                     </div>
                   </div>
 
-                  {/* Worker Sub-Filter */}
-                  <div style={{ display: 'flex', gap: '4px' }}>
-                    {[
-                      { id: 'all', label: 'All Submissions (W1-4)' },
-                      { id: 'submitting_worker_1', label: 'Worker 1' },
-                      { id: 'submitting_worker_2', label: 'Worker 2' },
-                      { id: 'submitting_worker_3', label: 'Worker 3' },
-                      { id: 'submitting_worker_4', label: 'Worker 4' },
-                    ].map((w) => (
-                      <button
-                        key={w.id}
-                        type="button"
-                        onClick={() => setSubmitWorkerFilter(w.id)}
-                        style={{
-                          padding: '3px 8px',
-                          fontSize: '0.72rem',
-                          borderRadius: '3px',
-                          border: '1px solid #334155',
-                          cursor: 'pointer',
-                          background: submitWorkerFilter === w.id ? '#059669' : '#1e293b',
-                          color: '#fff',
-                          fontWeight: submitWorkerFilter === w.id ? 'bold' : 'normal',
-                        }}
-                      >
-                        {w.label}
-                      </button>
-                    ))}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px', alignItems: 'flex-end' }}>
+                    {/* Separate Service Selector */}
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { id: 'all', label: 'All Services' },
+                        { id: 'Submitting_1', label: 'Submitting 1 (W1-2)' },
+                        { id: 'Submitting_2', label: 'Submitting 2 (W3-4)' },
+                      ].map((s) => (
+                        <button
+                          key={s.id}
+                          type="button"
+                          onClick={() => setSubmitServiceFilter(s.id)}
+                          style={{
+                            padding: '2px 7px',
+                            fontSize: '0.68rem',
+                            borderRadius: '3px',
+                            border: '1px solid #334155',
+                            cursor: 'pointer',
+                            background: submitServiceFilter === s.id ? '#059669' : '#0f172a',
+                            color: '#fff',
+                            fontWeight: submitServiceFilter === s.id ? 'bold' : 'normal',
+                          }}
+                        >
+                          {s.label}
+                        </button>
+                      ))}
+                    </div>
+                    {/* Worker Sub-Filter */}
+                    <div style={{ display: 'flex', gap: '4px' }}>
+                      {[
+                        { id: 'all', label: 'All Submissions (W1-4)' },
+                        { id: 'submitting_worker_1', label: 'Worker 1' },
+                        { id: 'submitting_worker_2', label: 'Worker 2' },
+                        { id: 'submitting_worker_3', label: 'Worker 3' },
+                        { id: 'submitting_worker_4', label: 'Worker 4' },
+                      ].map((w) => (
+                        <button
+                          key={w.id}
+                          type="button"
+                          onClick={() => setSubmitWorkerFilter(w.id)}
+                          style={{
+                            padding: '3px 8px',
+                            fontSize: '0.72rem',
+                            borderRadius: '3px',
+                            border: '1px solid #334155',
+                            cursor: 'pointer',
+                            background: submitWorkerFilter === w.id ? '#059669' : '#1e293b',
+                            color: '#fff',
+                            fontWeight: submitWorkerFilter === w.id ? 'bold' : 'normal',
+                          }}
+                        >
+                          {w.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
 
@@ -2050,6 +2199,13 @@ export default function DeveloperDashboard() {
                 }}>
                   {(() => {
                     const logs = (batchLogs.submitting || []).filter((l) => {
+                      if (submitServiceFilter !== 'all') {
+                        if (l.service_name && l.service_name !== submitServiceFilter) return false;
+                        if (!l.service_name) {
+                          if (submitServiceFilter === 'Submitting_1' && (l.worker_num === 3 || l.worker_num === 4 || l.worker_id?.includes('worker_3') || l.worker_id?.includes('worker_4'))) return false;
+                          if (submitServiceFilter === 'Submitting_2' && (l.worker_num === 1 || l.worker_num === 2 || l.worker_id?.includes('worker_1') || l.worker_id?.includes('worker_2'))) return false;
+                        }
+                      }
                       if (submitWorkerFilter === 'all') return true;
                       const num = submitWorkerFilter.match(/\d+$/)?.[0];
                       if (l.worker_num && num && String(l.worker_num) === num) return true;
@@ -2410,6 +2566,7 @@ export default function DeveloperDashboard() {
               <option value="needs_answers">Needs Answers</option>
               <option value="applying">Applying (In Progress)</option>
               <option value="submitted">Submitted</option>
+              <option value="already_applied">Already Applied</option>
               <option value="failed">Failed</option>
               <option value="already_scanned">Already Scanned</option>
               <option value="skipped">Skipped</option>
@@ -2544,6 +2701,22 @@ export default function DeveloperDashboard() {
                               </span>
                             );
                           }
+                          if (run.status?.toLowerCase() === 'already_applied') {
+                            return (
+                              <span
+                                className="video-status-tag"
+                                style={{
+                                  background: 'rgba(167, 139, 250, 0.18)',
+                                  color: '#a78bfa',
+                                  border: '1px solid rgba(167, 139, 250, 0.4)',
+                                  fontWeight: 'bold',
+                                  letterSpacing: '0.5px'
+                                }}
+                              >
+                                ⚡ ALREADY APPLIED
+                              </span>
+                            );
+                          }
                           return (
                             <span className={`video-status-tag ${run.status?.toLowerCase() || 'queued'}`}>
                               {run.status?.toUpperCase() || 'QUEUED'}
@@ -2555,7 +2728,7 @@ export default function DeveloperDashboard() {
                         {(() => {
                           const shot = extractFailureScreenshot(run);
                           if (!shot) return <span style={{ fontSize: '0.72rem', color: '#64748b' }}>—</span>;
-                          const isSuccess = ['submitted', 'reached_review', 'completed', 'already_scanned', 'scanned'].includes(run.status?.toLowerCase());
+                          const isSuccess = ['submitted', 'reached_review', 'completed', 'already_scanned', 'scanned', 'already_applied'].includes(run.status?.toLowerCase());
                           return (
                             <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
                               <button

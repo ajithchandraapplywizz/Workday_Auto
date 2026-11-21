@@ -137,3 +137,48 @@ test('acquireBrowserSlot allows concurrent browsers up to effectiveMax (2) and q
     else delete process.env.MAX_ACTIVE_BROWSERS;
   }
 });
+
+test('getDynamicMaxBrowsers dynamically respects WORKER_COUNT=3 and explicit worker ID lists', async () => {
+  const { getDynamicMaxBrowsers } = await import('../lib/browserLifecycle.mjs');
+
+  const origWorkers = process.env.WORKER_COUNT;
+  const origSubmitList = process.env.SUBMISSION_WORKER_IDS;
+  const origMax = process.env.MAX_ACTIVE_BROWSERS;
+
+  try {
+    // 1. When WORKER_COUNT=3 is set, submitting worker gets 3 slots
+    process.env.WORKER_COUNT = '3';
+    process.env.MAX_ACTIVE_BROWSERS = '1'; // Legacy env must NOT clamp below WORKER_COUNT
+    assert.equal(getDynamicMaxBrowsers('submitting_worker_1'), 3, 'Must allocate 3 slots when WORKER_COUNT=3');
+
+    // 2. When SUBMISSION_WORKER_IDS has 3 explicit workers, respects list count exactly
+    delete process.env.WORKER_COUNT;
+    process.env.SUBMISSION_WORKER_IDS = 'submitting_worker_1,submitting_worker_2,submitting_worker_3';
+    assert.equal(getDynamicMaxBrowsers('submitting_worker_2'), 3, 'Must allocate 3 slots matching SUBMISSION_WORKER_IDS list');
+  } finally {
+    if (origWorkers !== undefined) process.env.WORKER_COUNT = origWorkers;
+    else delete process.env.WORKER_COUNT;
+    if (origSubmitList !== undefined) process.env.SUBMISSION_WORKER_IDS = origSubmitList;
+    else delete process.env.SUBMISSION_WORKER_IDS;
+    if (origMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = origMax;
+    else delete process.env.MAX_ACTIVE_BROWSERS;
+  }
+});
+
+test('browserLifecycleEvents emits slot_released on releaseBrowserSlot', async () => {
+  const { browserLifecycleEvents, releaseBrowserSlot, acquireBrowserSlot } = await import('../lib/browserLifecycle.mjs');
+
+  let eventFired = false;
+  const handler = (wId) => {
+    if (wId === 'submitting_worker_test') eventFired = true;
+  };
+  browserLifecycleEvents.on('slot_released', handler);
+
+  try {
+    await acquireBrowserSlot('submitting_worker_test', 5);
+    releaseBrowserSlot('submitting_worker_test');
+    assert.equal(eventFired, true, 'slot_released event must fire on releaseBrowserSlot');
+  } finally {
+    browserLifecycleEvents.off('slot_released', handler);
+  }
+});

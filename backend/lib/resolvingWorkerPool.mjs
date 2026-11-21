@@ -22,18 +22,38 @@ import { PIPELINE_CONFIG } from '../config/pipelineConfig.mjs';
 export const RESOLVER_WORKER_IDS = (PIPELINE_CONFIG.resolveWorkerIds || Array.from({ length: 2 }, (_, i) => `resolving_worker_${i + 1}`)).slice(0, 2);
 
 /**
- * Universal Question Copying Policy: ONLY allowed universal questions can copy from lead blueprint
- * (How did you hear about us, Race/Ethnicity, Terms & Conditions/Agreements).
- * Personal Identity, Experience, Education, Gender, Veteran, Disability, and custom answers MUST NOT be copied from lead!
+ * Universal Question Copying Policy:
+ * USER RULE: ONLY TWO details are allowed to copy from lead blueprint to followers:
+ * 1. Race / Ethnicity (default Asian for all)
+ * 2. Terms & Conditions / Agreements / Declarations
+ *
+ * ALL OTHER questions (Gender, Veteran, Disability, How did you hear about us,
+ * Personal Identity, Contact details, Work Experience, Education, and custom questions)
+ * are strictly RESTRICTED from copying and MUST resolve dynamically per candidate.
  */
 export function isAllowedUniversalLeadQuestion(text = '') {
   const t = String(text || '').trim();
-  if (/(?:how|where)\s*(?:did|do)\s*you\s*hear|hear\s*about\s*(?:us|this)|^source$/i.test(t)) return true;
-  if (/(?:race|ethnic)/i.test(t) && !/gender|sex/i.test(t)) return true;
+
+  // ALLOWED 1: Race / Ethnicity (default Asian for all)
+  if (/race(\s*[\/\-]\s*ethnicity)?|^ethnicity$|ethnic\s*background/i.test(t) && !/hispanic|latino/i.test(t)) {
+    return true;
+  }
+
+  // ALLOWED 2: Terms & Conditions / Agreements / Consent / Privacy / Declaration
   if (/terms|condition|certif|acknowledge|agree|consent|foregoing|privacy|policy|declaration|electronic\s*signature\s*consent/i.test(t)) {
     if (/first\s*name|last\s*name|full\s*name|type\s*your\s*name|signature\s*name/i.test(t)) return false;
     return true;
   }
+
+  // Strict restriction: personal identity, contact, experience, education, gender, disability, veteran must NEVER be copied
+  if (/\bname\b|\bphone\b|\bmobile\b|\bemail\b|\baddress\b|\bcity\b|\bstate\b|\bzip\b|\bpostal\b|\bexperience\b|\beducation\b|\bcompany\b|\bschool\b|\buniversity\b|\bdegree\b|\bmajor\b|field\s*of\s*study|\bsalary\b|\bcompensation\b|\bnotice\b|\brelocat/i.test(t)) {
+    return false;
+  }
+  if (/gender|sex\b|disability|veteran|military/i.test(t)) {
+    return false;
+  }
+
+  // ALL OTHER DETAILS ARE STRICTLY RESTRICTED FROM COPYING FROM LEAD (must remain dynamic per client)
   return false;
 }
 
@@ -373,28 +393,34 @@ export async function runResolvingWorkerPool(options = {}) {
                   sa.source = 'Tier 3: CRM Profile';
                   sa.tier = 3;
                 } else if (/gender|sex\b/i.test(qText)) {
-                  const candidateGender = eeo.gender || profile?.gender;
+                  const candidateGender = eeo.gender || profile?.gender || profile?._dbClient?.raw_profile_json?.additional_information?.gender || '';
                   let chosen = candidateGender;
                   if (Array.isArray(sa.options) && sa.options.length > 0) {
-                    chosen = sa.options.find(o => new RegExp(`^${candidateGender || 'Male'}`, 'i').test(String(o).trim()))
-                      || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
-                      || sa.options[0];
+                    if (candidateGender) {
+                      chosen = sa.options.find(o => new RegExp(`^${candidateGender}`, 'i').test(String(o).trim()))
+                        || sa.options.find(o => new RegExp(candidateGender, 'i').test(String(o).trim()));
+                    }
+                    if (!chosen) {
+                      chosen = sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
+                        || sa.options[0];
+                    }
                   }
                   sa.answer = String(chosen || candidateGender || 'Decline to self-identify');
                   sa.is_answered = true;
                   sa.source = 'Tier 1: Profile EEO';
                   sa.tier = 1;
                 } else if (/race|ethnicity|ethnic/i.test(qText)) {
-                  const candidateRace = eeo.race || profile?.race;
+                  const candidateRace = eeo.race || profile?.race || 'Asian';
                   let chosen = candidateRace;
                   if (Array.isArray(sa.options) && sa.options.length > 0) {
                     chosen = sa.options.find(o => new RegExp(candidateRace || 'Asian', 'i').test(String(o).trim()))
+                      || sa.options.find(o => /asian/i.test(String(o).trim()))
                       || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
                       || sa.options[0];
                   }
-                  sa.answer = String(chosen || candidateRace || 'Decline to self-identify');
+                  sa.answer = String(chosen || candidateRace || 'Asian');
                   sa.is_answered = true;
-                  sa.source = 'Tier 1: Profile EEO';
+                  sa.source = 'Tier 1: Profile EEO (Asian Default)';
                   sa.tier = 1;
                 } else if (/veteran/i.test(qText)) {
                   const candidateVet = eeo.veteran || profile?.veteran;

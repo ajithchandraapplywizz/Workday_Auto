@@ -182,7 +182,7 @@ function profileFactForLabel(label, profile = {}) {
     return eeo.gender || null;
   }
   if (/hispanic|latino/.test(n)) return eeo.hispanic_latino || null;
-  if (/\b(race|ethnicity)\b/.test(n) && !/hispanic|latino/.test(n)) return eeo.race || null;
+  if (/\b(race|ethnicity)\b/.test(n) && !/hispanic|latino/.test(n)) return eeo.race || 'Asian';
   if (/veteran/.test(n)) {
     return eeo.veteran_status
       || profile._applyWizzQa?.['veteran status']

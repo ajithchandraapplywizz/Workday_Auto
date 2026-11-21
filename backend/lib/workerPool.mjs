@@ -20,7 +20,7 @@ import { fillForm } from './engine.mjs';
 import { loadProfile, generatePlan, pickResume } from './planner.mjs';
 import { extractJDText, detectATS, validateWorkdayUrl, extractWorkdayCompanyName, extractJobRoleFromDom, isWorkdayWizardVisible, isWorkdayAlreadyApplied } from './discovery.mjs';
 import { inferStandardOptions } from './workdayScanHarvest.mjs';
-import { resolveCompanyEmail, stripWorkdayQuestionLabel } from './applyWizzClient.mjs';
+import { resolveCompanyEmail, stripWorkdayQuestionLabel, parseAddress } from './applyWizzClient.mjs';
 import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
@@ -392,7 +392,36 @@ export async function executeWorkerTask({
   if (candidateDbClient.first_name) profile.personal.first_name = candidateDbClient.first_name;
   if (candidateDbClient.last_name) profile.personal.last_name = candidateDbClient.last_name;
   const rawCandidateMobile = candidateDbClient.mobile_number || candidateDbClient.phone || '';
-  const cleanCandidateDigits = String(rawCandidateMobile).replace(/\D/g, '').slice(-10);
+  let cleanCandidateDigits = String(rawCandidateMobile).replace(/\D/g, '').slice(-10);
+  if (!cleanCandidateDigits || cleanCandidateDigits.length < 7 || cleanCandidateDigits === '5102662606') {
+    try {
+      const { ensureClientResumeFromApplyWizz } = await import('./applyWizzResume.mjs');
+      const rPath = profile._resumePath || await ensureClientResumeFromApplyWizz(profile);
+      if (rPath) {
+        const { loadResumeText } = await import('./resumeParser.mjs');
+        const text = profile._resumeText || await loadResumeText(rPath);
+        if (text) {
+          const { extractContactFromResumeText } = await import('./clientContact.mjs');
+          const contact = extractContactFromResumeText(text);
+          const digits = String(contact?.phone || '').replace(/\D/g, '').slice(-10);
+          if (digits.length >= 7 && digits !== '5102662606') {
+            cleanCandidateDigits = digits;
+            console.log(`  📞 [Phone Recovery] Extracted missing phone for candidate ${candidateDbClient.applywizz_id || profile._applyWizzId} from resume: ${cleanCandidateDigits}`);
+            if (supabase && (candidateDbClient.applywizz_id || profile._applyWizzId)) {
+              const awl = candidateDbClient.applywizz_id || profile._applyWizzId;
+              await supabase.from('clients').update({
+                mobile_number: cleanCandidateDigits,
+                phone: cleanCandidateDigits,
+              }).eq('applywizz_id', awl);
+              console.log(`  💾 [Phone Recovery] Persisted extracted phone ${cleanCandidateDigits} into Supabase clients table for ${awl}`);
+            }
+          }
+        }
+      }
+    } catch (phoneErr) {
+      console.warn(`  ⚠️ Phone recovery notice: ${phoneErr.message}`);
+    }
+  }
   if (cleanCandidateDigits.length >= 7) {
     profile.personal.phone = cleanCandidateDigits;
     profile.personal.mobile_number = cleanCandidateDigits;
@@ -407,12 +436,32 @@ export async function executeWorkerTask({
   const rawInfo = candidateDbClient?.raw_profile_json?.additional_information || {};
   const rawClient = candidateDbClient?.raw_profile_json?.client || {};
 
-  if (rawInfo.full_address || candidateDbClient.full_address) {
-    profile.personal.full_address = rawInfo.full_address || candidateDbClient.full_address;
-    profile.personal.address_line1 = profile.personal.address_line1 || rawInfo.full_address;
+  const fullAddr = String(rawInfo.full_address || candidateDbClient.full_address || '').trim();
+  if (fullAddr) {
+    profile.personal.full_address = fullAddr;
+    try {
+      const parsed = parseAddress(fullAddr);
+      if (parsed.address_line1) profile.personal.address_line1 = parsed.address_line1;
+      if (parsed.city) profile.personal.city = parsed.city;
+      if (parsed.state) profile.personal.state = parsed.state;
+      if (parsed.postal_code) profile.personal.postal_code = parsed.postal_code;
+      if (parsed.country) profile.personal.country = parsed.country;
+    } catch {}
+    if (!profile.personal.address_line1) profile.personal.address_line1 = fullAddr;
   }
   if (rawInfo.state_of_residence) profile.personal.state = rawInfo.state_of_residence;
-  if (rawInfo.zip_or_country) profile.personal.postal_code = profile.personal.postal_code || rawInfo.zip_or_country;
+  if (candidateDbClient.state) profile.personal.state = profile.personal.state || candidateDbClient.state;
+  if (candidateDbClient.city) profile.personal.city = profile.personal.city || candidateDbClient.city;
+  if (candidateDbClient.country) profile.personal.country = profile.personal.country || candidateDbClient.country;
+
+  const rawZipOrCountry = String(rawInfo.zip_or_country || '').trim();
+  if (rawZipOrCountry) {
+    if (/^\d{5}/.test(rawZipOrCountry)) {
+      profile.personal.postal_code = rawZipOrCountry;
+    } else if (/united states|usa|india|canada|mexico|kingdom|uk/i.test(rawZipOrCountry)) {
+      profile.personal.country = rawZipOrCountry;
+    }
+  }
   if (rawInfo.date_of_birth) profile.personal.date_of_birth = rawInfo.date_of_birth;
 
   // Work Experience — Strictly from authenticated candidate's record
@@ -436,7 +485,11 @@ export async function executeWorkerTask({
 
   // EEO & Voluntary Disclosures — Strictly from authenticated candidate's record
   profile.eeo = profile.eeo || {};
-  if (rawInfo.gender) profile.eeo.gender = rawInfo.gender;
+  const candGender = rawInfo.gender || rawClient.gender || candidateDbClient.gender || '';
+  if (candGender) {
+    profile.eeo.gender = candGender;
+    profile.gender = candGender;
+  }
   if (rawInfo.race_ethnicity) profile.eeo.race = rawInfo.race_ethnicity;
   if (rawInfo.veteran_status) profile.eeo.veteran_status = rawInfo.veteran_status;
   if (rawInfo.disability_status) profile.eeo.disability_status = rawInfo.disability_status;
@@ -564,7 +617,7 @@ export async function executeWorkerTask({
   let roleTitle = profile._roleTitle || profile._jobTitle || 'Workday Application';
 
   try {
-    const launchJitterMs = Math.floor(Math.random() * 1200) + 300;
+    const launchJitterMs = Math.floor(Math.random() * 50) + 10;
     await new Promise((r) => setTimeout(r, launchJitterMs));
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
 

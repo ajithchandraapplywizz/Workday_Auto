@@ -334,7 +334,7 @@ export function extractContactFromResumeText(text = '') {
     /(?:phone|mobile|cell|tel(?:ephone)?)\s*[:\-]?\s*([+\d\s().-]{10,24})/i,
   );
   const barePhone = blob.match(
-    /\b(?:\+1[\s.-]?)?(?:\(\s*[2-9]\d{2}\s*\)|[2-9]\d{2})[\s.-]?\d{3}[\s.-]?\d{4}\b/,
+    /(?:^|[^\d+])(?:\+?1[\s.-]*)?(?:\(\s*[2-9]\d{2}\s*\)|[2-9]\d{2})[\s.-]?\d{3}[\s.-]?\d{4}\b/,
   );
   const phoneRaw = labeledPhone?.[1] || barePhone?.[0] || '';
   const plain = formatPlainUsPhone(phoneRaw);
@@ -461,12 +461,11 @@ export async function persistClientAddressToSupabase(profile = {}) {
     }
 
     const loc = [p.city, p.state, p.country].filter(Boolean).join(', ');
-    if (loc) {
-      await upsertSupabaseClient({
-        applywizzId,
-        latestJobLocation: loc,
-        mobileNumber: p.phone || '',
-      }).catch(() => {});
+    const clientPayload = { applywizzId };
+    if (loc) clientPayload.latestJobLocation = loc;
+    if (p.phone) clientPayload.mobileNumber = p.phone;
+    if (Object.keys(clientPayload).length > 1) {
+      await upsertSupabaseClient(clientPayload).catch(() => {});
     }
     return true;
   } catch (err) {

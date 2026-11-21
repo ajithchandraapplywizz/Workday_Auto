@@ -551,14 +551,36 @@ async function waitForResumeUploadComplete(page, expectedFileName = '') {
  * Re-resolves absolute path if the given path is stale/missing.
  */
 export async function handleWorkdayResumeUpload(page, resumePath, profile = null) {
-  let absPath = findExistingResumeFile(resumePath)
-    || (resumePath && existsSync(resumePath) ? resumePath : null);
+  const targetAwl = String(
+    profile?._applyWizzId
+    || profile?.applywizz_id
+    || profile?.applywizzId
+    || profile?._dbClient?.applywizz_id
+    || ''
+  ).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+
+  let absPath = null;
+  if (resumePath) {
+    const found = findExistingResumeFile(resumePath) || (existsSync(resumePath) ? resumePath : null);
+    if (found) {
+      if (!targetAwl || targetAwl === 'CLIENT' || basename(found).toUpperCase().includes(targetAwl)) {
+        absPath = found;
+      } else {
+        console.warn(`    ⚠️ Resume mismatch: passed path ${basename(found)} does not match candidate ${targetAwl}. Re-resolving...`);
+      }
+    }
+  }
 
   if (!absPath) {
     absPath = await getResumePathForApply(profile || {}, { resume: resumePath });
   }
   if (!absPath || !existsSync(absPath)) {
-    console.log(`    ⚠️  Resume file not found (tried: ${resumePath || '(none)'}). Put a PDF in resumes/`);
+    console.log(`    ⚠️  Resume file not found for candidate ${targetAwl || '(none)'}. Put an authentic PDF in client-resumes/`);
+    return false;
+  }
+
+  if (targetAwl && targetAwl !== 'CLIENT' && !basename(absPath).toUpperCase().includes(targetAwl)) {
+    console.error(`    ❌ CRITICAL GUARD: Refusing to upload ${basename(absPath)} for candidate ${targetAwl}! Strict client isolation enforced.`);
     return false;
   }
 
@@ -645,7 +667,7 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
   // Quick DOM check: if Phone Number, Device Type, and Country Code are already set, skip immediately
   const alreadyDone = await page.evaluate(() => {
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
-    const phoneInput = document.querySelector('input[data-automation-id*="phone-number" i], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]');
+    const phoneInput = document.querySelector('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"], input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]), input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="phoneType" i]), input[type="tel"]');
     const phoneVal = phoneInput ? norm(phoneInput.value).replace(/\D/g, '') : '';
     const phoneTypeBtn = document.querySelector('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i]');
     const typeVal = phoneTypeBtn ? norm(phoneTypeBtn.textContent || phoneTypeBtn.getAttribute('aria-label') || '') : 'ok';
@@ -661,7 +683,7 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
 
   // 1. Expand Phone section if an "Add" button exists and phone fields are not yet rendered
   try {
-    const hasVisiblePhone = await page.locator('input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 400 }).catch(() => false);
+    const hasVisiblePhone = await page.locator('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"], input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]), input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="phoneType" i]), input[type="tel"]').first().isVisible({ timeout: 400 }).catch(() => false);
     if (!hasVisiblePhone) {
       const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, [data-automation-id*="phone" i] button[data-automation-id="Add"], button:has-text("Add Phone")').first();
       if (await addPhoneBtn.isVisible({ timeout: 600 }).catch(() => false)) {
@@ -708,17 +730,50 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
     profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
   );
 
-  if ((!cleanDigits || cleanDigits.length < 7) && profile._applyWizzId) {
+  if ((!cleanDigits || cleanDigits.length < 7 || cleanDigits === '5102662606') && profile._applyWizzId) {
     try {
       const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
       const rec = await getClientRecordByAwlId(profile._applyWizzId);
       if (rec?.mobile_number || rec?.phone) {
-        cleanDigits = String(rec.mobile_number || rec.phone).replace(/\D/g, '').slice(-10);
+        const raw = String(rec.mobile_number || rec.phone).replace(/\D/g, '');
+        if (raw.length >= 7 && raw !== '5102662606') {
+          cleanDigits = raw.slice(-10);
+        }
       }
     } catch {}
   }
-  if (!cleanDigits || cleanDigits.length < 7) {
-    cleanDigits = '5102662606'; // reliable US contact phone fallback
+  // If still missing, attempt extracting directly from candidate authentic resume text / URL
+  if (!cleanDigits || cleanDigits.length < 7 || cleanDigits === '5102662606') {
+    const resumeSource = profile._resumePath || profile._resumeUrl || profile.resume_url;
+    if (resumeSource || profile._resumeText) {
+      try {
+        const { loadResumeText, inferAnswerFromResume } = await import('./resumeParser.mjs');
+        const text = profile._resumeText || await loadResumeText(resumeSource);
+        if (text) {
+          const { extractContactFromResumeText } = await import('./clientContact.mjs');
+          const contact = extractContactFromResumeText(text);
+          const raw = contact?.phone || inferAnswerFromResume('phone number', text, {});
+          const digits = String(raw || '').replace(/\D/g, '');
+          if (digits.length >= 7 && digits !== '5102662606') {
+            cleanDigits = digits.slice(-10);
+            console.log(`    📞 Phone extracted from authentic resume for ${profile._applyWizzId || 'candidate'}: ${cleanDigits}`);
+            if (profile._applyWizzId) {
+              const { supabase } = await import('./supabaseClient.mjs');
+              if (supabase) {
+                await supabase.from('clients').update({
+                  mobile_number: cleanDigits,
+                  phone: cleanDigits,
+                }).eq('applywizz_id', profile._applyWizzId).catch(() => {});
+                console.log(`    💾 Saved candidate ${profile._applyWizzId} phone "${cleanDigits}" from resume into Supabase clients table.`);
+              }
+            }
+          }
+        }
+      } catch {}
+    }
+  }
+  if (cleanDigits === '5102662606') {
+    cleanDigits = '';
   }
   profile.personal = profile.personal || {};
   profile.personal.phone = cleanDigits;
@@ -726,68 +781,34 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
   profile.phone = cleanDigits;
   profile.personal.phone_device_type = phoneDeviceType;
 
-  // 3. Fill / Verify Phone Device Type
-  try {
-    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*(device)?\\s*type')
-      || page.locator('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i], button[aria-label*="phone device type" i], button[aria-label*="phone type" i]')
-      .first();
-
-    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
-      if (!btnText || /select(\s+one)?\.?$/i.test(btnText)) {
-        await interactAndRescan(page, async () => {
-          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
-        });
-        await page.waitForTimeout(300);
-        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneDeviceType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
-          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneDeviceType + '")'))
-          .or(page.getByText(phoneDeviceType, { exact: true }))
-          .first();
-        await interactAndRescan(page, async () => {
-          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
-            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
-          } else {
-            await page.keyboard.press('ArrowDown');
-            await page.keyboard.press('Enter');
-          }
-        });
-        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
-      }
-    } else {
-      const phoneTypeSelect = page.locator('select[data-automation-id*="phoneType" i], select[name*="phoneType" i], select#phoneNumber--phoneType').first();
-      if (await phoneTypeSelect.isVisible({ timeout: 500 }).catch(() => false)) {
-        await phoneTypeSelect.selectOption({ label: phoneDeviceType }).catch(() => phoneTypeSelect.selectOption({ value: phoneDeviceType }));
-        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
-      }
-    }
-  } catch (err) {
-    console.log(`    ⚠️  Phone Device Type fill notice: ${err.message?.substring(0, 80)}`);
-  }
-
-  // 4. Country Phone Code is auto-bound by Country selection; never click or open the dropdown
-  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(country) || 'United States of America (+1)';
-  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
-
-  // 5. Fill / Verify Phone Number
+  // 3. Fill / Verify Phone Number FIRST (Mandatory)
   try {
     const phoneLocators = [
-      'input[data-automation-id="phone-number"]',
-      'input[data-automation-id*="phoneNumber" i]',
-      'input[data-automation-id*="phone-device-number" i]',
       'input#phoneNumber--phoneNumber',
-      'input[id*="phoneNumber" i]',
-      'input[name*="phoneNumber" i]',
-      'input[type="tel"]',
-      'input[data-automation-id*="phone" i]:not([type="hidden"])',
+      'input[data-automation-id="phone-number"]',
+      'input[data-automation-id="phone-device-number"]',
+      'input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]):not([data-automation-id*="code" i])',
+      'input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i])',
+      'input[name*="phoneNumber" i]:not([name*="country" i]):not([name*="phoneType" i]):not([name*="code" i])',
+      'input[type="tel"]:not([id*="country" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i])',
     ];
     let phoneNumberInput = page.locator(phoneLocators.join(', ')).first();
     if (!await phoneNumberInput.isVisible({ timeout: 500 }).catch(() => false)) {
-      phoneNumberInput = page.getByRole('textbox', { name: /^(phone|mobile|contact\s*phone)(\s*(number|phone))?(\s*\*|$)/i })
-        .or(page.getByLabel(/^(phone|mobile|contact\s*phone)(\s*(number|phone))?(\s*\*|$)/i))
+      phoneNumberInput = page.locator('label:has-text("Phone Number") + input, label:has-text("Phone Number*") + input, label:has-text("Phone Number") ~ div input, label:has-text("Phone Number*") ~ div input')
+        .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
+        .or(page.getByLabel(/^phone\s*number/i))
         .first();
     }
 
     if (await phoneNumberInput.isVisible({ timeout: 1500 }).catch(() => false)) {
+      const isCountryElement = await phoneNumberInput.evaluate((node) => {
+        const blob = `${node.id || ''} ${node.name || ''} ${node.getAttribute('data-automation-id') || ''} ${node.getAttribute('aria-label') || ''}`.toLowerCase();
+        return blob.includes('country') || blob.includes('code') || blob.includes('phonetype') || blob.includes('device');
+      }).catch(() => false);
+      if (isCountryElement) {
+        console.log('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
+        return;
+      }
       const currentDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
       const wantDigits = cleanDigits;
       if (currentDigits !== wantDigits) {
@@ -839,6 +860,48 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
   } catch (err) {
     console.log(`    ⚠️  Phone Number fill notice: ${err.message?.substring(0, 80)}`);
   }
+
+  // 4. Fill / Verify Phone Device Type SECOND
+  try {
+    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*(device)?\\s*type')
+      || page.locator('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i], button[aria-label*="phone device type" i], button[aria-label*="phone type" i]')
+      .first();
+
+    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
+      if (!btnText || /select(\s+one)?\.?$/i.test(btnText)) {
+        await interactAndRescan(page, async () => {
+          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
+        });
+        await page.waitForTimeout(300);
+        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneDeviceType.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
+          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneDeviceType + '")'))
+          .or(page.getByText(phoneDeviceType, { exact: true }))
+          .first();
+        await interactAndRescan(page, async () => {
+          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
+          } else {
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('Enter');
+          }
+        });
+        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
+      }
+    } else {
+      const phoneTypeSelect = page.locator('select[data-automation-id*="phoneType" i], select[name*="phoneType" i], select#phoneNumber--phoneType').first();
+      if (await phoneTypeSelect.isVisible({ timeout: 500 }).catch(() => false)) {
+        await phoneTypeSelect.selectOption({ label: phoneDeviceType }).catch(() => phoneTypeSelect.selectOption({ value: phoneDeviceType }));
+        recordFilled(profile, 'Phone Device Type', phoneDeviceType);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Phone Device Type fill notice: ${err.message?.substring(0, 80)}`);
+  }
+
+  // 5. Country Phone Code is auto-bound by Country selection; strictly NEVER click, focus, or touch
+  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(country) || 'United States of America (+1)';
+  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
 }
 
 export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
@@ -1146,116 +1209,8 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  Field 2 warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 2b/4] Resolving Phone Device Type...');
-  try {
-    const phoneValue = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
-    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*device\\s*type')
-      || page.locator('[data-automation-id*="phoneType"] button, #phoneNumber--phoneType, button[id*="phoneType"]')
-      .first();
-    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
-      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
-      if (!btnText || btnText.includes('Select One') || btnText.includes('Select')) {
-        await interactAndRescan(page, async () => {
-          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
-        });
-        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
-          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneValue + '")'))
-          .or(page.getByText(phoneValue, { exact: true }))
-          .first();
-        await interactAndRescan(page, async () => {
-          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
-            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
-          } else {
-            await page.keyboard.press('ArrowDown');
-            await page.keyboard.press('Enter');
-          }
-        });
-        recordFilled(profile, 'Phone Device Type', phoneValue);
-        logFieldTrace({
-          automationId: 'phoneNumber--phoneType',
-          label: 'Phone Device Type',
-          controlType: 'dropdown',
-          tier: 'tier1_profile_fact',
-          valueAttempted: phoneValue,
-          success: true,
-          step: 'My Information',
-        });
-      }
-    }
-  } catch {}
-
-  // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
-  console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
-  const { normalizeCountryForWorkday } = await import('./clientContact.mjs');
-  let selectedCountry = normalizeCountryForWorkday(profile.personal?.country || profile._applyWizzQa?.['country'] || profile._applyWizzQa?.['country / territory'] || '');
-  try {
-    const countryControl = await locateWorkdayFieldByLabel(page, '^(country|country\\s*\\/\\s*territory)$', { excludePatterns: ['phone', 'code', 'device'] })
-      || page.locator('[data-automation-id="addressSection_country"], [data-automation-id="address--country"], #address--country, [data-automation-id="countryDropdown"], button[aria-label*="Country" i]:not([aria-label*="Phone" i]):not([aria-label*="Code" i]), button[aria-label*="Country / Territory" i]:not([aria-label*="Phone" i])')
-          .first();
-
-    const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false);
-    let hasValidSelection = false;
-    if (isCountryVisible) {
-      const liveText = ((await countryControl.innerText().catch(() => '')) ||
-        (await countryControl.inputValue().catch(() => '')) ||
-        (await countryControl.textContent().catch(() => '')) || '').trim();
-      if (liveText && !/select(\s+one)?\.?$/i.test(liveText)) {
-        selectedCountry = normalizeCountryForWorkday(liveText);
-        hasValidSelection = true;
-        console.log(`    ✓ Country already selected on form: "${selectedCountry}" — keeping untouched to preserve phone/address cascade`);
-      }
-    }
-
-    if (!selectedCountry && profile._resumeText) {
-      const { extractContactFromResumeText } = await import('./clientContact.mjs');
-      const c = extractContactFromResumeText(profile._resumeText);
-      if (c.country) selectedCountry = normalizeCountryForWorkday(c.country);
-    }
-    if (!selectedCountry) selectedCountry = 'United States of America';
-
-    if (isCountryVisible && countryControl) {
-      profile.personal = profile.personal || {};
-      profile.personal.country = selectedCountry;
-      if (!profile.personal.country_phone_code) {
-        profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
-      }
-
-      if (!hasValidSelection) {
-        await interactAndRescan(page, async () => {
-          await countryControl.scrollIntoViewIfNeeded().catch(() => {});
-          await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
-        });
-        const query = selectedCountry.toLowerCase();
-        await handleSearchableDropdown(page, countryControl, query, selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
-        recordFilled(profile, 'Country', selectedCountry);
-        console.log(`    ✅ Country at top set: "${selectedCountry}"`);
-        // Wait for Workday address cascade to mount in DOM
-        await page.waitForTimeout(600);
-        try {
-          await page.waitForSelector('input[data-automation-id*="addressLine1" i], input[data-automation-id*="postalCode" i], [data-automation-id="addressSection_countryRegion"], #address--addressLine1', { timeout: 3500 });
-        } catch {}
-      } else {
-        recordFilled(profile, 'Country', selectedCountry);
-      }
-    }
-  } catch (err) {
-    console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
-  }
-
-  console.log('  🎯 [Field 3/4] Country Phone Code automatically bound to Country — skipping dropdown click');
-  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
-  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
-  logFieldTrace({
-    automationId: 'country-phone-code',
-    label: 'Country / Territory Phone Code',
-    controlType: 'combobox',
-    tier: 'tier1_profile_fact',
-    valueAttempted: expectedPhoneCode,
-    success: true,
-    step: 'My Information',
-  });
-
-  console.log('  🎯 [Field 4/4] Resolving Phone Number (strictly client clean digits)...');
+  // ─── Field 2a: Phone Number FIRST (Mandatory — Strictly Candidate Clean Digits) ───
+  console.log('  🎯 [Field 2a/4] Resolving Phone Number FIRST (strictly client clean digits)...');
   try {
     const pickValidPhone = (...candidates) => {
       for (const c of candidates) {
@@ -1287,17 +1242,50 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       profile?._resolvedAnswersMap?.get?.('mobile number')?.answer
     );
 
-    if ((!cleanDigits || cleanDigits.length < 7) && profile._applyWizzId) {
+    if ((!cleanDigits || cleanDigits.length < 7 || cleanDigits === '5102662606') && profile._applyWizzId) {
       try {
         const { getClientRecordByAwlId } = await import('./supabaseClient.mjs');
         const rec = await getClientRecordByAwlId(profile._applyWizzId);
         if (rec?.mobile_number || rec?.phone) {
-          cleanDigits = String(rec.mobile_number || rec.phone).replace(/\D/g, '').slice(-10);
+          const raw = String(rec.mobile_number || rec.phone).replace(/\D/g, '');
+          if (raw.length >= 7 && raw !== '5102662606') {
+            cleanDigits = raw.slice(-10);
+          }
         }
       } catch {}
     }
-    if (!cleanDigits || cleanDigits.length < 7) {
-      cleanDigits = '5102662606'; // reliable US contact phone fallback
+    // If still missing, attempt extracting directly from candidate authentic resume text / URL
+    if (!cleanDigits || cleanDigits.length < 7 || cleanDigits === '5102662606') {
+      const resumeSource = profile._resumePath || profile._resumeUrl || profile.resume_url;
+      if (resumeSource || profile._resumeText) {
+        try {
+          const { loadResumeText, inferAnswerFromResume } = await import('./resumeParser.mjs');
+          const text = profile._resumeText || await loadResumeText(resumeSource);
+          if (text) {
+            const { extractContactFromResumeText } = await import('./clientContact.mjs');
+            const contact = extractContactFromResumeText(text);
+            const raw = contact?.phone || inferAnswerFromResume('phone number', text, {});
+            const digits = String(raw || '').replace(/\D/g, '');
+            if (digits.length >= 7 && digits !== '5102662606') {
+              cleanDigits = digits.slice(-10);
+              console.log(`    📞 Phone extracted from authentic resume for ${profile._applyWizzId || 'candidate'}: ${cleanDigits}`);
+              if (profile._applyWizzId) {
+                const { supabase } = await import('./supabaseClient.mjs');
+                if (supabase) {
+                  await supabase.from('clients').update({
+                    mobile_number: cleanDigits,
+                    phone: cleanDigits,
+                  }).eq('applywizz_id', profile._applyWizzId).catch(() => {});
+                  console.log(`    💾 Saved candidate ${profile._applyWizzId} phone "${cleanDigits}" from resume into Supabase clients table.`);
+                }
+              }
+            }
+          }
+        } catch {}
+      }
+    }
+    if (cleanDigits === '5102662606') {
+      cleanDigits = '';
     }
     profile.personal = profile.personal || {};
     profile.personal.phone = cleanDigits;
@@ -1305,7 +1293,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     profile.phone = cleanDigits;
 
     // Check if phone section needs to be expanded first
-    const hasPhoneVisible = await page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-number" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]').first().isVisible({ timeout: 500 }).catch(() => false);
+    const hasPhoneVisible = await page.locator('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"], input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]), input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="phoneType" i]), input[type="tel"]').first().isVisible({ timeout: 500 }).catch(() => false);
     if (!hasPhoneVisible) {
       const addPhoneBtn = page.locator('[data-automation-id*="phone" i] button:has-text("Add"), button[data-automation-id*="add-phone" i], [data-automation-id*="phoneNumberSection"] button, button[data-automation-id="Add"]').first();
       if (await addPhoneBtn.isVisible({ timeout: 800 }).catch(() => false)) {
@@ -1315,12 +1303,24 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       }
     }
 
-    const phoneNumberInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[name*="phoneNumber" i], input[type="tel"]')
+    const phoneNumberInput = page.locator('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"]')
+      .or(page.locator('input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i])'))
+      .or(page.locator('input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]):not([data-automation-id*="code" i])'))
+      .or(page.locator('input[type="tel"]:not([id*="country" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i])'))
+      .or(page.locator('label:has-text("Phone Number") + input, label:has-text("Phone Number*") + input, label:has-text("Phone Number") ~ div input, label:has-text("Phone Number*") ~ div input'))
       .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
       .or(page.getByLabel(/^phone\s*number/i))
       .first();
 
     if (await phoneNumberInput.isVisible({ timeout: 2000 }).catch(() => false)) {
+      const isCountryElement = await phoneNumberInput.evaluate((node) => {
+        const blob = `${node.id || ''} ${node.name || ''} ${node.getAttribute('data-automation-id') || ''} ${node.getAttribute('aria-label') || ''}`.toLowerCase();
+        return blob.includes('country') || blob.includes('code') || blob.includes('phonetype') || blob.includes('device');
+      }).catch(() => false);
+      if (isCountryElement) {
+        console.log('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
+        return true;
+      }
       const curDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
       if (curDigits !== cleanDigits) {
         await interactAndRescan(page, async () => {
@@ -1364,7 +1364,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       if (!phoneOk) {
         console.log(`    ⚠️  Phone verify mismatch: expected ${cleanDigits}, got ${verified}`);
       } else {
-        console.log(`    ✅ Field 4 Complete: Phone Number "${cleanDigits}"`);
+        console.log(`    ✅ Field 2a Complete: Phone Number "${cleanDigits}"`);
       }
       recordFilled(profile, 'Phone Number', cleanDigits);
       logFieldTrace({
@@ -1378,8 +1378,121 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       });
     }
   } catch (err) {
-    console.log(`    ⚠️  Field 4 warning: ${err.message?.substring(0, 100)}`);
+    console.log(`    ⚠️  Field 2a Phone Number warning: ${err.message?.substring(0, 100)}`);
   }
+
+  console.log('  🎯 [Field 2b/4] Resolving Phone Device Type...');
+  try {
+    const phoneValue = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
+    const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*device\\s*type')
+      || page.locator('[data-automation-id*="phoneType"] button, #phoneNumber--phoneType, button[id*="phoneType"]')
+      .first();
+    if (await phoneTypeBtn.isVisible({ timeout: 1000 }).catch(() => false)) {
+      const btnText = (await phoneTypeBtn.textContent().catch(() => '')).trim();
+      if (!btnText || btnText.includes('Select One') || btnText.includes('Select')) {
+        await interactAndRescan(page, async () => {
+          await phoneTypeBtn.click({ force: true }).catch(() => phoneTypeBtn.evaluate(el => el.click()));
+        });
+        const mobileOpt = page.getByRole('option', { name: new RegExp(`^${phoneValue.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`, 'i') })
+          .or(page.locator('[data-automation-id="promptOption"]:has-text("' + phoneValue + '")'))
+          .or(page.getByText(phoneValue, { exact: true }))
+          .first();
+        await interactAndRescan(page, async () => {
+          if (await mobileOpt.isVisible({ timeout: 1000 }).catch(() => false)) {
+            await mobileOpt.click({ force: true }).catch(() => mobileOpt.evaluate(el => el.click()));
+          } else {
+            await page.keyboard.press('ArrowDown');
+            await page.keyboard.press('Enter');
+          }
+        });
+        recordFilled(profile, 'Phone Device Type', phoneValue);
+        logFieldTrace({
+          automationId: 'phoneNumber--phoneType',
+          label: 'Phone Device Type',
+          controlType: 'dropdown',
+          tier: 'tier1_profile_fact',
+          valueAttempted: phoneValue,
+          success: true,
+          step: 'My Information',
+        });
+      }
+    }
+  } catch {}
+
+  // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
+  console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
+  const { normalizeCountryForWorkday } = await import('./clientContact.mjs');
+  let selectedCountry = normalizeCountryForWorkday(profile.personal?.country || profile._dbClient?.raw_profile_json?.additional_information?.country || profile._dbClient?.country || profile._applyWizzQa?.['country'] || profile._applyWizzQa?.['country / territory'] || '');
+  try {
+    const countryControl = await locateWorkdayFieldByLabel(page, '^(country|country\\s*\\/\\s*territory)$', { excludePatterns: ['phone', 'code', 'device'] })
+      || page.locator('[data-automation-id="addressSection_country"], [data-automation-id="address--country"], #address--country, [data-automation-id="countryDropdown"], button[aria-label*="Country" i]:not([aria-label*="Phone" i]):not([aria-label*="Code" i]), button[aria-label*="Country / Territory" i]:not([aria-label*="Phone" i])')
+          .first();
+
+    const isCountryVisible = countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false);
+    const isInPhoneSection = isCountryVisible ? await countryControl.evaluate((el) => {
+      return Boolean(el.closest('[data-automation-id*="phone" i], [id*="phone" i], section[aria-label*="phone" i], [data-automation-id*="phoneNumberSection"]'));
+    }).catch(() => false) : false;
+
+    let hasValidSelection = false;
+    if (isCountryVisible && !isInPhoneSection) {
+      const liveText = ((await countryControl.innerText().catch(() => '')) ||
+        (await countryControl.inputValue().catch(() => '')) ||
+        (await countryControl.textContent().catch(() => '')) || '').trim();
+      if (liveText && !/select(\s+one)?\.?$/i.test(liveText)) {
+        selectedCountry = normalizeCountryForWorkday(liveText);
+        hasValidSelection = true;
+        console.log(`    ✓ Country already selected on form: "${selectedCountry}" — keeping untouched to preserve phone/address cascade`);
+      }
+    }
+
+    if (!selectedCountry && profile._resumeText) {
+      const { extractContactFromResumeText } = await import('./clientContact.mjs');
+      const c = extractContactFromResumeText(profile._resumeText);
+      if (c.country) selectedCountry = normalizeCountryForWorkday(c.country);
+    }
+    if (!selectedCountry) selectedCountry = 'United States of America';
+
+    if (isCountryVisible && !isInPhoneSection && countryControl) {
+      profile.personal = profile.personal || {};
+      profile.personal.country = selectedCountry;
+      if (!profile.personal.country_phone_code) {
+        profile.personal.country_phone_code = workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
+      }
+
+      if (!hasValidSelection) {
+        await interactAndRescan(page, async () => {
+          await countryControl.scrollIntoViewIfNeeded().catch(() => {});
+          await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+        });
+        const query = selectedCountry.toLowerCase();
+        await handleSearchableDropdown(page, countryControl, query, selectedCountry, { confirmWithEnter: true, alreadyOpen: true });
+        recordFilled(profile, 'Country', selectedCountry);
+        console.log(`    ✅ Country at top set: "${selectedCountry}"`);
+        // Wait for Workday address cascade to mount in DOM
+        await page.waitForTimeout(600);
+        try {
+          await page.waitForSelector('input[data-automation-id*="addressLine1" i], input[data-automation-id*="postalCode" i], [data-automation-id="addressSection_countryRegion"], #address--addressLine1', { timeout: 3500 });
+        } catch {}
+      } else {
+        recordFilled(profile, 'Country', selectedCountry);
+      }
+    }
+  } catch (err) {
+    console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
+  }
+
+  console.log('  🎯 [Field 3/4] Country Phone Code automatically bound to Country — skipping dropdown click');
+  const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
+  recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
+  logFieldTrace({
+    automationId: 'country-phone-code',
+    label: 'Country / Territory Phone Code',
+    controlType: 'combobox',
+    tier: 'tier1_profile_fact',
+    valueAttempted: expectedPhoneCode,
+    success: true,
+    step: 'My Information',
+  });
 
   try {
     const postalInput = page.locator('input[data-automation-id*="postalCode" i], input[data-automation-id*="postal-code" i], input#address--postalCode, input[name*="postalCode" i]')
@@ -1548,30 +1661,42 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
   console.log('  🎯 [Field 5a] Resolving Country (address — from Apply Wizz / resume)...');
   try {
-    const countryValue = String(profile?.personal?.country || 'United States of America').trim() || 'United States of America';
+    const rawCountry = profile?.personal?.country
+      || profile?._dbClient?.raw_profile_json?.additional_information?.country
+      || profile?._dbClient?.country
+      || profile?._applyWizzQa?.['country']
+      || 'United States of America';
+    const countryValue = String(rawCountry).trim() || 'United States of America';
     if (countryValue) {
       const countryControl = await locateWorkdayFieldByLabel(page, '^(country|country\\s*\\/\\s*territory)$', { excludePatterns: ['phone', 'code', 'device'] })
         || page.locator('[data-automation-id="addressSection_country"], [data-automation-id="address--country"], #address--country, [data-automation-id="countryDropdown"], button[aria-label*="Country" i]:not([aria-label*="Phone" i]):not([aria-label*="Code" i]), button[aria-label*="Country / Territory" i]:not([aria-label*="Phone" i])').first();
       if (countryControl && await countryControl.isVisible({ timeout: 1500 }).catch(() => false)) {
-        const current = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
-        const want = countryValue.toLowerCase();
-        if (!current || !current.toLowerCase().includes('united states')) {
-          await interactAndRescan(page, async () => {
-            await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+        const isInPhoneSection = await countryControl.evaluate((el) => {
+          return Boolean(el.closest('[data-automation-id*="phone" i], [id*="phone" i], section[aria-label*="phone" i], [data-automation-id*="phoneNumberSection"]'));
+        }).catch(() => false);
+        if (isInPhoneSection) {
+          console.log('    ⏭️ [No-Touch Country Code Policy] Field 5a Country matched inside phone section — skipping to avoid touching country code.');
+        } else {
+          const current = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
+          const want = countryValue.toLowerCase();
+          if (!current || !current.toLowerCase().includes(want)) {
+            await interactAndRescan(page, async () => {
+              await countryControl.click({ force: true }).catch(() => countryControl.evaluate((el) => el.click()));
+            });
+            await handleSearchableDropdown(page, countryControl, want, countryValue, { confirmWithEnter: true, alreadyOpen: true });
+          }
+          recordFilled(profile, 'Country', countryValue);
+          console.log(`    ✅ Country set from client profile: "${countryValue}"`);
+          logFieldTrace({
+            automationId: 'addressSection_country',
+            label: 'Country',
+            controlType: 'combobox',
+            tier: 'tier1_profile_fact',
+            valueAttempted: countryValue,
+            success: true,
+            step: 'My Information',
           });
-          await handleSearchableDropdown(page, countryControl, 'united states', countryValue, { confirmWithEnter: true, alreadyOpen: true });
         }
-        recordFilled(profile, 'Country', countryValue);
-        console.log(`    ✅ Country set from client profile: "${countryValue}"`);
-        logFieldTrace({
-          automationId: 'addressSection_country',
-          label: 'Country',
-          controlType: 'combobox',
-          tier: 'tier1_profile_fact',
-          valueAttempted: countryValue,
-          success: true,
-          step: 'My Information',
-        });
       }
     }
   } catch (err) {
@@ -1742,6 +1867,11 @@ async function fieldOptions(field) {
  */
 async function fillWorkdayField(page, field, mappedVal, profile) {
   const label = field.label || field.id;
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label || '')
+    || /countryphonecode|country-phone-code/i.test(field.automationId || field.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] fillWorkdayField skipping "${label}" — auto-populated by Country.`);
+    return true;
+  }
   let el = await findField(page, field);
   if (!el) return false;
   const isVisible = await el.isVisible().catch(() => false);
@@ -1869,6 +1999,10 @@ async function fillWorkdayFieldsFromScan(page, profile, plan, stepName) {
       const label = f.label || f.id;
       const norm = normalizeLabel(label);
       if (!norm || seenNorms.has(norm)) return false;
+      if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label || '')
+        || /countryphonecode|country-phone-code/i.test(f.automationId || f.id || '')) {
+        return false;
+      }
       if (isPhoneRelatedField(label, f)) {
         if (stepName === 'My Information') return false;
         return true;
@@ -2845,9 +2979,17 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
   }
   if (!profile?.personal?.phone) {
-    profile.personal = profile.personal || {};
-    profile.personal.phone = profile?.contact?.phone || '+1 (555) 234-5678';
-    console.warn('⚠️ No phone found after Apply Wizz bootstrap — using default contact phone fallback to continue form filling.');
+    if (profile._resumeText) {
+      const { inferAnswerFromResume } = await import('./resumeParser.mjs');
+      const phoneFromResume = inferAnswerFromResume('phone number', profile._resumeText, {});
+      if (phoneFromResume) {
+        profile.personal = profile.personal || {};
+        profile.personal.phone = phoneFromResume;
+        profile.personal.mobile_number = phoneFromResume;
+        profile.phone = phoneFromResume;
+        console.log(`  📞 [Bootstrap] Phone extracted from authentic resume: ${phoneFromResume}`);
+      }
+    }
   }
 
   await recordClientApplication(profile, {

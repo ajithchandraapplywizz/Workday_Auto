@@ -230,9 +230,22 @@ export async function syncActiveClientProfiles({ force = false, concurrency = 4 
           const c = json.client || json.data || {};
           const a = json.additional_information || {};
 
-          const fullName = c.full_name || c.name || c.client_name || null;
-          const firstName = fullName ? fullName.split(' ')[0] : '';
-          const lastName = fullName ? fullName.split(' ').slice(1).join(' ') : '';
+          let fullName = c.full_name || c.name || c.client_name || null;
+          let firstName = fullName ? fullName.split(' ')[0] : '';
+          let lastName = fullName ? fullName.split(' ').slice(1).join(' ') : '';
+
+          // Guard against dummy names (e.g. 'TSY' or duplicate 'Tsy Tsy')
+          const isDummyName = !fullName || firstName.toLowerCase() === lastName.toLowerCase() || firstName.length <= 3;
+          if (isDummyName) {
+            const { deriveNameFromCompanyEmail, deriveNameFromResumeFilename } = await import('./personName.mjs');
+            const legit = deriveNameFromResumeFilename(a.resume_url || a.resume_path || c.resume_url)
+              || deriveNameFromCompanyEmail(c.company_email || c.personal_email);
+            if (legit) {
+              fullName = legit.full_name;
+              firstName = legit.first_name;
+              lastName = legit.last_name;
+            }
+          }
 
           const payload = {
             applywizz_id: awlId,

@@ -1190,388 +1190,12 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
   }
 
-  // PHASE 3: Distribute to job_distributions table in PARALLEL for ALL clients!
-  console.log(`📍 [${workerId}] PHASE 3: Resolving answers & distributing into job_distributions table in PARALLEL...`);
-  console.log(`   Target: ${allSiblingAwlIds.length} candidate(s) allotted to this unique link`);
-
-  const { loadProfile } = await import('./planner.mjs');
-  const { preResolveClientAnswersDetailed } = await import('./jobFormCache.mjs');
-
-  const schema = {
-    id: scannedJobId,
-    fields_schema: harvestedQuestions,
-    company,
-    role_title: role,
-    tenant: cluster.tenant,
-  };
-
-  // Deduplicate and expand allTasks strictly: exactly 1 candidate task per unique applywizz_id
-  const uniqueCandidateTasksMap = new Map();
-  for (const t of allTasks) {
-    const ids = parseCandidateAwlIds(t.applywizz_id || t.client_ids);
-    for (const singleId of ids) {
-      if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
-        uniqueCandidateTasksMap.set(singleId, {
-          ...t,
-          id: `${singleId}:::${jobUrl}`,
-          applywizz_id: singleId,
-          applywizzId: singleId,
-          job_url: jobUrl,
-        });
-      }
-    }
-  }
-  // Ensure every sibling AWL ID is included
-  for (const singleId of allSiblingAwlIds) {
-    if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
-      uniqueCandidateTasksMap.set(singleId, {
-        id: `${singleId}:::${jobUrl}`,
-        applywizz_id: singleId,
-        applywizzId: singleId,
-        job_url: jobUrl,
-        company,
-        role_title: role,
-      });
-    }
-  }
-
-  // Ensure the lead candidate profile used for scanning is explicitly included in job_distributions!
-  const leadAwl = String(blueprintTask?.applywizz_id || MOCK_SCAN_CLIENT_ID).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-  if (leadAwl && !uniqueCandidateTasksMap.has(leadAwl)) {
-    uniqueCandidateTasksMap.set(leadAwl, {
-      id: `${leadAwl}:::${jobUrl}`,
-      applywizz_id: leadAwl,
-      applywizzId: leadAwl,
-      job_url: jobUrl,
-      company,
-      role_title: role,
-    });
-  }
-
-  const dedupedAllTasks = Array.from(uniqueCandidateTasksMap.values());
-
-  const distributionRows = [];
-  const RESOLVE_CHUNK = 8;
-  for (let cIdx = 0; cIdx < dedupedAllTasks.length; cIdx += RESOLVE_CHUNK) {
-    const chunk = dedupedAllTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
-    const chunkRows = await Promise.all(chunk.map(async (task, offset) => {
-      const idx = cIdx + offset;
-      const awlId = String(task.applywizz_id || '').trim().toUpperCase();
-      let detailed = null;
-      let profile = null;
-      try {
-        profile = await loadProfile(null, { applywizzId: awlId });
-        if (profile) {
-          profile._applyWizzId = awlId;
-          profile._canonicalJobUrl = jobUrl;
-          profile._jobUrl = jobUrl;
-          if (company) profile._company = company;
-          detailed = await preResolveClientAnswersDetailed({ jobUrl, schema, profile, options: { stage: 'stage2' } });
-        }
-      } catch (err) {
-        console.log(`   ⚠️ [${workerId}] Answer resolution error for client ${awlId}: ${err.message}`);
-      }
-
-      const structuredAnswers = detailed?.structuredAnswers || [];
-      const answersMap = detailed?.answersMap || {};
-
-      // Propagate universal questions answered by the lead candidate to siblings
-      const leadAnswerMap = new Map();
-      for (const la of (leadAnswers || [])) {
-        const qNorm = String(la.question || la.label || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-        const val = String(la.answer ?? la.value ?? '').trim();
-        if (qNorm && val) {
-          leadAnswerMap.set(qNorm, val);
-        }
-      }
-
-      const leadSourceAns = leadAnswers.find((la) => /how did you hear/i.test(la.question))?.answer
-        || harvestedQuestions.find((hq) => /how did you hear/i.test(hq.question || hq.label || ''))?.value
-        || 'LinkedIn';
-      const todayDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
-
-      const p = profile?.personal || {};
-      const w = profile?.work_auth || {};
-      const eeo = profile?.eeo || {};
-
-      for (const sa of structuredAnswers) {
-        const qText = sa.question || sa.label || '';
-        const qNorm = String(sa.question_normalized || qText).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
-
-        // 1. Copy lead blueprint answer for universal non-personal questions
-        if (!sa.answer || !sa.is_answered) {
-          const isPersonalIdentity = /first name|last name|email|phone|mobile|address line|street|postal|zip/i.test(qText);
-          if (!isPersonalIdentity && leadAnswerMap.has(qNorm)) {
-            sa.answer = leadAnswerMap.get(qNorm);
-            sa.is_answered = true;
-            sa.source = 'Lead Blueprint Answer (Universal)';
-            sa.tier = 1;
-          }
-        }
-
-        // 2. Specific universal question policies with candidate's respective details
-        if (!sa.answer || !sa.is_answered) {
-          if (/how did you hear|source|referral/i.test(qText)) {
-            sa.step = 'My Information';
-            sa.answer = String(leadSourceAns);
-            sa.is_answered = true;
-            sa.source = 'Lead Blueprint DOM Option';
-            sa.tier = 1;
-          } else if (/current value is|signature date|^date\*?$/i.test(qText)) {
-            sa.step = 'Self Identify';
-            sa.answer = todayDate;
-            sa.is_answered = true;
-            sa.source = 'Today Application Date';
-            sa.tier = 1;
-          } else if (/first\s*name/i.test(qText)) {
-            sa.answer = p.first_name || 'Candidate';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/last\s*name/i.test(qText)) {
-            sa.answer = p.last_name || 'Applicant';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/email/i.test(qText)) {
-            sa.answer = p.email || profile?.company_email || profile?.email || `${awlId.toLowerCase()}@applywizard.ai`;
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/phone|mobile/i.test(qText)) {
-            sa.answer = p.phone || '2035550199';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/city/i.test(qText)) {
-            sa.answer = p.city || 'Hartford';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/state|province/i.test(qText)) {
-            sa.answer = p.state || 'Connecticut';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/postal|zip/i.test(qText)) {
-            sa.answer = p.postal_code || p.zip || '06085';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/address/i.test(qText)) {
-            sa.answer = p.address_line_1 || p.address || '88 South Main Street';
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Identity';
-            sa.tier = 1;
-          } else if (/authorized to work|legally authorized|eligible to work/i.test(qText)) {
-            sa.answer = w.authorized_us !== false ? 'Yes' : 'No';
-            sa.is_answered = true;
-            sa.source = 'Tier 3: CRM Work Auth';
-            sa.tier = 3;
-          } else if (/sponsorship|require.*sponsor|visa sponsorship/i.test(qText)) {
-            sa.answer = w.require_sponsorship === true ? 'Yes' : 'No';
-            sa.is_answered = true;
-            sa.source = 'Tier 3: CRM Work Auth';
-            sa.tier = 3;
-          } else if (/salary|compensation|expected (?:base )?pay/i.test(qText)) {
-            sa.answer = profile?.salary_expectation || p.salary || '90000';
-            sa.is_answered = true;
-            sa.source = 'Tier 3: CRM Profile';
-            sa.tier = 3;
-          } else if (/gender|sex\b/i.test(qText)) {
-            const candidateGender = eeo.gender || profile?.gender;
-            let chosen = candidateGender;
-            if (Array.isArray(sa.options) && sa.options.length > 0) {
-              chosen = sa.options.find(o => new RegExp(`^${candidateGender || 'Male'}`, 'i').test(String(o).trim()))
-                || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
-                || sa.options[0];
-            }
-            sa.answer = String(chosen || candidateGender || 'Decline to self-identify');
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Profile EEO';
-            sa.tier = 1;
-          } else if (/race|ethnicity|ethnic/i.test(qText)) {
-            const candidateRace = eeo.race || profile?.race;
-            let chosen = candidateRace;
-            if (Array.isArray(sa.options) && sa.options.length > 0) {
-              chosen = sa.options.find(o => new RegExp(candidateRace || 'Asian', 'i').test(String(o).trim()))
-                || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
-                || sa.options[0];
-            }
-            sa.answer = String(chosen || candidateRace || 'Decline to self-identify');
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Profile EEO';
-            sa.tier = 1;
-          } else if (/veteran/i.test(qText)) {
-            const candidateVet = eeo.veteran || profile?.veteran;
-            let chosen = candidateVet;
-            if (Array.isArray(sa.options) && sa.options.length > 0) {
-              chosen = sa.options.find(o => /not a(?: protected)? veteran|not identify as|no\b/i.test(String(o).trim()))
-                || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
-                || sa.options[0];
-            }
-            sa.answer = String(chosen || candidateVet || 'I am not a protected veteran');
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Profile EEO';
-            sa.tier = 1;
-          } else if (/disabilit/i.test(qText)) {
-            const candidateDis = eeo.disability || profile?.disability;
-            let chosen = candidateDis;
-            if (Array.isArray(sa.options) && sa.options.length > 0) {
-              chosen = sa.options.find(o => /no,?\s*i (?:do not|don't)|no\b/i.test(String(o).trim()))
-                || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
-                || sa.options[0];
-            }
-            sa.answer = String(chosen || candidateDis || 'No, I do not have a disability');
-            sa.is_answered = true;
-            sa.source = 'Tier 1: Profile EEO';
-            sa.tier = 1;
-          } else if (/if yes.*explain/i.test(qText) || /explanation|additional comments|describe/i.test(qText)) {
-            sa.step = 'Voluntary Disclosures';
-            sa.answer = 'N/A';
-            sa.is_answered = true;
-            sa.source = 'Universal N/A Default';
-            sa.tier = 1;
-          } else if (Array.isArray(sa.options) && sa.options.length > 0) {
-            const yesOpt = sa.options.find(o => /^yes\b/i.test(String(o).trim()));
-            const noOpt = sa.options.find(o => /^no\b/i.test(String(o).trim()));
-            if (/felon|convict|crime|terminat|fired|conflict|non-?compet/i.test(qText) && noOpt) {
-              sa.answer = String(noOpt);
-            } else if (yesOpt) {
-              sa.answer = String(yesOpt);
-            } else {
-              sa.answer = String(sa.options[0]);
-            }
-            sa.is_answered = true;
-            sa.source = 'Tier 5: 5-Tier Policy Fallback';
-            sa.tier = 5;
-          } else if (sa.is_required) {
-            sa.answer = 'N/A';
-            sa.is_answered = true;
-            sa.source = 'Tier 5: 5-Tier Text Fallback';
-            sa.tier = 5;
-          }
-        }
-      }
-
-      const { getStepOrder } = await import('./stateDetector.mjs');
-      structuredAnswers.sort((a, b) => getStepOrder(a.step) - getStepOrder(b.step));
-
-      const answeredCount = structuredAnswers.filter(q => q.is_answered).length;
-      const unansweredQuestions = structuredAnswers
-        .filter(q => (!q.answer || !q.is_answered) && q.is_required)
-        .map(q => ({
-          question: q.question,
-          field_type: q.field_type || 'text',
-          step: q.step || 'Application Questions',
-          options: q.options || [],
-          is_required: true,
-          reason: 'missing_required_answer',
-        }));
-
-      // Strict Authentic 5-Tier Resolution: YAML is completely halted for job_distributions.
-      // Every profile (including the lead) is evaluated solely by authentic 5-tier answers and mandatorily marked ready_for_review.
-      const unansweredCount = unansweredQuestions.length;
-      const isFullyAnswered = true;
-      const clientStatus = 'ready_to_review';
-
-      console.log(`[${awlId}] | Company: ${company} | Status: scanned | Screenshot: ${reviewShotUrl || 'none'}`);
-
-      return {
-        taskId: task.id,
-        applywizzId: awlId,
-        jobId: task.job_id || cluster.reqId || null,
-        jobUrl,
-        company: task.company || company,
-        roleTitle: task.role_title || role,
-        leadApplywizzId: blueprintTask.applywizz_id,
-        scrapedQuestions: harvestedQuestions,
-        questionCount: harvestedQuestions.length,
-        resolvedAnswers: structuredAnswers,
-        unansweredQuestions: [],
-        unansweredCount: 0,
-        isFullyAnswered,
-        screenshotUrl: null,
-        status: clientStatus,
-        answersMap,
-      };
-    }));
-    distributionRows.push(...chunkRows);
-  }
-
-  // Batch insert all resolved clients into job_distributions table!
-  try {
-    const { recordJobDistributions, saveScannedJob } = await import('./supabaseClient.mjs');
-    await recordJobDistributions({
-      scannedJobId,
-      leadApplywizzId: blueprintTask.applywizz_id,
-      jobId: blueprintTask.job_id || cluster.reqId || null,
-      jobUrl,
-      company,
-      roleTitle: role,
-      scrapedQuestions: harvestedQuestions,
-      screenshotUrl: null, // STRICT POLICY: Scanned review screenshot belongs in scanned_jobs only; job_distributions screenshot is authentic post-submission proof only
-      status: 'distributed',
-      clients: distributionRows,
-    });
-    const readyCount = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review').length;
-    console.log(`[DISTRIBUTION] ${distributionRows.length} candidates distributed to job_distributions (${readyCount} ready_for_review)`);
-
-    // Also update scanned_jobs row with Candidate 1's resolved_answers
-    const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
-    if (leadRow?.resolvedAnswers?.length > 0) {
-      await saveScannedJob({
-        applywizzId: blueprintTask.applywizz_id,
-        jobUrl,
-        jobId: blueprintTask.job_id || cluster.reqId || null,
-        company,
-        roleTitle: role,
-        scrapedQuestions: harvestedQuestions,
-        resolvedAnswers: leadRow.resolvedAnswers,
-        screenshotPath: reviewShotUrl,
-        clientCount: allSiblingAwlIds.length,
-        scanStatus: 'completed',
-      });
-    }
-
-    // PHASE 4: Single source of truth is job_distributions with status 'ready_to_review'
-    const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review');
-
-    // Signal bot_control so submission services pick up ready applications immediately
-    if (readyToReviewRows.length > 0) {
-      try {
-        const bc = await queueDbRequest('bot_control', { query: '?id=eq.primary&limit=1' });
-        const primaryBc = Array.isArray(bc) && bc[0];
-        if (primaryBc && primaryBc.is_running && primaryBc.submit_status !== 'running') {
-          await queueDbRequest('bot_control', {
-            method: 'PATCH',
-            query: '?id=eq.primary',
-            prefer: 'return=minimal',
-            body: {
-              submit_status: 'running',
-              submit_enabled: true,
-              trigger_requested: true,
-              stage: 'parallel',
-              updated_at: new Date().toISOString(),
-            },
-          }).catch(() => {});
-          console.log(`⚡ [${workerId}] Signaled submission service in bot_control: ${readyToReviewRows.length} applications ready for immediate submission pickup!`);
-        }
-      } catch (bcSigErr) {
-        console.warn(`[${workerId}] Non-critical: submission signal error:`, bcSigErr?.message);
-      }
-    }
-  } catch (distErr) {
-    console.log(`⚠️ [${workerId}] Phase 3 note on job_distributions / scanned_jobs: ${distErr.message}`);
-  }
-
-  // STEP 4: Update candidate rows in batch_job_queue with scanned_job_id, status, and lead screenshot
+  // STEP 4: Immediately update candidate rows in batch_job_queue with scanned_job_id, status, and lead screenshot
   try {
     const urlsToComplete = Array.from(new Set([
       ...allTasks.map((t) => t.job_url || t.rawJobUrl).filter(Boolean),
       jobUrl,
     ]));
-    // Update by exact task ID from batch_job_queue
     for (const tId of allTaskIds) {
       if (tId && !String(tId).includes(':::')) {
         await queueDbRequest('batch_job_queue', {
@@ -1609,13 +1233,371 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
     }
     console.log(`\n📤 [PATCH → batch_job_queue]`);
     console.log(`   URL: ${jobUrl}`);
-    console.log(`   Status: reached_review (${allSiblingAwlIds.length} AWL-IDs covered by 1 unique scanned_jobs row)`);
+    console.log(`   Status: already_scanned (${allSiblingAwlIds.length} AWL-IDs covered by scanned_jobs ID: ${scannedJobId})`);
     console.log(`   Screenshot Proof: ${reviewShotUrl || 'Uploaded to Supabase Storage'}\n`);
   } catch (qErr) {
     console.log(`⚠️ [${workerId}] Note updating queue task status: ${qErr.message}`);
   }
 
-  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER: ${company} — Tested Lead (${blueprintTask.applywizz_id}) in Browser & Distributed all ${allTasks.length} Clients with Resolved Answers.`);
+  // PHASE 3: Background Parallel Distribution into job_distributions table
+  // Dispatched asynchronously so the scanning worker immediately proceeds to the next cluster without sitting idle
+  const runBackgroundDistribution = async () => {
+    try {
+      console.log(`📍 [${workerId}] PHASE 3 (ASYNC): Resolving answers & distributing into job_distributions table...`);
+      const { loadProfile } = await import('./planner.mjs');
+      const { preResolveClientAnswersDetailed } = await import('./jobFormCache.mjs');
+
+      const schema = {
+        id: scannedJobId,
+        fields_schema: harvestedQuestions,
+        company,
+        role_title: role,
+        tenant: cluster.tenant,
+      };
+
+      const uniqueCandidateTasksMap = new Map();
+      for (const t of allTasks) {
+        const ids = parseCandidateAwlIds(t.applywizz_id || t.client_ids);
+        for (const singleId of ids) {
+          if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
+            uniqueCandidateTasksMap.set(singleId, {
+              ...t,
+              id: `${singleId}:::${jobUrl}`,
+              applywizz_id: singleId,
+              applywizzId: singleId,
+              job_url: jobUrl,
+            });
+          }
+        }
+      }
+      for (const singleId of allSiblingAwlIds) {
+        if (singleId && !uniqueCandidateTasksMap.has(singleId)) {
+          uniqueCandidateTasksMap.set(singleId, {
+            id: `${singleId}:::${jobUrl}`,
+            applywizz_id: singleId,
+            applywizzId: singleId,
+            job_url: jobUrl,
+            company,
+            role_title: role,
+          });
+        }
+      }
+
+      const leadAwl = String(blueprintTask?.applywizz_id || MOCK_SCAN_CLIENT_ID).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      if (leadAwl && !uniqueCandidateTasksMap.has(leadAwl)) {
+        uniqueCandidateTasksMap.set(leadAwl, {
+          id: `${leadAwl}:::${jobUrl}`,
+          applywizz_id: leadAwl,
+          applywizzId: leadAwl,
+          job_url: jobUrl,
+          company,
+          role_title: role,
+        });
+      }
+
+      const dedupedAllTasks = Array.from(uniqueCandidateTasksMap.values());
+      const distributionRows = [];
+      const RESOLVE_CHUNK = 8;
+      for (let cIdx = 0; cIdx < dedupedAllTasks.length; cIdx += RESOLVE_CHUNK) {
+        const chunk = dedupedAllTasks.slice(cIdx, cIdx + RESOLVE_CHUNK);
+        const chunkRows = await Promise.all(chunk.map(async (task, offset) => {
+          const awlId = String(task.applywizz_id || '').trim().toUpperCase();
+          let detailed = null;
+          let profile = null;
+          try {
+            profile = await loadProfile(null, { applywizzId: awlId });
+            if (profile) {
+              profile._applyWizzId = awlId;
+              profile._canonicalJobUrl = jobUrl;
+              profile._jobUrl = jobUrl;
+              if (company) profile._company = company;
+              detailed = await preResolveClientAnswersDetailed({ jobUrl, schema, profile, options: { stage: 'stage2' } });
+            }
+          } catch (err) {
+            console.log(`   ⚠️ [${workerId}] Answer resolution error for client ${awlId}: ${err.message}`);
+          }
+
+          const structuredAnswers = detailed?.structuredAnswers || [];
+          const answersMap = detailed?.answersMap || {};
+
+          const leadAnswerMap = new Map();
+          for (const la of (leadAnswers || [])) {
+            const qNorm = String(la.question || la.label || '').toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+            const val = String(la.answer ?? la.value ?? '').trim();
+            if (qNorm && val) {
+              leadAnswerMap.set(qNorm, val);
+            }
+          }
+
+          const leadSourceAns = leadAnswers.find((la) => /how did you hear/i.test(la.question))?.answer
+            || harvestedQuestions.find((hq) => /how did you hear/i.test(hq.question || hq.label || ''))?.value
+            || 'LinkedIn';
+          const todayDate = new Date().toLocaleDateString('en-US', { month: '2-digit', day: '2-digit', year: 'numeric' });
+
+          const p = profile?.personal || {};
+          const w = profile?.work_auth || {};
+          const eeo = profile?.eeo || {};
+
+          for (const sa of structuredAnswers) {
+            const qText = sa.question || sa.label || '';
+            const qNorm = String(sa.question_normalized || qText).toLowerCase().replace(/[^a-z0-9]/g, ' ').replace(/\s+/g, ' ').trim();
+
+            if (!sa.answer || !sa.is_answered) {
+              const { isAllowedUniversalLeadQuestion } = await import('./resolvingWorkerPool.mjs');
+              if (isAllowedUniversalLeadQuestion(qText) && leadAnswerMap.has(qNorm)) {
+                sa.answer = leadAnswerMap.get(qNorm);
+                sa.is_answered = true;
+                sa.source = 'Lead Blueprint Answer (Universal)';
+                sa.tier = 1;
+              }
+            }
+
+            if (!sa.answer || !sa.is_answered) {
+              if (/how did you hear|source|referral/i.test(qText)) {
+                sa.step = 'My Information';
+                sa.answer = p.source || 'LinkedIn';
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Profile Source';
+                sa.tier = 1;
+              } else if (/current value is|signature date|^date\*?$/i.test(qText)) {
+                sa.step = 'Self Identify';
+                sa.answer = todayDate;
+                sa.is_answered = true;
+                sa.source = 'Today Application Date';
+                sa.tier = 1;
+              } else if (/first\s*name/i.test(qText)) {
+                sa.answer = p.first_name || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/last\s*name/i.test(qText)) {
+                sa.answer = p.last_name || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/email/i.test(qText)) {
+                sa.answer = p.email || profile?.company_email || profile?.email || `${awlId.toLowerCase()}@applywizard.ai`;
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/phone|mobile/i.test(qText)) {
+                sa.answer = p.phone || p.mobile_number || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/city/i.test(qText)) {
+                sa.answer = p.city || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/state|province/i.test(qText)) {
+                sa.answer = p.state || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/postal|zip/i.test(qText)) {
+                sa.answer = p.postal_code || p.zip || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/address/i.test(qText)) {
+                sa.answer = p.address_line_1 || p.address_line1 || p.address || '';
+                sa.is_answered = Boolean(sa.answer);
+                sa.source = 'Tier 1: Identity';
+                sa.tier = 1;
+              } else if (/authorized to work|legally authorized|eligible to work/i.test(qText)) {
+                sa.answer = w.authorized_us !== false ? 'Yes' : 'No';
+                sa.is_answered = true;
+                sa.source = 'Tier 3: CRM Work Auth';
+                sa.tier = 3;
+              } else if (/sponsorship|require.*sponsor|visa sponsorship/i.test(qText)) {
+                sa.answer = w.require_sponsorship === true ? 'Yes' : 'No';
+                sa.is_answered = true;
+                sa.source = 'Tier 3: CRM Work Auth';
+                sa.tier = 3;
+              } else if (/salary|compensation|expected (?:base )?pay/i.test(qText)) {
+                sa.answer = profile?.salary_expectation || p.salary || '90000';
+                sa.is_answered = true;
+                sa.source = 'Tier 3: CRM Profile';
+                sa.tier = 3;
+              } else if (/gender|sex\b/i.test(qText)) {
+                const candidateGender = eeo.gender || profile?.gender || profile?._dbClient?.raw_profile_json?.additional_information?.gender || '';
+                let chosen = candidateGender;
+                if (Array.isArray(sa.options) && sa.options.length > 0) {
+                  if (candidateGender) {
+                    chosen = sa.options.find(o => new RegExp(`^${candidateGender}`, 'i').test(String(o).trim()))
+                      || sa.options.find(o => new RegExp(candidateGender, 'i').test(String(o).trim()));
+                  }
+                  if (!chosen) {
+                    chosen = sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
+                      || sa.options[0];
+                  }
+                }
+                sa.answer = String(chosen || candidateGender || 'Decline to self-identify');
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Profile EEO';
+                sa.tier = 1;
+              } else if (/race|ethnicity|ethnic/i.test(qText)) {
+                const candidateRace = eeo.race || profile?.race || 'Asian';
+                let chosen = candidateRace;
+                if (Array.isArray(sa.options) && sa.options.length > 0) {
+                  chosen = sa.options.find(o => new RegExp(candidateRace || 'Asian', 'i').test(String(o).trim()))
+                    || sa.options.find(o => /asian/i.test(String(o).trim()))
+                    || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
+                    || sa.options[0];
+                }
+                sa.answer = String(chosen || candidateRace || 'Asian');
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Profile EEO (Asian Default)';
+                sa.tier = 1;
+              } else if (/veteran/i.test(qText)) {
+                const candidateVet = eeo.veteran || profile?.veteran;
+                let chosen = candidateVet;
+                if (Array.isArray(sa.options) && sa.options.length > 0) {
+                  chosen = sa.options.find(o => /not a(?: protected)? veteran|not identify as|no\b/i.test(String(o).trim()))
+                    || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
+                    || sa.options[0];
+                }
+                sa.answer = String(chosen || candidateVet || 'I am not a protected veteran');
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Profile EEO';
+                sa.tier = 1;
+              } else if (/disabilit/i.test(qText)) {
+                const candidateDis = eeo.disability || profile?.disability;
+                let chosen = candidateDis;
+                if (Array.isArray(sa.options) && sa.options.length > 0) {
+                  chosen = sa.options.find(o => /no,?\s*i (?:do not|don't)|no\b/i.test(String(o).trim()))
+                    || sa.options.find(o => /decline|not wish to|prefer not/i.test(String(o).trim()))
+                    || sa.options[0];
+                }
+                sa.answer = String(chosen || candidateDis || 'No, I do not have a disability');
+                sa.is_answered = true;
+                sa.source = 'Tier 1: Profile EEO';
+                sa.tier = 1;
+              } else if (/if yes.*explain/i.test(qText) || /explanation|additional comments|describe/i.test(qText)) {
+                sa.step = 'Voluntary Disclosures';
+                sa.answer = 'N/A';
+                sa.is_answered = true;
+                sa.source = 'Universal N/A Default';
+                sa.tier = 1;
+              } else if (Array.isArray(sa.options) && sa.options.length > 0) {
+                const yesOpt = sa.options.find(o => /^yes\b/i.test(String(o).trim()));
+                const noOpt = sa.options.find(o => /^no\b/i.test(String(o).trim()));
+                if (/felon|convict|crime|terminat|fired|conflict|non-?compet/i.test(qText) && noOpt) {
+                  sa.answer = String(noOpt);
+                } else if (yesOpt) {
+                  sa.answer = String(yesOpt);
+                } else {
+                  sa.answer = String(sa.options[0]);
+                }
+                sa.is_answered = true;
+                sa.source = 'Tier 5: 5-Tier Policy Fallback';
+                sa.tier = 5;
+              } else if (sa.is_required) {
+                sa.answer = 'N/A';
+                sa.is_answered = true;
+                sa.source = 'Tier 5: 5-Tier Text Fallback';
+                sa.tier = 5;
+              }
+            }
+          }
+
+          const { getStepOrder } = await import('./stateDetector.mjs');
+          structuredAnswers.sort((a, b) => getStepOrder(a.step) - getStepOrder(b.step));
+
+          const isFullyAnswered = true;
+          const clientStatus = 'ready_to_review';
+
+          console.log(`[${awlId}] | Company: ${company} | Status: scanned | Screenshot: ${reviewShotUrl || 'none'}`);
+
+          return {
+            taskId: task.id,
+            applywizzId: awlId,
+            jobId: task.job_id || cluster.reqId || null,
+            jobUrl,
+            company: task.company || company,
+            roleTitle: task.role_title || role,
+            leadApplywizzId: blueprintTask.applywizz_id,
+            scrapedQuestions: harvestedQuestions,
+            questionCount: harvestedQuestions.length,
+            resolvedAnswers: structuredAnswers,
+            unansweredQuestions: [],
+            unansweredCount: 0,
+            isFullyAnswered,
+            screenshotUrl: null,
+            status: clientStatus,
+            answersMap,
+          };
+        }));
+        distributionRows.push(...chunkRows);
+      }
+
+      // Batch insert all resolved clients into job_distributions table
+      const { recordJobDistributions, saveScannedJob } = await import('./supabaseClient.mjs');
+      await recordJobDistributions({
+        scannedJobId,
+        leadApplywizzId: blueprintTask.applywizz_id,
+        jobId: blueprintTask.job_id || cluster.reqId || null,
+        jobUrl,
+        company,
+        roleTitle: role,
+        scrapedQuestions: harvestedQuestions,
+        screenshotUrl: null,
+        status: 'distributed',
+        clients: distributionRows,
+      });
+      const readyCount = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review').length;
+      console.log(`[DISTRIBUTION] ${distributionRows.length} candidates distributed to job_distributions (${readyCount} ready_for_review)`);
+
+      const leadRow = distributionRows.find(r => r.applywizzId === String(blueprintTask.applywizz_id).trim().toUpperCase()) || distributionRows[0];
+      if (leadRow?.resolvedAnswers?.length > 0) {
+        await saveScannedJob({
+          applywizzId: blueprintTask.applywizz_id,
+          jobUrl,
+          jobId: blueprintTask.job_id || cluster.reqId || null,
+          company,
+          roleTitle: role,
+          scrapedQuestions: harvestedQuestions,
+          resolvedAnswers: leadRow.resolvedAnswers,
+          screenshotPath: reviewShotUrl,
+          clientCount: allSiblingAwlIds.length,
+          scanStatus: 'completed',
+        });
+      }
+
+      const readyToReviewRows = distributionRows.filter((r) => r.status === 'ready_to_review' || r.status === 'ready_for_review');
+      if (readyToReviewRows.length > 0) {
+        try {
+          const bc = await queueDbRequest('bot_control', { query: '?id=eq.primary&limit=1' });
+          const primaryBc = Array.isArray(bc) && bc[0];
+          if (primaryBc && primaryBc.is_running && primaryBc.submit_status !== 'running') {
+            await queueDbRequest('bot_control', {
+              method: 'PATCH',
+              query: '?id=eq.primary',
+              prefer: 'return=minimal',
+              body: {
+                submit_status: 'running',
+                submit_enabled: true,
+                trigger_requested: true,
+                stage: 'parallel',
+                updated_at: new Date().toISOString(),
+              },
+            }).catch(() => {});
+            console.log(`⚡ [${workerId}] Signaled submission service in bot_control: ${readyToReviewRows.length} applications ready for immediate submission pickup!`);
+          }
+        } catch (bcSigErr) {
+          console.warn(`[${workerId}] Non-critical: submission signal error:`, bcSigErr?.message);
+        }
+      }
+    } catch (distErr) {
+      console.warn(`⚠️ [${workerId}] Background Phase 3 distribution error:`, distErr?.message || distErr);
+    }
+  };
+
+  // Kick off background distribution immediately so worker loop is unblocked without delay
+  runBackgroundDistribution().catch((err) => console.warn(`[${workerId}] Async distribution failed:`, err?.message));
+
+  console.log(`\n🏁 [${workerId}] COMPLETED CLUSTER SCAN: ${company} — Blueprint scan finished & verified. Returning immediately to fill next cluster slot!`);
   return {
     workerId,
     jobUrl,
@@ -1758,7 +1740,7 @@ export async function runClusterBatchRunner({
     let clusterIndex = 0;
 
     async function workerLoop(slot) {
-      const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot}`;
+      const workerId = PIPELINE_CONFIG.scanWorkerIds?.[slot - 1] || `scanning_worker_${slot + (Number(process.env.WORKER_OFFSET) || 0)}`;
       while (clusterIndex < clusters.length) {
         if (await isClusterStopRequested()) {
           console.log(`🛑 [Worker ${slot}] Stop flag active! Halting cluster loop.`);
@@ -1888,7 +1870,7 @@ export async function runClusterBatchRunner({
               const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
               cleanupOrphanChromeProcesses({ ignoreSlots: true });
             } catch {}
-            await new Promise((r) => setTimeout(r, 6000 + Math.floor(Math.random() * 4000)));
+            await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 500)));
             continue;
           }
 

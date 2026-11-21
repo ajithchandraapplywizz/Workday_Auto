@@ -205,7 +205,12 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
       resumePath: profile._resumePath,
     },
   );
-  if (isPhoneRelatedField(label, descriptor) || /phone|mobile|tel\b/i.test(label)) {
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label || '')
+    || /countryphonecode|country-phone-code/i.test(descriptor.automationId || descriptor.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] Skipping repair value for "${label}" — auto-populated by Country.`);
+    return null;
+  }
+  if ((isPhoneRelatedField(label, descriptor) || /phone|mobile|tel\b/i.test(label)) && !/country|code/i.test(label)) {
     const rawPhone = String(
       profile?.personal?.phone
       || profile?.personal?.mobile_number
@@ -215,10 +220,10 @@ async function resolveErrorFieldAnswer(page, profile, tenant, descriptor, stepNa
       || profile?._applyWizzClientContext?.additional_information?.primary_phone
       || profile?._applyWizzClientContext?.client?.callable_phone
       || profile?._applyWizzClientContext?.client?.phone
-      || '5102662606'
+      || ''
     ).trim();
     const digits = rawPhone.replace(/\D/g, '').slice(-10);
-    return digits.length >= 7 ? digits : '5102662606';
+    return digits.length >= 7 && digits !== '5102662606' ? digits : '';
   }
   if (/postal\s*code|zip\s*code/i.test(label)) {
     return resolvePostalForWorkday(profile);
@@ -419,11 +424,18 @@ async function fillMarkedField(page, descriptor, answer) {
   if (!(await control.isVisible({ timeout: 600 }).catch(() => false))) return false;
   await control.click({ force: true }).catch(() => { });
 
-  const isPhoneField = isPhoneRelatedField(descriptor.label, descriptor) || /phone|mobile|tel\b/i.test(descriptor.label || descriptor.name || '');
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(descriptor.label || '')
+    || /countryphonecode|country-phone-code/i.test(descriptor.automationId || descriptor.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] Skipping marked field repair for "${descriptor.label}" — auto-populated by Country.`);
+    return true;
+  }
+
+  const isPhoneField = (isPhoneRelatedField(descriptor.label, descriptor) || /phone|mobile|tel\b/i.test(descriptor.label || descriptor.name || ''))
+    && !/country|code/i.test(descriptor.label || descriptor.name || descriptor.id || '');
   let finalVal = wanted;
   if (isPhoneField) {
     const rawDigits = String(wanted || '').replace(/\D/g, '').slice(-10);
-    finalVal = rawDigits.length >= 7 ? rawDigits : '5102662606';
+    finalVal = rawDigits.length >= 7 && rawDigits !== '5102662606' ? rawDigits : '';
   }
 
   await control.fill('').catch(() => { });
@@ -583,8 +595,8 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
       }
     }
 
-    // Direct repair for Phone Number
-    if (/phone\s*(number)?/i.test(text)) {
+    // Direct repair for Phone Number (strictly target phone number, NEVER country code)
+    if (/phone\s*(number)?/i.test(text) && !/country|code|device|type/i.test(text)) {
       const phoneVal = String(
         profile?.personal?.phone
         || profile?.phone
@@ -593,13 +605,27 @@ export async function repairRequiredFieldsFromErrors(page, profile, stepName = '
         || profile?._dbClient?.phone
         || ''
       ).trim();
-      const cleanDigits = phoneVal.replace(/\D/g, '').slice(-10) || '5102662606';
+      const cleanDigits = phoneVal.replace(/\D/g, '').slice(-10);
+      if (!cleanDigits || cleanDigits.length < 7 || cleanDigits === '5102662606') {
+        return false;
+      }
       try {
-        const phoneInput = page.locator('input[data-automation-id="phone-number"], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber"], input[type="tel"]')
+        const phoneInput = page.locator('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"]')
+          .or(page.locator('input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i])'))
+          .or(page.locator('input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]):not([data-automation-id*="code" i])'))
+          .or(page.locator('input[type="tel"]:not([id*="country" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i])'))
           .or(page.getByRole('textbox', { name: /^phone\s*number/i }))
           .or(page.getByLabel(/^phone\s*number/i))
           .first();
         if (await phoneInput.isVisible({ timeout: 1000 }).catch(() => false)) {
+          const isCountryElement = await phoneInput.evaluate((node) => {
+            const blob = `${node.id || ''} ${node.name || ''} ${node.getAttribute('data-automation-id') || ''} ${node.getAttribute('aria-label') || ''}`.toLowerCase();
+            return blob.includes('country') || blob.includes('code') || blob.includes('phonetype') || blob.includes('device');
+          }).catch(() => false);
+          if (isCountryElement) {
+            console.log('    ⏭️ [No-Touch Country Code Policy] Skipping repair — phoneInput matched country code element.');
+            return false;
+          }
           await phoneInput.fill('');
           await phoneInput.fill(cleanDigits).catch(() => {});
           await phoneInput.evaluate((el, val) => {

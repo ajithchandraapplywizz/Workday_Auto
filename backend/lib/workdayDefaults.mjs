@@ -90,12 +90,12 @@ export const WORKDAY_NOTICE_PERIOD_OPTIONS = ['4 Weeks', '4 weeks', '1 Month', '
 
 /** Default Work Experience (Booz Allen / general Workday My Experience). */
 export const WORKDAY_DEFAULT_EXPERIENCE = {
-  current_title: 'Full stack Intern',
-  current_company: 'Student spot',
+  current_title: '',
+  current_company: '',
   location: 'Hybrid',
-  from_date: '05/2025',
-  to_date: '06/2026',
-  description: "Full stack Intern developed websites and automation worked with agents Rags and LLM's",
+  from_date: '05/2021',
+  to_date: '06/2024',
+  description: '',
   currently_working: false,
   notice_period: WORKDAY_DEFAULT_NOTICE_PERIOD,
 };
@@ -975,7 +975,8 @@ export function lookupDefaultAnswer(label) {
   if (/highest\s*level\s*of\s*education/i.test(norm)) return WORKDAY_DEFAULT_EDUCATION.highest_level;
   if (/school\s*or\s*university|^school$/i.test(norm)) return WORKDAY_DEFAULT_EDUCATION.university;
   if (/to\s*\(actual\s*or\s*expected\)/i.test(norm)) return WORKDAY_DEFAULT_EDUCATION.to_year;
-  if (/^role\s*description/i.test(norm)) return WORKDAY_DEFAULT_EXPERIENCE.description;
+  // Role Description is dynamic per candidate resume/LLM — never return hardcoded defaults
+  if (/^role\s*description/i.test(norm)) return null;
   if (/^notice\s*period$/i.test(norm)) return WORKDAY_DEFAULT_NOTICE_PERIOD;
   if (/type to add skills|^skills$/i.test(norm) || /enter a skill below/i.test(norm)) {
     return WORKDAY_DEFAULT_SKILLS.join(', ');
@@ -1018,7 +1019,7 @@ export function lookupDefaultAnswer(label) {
     return 'Yes';
   }
   if (/please select your gender|please select your sex/i.test(norm) || norm === 'gender' || norm === 'sex') {
-    return 'Male';
+    return 'Decline to self-identify';
   }
   if (/^hispanic or latino$|hispanic\s*or\s*latino|^hispanic$|are you hispanic or latino/i.test(norm)) {
     return 'No';
@@ -1026,7 +1027,7 @@ export function lookupDefaultAnswer(label) {
   if (
     /^race$|^ethnicity$/i.test(norm)
     || /^race\/ethnicity$|^race ethnicity$/i.test(norm)
-    || /please select your race-ethnicity|ethnicity single selection/i.test(norm)
+    || /please\s*(indicate|select).*race|your\s*race|race.*ethnicity|ethnicity.*race|ethnicity single selection/i.test(norm)
   ) {
     return 'Asian (United States of America)';
   }

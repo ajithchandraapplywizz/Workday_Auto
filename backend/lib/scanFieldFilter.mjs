@@ -112,23 +112,39 @@ export function hasRequiredSignal(label = '', field = {}) {
 }
 
 /**
- * Detects whether a label or field is phone-related (Phone Number, Phone Device Type, Country Phone Code, Mobile, etc.)
+ * True when the field is a Country Phone Code / Country Code field.
+ * Workday automatically binds and autofills Country Phone Code from the Country selected at the top.
+ * STRICT POLICY: NEVER touch, click, focus, or fill Country Phone Code.
+ */
+export function isCountryPhoneCodeField(label = '', field = {}) {
+  const text = String(label || '').trim().toLowerCase();
+  const idOrName = String(field?.id || field?.name || field?.automationId || '').toLowerCase();
+  return /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code|dialing\s*code|country\s*dial\s*code/i.test(text)
+    || /countryphonecode|country-phone-code|country_phone_code|countrycode|country-code/i.test(idOrName)
+    || /country.*phone.*code|phone.*country.*code/i.test(idOrName)
+    || /\(\+(?:1|91|44|61|33|49)\)/.test(text);
+}
+
+/**
+ * Detects whether a label or field is phone-related (Phone Number, Phone Device Type, Mobile, etc.)
  * Strictly mandatory across all Workday forms regardless of whether marked required or optional.
+ * Note: Country Phone Code is explicitly EXCLUDED (auto-bound by Country selection; never touched).
  */
 export function isPhoneRelatedField(label = '', field = {}) {
   const text = String(label || '').trim().toLowerCase();
   const idOrName = String(field?.id || field?.name || field?.automationId || '').toLowerCase();
   if (/phone\s*extension|\bextension\b/i.test(text) && !/number|type|device|code/i.test(text)) return false;
+  if (isCountryPhoneCodeField(label, field)) return false;
   if (/phone(\s*device)?\s*type|phone\s*type|device\s*type/i.test(text)) return true;
-  if (/country.*phone.*code|phone.*country.*code/i.test(text)) return true;
   if (/phone(\s*number)?|mobile(\s*number|\s*phone)?|cell(\s*phone)?|telephone/i.test(text)) return true;
-  if (/phonenumber|phone-number|phonetype|phone-device-type|countryphonecode|country-phone-code/i.test(idOrName)) return true;
+  if (/phonenumber|phone-number|phonetype|phone-device-type/i.test(idOrName)) return true;
   return false;
 }
 
 export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return true;
+  if (isCountryPhoneCodeField(label, field)) return true;
   if (isPhoneRelatedField(label, field)) return false;
   if (isCc305SelfIdentifyField(label, field, stepName)) return false;
   if (hasRequiredSignal(text, field)) return false;
@@ -162,6 +178,7 @@ export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '
 export function isMandatoryField(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
+  if (isCountryPhoneCodeField(label, field)) return false; // Strictly auto-populated by Country selection — never mandatory/touch
   if (isPhoneRelatedField(label, field)) return true;
   if (isMinimumAgeQuestion(text)) return true;
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
@@ -200,6 +217,7 @@ export function shouldIncludeInScan(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
   if (/^password\b|confirm\s*password|verify\s*password/i.test(text)) return false;
+  if (isCountryPhoneCodeField(label, field)) return false; // Auto-bound by Country; never scan or prompt
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
   if (isMinimumAgeQuestion(text)) return true;
   if (isMandatoryField(text, field, stepName)) return true;

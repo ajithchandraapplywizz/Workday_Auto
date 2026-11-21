@@ -98,14 +98,22 @@ async function firstPdfInResumesFolders() {
  * Resolve resume file to an absolute path that exists on disk.
  * Order: explicit → resumes.yml default → DEFAULT_RESUME_PATH → first PDF in resumes/.
  * @param {string} [explicitPath]
+ * @param {string} [targetAwl]
  * @returns {Promise<string|null>} absolute path or null
  */
-export async function resolveResumePath(explicitPath) {
+export async function resolveResumePath(explicitPath, targetAwl = null) {
   const fromExplicit = findExistingResumeFile(explicitPath);
-  if (fromExplicit) return fromExplicit;
+  if (fromExplicit) {
+    if (!targetAwl || targetAwl === 'CLIENT' || basename(fromExplicit).toUpperCase().includes(targetAwl)) return fromExplicit;
+  }
 
   const fromYml = await loadDefaultFromResumesYml();
-  if (fromYml) return fromYml;
+  if (fromYml && (!targetAwl || targetAwl === 'CLIENT' || basename(fromYml).toUpperCase().includes(targetAwl))) return fromYml;
+
+  // Strict isolation: never fall back to generic/other client resume if targetAwl is set!
+  if (targetAwl && targetAwl !== 'CLIENT') {
+    return null;
+  }
 
   const fromDefault = findExistingResumeFile(DEFAULT_RESUME_PATH);
   if (fromDefault) return fromDefault;
@@ -123,6 +131,7 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
     profile?._applyWizzId
     || profile?.applywizz_id
     || profile?.applywizzId
+    || profile?._dbClient?.applywizz_id
     || profile?.candidateId
     || ''
   ).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
@@ -170,19 +179,23 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
   for (const c of candidates) {
     const abs = findExistingResumeFile(c);
     if (abs) {
+      if (targetAwl && targetAwl !== 'CLIENT') {
+        if (!basename(abs).toUpperCase().includes(targetAwl)) {
+          console.warn(`    ⚠️  Strict Resume Match: Rejecting unverified path ${basename(abs)} for client ${targetAwl}`);
+          continue;
+        }
+      }
       if (profile) profile._resumePath = abs;
       return abs;
     }
   }
 
-  const path = await resolveResumePath(null);
   if (targetAwl && targetAwl !== 'CLIENT') {
-    if (path && !basename(path).toUpperCase().includes(targetAwl)) {
-      console.warn(`    ⚠️  Strict Resume Match: Rejecting mismatched resume ${basename(path)} for client ${targetAwl}`);
-      return null;
-    }
+    console.warn(`    ⚠️ Strict Resume Guard: No verified resume found for candidate ${targetAwl}. Fallback to generic resumes blocked.`);
+    return null;
   }
 
+  const path = await resolveResumePath(null);
   if (path && profile) profile._resumePath = path;
   if (path) {
     console.log(`    📎 Resume resolved: ${basename(path)}`);
@@ -193,12 +206,51 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
 }
 
 /**
- * Load and cache plain text from a resume PDF.
- * @param {string} resumePath
+ * Load and cache plain text from a resume PDF or HTTPS URL.
+ * @param {string} resumePath local path or HTTP/HTTPS URL
  * @returns {Promise<string|null>}
  */
 export async function loadResumeText(resumePath) {
-  const abs = await resolveResumePath(resumePath);
+  if (!resumePath) return null;
+  const rawPath = String(resumePath).trim();
+
+  // If HTTP/HTTPS URL, download into in-memory buffer and parse directly
+  if (/^https?:\/\//i.test(rawPath)) {
+    if (textCache.has(rawPath)) return textCache.get(rawPath);
+    // Auto-normalize legacy v1 S3 URL to active v2 S3 URL
+    const targetUrl = rawPath.replace('applywizz-prod.s3.', 'applywizz-prod-v2.s3.');
+    if (textCache.has(targetUrl)) return textCache.get(targetUrl);
+    try {
+      let res = await fetch(targetUrl, {
+        headers: { Accept: 'application/pdf,*/*', 'User-Agent': 'workday-auto-apply' },
+      });
+      if (!res.ok && targetUrl !== rawPath) {
+        res = await fetch(rawPath, {
+          headers: { Accept: 'application/pdf,*/*', 'User-Agent': 'workday-auto-apply' },
+        });
+      }
+      if (!res.ok) {
+        console.warn(`    ⚠️ Could not fetch resume from URL (HTTP ${res.status}): ${targetUrl.slice(0, 100)}`);
+        return null;
+      }
+      const buffer = Buffer.from(await res.arrayBuffer());
+      const { PDFParse } = await import('pdf-parse');
+      const parser = new PDFParse({ data: buffer });
+      const result = await parser.getText();
+      await parser.destroy().catch(() => {});
+      const text = (result?.text || '').trim();
+      if (text) {
+        textCache.set(rawPath, text);
+        textCache.set(targetUrl, text);
+      }
+      return text;
+    } catch (err) {
+      console.warn(`    ⚠️ Could not download/parse resume from URL: ${err.message?.substring(0, 80)}`);
+      return null;
+    }
+  }
+
+  const abs = await resolveResumePath(rawPath);
   if (!abs) return null;
 
   if (textCache.has(abs)) return textCache.get(abs);
@@ -316,6 +368,10 @@ export function parseResumeProfile(text = '') {
   const title = dateIndex >= 0 ? cleanResumeLine(dateLine.slice(0, dateLine.indexOf(dateParts?.[1] || dateLine)).replace(/[|—–-]\s*$/, '')) : '';
   const companyParts = (dateIndex >= 0 ? experienceLines[dateIndex + 1] || '' : '').split('|').map(cleanResumeLine).filter(Boolean);
   const current = /\b(present|current)\b/i.test(dateLine);
+  const bulletLines = (dateIndex >= 0 ? experienceLines.slice(dateIndex + 2) : experienceLines)
+    .map(cleanResumeLine)
+    .filter((l) => l.length >= 30 && !anyDatePattern.test(l) && !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i.test(l));
+  const extractedDescription = bulletLines.slice(0, 2).join(' ');
 
   return {
     skills: extractResumeSkillNames(raw),
@@ -335,6 +391,7 @@ export function parseResumeProfile(text = '') {
       location: companyParts[1] || '',
       from_date: parseResumeMonthYear(dateParts?.[1] || ''),
       to_date: current ? '' : parseResumeMonthYear(dateParts?.[2] || ''),
+      description: extractedDescription,
       currently_working: current,
     },
   };
@@ -536,6 +593,13 @@ export function inferAnswerFromResume(label, resumeText, field = {}) {
     if (line) return line.replace(/^●\s*/, '').replace(/.*?:\s*/, '').split(',')[0]?.trim();
   }
 
+  if (/role\s*description|job\s*description|work\s*description/i.test(lower)) {
+    const expLines = experience.split('\n')
+      .map(cleanResumeLine)
+      .filter((l) => l.length >= 30 && !anyDatePattern.test(l) && !/^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|\d{4})/i.test(l));
+    if (expLines.length >= 2) return `${expLines[0].replace(/\.+$/, '')}. ${expLines[1].replace(/\.+$/, '')}.`;
+    if (expLines.length === 1) return expLines[0];
+  }
   if (/related.*employee|relative.*employee|previously\s*worked|prior\s*worker|prior\s*employment|contractor experience|covidien|conflict/i.test(lower)) {
     return 'No';
   }

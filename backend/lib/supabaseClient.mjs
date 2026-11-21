@@ -2018,6 +2018,9 @@ export async function updateBotControl(patch = {}) {
   const fullBody = {
     ...coreBody,
     mode: patch.mode || patch.stage || memoryBotControl.mode || 'idle',
+    universal_status: patch.universal_status ?? memoryBotControl.universal_status ?? 'off',
+    universal_enabled: Boolean(patch.universal_enabled ?? memoryBotControl.universal_enabled ?? false),
+    universal_stop_requested: Boolean(patch.universal_stop_requested ?? memoryBotControl.universal_stop_requested ?? false),
     scan_status: patch.scan_status ?? memoryBotControl.scan_status ?? 'off',
     submit_status: patch.submit_status ?? memoryBotControl.submit_status ?? 'off',
     scan_enabled: Boolean(patch.scan_enabled ?? memoryBotControl.scan_enabled ?? false),
@@ -2030,6 +2033,12 @@ export async function updateBotControl(patch = {}) {
   }
   if (patch.scan_run_started_at || memoryBotControl.scan_run_started_at) {
     fullBody.scan_run_started_at = patch.scan_run_started_at || memoryBotControl.scan_run_started_at;
+  }
+  if (patch.backend_port || memoryBotControl.backend_port) {
+    fullBody.backend_port = patch.backend_port || memoryBotControl.backend_port;
+  }
+  if (patch.daemon_port || memoryBotControl.daemon_port) {
+    fullBody.daemon_port = patch.daemon_port || memoryBotControl.daemon_port;
   }
 
   try {

@@ -27,11 +27,11 @@ export function parseSkillsList(answer) {
 export function isEducationOrInvalidSkill(skill = '') {
   const s = String(skill || '').trim().toLowerCase();
   if (!s || s.length < 2 || s.length > 35) return true;
-  if (/\b(master|bachelor|phd|doctorate|doctor|associate|degree|diploma)\b/i.test(s)) return true;
+  if (/\b(master|bachelor|phd|doctorate|doctor|associate|degree|diploma|science|arts|engineering|technology)\b/i.test(s)) return true;
   if (/\b(m\.?s\.?|b\.?s\.?|m\.?a\.?|b\.?a\.?|b\.?tech|m\.?tech|m\.?b\.?a)\b/i.test(s)) return true;
   if (/\b(university|college|school|academy|institute|graduat|education|student)\b/i.test(s)) return true;
-  if (/\b(major|minor|field of study|coursework|curriculum|academic)\b/i.test(s)) return true;
-  if (/\b(computer science|information technology)\b/i.test(s) && /\b(master|bachelor|degree|major)\b/i.test(s)) return true;
+  if (/\b(major|minor|field of study|coursework|curriculum|academic|gpa)\b/i.test(s)) return true;
+  if (/\b(computer science|data analytics|information technology|information systems)\b/i.test(s)) return true;
   if (s === 'computer science') return true;
   if (/^master\s*of/i.test(s) || /^bachelor\s*of/i.test(s) || /^science$/i.test(s)) return true;
   return false;
@@ -197,19 +197,24 @@ export async function fillWorkdaySkillsField(page, skillsInput, profile = {}) {
 export async function isSkillsFieldRequired(page) {
   return await page.evaluate(() => {
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
-    const labels = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"], h2, h3, h4'));
+    // 1. Direct input attribute check
+    const inputs = document.querySelectorAll('input[placeholder*="skill" i], input[aria-label*="skill" i], [data-automation-id*="skills" i] input');
+    for (const input of inputs) {
+      if (input.required || input.getAttribute('aria-required') === 'true') return true;
+    }
+    // 2. Immediate label / field check — strictly scoped to skills field itself (never crawling to section parents)
+    const labels = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"]'));
     for (const el of labels) {
       const text = norm(el.textContent);
-      if (!/^(skills?|type to add skills|enter a skill below)/i.test(text) && !/type to add skills|enter a skill below/i.test(text)) {
+      if (!/^(skills?|type to add skills|enter a skill below)$/i.test(text) && !/type to add skills|enter a skill below/i.test(text)) {
         continue;
       }
       if (/\*/.test(text) || /\brequired\b/i.test(text)) return true;
-      const field = el.closest('[data-automation-id*="formField"]') || el.parentElement;
-      if (field?.querySelector?.('[aria-required="true"]')) return true;
-    }
-    const inputs = document.querySelectorAll('input[placeholder*="skill" i], input[aria-label*="skill" i]');
-    for (const input of inputs) {
-      if (input.required || input.getAttribute('aria-required') === 'true') return true;
+      const field = el.closest('[data-automation-id*="formField"]');
+      if (field) {
+        const inp = field.querySelector('input');
+        if (inp && (inp.required || inp.getAttribute('aria-required') === 'true')) return true;
+      }
     }
     return false;
   }).catch(() => false);

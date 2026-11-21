@@ -293,11 +293,11 @@ education:
   graduation_year: ""
 
 experience:
-  current_title: "Full stack intern"
-  current_company: "Student Spot"
-  location: "Hybrid"
-  from_date: "11/2022"
-  to_date: "05/2026"
+  current_title: ""
+  current_company: ""
+  location: ""
+  from_date: ""
+  to_date: ""
   description: ""
   currently_working: false
 

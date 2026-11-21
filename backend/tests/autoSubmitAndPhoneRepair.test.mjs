@@ -1,13 +1,15 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { isPhoneRelatedField } from '../lib/scanFieldFilter.mjs';
+import { isPhoneRelatedField, isCountryPhoneCodeField } from '../lib/scanFieldFilter.mjs';
 import { resolveFieldWithoutLlm } from '../lib/questionEngine/pageAnswerEngine.mjs';
 
 test('isPhoneRelatedField accurately identifies phone fields and labels', () => {
   assert.equal(isPhoneRelatedField('Phone Number', {}), true);
   assert.equal(isPhoneRelatedField('Mobile Phone', {}), true);
   assert.equal(isPhoneRelatedField('Phone Device Type', {}), true);
-  assert.equal(isPhoneRelatedField('Country Phone Code', {}), true);
+  // Country Phone Code has strict No-Touch policy (auto-bound by Country selection)
+  assert.equal(isCountryPhoneCodeField('Country Phone Code', {}), true);
+  assert.equal(isPhoneRelatedField('Country Phone Code', {}), false);
   assert.equal(isPhoneRelatedField('', { automationId: 'phoneNumber--phoneNumber' }), true);
   assert.equal(isPhoneRelatedField('How Did You Hear About Us?', {}), false);
   assert.equal(isPhoneRelatedField('City', {}), false);

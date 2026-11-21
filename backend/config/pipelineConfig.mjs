@@ -49,7 +49,9 @@ export const SUBMIT_WORKER_COUNT = parsePositiveInt(
   WORKER_COUNT
 );
 
-export const WORKER_OFFSET = Number(process.env.WORKER_OFFSET) || 0;
+export const WORKER_OFFSET = Number.isFinite(Number(process.env.WORKER_OFFSET)) && process.env.WORKER_OFFSET !== undefined
+  ? Number(process.env.WORKER_OFFSET)
+  : (/2\b|_2\b|-2\b/i.test(process.env.RAILWAY_SERVICE_NAME || process.env.SERVICE_NAME || '') ? WORKER_COUNT : 0);
 
 // Dynamic worker counts per stage across all services (default: 2 services * WORKER_COUNT)
 export const TOTAL_SERVICES = Number(process.env.TOTAL_SERVICES) || 2;

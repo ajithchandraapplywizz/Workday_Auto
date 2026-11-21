@@ -615,7 +615,7 @@ function isQuestionDomFilled(q, questionLabel, expectedAnswer = '', profile = nu
 
 const SELECT_ONE_WIDGET_SELECTOR = '[data-automation-id="selectOne"], [data-automation-id="selectWidget"]';
 const DROPDOWN_FORM_FIELD_SELECTOR = '[data-automation-id*="formField"]';
-const DROPDOWN_TRIGGER_IN_FIELD = 'button[aria-haspopup="listbox"], [role="combobox"], [data-automation-id="promptIcon"], [data-automation-id="arrow"], [data-automation-id="selectWidget"], select, [data-automation-id="selectOne"] button, [data-automation-id="selectWidget"] button, [data-automation-id*="select"] button';
+const DROPDOWN_TRIGGER_IN_FIELD = 'button[aria-haspopup="listbox"]:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i]):not([aria-label*="Country Phone Code" i]):not([aria-label*="Country / Territory Phone Code" i]):not([aria-label*="Country Code" i]), [role="combobox"]:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i]):not([aria-label*="Country Phone Code" i]):not([aria-label*="Country / Territory Phone Code" i]):not([aria-label*="Country Code" i]), [data-automation-id="promptIcon"], [data-automation-id="arrow"], [data-automation-id="selectWidget"]:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i]), select:not([id*="countryPhoneCode" i]):not([name*="countryPhoneCode" i]):not([data-automation-id*="countryPhoneCode" i]), [data-automation-id="selectOne"] button:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i]), [data-automation-id="selectWidget"] button:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i]), [data-automation-id*="select"] button:not([data-automation-id*="countryPhoneCode" i]):not([id*="countryPhoneCode" i])';
 
 function buildSelectOneOptionCandidates(answer, labelText = '') {
   const opts = [String(answer)];
@@ -915,7 +915,7 @@ export function resolveAnswerFromLiveOptions({ liveOptions = [], labelText = '',
   const hasMale = lowerOpts.some((o) => /\bmale\b|\bman\b/i.test(o));
   const hasFemale = lowerOpts.some((o) => /\bfemale\b|\bwoman\b/i.test(o));
   if (hasMale && hasFemale) {
-    const userGender = String(profile?.eeo?.gender || profile?.gender || profile?._gender || preferredAnswer || '').trim().toLowerCase();
+    const userGender = String(profile?.eeo?.gender || profile?.gender || profile?._gender || profile?._dbClient?.gender || profile?._dbClient?.raw_profile_json?.additional_information?.gender || profile?._applyWizzClientContext?.additional_information?.gender || preferredAnswer || '').trim().toLowerCase();
     if (/female|woman/i.test(userGender)) {
       return findOpt(/\bfemale\b|\bwoman\b/i) || 'Female';
     }
@@ -925,7 +925,7 @@ export function resolveAnswerFromLiveOptions({ liveOptions = [], labelText = '',
     if (/decline|prefer not|choose not/i.test(userGender)) {
       return findOpt(/decline|choose not|prefer not/i) || 'I choose not to disclose';
     }
-    return findOpt(/\bmale\b/i) || findOpt(/\bfemale\b/i) || cleanOpts[0];
+    return findOpt(/decline|prefer not/i) || cleanOpts[0];
   }
 
   // 2. RACE / ETHNICITY CLASSIFICATION
@@ -934,9 +934,9 @@ export function resolveAnswerFromLiveOptions({ liveOptions = [], labelText = '',
   const matchedRaceSignals = raceSignals.filter((sig) => lowerOpts.some((o) => o.includes(sig)));
   if (matchedRaceSignals.length >= 2) {
     const userRace = String(profile?.eeo?.race || profile?.race || profile?._race || preferredAnswer || 'Asian').trim().toLowerCase();
-    if (/asian/i.test(userRace)) {
-      return findOpt(/asian/i) || 'Asian';
-    }
+    // Default strictly to Asian for all race questions as required
+    const asianOpt = findOpt(/^asian\b|asian/i);
+    if (asianOpt) return asianOpt;
     if (/white/i.test(userRace)) {
       return findOpt(/white/i) || 'White';
     }
@@ -946,10 +946,7 @@ export function resolveAnswerFromLiveOptions({ liveOptions = [], labelText = '',
     if (/two or more/i.test(userRace)) {
       return findOpt(/two or more/i) || 'Two or More Races';
     }
-    if (/decline|choose not|prefer not/i.test(userRace)) {
-      return findOpt(/decline|choose not|prefer not/i) || 'I choose not to disclose';
-    }
-    return findOpt(/asian/i) || findOpt(/white/i) || cleanOpts[0];
+    return cleanOpts[0] || 'Asian (United States of America)';
   }
 
   // 3. HISPANIC / LATINO CLASSIFICATION (isolated question with Yes/No or Hispanic/Not Hispanic)
@@ -1253,6 +1250,10 @@ async function readMarkedSelectOneValue(page) {
  * Clicks the listbox button and picks a visible prompt option — never uses .fill() on buttons.
  */
 export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { selectOneIndex = null, formFieldIndex = null, dropdownPageIndex = null, profile = null } = {}) {
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(labelText || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] Skipping selectOne "${labelText}" — auto-populated by Country, preventing dropdown mis-clicks.`);
+    return true;
+  }
   const hasIndex = selectOneIndex != null || formFieldIndex != null || dropdownPageIndex != null;
   if (!hasIndex && labelText && String(answer || '').trim()) {
     const custom = await fillWorkdayCustomDropdown(page, { label: labelText, fieldType: 'dropdown' }, answer);
@@ -1279,6 +1280,18 @@ export async function fillWorkdaySelectOneDropdown(page, labelText, answer, { se
   if (!(await trigger.isVisible({ timeout: 1500 }).catch(() => false))) {
     console.log(`    ⚠️  selectOne trigger not visible for: "${labelText.slice(0, 55)}..."`);
     return false;
+  }
+
+  const isCountryCodeTrigger = await trigger.evaluate((el) => {
+    const blob = `${el.id || ''} ${el.name || ''} ${el.getAttribute('data-automation-id') || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+    if (blob.includes('countryphonecode') || blob.includes('country-phone-code') || (blob.includes('country') && blob.includes('code'))) return true;
+    const parent = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el.parentElement;
+    const parentText = (parent?.textContent || '').toLowerCase();
+    return /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(parentText);
+  }).catch(() => false);
+  if (isCountryCodeTrigger) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] fillWorkdaySelectOneDropdown trigger is country phone code — skipping.`);
+    return true;
   }
 
   await page.keyboard.press('Escape').catch(() => {});
@@ -1677,7 +1690,7 @@ export async function countUnfilledMandatoryQuestions(page, profile, stepName = 
       const phoneUnfilled = await page.evaluate(() => {
         let missing = 0;
         const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
-        const phoneInput = document.querySelector('input[data-automation-id*="phone-number" i], input[data-automation-id*="phoneNumber" i], input[data-automation-id*="phone-device-number" i], input#phoneNumber--phoneNumber, input[id*="phoneNumber" i], input[type="tel"]');
+        const phoneInput = document.querySelector('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"], input[data-automation-id*="phone-number" i]:not([data-automation-id*="country" i]), input[id*="phoneNumber" i]:not([id*="country" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="phoneType" i]), input[type="tel"]');
         if (phoneInput && !norm(phoneInput.value)) missing++;
         const phoneTypeBtn = document.querySelector('[data-automation-id*="phoneType" i] button, [data-automation-id*="phone-device-type" i] button, #phoneNumber--phoneType, button[id*="phoneType" i]');
         if (phoneTypeBtn) {
@@ -2386,6 +2399,11 @@ const DROPDOWN_TRIGGER_SELECTOR = [
 ].join(', ');
 
 async function fillDropdownInFieldBox(page, fieldBox, label, answer, profile = null, fieldMetadata = {}) {
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label || '')
+    || /countryphonecode|country-phone-code/i.test(fieldMetadata?.automationId || fieldMetadata?.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] Skipping dropdown "${label}" — auto-populated by Country, preventing dropdown mis-clicks.`);
+    return true;
+  }
   const combo = fieldBox.locator(DROPDOWN_TRIGGER_SELECTOR).first();
   if (!(await combo.isVisible({ timeout: 1000 }).catch(() => false))) {
     const typedOnly = await typeAndClickOption(page, fieldBox, answer);
@@ -2566,6 +2584,11 @@ async function selectExactAgreementOption(page, label, answer) {
 
 export async function fillApplicationQuestionField(page, label, fieldType, answer, profile = null, fieldMetadata = {}) {
   const questionLabel = extractQuestionLabel(label);
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(questionLabel)
+    || /countryphonecode|country-phone-code/i.test(fieldMetadata?.automationId || fieldMetadata?.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] Skipping "${questionLabel}" — auto-populated by Country, preventing dropdown mis-clicks.`);
+    return true;
+  }
   if (/type to add skills|enter a skill below/i.test(questionLabel)) {
     if (profile?._fillOptionalFields !== true && !isMandatoryField(questionLabel, fieldMetadata)) {
       return true;
@@ -2814,14 +2837,24 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         ? (compensationInputValue(profile, questionLabel) || answer)
         : answer;
       const candidates = [
-        fieldBox.locator('input[type="text"]'),
-        fieldBox.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"])'),
+        fieldBox.locator('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"]'),
+        fieldBox.locator('input[type="tel"]:not([id*="country" i]):not([id*="code" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i])'),
+        fieldBox.locator('input[type="text"]:not([id*="country" i]):not([id*="code" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i])'),
+        fieldBox.locator('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([id*="country" i]):not([id*="code" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i])'),
         fieldBox.locator('textarea'),
         fieldBox.locator('[contenteditable="true"]'),
       ];
       for (const loc of candidates) {
         const input = loc.first();
         if (await input.isVisible({ timeout: 500 }).catch(() => false)) {
+          const isCountryOrType = await input.evaluate((el) => {
+            const blob = `${el.id || ''} ${el.name || ''} ${el.getAttribute('data-automation-id') || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+            return blob.includes('countryphonecode') || blob.includes('country-phone-code') || (blob.includes('country') && blob.includes('code')) || blob.includes('phonetype') || blob.includes('device');
+          }).catch(() => false);
+          if (isCountryOrType) {
+            console.log('    ⏭️ [No-Touch Country Code Policy] Skipping candidate input matching country code / phone type.');
+            continue;
+          }
           const isPhoneInput = await input.evaluate((el) => {
             const blob = `${el.id || ''} ${el.name || ''} ${el.getAttribute('data-automation-id') || ''} ${el.type || ''}`.toLowerCase();
             return blob.includes('phone') || el.type === 'tel';
@@ -2852,7 +2885,8 @@ export async function fillApplicationQuestionField(page, label, fieldType, answe
         ok = await page.evaluate(({ value }) => {
           const box = document.querySelector('[data-auto-fill-target="1"]');
           if (!box) return false;
-          const input = box.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]), textarea');
+          const input = box.querySelector('input#phoneNumber--phoneNumber, input[data-automation-id="phone-number"], input[data-automation-id="phone-device-number"]')
+            || box.querySelector('input:not([type="hidden"]):not([type="checkbox"]):not([type="radio"]):not([id*="country" i]):not([id*="code" i]):not([id*="phoneType" i]):not([data-automation-id*="country" i]):not([data-automation-id*="code" i]):not([data-automation-id*="phoneType" i]), textarea');
           if (!input) return false;
           const isTel = input.type === 'tel' || /phone/i.test(`${input.id || ''} ${input.name || ''} ${input.getAttribute('data-automation-id') || ''}`);
           const finalVal = isTel ? String(value).replace(/\D/g, '').slice(-10) : value;
@@ -3818,11 +3852,19 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
   const wanted = String(
     gender
     || profile?.eeo?.gender
+    || profile?.gender
+    || profile?._dbClient?.gender
+    || profile?._dbClient?.raw_profile_json?.additional_information?.gender
+    || profile?._applyWizzClientContext?.additional_information?.gender
     || peekExpectedAnswer('Please select your gender.', profile)
     || ''
   ).trim();
   if (!wanted) return false;
   gender = wanted;
+
+  const genderAlts = /female/i.test(gender)
+    ? [gender, 'Female', 'Decline to self-identify', 'I prefer not to say']
+    : [gender, 'Male', 'Decline to self-identify', 'I prefer not to say'];
 
   for (const label of ['Please select your gender.', 'Gender', 'Sex']) {
     const custom = await fillWorkdayCustomDropdown(page, { label, fieldType: 'dropdown' }, wanted);
@@ -3867,7 +3909,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
       return true;
     }
     await byRole.click({ force: true });
-    const picked = await clickVisiblePromptOption(page, [gender, 'Male', 'Female']);
+    const picked = await clickVisiblePromptOption(page, genderAlts);
     if (picked) {
       recordField(profile, 'Gender', gender);
       return true;
@@ -3897,7 +3939,7 @@ export async function fillGenderDropdown(page, gender = '', profile = null) {
       await fallbackCombo.scrollIntoViewIfNeeded().catch(() => {});
       await fallbackCombo.click({ force: true }).catch(() => fallbackCombo.evaluate((el) => el.click()));
       await page.waitForTimeout(300);
-      const picked = await clickVisiblePromptOption(page, [gender, 'Male']);
+      const picked = await clickVisiblePromptOption(page, genderAlts);
       const after = await discoverVoluntaryDisclosureDom(page);
       if (picked && (/male|female|non-binary/i.test(after.gender.currentValue) || picked.toLowerCase() === gender.toLowerCase())) {
         recordField(profile, 'Gender', gender);
@@ -4143,6 +4185,11 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
   const longLabels = [
     'Please select the ethnicity which most accurately describes how you identify yourself.',
     'Please select the race which most accurately describes how you identify yourself.',
+    'Please indicate your race.',
+    'Please indicate your race*',
+    'Please indicate your race',
+    'Please select your race.',
+    'Please select your race',
     'Race',
     'Ethnicity',
   ];
@@ -4160,7 +4207,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
   const already = await page.evaluate(() => {
     const normalize = (text) => (text || '').replace(/\s+/g, ' ').replace(/\*+$/, '').trim();
     const label = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]'))
-      .find((el) => /^(race|ethnicity|race\/ethnicity)$/i.test(normalize(el.textContent)));
+      .find((el) => /^(race|ethnicity|race\/ethnicity)$|please\s*(indicate|select).*race/i.test(normalize(el.textContent)));
     if (!label) return { found: false, value: '' };
     const field = label.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || label.parentElement;
     const selected = field?.querySelector('[data-automation-id="selectedItem"]');
@@ -4228,7 +4275,7 @@ export async function fillRaceEthnicityDropdown(page, race = '', profile = null)
     const normalize = (text) => (text || '').replace(/\s+/g, ' ').replace(/\*+$/, '').trim();
     document.querySelectorAll('[data-auto-race-target]').forEach((el) => el.removeAttribute('data-auto-race-target'));
     const label = Array.from(document.querySelectorAll('label, legend, [data-automation-id*="label"], [data-automation-id*="richText"]'))
-      .find((el) => /^(race|ethnicity|race\/ethnicity)$/i.test(normalize(el.textContent)));
+      .find((el) => /^(race|ethnicity|race\/ethnicity)$|please\s*(indicate|select).*race/i.test(normalize(el.textContent)));
     if (!label) return false;
     const field = label.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || label.parentElement;
     const control = field?.querySelector(
@@ -4474,6 +4521,18 @@ export async function sweepAndFillAllRemainingDropdowns(page, profile = null, st
           const container = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el.parentElement;
           return (container?.textContent || '').replace(/\s+/g, ' ').trim();
         }).catch(() => '');
+
+        const isCountryCodeBtn = await btn.evaluate((el) => {
+          const blob = `${el.id || ''} ${el.name || ''} ${el.getAttribute('data-automation-id') || ''} ${el.getAttribute('aria-label') || ''}`.toLowerCase();
+          if (blob.includes('countryphonecode') || blob.includes('country-phone-code') || (blob.includes('country') && blob.includes('code'))) return true;
+          const container = el.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || el.parentElement;
+          const cText = (container?.textContent || '').toLowerCase();
+          return /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(cText);
+        }).catch(() => false);
+        if (isCountryCodeBtn) {
+          console.log(`    ⏭️ [No-Touch Country Code Policy] sweepDropdown skipping Country Phone Code dropdown.`);
+          continue;
+        }
 
         console.log(`    🔍 [sweepDropdown] Opening unfilled dropdown (step: "${stepName}", context: "${contextText.slice(0, 60)}...")`);
         await page.keyboard.press('Escape').catch(() => {});

@@ -16,7 +16,7 @@
 
 
 
-import { loadLocalEnvOnce, updateWorkerStatus, getWorkerControls } from './supabaseClient.mjs';
+import { loadLocalEnvOnce, updateWorkerStatus, getWorkerControls, canonicalJobPostingUrl } from './supabaseClient.mjs';
 import { canExecuteWorkers } from '../config/envConfig.mjs';
 
 import { createClient } from '@supabase/supabase-js';
@@ -42,6 +42,11 @@ const supabase = (process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_
 
 
 function getDynamicSubmitWorkerCount() {
+  const list = process.env.SUBMISSION_WORKER_IDS || process.env.SUBMIT_WORKER_IDS;
+  if (list) {
+    const parts = list.split(',').map((s) => s.trim()).filter(Boolean);
+    if (parts.length > 0) return parts.length;
+  }
   const envVal = Number(process.env.SUBMIT_WORKER_COUNT) ||
     Number(process.env.SUBMIT_WORKERS) ||
     Number(process.env.SUBMISSION_WORKER_COUNT) ||
@@ -78,6 +83,15 @@ export async function resolveInstanceSubmissionWorkerIds() {
   const baseOffset = Number(process.env.WORKER_OFFSET);
   if (!Number.isNaN(baseOffset) && process.env.WORKER_OFFSET !== undefined) {
     return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + baseOffset}`);
+  }
+
+  // Automatic deduction from Railway Service Name: Submitting_2 -> offset workerCount (e.g. 2 -> W3, W4)
+  const serviceName = process.env.RAILWAY_SERVICE_NAME || process.env.SERVICE_NAME || '';
+  if (/2\b|_2\b|-2\b/i.test(serviceName)) {
+    return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1 + workerCount}`);
+  }
+  if (/1\b|_1\b|-1\b/i.test(serviceName)) {
+    return Array.from({ length: workerCount }, (_, i) => `submitting_worker_${i + 1}`);
   }
 
   const replicaIndex = Number(process.env.RAILWAY_REPLICA_INDEX ?? process.env.REPLICA_INDEX);
@@ -145,6 +159,107 @@ export function getSubmissionAttemptCount(errorMessage) {
     return parseInt(match[1], 10);
   }
   return 0;
+}
+
+/**
+ * Extract Workday requisition ID from job posting URL.
+ * e.g. "Senior-Software-Engineer_JR1985432" -> "jr1985432"
+ *      "Claims-Specialist_R-123456" -> "r-123456"
+ */
+export function extractWorkdayRequisitionId(url = '') {
+  if (!url) return '';
+  const clean = String(url).trim();
+  const match = clean.match(/(?:_|\/)([a-z]{0,4}-?\d{4,10})(?:[/?#]|$)/i)
+    || clean.match(/(?:req(?:uisition)?[-_]?id=|[?&]id=)([a-z0-9_-]+)/i);
+  return match ? match[1].toLowerCase() : '';
+}
+
+/**
+ * Pre-Browser Fast Check: Verifies if candidate already submitted or applied to this job.
+ * Checks previous submissions in job_distributions via:
+ * 1. Exact URL match
+ * 2. Canonical URL match
+ * 3. Same Company + Requisition ID match
+ */
+export async function checkIfClientAlreadyAppliedToJob({ applywizzId, jobUrl, company, currentTaskId = null }) {
+  if (!applywizzId || !jobUrl || !supabase) {
+    return { alreadyApplied: false };
+  }
+
+  const cleanId = String(applywizzId).trim();
+  const canonicalTarget = typeof canonicalJobPostingUrl === 'function' ? canonicalJobPostingUrl(jobUrl) : jobUrl.split('?')[0];
+  const targetReqId = extractWorkdayRequisitionId(jobUrl);
+  const cleanCompany = String(company || '').trim().toLowerCase();
+
+  try {
+    const { data: priorRows, error: queryErr } = await supabase
+      .from('job_distributions')
+      .select('id, job_url, company, status, application_submitted_screenshot_url, created_at, updated_at')
+      .eq('applywizz_id', cleanId)
+      .in('status', ['submitted', 'already_applied', 'completed']);
+
+    if (queryErr || !Array.isArray(priorRows) || priorRows.length === 0) {
+      return { alreadyApplied: false };
+    }
+
+    for (const prior of priorRows) {
+      if (currentTaskId && String(prior.id) === String(currentTaskId)) {
+        continue;
+      }
+
+      const priorRawUrl = prior.job_url || '';
+      const priorCanonical = typeof canonicalJobPostingUrl === 'function' ? canonicalJobPostingUrl(priorRawUrl) : priorRawUrl.split('?')[0];
+      const priorReqId = extractWorkdayRequisitionId(priorRawUrl);
+      const priorCompany = String(prior.company || '').trim().toLowerCase();
+
+      // Check 1: Exact URL match
+      if (priorRawUrl === jobUrl) {
+        return {
+          alreadyApplied: true,
+          matchedId: prior.id,
+          matchedUrl: priorRawUrl,
+          matchedDate: prior.updated_at || prior.created_at,
+          screenshotUrl: prior.application_submitted_screenshot_url,
+          matchType: 'exact_url',
+        };
+      }
+
+      // Check 2: Canonical URL match
+      if (canonicalTarget && priorCanonical && canonicalTarget === priorCanonical) {
+        return {
+          alreadyApplied: true,
+          matchedId: prior.id,
+          matchedUrl: priorRawUrl,
+          matchedDate: prior.updated_at || prior.created_at,
+          screenshotUrl: prior.application_submitted_screenshot_url,
+          matchType: 'canonical_url',
+        };
+      }
+
+      // Check 3: Same Company + Same Requisition ID match
+      if (targetReqId && priorReqId && targetReqId === priorReqId) {
+        const companyMatches = !cleanCompany || !priorCompany ||
+          cleanCompany === priorCompany ||
+          priorRawUrl.toLowerCase().includes(cleanCompany) ||
+          jobUrl.toLowerCase().includes(priorCompany);
+        if (companyMatches) {
+          return {
+            alreadyApplied: true,
+            matchedId: prior.id,
+            matchedUrl: priorRawUrl,
+            matchedDate: prior.updated_at || prior.created_at,
+            screenshotUrl: prior.application_submitted_screenshot_url,
+            matchType: 'requisition_id',
+          };
+        }
+      }
+    }
+
+    return { alreadyApplied: false };
+  } catch (err) {
+    console.warn(`[checkIfClientAlreadyAppliedToJob] Pre-check notice for ${cleanId}: ${err?.message || err}`);
+    return { alreadyApplied: false };
+  }
 }
 
 
@@ -395,45 +510,7 @@ export async function updateJobDistributionWithCheck({
   console.error(finalErrMsg);
 
   return { success: false, error: lastErr || new Error(finalErrMsg) };
-
 }
-
-
-
-/**
-
- * Synchronize all ready_for_review applications from job_distributions into submission_tasks.
-
- * Bypass: User explicit policy — tasks are picked directly from job_distributions without comparison or pre-sync.
-
- */
-
-export async function syncJobDistributionsToSubmissionTasks() {
-
-  return 0;
-
-}
-
-
-
-/**
-
- * Move ready_for_review rows to queued.
-
- * Bypassed in favor of direct ready_for_review -> applying claiming, preventing large batches in 'queued'.
-
- */
-
-export async function moveReadyTasksToQueued(limit = getDynamicSubmitWorkerCount()) {
-
-  // Direct pipeline: tasks remain in 'ready_for_review' and transition straight to 'applying'
-
-  // when an idle worker claims them. This ensures exactly and only active workers are ever in flight.
-
-  return 0;
-
-}
-
 
 
 /**
@@ -465,12 +542,12 @@ export async function getRemainingReadyForReviewCount() {
       .neq('status', 'archived');
     if (error) {
       console.warn('[SUBMISSION QUEUE] getRemainingReadyForReviewCount error:', error.message);
-      return 0;
+      return -1;
     }
     return typeof count === 'number' ? count : 0;
   } catch (err) {
     console.warn('[SUBMISSION QUEUE] getRemainingReadyForReviewCount exception:', err.message);
-    return 0;
+    return -1;
   }
 }
 
@@ -511,10 +588,12 @@ export async function claimNextTask(workerId) {
   const envWorkerCount = getDynamicSubmitWorkerCount();
   const totalServices = Number(process.env.TOTAL_SERVICES) || Number(PIPELINE_CONFIG.totalServices) || 2;
   const maxClusterSubmitLimit = envWorkerCount * totalServices;
-  const maxConcurrent = Number(process.env.CLUSTER_CONCURRENCY) ||
-    Number(process.env.GLOBAL_WORKER_COUNT) ||
-    Number(process.env.MAX_CONCURRENT_SUBMISSIONS) ||
-    (Number(process.env.TOTAL_SUBMIT_WORKERS) && Number(process.env.TOTAL_SUBMIT_WORKERS) <= maxClusterSubmitLimit ? Number(process.env.TOTAL_SUBMIT_WORKERS) : maxClusterSubmitLimit);
+  const maxConcurrent = Math.max(
+    maxClusterSubmitLimit,
+    Number(process.env.CLUSTER_CONCURRENCY) || 0,
+    Number(process.env.GLOBAL_WORKER_COUNT) || 0,
+    Number(process.env.MAX_CONCURRENT_SUBMISSIONS) || 0
+  );
 
   // Cluster Concurrency Guard: Strictly at most maxConcurrent rows can be 'applying' across all services and replicas
   try {
@@ -525,8 +604,8 @@ export async function claimNextTask(workerId) {
       .eq('status', 'applying');
 
     if (typeof rawApplyingCount === 'number' && rawApplyingCount >= maxConcurrent) {
-      // Proactively reap any stale / expired leases right now
-      const reaped = await reapExpiredLeases(3).catch(() => []);
+      // Proactively reap any stale / expired leases right now (>2m cutoff)
+      const reaped = await reapExpiredLeases(2).catch(() => []);
       const remainingApplying = rawApplyingCount - (reaped?.length || 0);
       if (remainingApplying >= maxConcurrent) {
         return null;
@@ -565,9 +644,7 @@ export async function claimNextTask(workerId) {
       .is('application_submitted_screenshot_url', null)
       .neq('status', 'submitted')
       .neq('status', 'completed')
-      .neq('status', 'archived')
-      .not('error_message', 'ilike', '%Resource Cooldown%')
-      .not('error_message', 'ilike', '%Host process limit%');
+      .neq('status', 'archived');
 
     if (activeBatchUrls && activeBatchUrls.length > 0 && activeBatchUrls.length <= 30) {
       candQuery = candQuery.in('job_url', activeBatchUrls);
@@ -590,9 +667,7 @@ export async function claimNextTask(workerId) {
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
-        .neq('status', 'archived')
-        .not('error_message', 'ilike', '%Resource Cooldown%')
-        .not('error_message', 'ilike', '%Host process limit%');
+        .neq('status', 'archived');
 
       const { data: fbCandidates } = await fallback0Query
         .order('created_at', { ascending: true })
@@ -603,6 +678,7 @@ export async function claimNextTask(workerId) {
     // In JavaScript: filter strictly for 0th attempt tasks (error_message null or not containing [Attempt)
     let candidates = (allRawCandidates || []).filter((r) => {
       const err = r.error_message || '';
+      if (err.includes('Resource Cooldown') || err.includes('Host process limit')) return false;
       return !err || !err.includes('[Attempt') || err.includes('Stopped by user');
     });
 
@@ -702,10 +778,20 @@ export async function claimNextTask(workerId) {
 
 
       if (!claimErr && claimed && claimed.length > 0) {
-
         const claimedDist = claimed[0];
 
-
+        // Immediately reflect in_flight state in worker_status table for dashboard and multi-replica visibility
+        try {
+          const { updateWorkerStatus } = await import('./supabaseClient.mjs');
+          const workerNum = String(workerId).replace(/\D+/g, '') || '1';
+          await updateWorkerStatus(workerId, {
+            state: 'in_flight',
+            stage: 'submitting',
+            current_application_id: claimedDist.id,
+            bot_name: `Submitting Worker ${workerNum}`,
+            updated_at: now,
+          });
+        } catch {}
 
         // Format task object for worker execution directly from job_distributions
 
@@ -930,6 +1016,35 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
     bot_name: `Submitting Worker ${workerNum}`,
     updated_at: new Date().toISOString(),
   }).catch(() => { });
+
+  // ⚡ Pre-Browser Fast Check: Skip browser if candidate already submitted or applied to this job
+  const priorApp = await checkIfClientAlreadyAppliedToJob({
+    applywizzId: task.applywizz_id,
+    jobUrl: task.job_url,
+    company: task.company,
+    currentTaskId: task.id,
+  });
+
+  if (priorApp.alreadyApplied) {
+    const formattedDate = priorApp.matchedDate ? new Date(priorApp.matchedDate).toLocaleDateString() : 'prior run';
+    console.log(`⚡ [${serviceName}] [${workerId}] [PRE-CHECK FAST-PATH] Candidate ${task.applywizz_id} already applied to ${task.company} (matched ${priorApp.matchType} #${priorApp.matchedId} on ${formattedDate}). Skipping browser launch!`);
+
+    await updateJobDistributionWithCheck({
+      id: task.id,
+      status: 'already_applied',
+      application_submitted_screenshot_url: priorApp.screenshotUrl || 'prior_submission_proof',
+      error_message: `Pre-check: Already applied (matched previous submission #${priorApp.matchedId} on ${formattedDate})`,
+      updated_at: new Date().toISOString(),
+    });
+
+    return {
+      success: true,
+      status: 'already_applied',
+      skippedBrowser: true,
+      screenshotUrl: priorApp.screenshotUrl,
+      reason: `Pre-check: Already applied (matched prior submission #${priorApp.matchedId})`,
+    };
+  }
 
 
 

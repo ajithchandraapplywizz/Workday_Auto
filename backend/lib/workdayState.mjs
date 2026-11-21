@@ -12,9 +12,11 @@ export const WORKDAY_DEFAULT_STATE = 'California';
  * @returns {string}
  */
 export function resolveStateValue(profile = {}, tenant = '') {
-  const fromTenantPersonal = profile?.personal?.state
+  let fromTenantPersonal = profile?.personal?.state
     || profile?.personal?.State
     || profile?.personal?.province
+    || profile?._dbClient?.raw_profile_json?.additional_information?.state_of_residence
+    || profile?._dbClient?.state
     || profile?._supabaseQa?.['State*']
     || profile?._supabaseQa?.['State California']
     || profile?._supabaseQa?.['State']
@@ -26,13 +28,32 @@ export function resolveStateValue(profile = {}, tenant = '') {
     || profile?.qa_answers?.['state / province']
     || profile?.qa_answers?.province;
 
+  // Extract from candidate full address if not found
+  if (!fromTenantPersonal && profile?.personal?.full_address) {
+    const parts = String(profile.personal.full_address).split(',').map((p) => p.trim());
+    for (const part of parts) {
+      const lower = part.toLowerCase();
+      if (US_STATE_MAP[lower]) {
+        fromTenantPersonal = US_STATE_MAP[lower];
+        break;
+      }
+      for (const [code, name] of Object.entries(US_STATE_MAP)) {
+        if (lower === name) {
+          fromTenantPersonal = name;
+          break;
+        }
+      }
+    }
+  }
+
   const raw = String(fromTenantPersonal || WORKDAY_DEFAULT_STATE).trim();
   const lower = raw.toLowerCase();
-  if (US_STATE_MAP[lower]) {
-    const full = US_STATE_MAP[lower];
-    return full.charAt(0).toUpperCase() + full.slice(1);
+  for (const [code, full] of Object.entries(US_STATE_MAP)) {
+    if (lower === code || lower === full) {
+      return full.charAt(0).toUpperCase() + full.slice(1);
+    }
   }
-  return raw;
+  return raw ? raw.charAt(0).toUpperCase() + raw.slice(1) : raw;
 }
 
 const US_STATE_MAP = {

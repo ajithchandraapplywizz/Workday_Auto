@@ -15,6 +15,7 @@ import { getWorkdayTenant } from './discovery.mjs';
 import { hydrateExperienceFromLlm, pickNearestSelectOption, resolveUnknownWithLlm } from './claudeLlm.mjs';
 import { collectLiveFieldOptions } from './workdayDom.mjs';
 import { inferFromResumeFile, getResumePathForApply } from './resumeParser.mjs';
+import { resolveCandidateRoleDescription, isHardcodedInternDescription } from './roleDescriptionResolver.mjs';
 import {
   WORKDAY_DEFAULT_EXPERIENCE,
   WORKDAY_DEFAULT_EDUCATION,
@@ -753,7 +754,7 @@ async function readFieldValue(fieldLoc) {
     if (pillTexts.length) return pillTexts[0];
     if (field.tagName === 'BUTTON' || field.getAttribute?.('role') === 'combobox') {
       const t = normalize(field.textContent);
-      if (t && !/^select(\s+one)?$/i.test(t) && !/^0 items selected$/i.test(t) && !/^no items selected$/i.test(t)) return t;
+      if (t && !/^select(\s+one)?$/i.test(t) && !/^0 items selected$/i.test(t) && !/^no items selected$/i.test(t) && !/^none$/i.test(t)) return t;
     }
     const btn = field.querySelector('[data-automation-id="selectWidget"] button, button[aria-haspopup="listbox"], [role="combobox"]');
     if (btn) {
@@ -766,7 +767,7 @@ async function readFieldValue(fieldLoc) {
         if (m?.[1]) return normalize(m[1]);
         return t;
       }
-      if (t && !/^select(\s+one)?$/i.test(t) && !/^0 items selected$/i.test(t) && !/^no items selected$/i.test(t)) return t;
+      if (t && !/^select(\s+one)?$/i.test(t) && !/^0 items selected$/i.test(t) && !/^no items selected$/i.test(t) && !/^none$/i.test(t)) return t;
     }
     return '';
   }).catch(() => '');
@@ -1270,15 +1271,21 @@ function pickLocalNearestOption(label, options = [], preferred = '') {
 
 async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable = false } = {}) {
   const attempts = [];
-  const variants = /degree/i.test(label) ? getDegreeVariantsForLevel(value) : [];
-  const options = /degree/i.test(label) || !searchable
-    ? [value, ...variants]
+  const isDegree = /degree/i.test(label);
+  const cleanParts = isDegree && typeof value === 'string' && value.includes('/')
+    ? value.split('/').map((s) => s.trim()).filter(Boolean)
     : [value];
-  let uniqueOptions = [...new Set(options.map(String).filter(Boolean))];
+  const primaryVal = cleanParts[0] || value;
+  const variants = isDegree ? getDegreeVariantsForLevel(primaryVal) : [];
+  const options = isDegree || !searchable
+    ? [...cleanParts, ...variants]
+    : [primaryVal];
+  let uniqueOptions = [...new Set(options.map(String).filter((s) => s && !/^none$/i.test(s) && !s.includes('/')))];
 
   // 1. Fast check: is field already populated with matching value?
   const existingVal = await readFieldValue(fieldLoc).catch(() => '');
-  if (existingVal && !/select(\s+one)?/i.test(existingVal) && (valuesMatch(existingVal, value) || uniqueOptions.some((o) => valuesMatch(existingVal, o)))) {
+  const isExistingEmpty = !existingVal || /^(select(\s+one)?|none)$/i.test(existingVal);
+  if (!isExistingEmpty && (valuesMatch(existingVal, primaryVal) || uniqueOptions.some((o) => valuesMatch(existingVal, o)))) {
     attempts.push(`already filled with "${existingVal}" ✓`);
     return { ok: true, selected: existingVal, attempts };
   }
@@ -1287,13 +1294,9 @@ async function fillDropdownAggressive(page, fieldLoc, value, label, { searchable
   if (live.length) {
     const present = uniqueOptions.filter((opt) => live.some((o) => valuesMatch(o, opt)));
     let narrowed = present.length ? present : [pickLocalNearestOption(label, live, value)].filter(Boolean);
-    if (!narrowed.length) {
-      const llmNearest = await pickNearestSelectOption({
-        question: label,
-        options: live,
-        preferred: value,
-      }).catch(() => null);
-      if (llmNearest) narrowed = [llmNearest];
+    if (!narrowed.length && live[0]) {
+      // Fast deterministic local fallback: use first live option or closest substring without calling LLM
+      narrowed = [typeof live[0] === 'string' ? live[0] : (live[0]?.text || value)];
     }
     if (narrowed.length) {
       attempts.push(`live options narrowed to: ${narrowed.join(', ')}`);
@@ -1437,44 +1440,41 @@ async function fillSingleFieldOfStudy(page, field, unique, leaf, force) {
   }
   // ── USER RULE: If options do not match typed words in Stage 1 or Stage 3,
   // type ONE letter and pick / click the FIRST dropdown option that appears ──
-  console.log('    ↻ Field of Study words did not match — executing 1-letter typing + first dropdown option fallback...');
+  console.log('    ↻ Field of Study words did not match — executing swift 1-letter typing + first dropdown option fallback...');
   const firstChar = String(leaf || '').trim()[0] || 'c';
-  const candidateLetters = [...new Set([firstChar.toLowerCase(), 'c', 'a', 'e', 's'])].filter((c) => /^[a-z]$/i.test(c));
+  const letter = /^[a-z]$/i.test(firstChar) ? firstChar.toLowerCase() : 'c';
 
-  for (const letter of candidateLetters) {
-    await combo.click({ force: true, timeout: 2000 }).catch(async () => {
-      await field.click({ force: true, timeout: 2000 }).catch(() => {});
-    });
-    await page.waitForTimeout(200);
+  await combo.click({ force: true, timeout: 1500 }).catch(async () => {
+    await field.click({ force: true, timeout: 1500 }).catch(() => {});
+  });
+  await page.waitForTimeout(150);
 
-    const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
-    if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
-      await search.fill('').catch(() => {});
-      await page.waitForTimeout(100);
-      await search.pressSequentially(letter, { delay: 45 });
-    } else {
-      await page.waitForTimeout(100);
-      await page.keyboard.type(letter, { delay: 45 });
-    }
+  const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
+  if (await search.isVisible({ timeout: 500 }).catch(() => false)) {
+    await search.fill('').catch(() => {});
+    await page.waitForTimeout(50);
+    await search.pressSequentially(letter, { delay: 30 });
+  } else {
+    await page.waitForTimeout(50);
+    await page.keyboard.type(letter, { delay: 30 });
+  }
 
-    await page.waitForTimeout(500);
+  await page.waitForTimeout(300);
 
-    // Click FIRST visible prompt option
-    const pickedFirst = await clickFirstVisiblePromptOption(page);
-    if (!pickedFirst) {
-      await page.keyboard.press('ArrowDown').catch(() => {});
-      await page.waitForTimeout(100);
-      await page.keyboard.press('Enter').catch(() => {});
-    }
-    await page.waitForTimeout(250);
-    await page.keyboard.press('Escape').catch(() => {});
-    await page.waitForTimeout(200);
+  // Click FIRST visible prompt option
+  const pickedFirst = await clickFirstVisiblePromptOption(page);
+  if (!pickedFirst) {
+    await page.keyboard.press('ArrowDown').catch(() => {});
+    await page.waitForTimeout(80);
+    await page.keyboard.press('Enter').catch(() => {});
+  }
+  await page.waitForTimeout(150);
+  await page.keyboard.press('Escape').catch(() => {});
 
-    const afterFallback = await readFieldValue(field).catch(() => '');
-    if (pickedFirst || isFieldOfStudyFilled(afterFallback, letter)) {
-      console.log(`    ✅ Field of Study (1-letter fallback "${letter}") ← "${afterFallback || pickedFirst}"`);
-      return true;
-    }
+  const afterLetter = await readFieldValue(field).catch(() => '');
+  if (pickedFirst || isFieldOfStudyFilled(afterLetter, letter)) {
+    console.log(`    ✅ Field of Study (1-letter '${letter}') ← "${pickedFirst || afterLetter}"`);
+    return true;
   }
 
   console.log('    ✗ Field of Study still empty after type+option');
@@ -1647,8 +1647,8 @@ export async function resolveAnswer(label, profileKey, labelText, profile, qaSto
     const loc = profile?.experience?.location;
     if (loc) return String(loc);
   }
-  if (profileKey === 'experience.description') {
-    const desc = profile?.experience?.description;
+  if (profileKey === 'experience.description' || /role\s*description|job\s*description/i.test(labelText || '')) {
+    const desc = await resolveCandidateRoleDescription(profile, { page, qaStore });
     if (desc) return String(desc);
   }
 
@@ -1663,7 +1663,15 @@ export async function resolveAnswer(label, profileKey, labelText, profile, qaSto
     }
     return fromProfile || 'Other';
   }
-  if (profileKey === 'education.degree') return profile?.education?.degree || "Bachelor's";
+  if (profileKey === 'education.degree') {
+    const rawDeg = profile?.education?.degree
+      || profile?._dbClient?.degree
+      || profile?._dbClient?.highest_education
+      || profile?._applyWizzClientContext?.client?.highest_education
+      || profile?.experience?.degree
+      || "Bachelor's";
+    return String(rawDeg);
+  }
   if (profileKey === 'education.field_of_study_hierarchy' || /field\s*of\s*study/i.test(labelText)) {
     const major = profile?.education?.major
       || (Array.isArray(profile?.education?.field_of_study_hierarchy)
@@ -1750,9 +1758,11 @@ async function isFieldRequiredInDom(page, fieldLoc, labelText = '') {
       }
     }
 
-    // Compact formField still showing * next to the control.
-    const text = (container?.textContent || '').replace(/\s+/g, ' ').trim();
-    if (/\*/.test(text) && text.length < 280) return true;
+    // Compact formField still showing * next to the control (only if not an optional field like Location).
+    if (!/location/i.test(labelText)) {
+      const text = (container?.textContent || '').replace(/\s+/g, ' ').trim();
+      if (/\*/.test(text) && text.length < 280) return true;
+    }
     return false;
   }).catch(() => false);
 }
@@ -1770,6 +1780,20 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
   // Required-only mode — except Job Title / Company that must always be set when
   // the work row is open. Dates use their own * / spin-map filler below.
   if (!isDateField && profile?._fillOptionalFields !== true && !alwaysFill) {
+    // Secret Feature: If a field is "Category", check if there is a delete button on the right and delete the row!
+    if (/category/i.test(label)) {
+      console.log(`    🔍 [Step 2 Secret Feature] "Category" field detected ("${label}") — attempting right-side delete button skip...`);
+      const deleted = await deleteCategoryRowsIfPresent(page);
+      if (deleted > 0) {
+        logBlock(sectionName, label, ['Category row deleted via right-side delete button — skipped filling']);
+        return true;
+      }
+    }
+
+    if (/^location$/i.test(label) && !profile?.experience?.location) {
+      logBlock(sectionName, label, ['Location not in profile and not strictly mandatory — skipped']);
+      return true;
+    }
     const required = await isFieldRequiredInDom(page, fieldLoc, label);
     if (!required) {
       logBlock(sectionName, label, ['optional (no *) — skipped']);
@@ -1847,20 +1871,26 @@ async function fillFieldAtAnyCost(page, sectionName, sectionType, spec, profile,
     await tryPick(pickLocalNearestOption(label, live, answer), 'DOM nearest');
 
     if (!verified) {
-      const nearest = live.length
-        ? await pickNearestSelectOption({
-          question: label,
-          options: live,
-          preferred: answer,
-          profile,
-          company: profile?._company || profile?.company,
-        })
-        : await resolveUnknownWithLlm(label, { type, required: true }, {
-          page,
-          profile,
-          company: profile?._company || profile?.company,
-        });
-      if (nearest) await tryPick(nearest, 'LLM/nearest');
+      // Step 2 Work Experience & Education fields are candidate profile facts — NEVER call LLM for Step 2!
+      const isExperienceOrEducation = sectionType === 'work' || sectionType === 'education';
+      if (!isExperienceOrEducation) {
+        const nearest = live.length
+          ? await pickNearestSelectOption({
+            question: label,
+            options: live,
+            preferred: answer,
+            profile,
+            company: profile?._company || profile?.company,
+          })
+          : await resolveUnknownWithLlm(label, { type, required: true }, {
+            page,
+            profile,
+            company: profile?._company || profile?.company,
+          });
+        if (nearest) await tryPick(nearest, 'LLM/nearest');
+      } else {
+        logBlock(sectionName, label, ['Step 2 experience/education: LLM fallback bypassed (deterministic candidate facts only)']);
+      }
     }
   } else if (!verified && (type === 'monthyear' || type === 'year')) {
     result = await fillWorkdayDateField(page, {
@@ -2093,11 +2123,11 @@ export async function checkMyExperienceRequiredFields(page, profile = {}) {
         // Degree
         const degreeBtn = eduSection.querySelector('[data-automation-id*="degree" i] button, [data-automation-id*="degree" i] [role="combobox"], [data-automation-id*="degree" i] input');
         const degreeVal = degreeBtn ? norm(degreeBtn.textContent || degreeBtn.value) : '';
-        if (!degreeVal || /^select/i.test(degreeVal)) {
+        if (!degreeVal || /^(select(\s+one)?|none)$/i.test(degreeVal)) {
           const degLabel = Array.from(eduSection.querySelectorAll('label')).find((l) => /degree/i.test(l.textContent || ''));
           const dInp = degLabel?.closest('[data-automation-id*="formField"], div')?.querySelector('button, [role="combobox"], input');
           const dVal = dInp ? norm(dInp.textContent || dInp.value) : '';
-          if (!dVal || /^select/i.test(dVal)) missing.push('Education: Degree');
+          if (!dVal || /^(select(\s+one)?|none)$/i.test(dVal)) missing.push('Education: Degree');
         }
 
         // Field of Study
@@ -2126,6 +2156,103 @@ export async function checkMyExperienceRequiredFields(page, profile = {}) {
   }).catch(() => ({ unfilledCount: 0, missing: [] }));
 }
 
+/**
+ * Secret Feature: If a "Category" field appears on Step 2 (My Experience),
+ * find the Delete / Remove button at the right of it and click it to delete
+ * that row/section, skipping the need to fill it directly.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<number>} number of category rows deleted
+ */
+export async function deleteCategoryRowsIfPresent(page) {
+  let totalDeleted = 0;
+  for (let pass = 0; pass < 5; pass++) {
+    const deletedThisPass = await page.evaluate(async () => {
+      const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
+
+      // 1. Locate any element, field, or label mentioning "Category"
+      const allCategoryElements = Array.from(document.querySelectorAll(
+        'label, legend, [data-automation-id*="label"], [data-automation-id*="category" i], [id*="category" i], [name*="category" i], [data-automation-id*="formField"]'
+      )).filter((el) => {
+        const text = norm(el.textContent || el.getAttribute('aria-label') || el.getAttribute('data-automation-id') || el.id || '');
+        return /\bcategory\b/i.test(text) && text.length < 100;
+      });
+
+      if (!allCategoryElements.length) return 0;
+
+      for (const catEl of allCategoryElements) {
+        // Find enclosing row / panel / container
+        const row = catEl.closest(
+          '[data-automation-id*="panelSet"], [data-automation-id*="panel-set"], [data-automation-id*="Panel"], [data-automation-id*="panel"], [data-automation-id*="row"], fieldset, [role="group"], [data-automation-id*="formField"]'
+        ) || catEl.parentElement?.parentElement;
+
+        if (!row) continue;
+
+        // Find delete button inside this row / container or sibling to the right
+        const buttons = Array.from(row.querySelectorAll('button, [role="button"], a[role="button"]'));
+        let deleteBtn = buttons.find((btn) => {
+          const text = norm(btn.textContent);
+          const auto = btn.getAttribute('data-automation-id') || '';
+          const aria = norm(btn.getAttribute('aria-label') || '');
+          const title = norm(btn.getAttribute('title') || '');
+          return /delete|remove|trash/i.test(auto)
+            || /^(delete|remove)$/i.test(text)
+            || /delete|remove/i.test(aria)
+            || /delete|remove/i.test(title);
+        });
+
+        if (!deleteBtn) {
+          // Look for any delete button in the document positioned to the right of the category element
+          const catRect = catEl.getBoundingClientRect();
+          const allDeleteBtns = Array.from(document.querySelectorAll(
+            'button[data-automation-id*="delete" i], button[data-automation-id*="remove" i], button[aria-label*="delete" i], button[aria-label*="remove" i], [data-automation-id="panel-set-delete-button"]'
+          ));
+          deleteBtn = allDeleteBtns.find((btn) => {
+            const rect = btn.getBoundingClientRect();
+            return Math.abs(rect.top - catRect.top) < 70 && rect.left >= (catRect.left + 50);
+          });
+        }
+
+        if (deleteBtn && (deleteBtn.offsetParent !== null || deleteBtn.getClientRects().length > 0)) {
+          deleteBtn.scrollIntoView?.({ block: 'center' });
+          deleteBtn.click();
+          return 1;
+        }
+      }
+      return 0;
+    }).catch(() => 0);
+
+    if (deletedThisPass > 0) {
+      totalDeleted += deletedThisPass;
+      console.log(`    🗑️ [Step 2 Secret Feature] Detected "Category" field with delete button on the right — clicked delete to skip filling!`);
+      await page.waitForTimeout(600);
+
+      // Confirm any confirmation dialog if Workday prompts "Are you sure you want to delete?"
+      const confirmed = await page.evaluate(() => {
+        const modal = document.querySelector('[role="dialog"], [data-automation-id*="modal"], [data-automation-id*="dialog"]');
+        if (!modal) return false;
+        const confirmBtn = Array.from(modal.querySelectorAll('button')).find((b) => {
+          const t = (b.textContent || '').trim().toLowerCase();
+          return /delete|yes|confirm|ok|remove/i.test(t);
+        });
+        if (confirmBtn) {
+          confirmBtn.click();
+          return true;
+        }
+        return false;
+      }).catch(() => false);
+
+      if (confirmed) {
+        console.log(`    ✓ Confirmed deletion modal for Category row`);
+        await page.waitForTimeout(400);
+      }
+    } else {
+      break;
+    }
+  }
+
+  return totalDeleted;
+}
+
 export async function handleStep2MyExperience(page, profile = {}) {
   console.log('  📋 [Step 2: My Experience] Automating required experience & education fields...');
 
@@ -2134,6 +2261,9 @@ export async function handleStep2MyExperience(page, profile = {}) {
     ...WORKDAY_DEFAULT_EXPERIENCE,
     ...(profile.experience || {}),
   };
+  if (isHardcodedInternDescription(profile.experience.description)) {
+    profile.experience.description = '';
+  }
   const configuredUniversity = profile?.education?.university || profile?.education?.school || '';
   profile.education = {
     ...WORKDAY_DEFAULT_EDUCATION,
@@ -2166,18 +2296,31 @@ export async function handleStep2MyExperience(page, profile = {}) {
   const stepBlocked = await pageHasValidationErrors(page);
   await skipOptionalExperienceSections(page, profile, { force: stepBlocked });
 
+  // Secret Feature: If a "Category" field appears with a delete button on the right, delete it to skip filling!
+  const deletedCat = await deleteCategoryRowsIfPresent(page);
+  if (deletedCat > 0) {
+    console.log(`    🗑️ [Step 2 Secret Feature] Cleaned up ${deletedCat} Category row(s) before My Experience fill`);
+  }
+
   const fillOptional = profile?._fillOptionalFields === true;
 
   const hasCandidateWorkData = Boolean(
     profile.experience?.current_company ||
     profile.experience?.company ||
     profile.experience?.current_title ||
-    profile.experience?.role
+    profile.experience?.role ||
+    profile.experience?.latest_company ||
+    profile.experience?.latest_job_title ||
+    profile._dbClient?.latest_company ||
+    profile._dbClient?.latest_job_title
   );
   const hasCandidateEduData = Boolean(
     profile.education?.university ||
     profile.education?.school ||
-    profile.education?.degree
+    profile.education?.degree ||
+    profile._dbClient?.university_or_school ||
+    profile._dbClient?.degree ||
+    profile._dbClient?.education
   );
 
   const workOnPage = await sectionPresentOnPage(page, 'work');
@@ -2228,6 +2371,7 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   if (hasWorkSection) {
+    await deleteCategoryRowsIfPresent(page);
     console.log('\n  ▶ WORK EXPERIENCE');
     const currentlyWorking = profile?.experience?.currently_working === true || await page.evaluate(() => {
       const cb = document.querySelector('input[type="checkbox"][data-automation-id*="currentlyWork" i], input[type="checkbox"]#currentlyWorkHere');
@@ -2253,6 +2397,7 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   if (hasEducationSection) {
+    await deleteCategoryRowsIfPresent(page);
     console.log('\n  ▶ EDUCATION (school from Supabase/default; degree from resume + LLM analysis)');
     for (const spec of EDUCATION_CORE_FIELDS) {
     const ok = await fillFieldAtAnyCost(page, 'Education', 'education', spec, profile, qaStore, url);
@@ -2346,6 +2491,9 @@ export function mergeWorkdayDefaultExperienceEducation(profile) {
     ...WORKDAY_DEFAULT_EXPERIENCE,
     ...(profile.experience || {}),
   };
+  if (isHardcodedInternDescription(profile.experience.description)) {
+    profile.experience.description = '';
+  }
   const configuredUniversity = profile?.education?.university || profile?.education?.school || '';
   profile.education = {
     ...WORKDAY_DEFAULT_EDUCATION,

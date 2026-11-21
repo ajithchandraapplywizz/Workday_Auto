@@ -4,15 +4,22 @@ import { isAllowedUniversalLeadQuestion } from '../lib/resolvingWorkerPool.mjs';
 import { preResolveClientAnswersMap } from '../lib/jobFormCache.mjs';
 
 test('isAllowedUniversalLeadQuestion allows only universal questions and rejects all personal/experience/education data', () => {
-  // Allowed universal questions
-  assert.equal(isAllowedUniversalLeadQuestion('How did you hear about us?'), true);
-  assert.equal(isAllowedUniversalLeadQuestion('Source'), true);
-  assert.equal(isAllowedUniversalLeadQuestion('Where did you hear about this opportunity?'), true);
+  // Allowed universal questions (Race/Ethnicity default Asian, Terms & Conditions)
   assert.equal(isAllowedUniversalLeadQuestion('Race / Ethnicity'), true);
   assert.equal(isAllowedUniversalLeadQuestion('Ethnic Background'), true);
   assert.equal(isAllowedUniversalLeadQuestion('I agree to the terms and conditions'), true);
   assert.equal(isAllowedUniversalLeadQuestion('Do you certify that the information provided is accurate?'), true);
   assert.equal(isAllowedUniversalLeadQuestion('Privacy Policy Acknowledgment'), true);
+
+  // Strictly rejected dynamic referral questions (must resolve per candidate)
+  assert.equal(isAllowedUniversalLeadQuestion('How did you hear about us?'), false);
+  assert.equal(isAllowedUniversalLeadQuestion('Source'), false);
+  assert.equal(isAllowedUniversalLeadQuestion('Where did you hear about this opportunity?'), false);
+
+  // Strictly rejected EEO & personal identity
+  assert.equal(isAllowedUniversalLeadQuestion('Gender'), false);
+  assert.equal(isAllowedUniversalLeadQuestion('Veteran Status'), false);
+  assert.equal(isAllowedUniversalLeadQuestion('Disability'), false);
 
   // Strictly rejected personal identity & contact
   assert.equal(isAllowedUniversalLeadQuestion('First Name'), false);
@@ -126,11 +133,11 @@ test('Lead distribution filtering strictly strips personal and experience data f
   const filteredForSibling = leadAnswers.filter((a) => isAllowedUniversalLeadQuestion(a.question));
 
   const siblingQuestions = filteredForSibling.map((a) => a.question);
-  assert.ok(siblingQuestions.includes('How did you hear about us?'));
-  assert.ok(siblingQuestions.includes('I agree to terms and conditions'));
   assert.ok(siblingQuestions.includes('Race / Ethnicity'));
+  assert.ok(siblingQuestions.includes('I agree to terms and conditions'));
 
-  // Personal and experience data MUST NOT be present
+  // Personal, dynamic referral, and experience data MUST NOT be present
+  assert.ok(!siblingQuestions.includes('How did you hear about us?'));
   assert.ok(!siblingQuestions.includes('First Name'));
   assert.ok(!siblingQuestions.includes('Last Name'));
   assert.ok(!siblingQuestions.includes('Email Address'));
@@ -393,6 +400,66 @@ test('Postal Code validation strictly detects State-Zip mismatch and recovers va
   assert.notEqual(recovered, '55401');
   assert.equal(isPostalMatchingState(recovered, 'Massachusetts'), true);
   assert.equal(profileWithMismatch.personal.postal_code, recovered);
+});
+
+test('parseAddress accurately extracts street, apartment, city, state, postal code and country without contamination', async () => {
+  const { parseAddress } = await import('../lib/applyWizzClient.mjs');
+  const rawAddr = '12107 Sycamore Terrace Dr, Apt A, Cincinnti, OHIO, 45249, United States';
+  const parsed = parseAddress(rawAddr);
+
+  assert.equal(parsed.address_line1, '12107 Sycamore Terrace Dr, Apt A');
+  assert.equal(parsed.city, 'Cincinnti');
+  assert.equal(parsed.state, 'OHIO');
+  assert.equal(parsed.postal_code, '45249');
+  assert.equal(parsed.country, 'United States');
+});
+
+test('resolveStateValue resolves authentic candidate state and does not default to California', async () => {
+  const { resolveStateValue } = await import('../lib/workdayState.mjs');
+  
+  // Case 1: Candidate with state in raw_profile_json
+  const profileOhio = {
+    personal: {},
+    _dbClient: {
+      raw_profile_json: {
+        additional_information: {
+          state_of_residence: 'Ohio',
+        },
+      },
+    },
+  };
+  assert.equal(resolveStateValue(profileOhio), 'Ohio');
+
+  // Case 2: Candidate with state only in full_address
+  const profileFromAddress = {
+    personal: {
+      full_address: '12107 Sycamore Terrace Dr, Apt A, Cincinnti, OHIO, 45249, United States',
+    },
+  };
+  assert.equal(resolveStateValue(profileFromAddress), 'Ohio');
+});
+
+test('Strict candidate resume isolation blocks cross-contamination of resumes across AWL IDs', async () => {
+  const { getResumePathForApply, resolveResumePath } = await import('../lib/resumeParser.mjs');
+
+  // Passing a different client's resume or generic fallback for AWL-30415 must be rejected
+  const fakeOtherClientPath = 'resumes/Ajithchandra_Resume_AIPractice_Intern.pdf';
+  const resolved = await resolveResumePath(fakeOtherClientPath, 'AWL-30415');
+  assert.equal(resolved, null, 'Must reject mismatched resume for AWL-30415');
+
+  const profileCandidate = {
+    _applyWizzId: 'AWL-30415',
+    personal: {
+      first_name: 'Vadiraja',
+      last_name: 'Korlahalli',
+      resume: fakeOtherClientPath,
+    },
+  };
+
+  const path = await getResumePathForApply(profileCandidate, { resume: fakeOtherClientPath });
+  if (path) {
+    assert.match(path.toUpperCase(), /AWL-30415/, 'Any resolved resume path MUST contain target AWL ID');
+  }
 });
 
 

@@ -1431,6 +1431,16 @@ export async function locateWorkdayFieldByLabel(page, labelPattern, options = {}
       );
       if (!trigger) continue;
 
+      // STRICT SHIELD: Never select or return a Country Phone Code trigger
+      const triggerBlob = `${trigger.id || ''} ${trigger.name || ''} ${trigger.getAttribute('data-automation-id') || ''} ${trigger.getAttribute('aria-label') || ''}`.toLowerCase();
+      if (triggerBlob.includes('countryphonecode') || triggerBlob.includes('country-phone-code') || (triggerBlob.includes('country') && triggerBlob.includes('code') && triggerBlob.includes('phone'))) {
+        continue;
+      }
+      const phoneParent = formField.closest('[data-automation-id*="phoneNumberSection"], [data-automation-id*="phoneSection"]');
+      if (phoneParent && !pattern.includes('phone') && !pattern.includes('device')) {
+        continue;
+      }
+
       const rect = formField.getBoundingClientRect();
       candidates.push({
         trigger,

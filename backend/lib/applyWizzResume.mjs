@@ -3,7 +3,7 @@
  */
 
 import { mkdir, writeFile, unlink } from 'fs/promises';
-import { existsSync } from 'fs';
+import { existsSync, statSync } from 'fs';
 import { resolve, dirname, basename } from 'path';
 import https from 'node:https';
 import { URL, fileURLToPath } from 'node:url';
@@ -11,18 +11,27 @@ import { loadResumeText } from './resumeParser.mjs';
 import { formatHttpError, isTlsCertError } from './httpClient.mjs';
 
 const CACHE_DIR = resolve(process.cwd(), 'data', 'client-resumes');
-const DEFAULT_ASSET_BASE = 'https://www.apply-wizz.me';
+const DEFAULT_ASSET_BASE = 'https://applywizz-prod-v2.s3.us-east-2.amazonaws.com';
 
 /**
  * Turn Apply Wizz resume_url / resume_path into an absolute HTTPS URL.
+ * Automatically resolves and migrates legacy/relative CRM paths to the
+ * authentic production AWS S3 CRM bucket:
+ * https://applywizz-prod-v2.s3.us-east-2.amazonaws.com/CRM/{AWL_ID}...
  * @param {string} raw
  * @returns {string}
  */
 export function absolutizeApplyWizzResumeUrl(raw = '') {
   const t = String(raw || '').trim();
   if (!t) return '';
+  if (/apply-wizz\.me\/CRM\//i.test(t)) {
+    return t.replace(/https?:\/\/(?:www\.)?apply-wizz\.me\/CRM\//i, 'https://applywizz-prod-v2.s3.us-east-2.amazonaws.com/CRM/');
+  }
   if (/^https?:\/\//i.test(t)) return t;
   if (t.startsWith('//')) return `https:${t}`;
+  if (/^(\/)?CRM\//i.test(t)) {
+    return `https://applywizz-prod-v2.s3.us-east-2.amazonaws.com/${t.replace(/^\/+/, '')}`;
+  }
   const base = String(process.env.APPLYWIZZ_ASSET_BASE || DEFAULT_ASSET_BASE).replace(/\/+$/, '');
   return t.startsWith('/') ? `${base}${t}` : `${base}/${t}`;
 }
@@ -72,7 +81,7 @@ function downloadBinary(url, destPath, { rejectUnauthorized = true } = {}) {
       port: target.port || 443,
       path: `${target.pathname}${target.search}`,
       method: 'GET',
-      family: 4,
+      autoSelectFamily: true,
       rejectUnauthorized,
       headers: { Accept: 'application/pdf,*/*', 'User-Agent': 'workday-auto-apply' },
       timeout: 45000,
@@ -123,21 +132,46 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   const altCached = clientAwlId ? resolve(CACHE_DIR, `_${clientAwlId}_.pdf`) : null;
   const applicationKey = String(profile._jobUrl || profile._currentJobUrl || '').trim();
 
-  // 1. Instant check: Already on disk in data/client-resumes/
+  // 1. Instant check: Already on disk in data/client-resumes/ (must be authentic resume, > 2KB)
   if (existsSync(cached)) {
-    profile._resumePath = cached;
-    profile._resumeDownloadedForApplication = true;
-    profile._resumeApplicationKey = applicationKey;
-    return cached;
+    try {
+      if (statSync(cached).size > 2048) {
+        // Verify authenticity against candidate's name to avoid stale cross-contamination
+        const candLastName = String(profile.personal?.last_name || profile.lastName || profile.client_name?.split(' ').pop() || '').trim().toLowerCase();
+        let valid = true;
+        if (candLastName && candLastName.length > 2) {
+          try {
+            const { loadResumeText } = await import('./resumeParser.mjs');
+            const txt = (await loadResumeText(cached)) || '';
+            if (txt && !txt.toLowerCase().includes(candLastName)) {
+              console.warn(`  ⚠️ Cached resume at ${basename(cached)} did NOT contain candidate name "${candLastName}" — purging corrupted cache.`);
+              const { unlink } = await import('fs/promises');
+              await unlink(cached).catch(() => {});
+              valid = false;
+            }
+          } catch {}
+        }
+        if (valid && existsSync(cached)) {
+          profile._resumePath = cached;
+          profile._resumeDownloadedForApplication = true;
+          profile._resumeApplicationKey = applicationKey;
+          return cached;
+        }
+      }
+    } catch {}
   }
   if (altCached && existsSync(altCached)) {
-    profile._resumePath = altCached;
-    profile._resumeDownloadedForApplication = true;
-    profile._resumeApplicationKey = applicationKey;
-    return altCached;
+    try {
+      if (statSync(altCached).size > 2048) {
+        profile._resumePath = altCached;
+        profile._resumeDownloadedForApplication = true;
+        profile._resumeApplicationKey = applicationKey;
+        return altCached;
+      }
+    } catch {}
   }
 
-  // 2. Cloud Fallback: Supabase Storage bucket 'client-resumes'
+  // 2. Cloud Check & Authentic AWS S3 CRM Fallback with Auto-Cache to Supabase Storage
   if (clientAwlId && clientAwlId !== 'CLIENT') {
     try {
       const { supabase } = await import('./supabaseClient.mjs');
@@ -145,10 +179,9 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
         const { data: publicData } = supabase.storage.from('client-resumes').getPublicUrl(`${clientAwlId}.pdf`);
         const sbUrl = publicData?.publicUrl;
         if (sbUrl) {
-          console.log(`  📥 [Cloud Storage] Fetching authentic resume from Supabase: ${clientAwlId}.pdf...`);
           try {
             await downloadBinary(sbUrl, cached, { rejectUnauthorized: true });
-            if (existsSync(cached)) {
+            if (existsSync(cached) && statSync(cached).size > 2048) {
               profile._resumePath = cached;
               profile._resumeUrl = sbUrl;
               profile._resumeDownloadedForApplication = true;
@@ -157,20 +190,60 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
               return cached;
             }
           } catch (dlErr) {
-            // Try alternative format e.g. _AWL-1568_.pdf in Supabase Storage
-            const { data: altData } = supabase.storage.from('client-resumes').getPublicUrl(`_${clientAwlId}_.pdf`);
-            if (altData?.publicUrl) {
-              await downloadBinary(altData.publicUrl, cached, { rejectUnauthorized: true }).catch(() => {});
-              if (existsSync(cached)) {
-                profile._resumePath = cached;
-                profile._resumeUrl = altData.publicUrl;
-                profile._resumeDownloadedForApplication = true;
-                profile._resumeApplicationKey = applicationKey;
-                console.log(`  ✅ Resume cached from Supabase Storage: ${basename(cached)}`);
-                return cached;
+            // File not in Supabase Storage yet — immediately query clients table for authentic AWS S3 URL
+          }
+        }
+
+        // Direct S3 Fallback: Query clients table for authentic AWS S3 URL from ApplyWizz CRM
+        try {
+          const { data: clientRow } = await supabase
+            .from('clients')
+            .select('resume_url, raw_profile_json')
+            .eq('applywizz_id', clientAwlId)
+            .maybeSingle();
+
+          const rawS3 = clientRow?.raw_profile_json?.additional_information?.resume_url
+            || clientRow?.raw_profile_json?.additional_information?.resume_path
+            || clientRow?.raw_profile_json?.client?.resume_url
+            || clientRow?.raw_profile_json?.client?.resume_path
+            || clientRow?.resume_url;
+          let s3ResumeUrl = absolutizeApplyWizzResumeUrl(rawS3);
+
+          if (s3ResumeUrl) {
+            console.log(`  📥 [AWS S3 CRM Fallback] Fetching authentic resume from ApplyWizz S3: ${clientAwlId}...`);
+            await downloadBinary(s3ResumeUrl, cached, { rejectUnauthorized: true });
+            if (existsSync(cached) && statSync(cached).size > 2048) {
+              profile._resumePath = cached;
+              profile._resumeUrl = s3ResumeUrl;
+              profile._resumeDownloadedForApplication = true;
+              profile._resumeApplicationKey = applicationKey;
+              console.log(`  ✅ Resume cached from AWS S3: ${basename(cached)}`);
+
+              // Auto-cache back to Supabase Storage bucket 'client-resumes'
+              try {
+                const { readFile } = await import('fs/promises');
+                const buf = await readFile(cached);
+                const { error: upErr } = await supabase.storage.from('client-resumes').upload(`${clientAwlId}.pdf`, buf, {
+                  contentType: 'application/pdf',
+                  upsert: true,
+                });
+                if (!upErr) {
+                  const { data: pubData } = supabase.storage.from('client-resumes').getPublicUrl(`${clientAwlId}.pdf`);
+                  if (pubData?.publicUrl) {
+                    await supabase.from('clients').update({ resume_url: pubData.publicUrl }).eq('applywizz_id', clientAwlId);
+                    profile._resumeUrl = pubData.publicUrl;
+                    console.log(`  ☁️ Auto-synced authentic resume to Supabase Storage: client-resumes/${clientAwlId}.pdf`);
+                  }
+                }
+              } catch (upSyncErr) {
+                console.warn(`  ⚠️ Note on auto-syncing resume to Supabase: ${upSyncErr.message}`);
               }
+
+              return cached;
             }
           }
+        } catch (s3FetchErr) {
+          console.warn(`  ⚠️ S3 CRM resume fallback lookup error: ${s3FetchErr.message}`);
         }
       }
     } catch (sbErr) {
@@ -244,10 +317,21 @@ export async function ensureClientResumeFromApplyWizz(profile = {}) {
   }
 }
 
-/** Retain cached client resume in data/client-resumes/ so concurrent workers never unlink an active PDF. */
-export async function cleanupClientResume(profile = {}) {
+/** Clean up cached client resume in data/client-resumes/ after submission if requested. */
+export async function cleanupClientResume(profile = {}, { force = false } = {}) {
   const path = String(profile._resumePath || '');
   if (!path) return false;
+  try {
+    if (force && existsSync(path) && path.includes('client-resumes')) {
+      const { unlink } = await import('fs/promises');
+      await unlink(path);
+      console.log(`  🧹 Cleaned up cached candidate resume: ${basename(path)}`);
+      profile._resumePath = null;
+      return true;
+    }
+  } catch (err) {
+    console.warn(`  ⚠️ Could not clean up resume ${path}: ${err.message}`);
+  }
   return true;
 }
 

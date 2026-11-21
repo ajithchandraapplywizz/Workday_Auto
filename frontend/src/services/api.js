@@ -590,21 +590,15 @@ export function getApplicationEffectiveTimestamp(item) {
       const t = new Date(isoStr).getTime();
       if (!isNaN(t) && t > 0) return t;
     }
-    // Matches epoch ms like 1794774093550
-    const msMatch = shotText.match(/_(\d{13})(?:\.|$)/);
+    // Matches epoch ms like 1794774093550 anywhere in filename (e.g. _1795219456304_link_expired.jpg)
+    const msMatch = shotText.match(/(?:_|^)(\d{13})(?:[._-]|$)/);
     if (msMatch) {
       const t = Number(msMatch[1]);
       if (!isNaN(t) && t > 0) return t;
     }
   }
 
-  // 2. Second priority: Worker lease time (moment worker began processing)
-  if (item.worker_leased_at) {
-    const t = new Date(item.worker_leased_at).getTime();
-    if (!isNaN(t) && t > 0) return t;
-  }
-
-  // 3. Third priority: Specific terminal timestamps if populated
+  // 2. Second priority: Specific terminal timestamps if populated
   if (item.submitted_at) {
     const t = new Date(item.submitted_at).getTime();
     if (!isNaN(t) && t > 0) return t;
@@ -614,15 +608,20 @@ export function getApplicationEffectiveTimestamp(item) {
     if (!isNaN(t) && t > 0) return t;
   }
 
-  // 4. For terminal applications (submitted/completed/failed), fallback to created_at.
-  // NEVER use updated_at because queue sweeps, syncs, and migrations touch updated_at!
+  // 3. Third priority: Worker lease time (moment worker began processing)
+  if (item.worker_leased_at) {
+    const t = new Date(item.worker_leased_at).getTime();
+    if (!isNaN(t) && t > 0) return t;
+  }
+
+  // 4. For terminal applications (submitted/completed/failed/already_applied), updated_at marks the exact completion moment
   if (isTerminal) {
-    if (item.created_at) {
-      const t = new Date(item.created_at).getTime();
-      if (!isNaN(t) && t > 0) return t;
-    }
     if (item.updated_at) {
       const t = new Date(item.updated_at).getTime();
+      if (!isNaN(t) && t > 0) return t;
+    }
+    if (item.created_at) {
+      const t = new Date(item.created_at).getTime();
       if (!isNaN(t) && t > 0) return t;
     }
   } else {
@@ -1220,6 +1219,12 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return isSub && matchesDay(a);
     }).length;
 
+    // Already Applied strictly matching day bounds
+    const alreadyApplied = allApps.filter((a) => {
+      const st = (a.status || '').toLowerCase();
+      return st === 'already_applied' && matchesDay(a);
+    }).length;
+
     // 2. Applying: sync from database status and active worker status across all services (up to configured submit capacity)
     const now = Date.now();
     const tenMinutesAgo = new Date(now - 10 * 60 * 1000).toISOString();
@@ -1298,6 +1303,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       total: allApps.length,
       submitted,
       submittedOnly,
+      alreadyApplied,
       applying,
       failed,
       queued,
@@ -1316,6 +1322,7 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       total: 0,
       submitted: 0,
       submittedOnly: 0,
+      alreadyApplied: 0,
       applying: 0,
       failed: 0,
       queued: 0,
@@ -1409,10 +1416,30 @@ export function getBackendBaseUrls() {
   }
 
   if (typeof window !== 'undefined') {
+    // 1. User/Environment cached backend URLs have priority
     add(window.localStorage.getItem('WORKDAY_BACKEND_URL'));
     add(window.localStorage.getItem('VITE_BACKEND_URL'));
     add(window.localStorage.getItem('WORKDAY_BACKEND_URL_2'));
     add(window.localStorage.getItem('VITE_BACKEND_URL_2'));
+
+    // 2. Dynamic host & port pairing:
+    // If dashboard is accessed on laptop (localhost) or mobile/LAN IP (e.g. 172.16.0.84),
+    // automatically attach to the backend daemon running on the paired dynamic port
+    const host = window.location.hostname || 'localhost';
+    if (window.location.port) {
+      const p = Number(window.location.port);
+      if (p > 1000) {
+        add(`http://${host}:${p - 1}`);
+        add(`http://localhost:${p - 1}`);
+      }
+    }
+    // 3. Active dynamic port and local ports
+    add(`http://${host}:63496`);
+    add(`http://localhost:63496`);
+    add(`http://${host}:3001`);
+    add(`http://${host}:3002`);
+    add(`http://localhost:3001`);
+    add(`http://localhost:3002`);
   }
   if (typeof import.meta !== 'undefined' && import.meta.env) {
     add(import.meta.env.VITE_BACKEND_URL);
@@ -1466,17 +1493,12 @@ export function getStaffAuthHeaders(baseHeaders = {}) {
 
 export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
   try {
-    const backendBase = getBackendBaseUrl();
-    const isLocal = isLocalEnvironment();
-    const endpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/logs`, `${backendBase}/api/developer/logs`] : []),
-      ...(isLocal ? [
-        'http://localhost:3002/api/bot/logs',
-        'http://localhost:3002/api/developer/logs',
-        'http://localhost:3001/api/bot/logs',
-        'http://localhost:3001/api/developer/logs',
-      ] : []),
-    ];
+    const baseUrls = getBackendBaseUrls();
+    const endpoints = [];
+    for (const b of new Set(baseUrls)) {
+      endpoints.push(`${b}/api/bot/logs`);
+      endpoints.push(`${b}/api/developer/logs`);
+    }
 
     let scanningLogs = [];
     let resolvingLogs = [];
@@ -1526,33 +1548,59 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
       return null;
     };
 
-    const baseUrls = getBackendBaseUrls();
-    const localTargets = isLocal ? [
-      fetchLogEndpoint('http://localhost:3001/api/bot/logs'),
-      fetchLogEndpoint('http://localhost:3002/api/bot/logs'),
-    ] : [];
-    const remoteTargets = baseUrls.map((b) => fetchLogEndpoint(`${b}/api/bot/logs`));
+    const namedTargets = [];
+    for (const b of new Set(baseUrls)) {
+      let defaultService = 'Worker_Service';
+      if (b.includes('scannerresolver2')) defaultService = 'Scanner_Resolver_2';
+      else if (b.includes('scannerresolver') || b.includes('3001')) defaultService = 'Scanner_Resolver_1';
+      else if (b.includes('submitting2')) defaultService = 'Submitting_2';
+      else if (b.includes('submitting') || b.includes('3002')) defaultService = 'Submitting_1';
+      else defaultService = 'Local_Daemon';
+      namedTargets.push({ url: `${b}/api/bot/logs`, defaultService });
+    }
 
-    const results = await Promise.allSettled([...localTargets, ...remoteTargets]);
+    const byService = {
+      'Scanner_Resolver_1': [],
+      'Scanner_Resolver_2': [],
+      'Submitting_1': [],
+      'Submitting_2': [],
+    };
+
+    const results = await Promise.allSettled(
+      namedTargets.map(async (t) => {
+        const json = await fetchLogEndpoint(t.url);
+        return { data: json, defaultService: t.defaultService };
+      })
+    );
     let anyLive = false;
 
     for (const r of results) {
-      if (r.status === 'fulfilled' && r.value) {
-        const data = r.value;
+      if (r.status === 'fulfilled' && r.value?.data) {
+        const data = r.value.data;
+        const serviceName = data.service_name || r.value.defaultService;
+        if (!byService[serviceName]) byService[serviceName] = [];
+
+        function tagService(l, defaultCluster = 'Scan') {
+          const norm = normalizeLog(l, defaultCluster);
+          norm.service_name = serviceName;
+          byService[serviceName].push(norm);
+          return norm;
+        }
+
         if (Array.isArray(data.scanLogs) && data.scanLogs.length > 0) {
-          scanningLogs.push(...data.scanLogs.map((l) => normalizeLog(l, 'Scan')));
+          scanningLogs.push(...data.scanLogs.map((l) => tagService(l, 'Scan')));
           anyLive = true;
         }
         if (Array.isArray(data.resolveLogs) && data.resolveLogs.length > 0) {
-          resolvingLogs.push(...data.resolveLogs.map((l) => normalizeLog(l, 'Resolve')));
+          resolvingLogs.push(...data.resolveLogs.map((l) => tagService(l, 'Resolve')));
           anyLive = true;
         }
         if (Array.isArray(data.submitLogs) && data.submitLogs.length > 0) {
-          submittingLogs.push(...data.submitLogs.map((l) => normalizeLog(l, 'Submit')));
+          submittingLogs.push(...data.submitLogs.map((l) => tagService(l, 'Submit')));
           anyLive = true;
         }
         if (Array.isArray(data.logs) && data.logs.length > 0) {
-          allLogs.push(...data.logs.map((l) => normalizeLog(l)));
+          allLogs.push(...data.logs.map((l) => tagService(l)));
           anyLive = true;
         }
       }
@@ -1579,6 +1627,12 @@ export async function fetchBatchWorkerLogs({ limit = 150 } = {}) {
           scanning: scanningLogs.slice(-limit),
           resolving: resolvingLogs.slice(-limit),
           submitting: submittingLogs.slice(-limit),
+          byService: {
+            'Scanner_Resolver_1': (byService['Scanner_Resolver_1'] || []).slice(-limit),
+            'Scanner_Resolver_2': (byService['Scanner_Resolver_2'] || []).slice(-limit),
+            'Submitting_1': (byService['Submitting_1'] || []).slice(-limit),
+            'Submitting_2': (byService['Submitting_2'] || []).slice(-limit),
+          },
         },
         allLogs: allLogs.slice(-limit * 2),
       };
@@ -2862,25 +2916,20 @@ export async function triggerAutonomousBot() {
     }
 
     // 5. Webhook call to daemon (POST /api/bot/start / /api/bot/trigger)
-    const backendBase = getBackendBaseUrl();
-    const isLocal = isLocalEnvironment();
-    const endpoints = [
-      ...(backendBase ? [`${backendBase}/api/bot/start`, `${backendBase}/api/bot/trigger`, `${backendBase}/api/bot/webhook`] : []),
-      ...(!backendBase && isLocal ? [
-        'http://localhost:3001/api/bot/start',
-        'http://localhost:3001/api/bot/trigger',
-        'http://localhost:3001/api/bot/webhook',
-      ] : []),
-    ];
+    const backendUrls = getBackendBaseUrls();
+    const endpoints = [];
+    for (const b of new Set(backendUrls)) {
+      endpoints.push(`${b}/api/bot/start`, `${b}/api/bot/trigger`, `${b}/api/bot/webhook`);
+    }
     for (const ep of endpoints) {
       try {
         const resp = await fetch(ep, {
           method: 'POST',
           headers: getStaffAuthHeaders(),
           body: JSON.stringify({ action: 'start', trigger: true, nonce: actionNonce, timestamp: now }),
-          signal: AbortSignal.timeout(2000),
+          signal: AbortSignal.timeout(1500),
         });
-        if (resp.ok) break;
+        if (resp && resp.ok) break;
       } catch {}
     }
 
@@ -2904,21 +2953,11 @@ export async function stopAutonomousBot() {
     const actionNonce = Date.now().toString();
 
     // 1. Webhook stop call to daemon
-    const backendBase = getBackendBaseUrl();
-    const isLocal = isLocalEnvironment();
-    const stopEndpoints = [
-      ...(backendBase ? [
-        `${backendBase}/api/bot/scan/stop`,
-        `${backendBase}/api/bot/stop`,
-        `${backendBase}/api/bot/webhook`,
-        `${backendBase}/api/bot/controls`,
-      ] : []),
-      ...(!backendBase && isLocal ? [
-        'http://localhost:3001/api/bot/scan/stop',
-        'http://localhost:3001/api/bot/stop',
-        'http://localhost:3001/api/bot/controls',
-      ] : []),
-    ];
+    const backendUrls = getBackendBaseUrls();
+    const stopEndpoints = [];
+    for (const b of new Set(backendUrls)) {
+      stopEndpoints.push(`${b}/api/bot/scan/stop`, `${b}/api/bot/stop`, `${b}/api/bot/webhook`, `${b}/api/bot/controls`);
+    }
     await Promise.any(
       stopEndpoints.map((u) =>
         fetch(u, {
@@ -3195,6 +3234,9 @@ export async function triggerAllParallelStage() {
       is_running: true,
       is_paused: false,
       stop_requested: false,
+      universal_status: 'running',
+      universal_enabled: true,
+      universal_stop_requested: false,
       scan_enabled: true,
       scan_status: 'running',
       scan_stop_requested: false,
@@ -3207,11 +3249,20 @@ export async function triggerAllParallelStage() {
       active_worker_count: 6,
       updated_at: now,
     };
-    const { error: sbErr } = await supabase
+    let { error: sbErr } = await supabase
       .from('bot_control')
       .update(payload)
       .eq('id', 'primary');
-    if (!sbErr) supabaseSuccess = true;
+    if (sbErr && sbErr.message?.includes('column')) {
+      const corePayload = { ...payload };
+      delete corePayload.universal_status;
+      delete corePayload.universal_enabled;
+      delete corePayload.universal_stop_requested;
+      const fallbackRes = await supabase.from('bot_control').update(corePayload).eq('id', 'primary');
+      if (!fallbackRes.error) supabaseSuccess = true;
+    } else if (!sbErr) {
+      supabaseSuccess = true;
+    }
 
     // 2. Mark both scanning and submitting workers as in_flight
     const { scan, submit } = getEnvWorkerCounts();
@@ -3272,27 +3323,38 @@ export async function stopAllParallelStage() {
 
   // 1. Authoritative atomic update to bot_control: EVERYTHING OFF
   try {
-    await supabase
+    const stopPayload = {
+      stage: 'idle',
+      mode: 'idle',
+      is_running: false,
+      is_paused: false,
+      stop_requested: true,
+      universal_status: 'off',
+      universal_enabled: false,
+      universal_stop_requested: true,
+      scan_status: 'off',
+      scan_enabled: false,
+      scan_stop_requested: true,
+      submit_status: 'off',
+      submit_enabled: false,
+      submit_stop_requested: true,
+      trigger_requested: false,
+      last_action_requested: 'stop_universal',
+      current_action: 'All workers stopped immediately by user.',
+      active_worker_count: 0,
+      updated_at: now,
+    };
+    let { error: sbErr } = await supabase
       .from('bot_control')
-      .update({
-        stage: 'idle',
-        mode: 'idle',
-        is_running: false,
-        is_paused: false,
-        stop_requested: true,
-        scan_status: 'off',
-        scan_enabled: false,
-        scan_stop_requested: true,
-        submit_status: 'off',
-        submit_enabled: false,
-        submit_stop_requested: true,
-        trigger_requested: false,
-        last_action_requested: 'stop',
-        current_action: 'All workers stopped immediately by user.',
-        active_worker_count: 0,
-        updated_at: now,
-      })
+      .update(stopPayload)
       .eq('id', 'primary');
+    if (sbErr && sbErr.message?.includes('column')) {
+      const corePayload = { ...stopPayload };
+      delete corePayload.universal_status;
+      delete corePayload.universal_enabled;
+      delete corePayload.universal_stop_requested;
+      await supabase.from('bot_control').update(corePayload).eq('id', 'primary');
+    }
   } catch (bcErr) {
     console.warn('Note on updating bot_control for stop all:', bcErr?.message);
   }
@@ -3369,12 +3431,8 @@ export async function fetchBotDaemonStatus() {
 
     // 1. Concurrent queries: Query Supabase AND probe daemon HTTP endpoints simultaneously (zero blocking latency)
     const probeEndpoints = [];
-    if (isLocal) {
-      probeEndpoints.push({ url: 'http://localhost:3001/api/bot/status', type: 'scanner' });
-      probeEndpoints.push({ url: 'http://localhost:3002/api/bot/status', type: 'submitter' });
-    }
     const backendUrls = getBackendBaseUrls();
-    for (const bUrl of backendUrls) {
+    for (const bUrl of new Set(backendUrls)) {
       probeEndpoints.push({ url: `${bUrl}/api/bot/status`, type: 'backend' });
     }
 
@@ -3387,7 +3445,7 @@ export async function fetchBotDaemonStatus() {
           });
           if (res.ok) {
             const j = await res.json();
-            return { type, data: j };
+            return { type, data: j, url };
           }
         } catch {}
         return null;
@@ -3412,9 +3470,15 @@ export async function fetchBotDaemonStatus() {
       supabasePromise,
     ]);
 
-    // Process probe results
+    // Process probe results & dynamically attach active backend URL
     for (const item of probeResults) {
       if (item.status === 'fulfilled' && item.value?.data) {
+        if (typeof window !== 'undefined' && item.value.url) {
+          try {
+            const matchedOrigin = new URL(item.value.url).origin;
+            window.localStorage.setItem('WORKDAY_BACKEND_URL', matchedOrigin);
+          } catch {}
+        }
         const j = item.value.data;
         if (item.value.type === 'scanner') {
           if (j.isRunning || j.stage === 'scanning' || j.stage === 'resolving' || j.scan_status === 'running') {
@@ -3439,6 +3503,12 @@ export async function fetchBotDaemonStatus() {
 
     const workers = workersRes.data || [];
     const botControl = controlRes?.data || null;
+    if (botControl?.backend_port && typeof window !== 'undefined') {
+      const host = window.location.hostname || 'localhost';
+      try {
+        window.localStorage.setItem('WORKDAY_BACKEND_URL', `http://${host}:${botControl.backend_port}`);
+      } catch {}
+    }
     const scanWc = {
       key: 'scan',
       enabled: botControl?.scan_enabled !== false && botControl?.scan_status !== 'off',
@@ -3495,7 +3565,14 @@ export async function fetchBotDaemonStatus() {
       (botControl?.is_running && (hasActiveSubmitWorkers || submitterApiRunning || botControl?.stage === 'submitting' || botControl?.stage === 'parallel'))
     );
 
-    const isRunning = !isGlobalStopped && (isScanning || isSubmitting || Boolean(botControl?.is_running));
+    const isUniversalRunning = !isGlobalStopped && Boolean(
+      botControl?.universal_status === 'running' ||
+      botControl?.universal_enabled === true ||
+      (botControl?.stage === 'parallel' && botControl?.is_running) ||
+      (isScanning && isSubmitting)
+    );
+
+    const isRunning = !isGlobalStopped && (isScanning || isSubmitting || isUniversalRunning || Boolean(botControl?.is_running));
     let currentStage = 'idle';
     if (isScanning && isSubmitting) currentStage = 'parallel';
     else if (isSubmitting) currentStage = 'submitting';
@@ -3507,6 +3584,7 @@ export async function fetchBotDaemonStatus() {
       isRunning,
       isScanning,
       isSubmitting,
+      isUniversalRunning,
       state: isRunning ? currentStage : 'idle',
       stage: currentStage,
       workersAssigned: workers.length || getDynamicWorkerIds().length,

@@ -1,4 +1,8 @@
 import { exec } from 'node:child_process';
+import { EventEmitter } from 'node:events';
+
+export const browserLifecycleEvents = new EventEmitter();
+browserLifecycleEvents.setMaxListeners(100);
 
 if (!process.env.MALLOC_ARENA_MAX) process.env.MALLOC_ARENA_MAX = '2';
 if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '64';
@@ -118,24 +122,70 @@ const waitingQueue = [];
 
 /**
  * Dynamically calculates the maximum allowable concurrent browsers from environment variables.
- * Defaults to 2 active browsers per service container (or WORKER_COUNT from env)
- * to allow both dedicated submitting workers in each service (e.g. submitting_worker_1 & 2 on Service 1,
- * and submitting_worker_3 & 4 on Service 2) to execute applications concurrently.
+ * Enforces per-service concurrency matching the instance's active worker count:
+ * - If WORKER_COUNT / SUBMIT_WORKER_COUNT is set to 2 or 3, exactly 2 or 3 browsers run concurrently.
+ * - Never clamps below the configured worker count.
+ * - If explicit worker IDs list is provided (SUBMISSION_WORKER_IDS, SCAN_WORKER_IDS), uses that list length.
  */
-export function getDynamicMaxBrowsers() {
+export function getDynamicMaxBrowsers(workerId = null) {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
-  if (Number.isFinite(envExplicit) && envExplicit > 0) return Math.floor(envExplicit);
 
-  const envWorkers = Number(process.env.SUBMIT_WORKER_COUNT) ||
+  const isSubmitWorker = Boolean(workerId && String(workerId).includes('submit'));
+  const isScanWorker = Boolean(workerId && String(workerId).includes('scan'));
+
+  // 1. Check explicit comma-separated ID lists in env
+  if (isSubmitWorker) {
+    const list = process.env.SUBMISSION_WORKER_IDS || process.env.SUBMIT_WORKER_IDS;
+    if (list) {
+      const parts = list.split(',').map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts.length;
+    }
+  } else if (isScanWorker) {
+    const list = process.env.SCAN_WORKER_IDS;
+    if (list) {
+      const parts = list.split(',').map((s) => s.trim()).filter(Boolean);
+      if (parts.length > 0) return parts.length;
+    }
+  }
+
+  // 2. Parse role-specific worker counts from env
+  const scanSpecific = Number(process.env.SCAN_WORKER_COUNT) ||
+    Number(process.env.SCAN_WORKERS) ||
+    Number(process.env.SCANNING_WORKER_COUNT) || 0;
+
+  const submitSpecific = Number(process.env.SUBMIT_WORKER_COUNT) ||
     Number(process.env.SUBMIT_WORKERS) ||
     Number(process.env.SUBMISSION_WORKER_COUNT) ||
-    Number(process.env.WORKER_COUNT) ||
+    Number(process.env.SUBMISSION_WORKERS) || 0;
+
+  const generalWorkers = Number(process.env.WORKER_COUNT) ||
     Number(process.env.WORKERS_COUNT) ||
     Number(process.env.WORKERS) ||
-    Number(process.env.MAX_WORKERS);
+    Number(process.env.MAX_WORKERS) ||
+    Number(process.env.CONCURRENT_WORKERS) || 0;
 
-  if (Number.isFinite(envWorkers) && envWorkers > 0) {
-    return Math.floor(envWorkers);
+  if (isScanWorker && scanSpecific > 0) {
+    return Math.floor(scanSpecific);
+  }
+  if (isSubmitWorker && submitSpecific > 0) {
+    return Math.floor(submitSpecific);
+  }
+
+  // If workerId is provided and general worker count is set (e.g. WORKER_COUNT=3):
+  if (workerId && generalWorkers > 0) {
+    return (Number.isFinite(envExplicit) && envExplicit > generalWorkers)
+      ? Math.floor(envExplicit)
+      : Math.floor(generalWorkers);
+  }
+
+  // If MAX_ACTIVE_BROWSERS is explicitly set in env, it directly defines the container limit
+  if (Number.isFinite(envExplicit) && envExplicit > 0) {
+    return Math.floor(envExplicit);
+  }
+
+  // If general worker count is set
+  if (generalWorkers > 0) {
+    return Math.floor(generalWorkers);
   }
 
   // Default to 2 concurrent active browsers per container/service
@@ -173,7 +223,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
 
   const effectiveMax = (maxSlots !== null && Number(maxSlots) > 0)
     ? Math.floor(Number(maxSlots))
-    : getDynamicMaxBrowsers();
+    : getDynamicMaxBrowsers(workerId);
 
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
@@ -193,7 +243,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
     const queueItem = { workerId, resolve, reject, cleanup };
     waitingQueue.push(queueItem);
 
-    // Rapid check (30ms) to unblock immediately when a slot frees up or on stop signals
+    // Rapid check (20ms) to unblock immediately when a slot frees up or on stop signals
     checkTimer = setInterval(() => {
       if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
         cleanup();
@@ -219,7 +269,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
         console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot immediately (${activeBrowsers.size + 1}/${effectiveMax})`);
         resolve(true);
       }
-    }, 30);
+    }, 20);
 
     if (checkTimer && typeof checkTimer.unref === 'function') {
       checkTimer.unref();
@@ -239,7 +289,7 @@ export function releaseBrowserSlot(workerId = 'worker') {
       browserRoles.delete(b);
     }
   }
-  const effectiveMax = getDynamicMaxBrowsers();
+  const effectiveMax = getDynamicMaxBrowsers(workerId);
   while (waitingQueue.length > 0 && activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     const next = waitingQueue.shift();
     if (next) {
@@ -253,6 +303,9 @@ export function releaseBrowserSlot(workerId = 'worker') {
       }
     }
   }
+  try {
+    browserLifecycleEvents.emit('slot_released', workerId);
+  } catch {}
 }
 
 const browserRoles = new Map();

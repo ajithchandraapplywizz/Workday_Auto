@@ -243,6 +243,19 @@ export async function markDropdownByLabel(page, targetArg = '') {
       return widget.closest('[data-automation-id="selectOne"]')
         && widget.getAttribute('data-automation-id') === 'selectWidget';
     }
+    function isCountryPhoneCodeWidget(widget) {
+      const bits = [
+        widget.getAttribute('aria-label') || '',
+        widget.getAttribute('data-automation-id') || '',
+        widget.getAttribute('id') || '',
+        widget.getAttribute('name') || '',
+        widget.textContent || '',
+      ].join(' ').toLowerCase();
+      if (bits.includes('countryphonecode') || bits.includes('country-phone-code') || (bits.includes('country') && bits.includes('code'))) return true;
+      const parent = widget.closest('[data-automation-id*="formField"], fieldset, [role="group"]') || widget.parentElement;
+      const pText = (parent?.textContent || '').toLowerCase();
+      return /country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(pText);
+    }
     function readValue(widget) {
       const selected = widget.querySelector('[data-automation-id="selectedItem"], [data-automation-id="promptSelectedItem"]');
       if (selected?.textContent?.trim()) {
@@ -287,7 +300,7 @@ export async function markDropdownByLabel(page, targetArg = '') {
     // Direct match: find container by label text first (only if container has a single widget)
     const containers = Array.from(document.querySelectorAll('[data-automation-id*="formField"], [data-automation-id*="question"], [data-automation-id*="secondaryQuestionnaire"], [data-wd-q-id], fieldset, [role="group"]'));
     for (const c of containers) {
-      const widgetsInC = Array.from(c.querySelectorAll('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]')).filter((w) => !isNestedSelectWidget(w));
+      const widgetsInC = Array.from(c.querySelectorAll('[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], button[aria-haspopup="listbox"], button[aria-haspopup], [role="combobox"]')).filter((w) => !isNestedSelectWidget(w) && !isCountryPhoneCodeWidget(w));
       if (widgetsInC.length === 1) {
         const cText = norm(c.textContent);
         if (wantNorm && (cText.includes(wantNorm.slice(0, 40)) || wantNorm.includes(cText.slice(0, 40)))) {
@@ -300,7 +313,7 @@ export async function markDropdownByLabel(page, targetArg = '') {
 
     const widgets = Array.from(document.querySelectorAll(
       '[data-automation-id="selectOne"], [data-automation-id="selectWidget"], [data-automation-id="select-one"], [data-automation-id="multiSelectContainer"], button[aria-haspopup="listbox"], [role="combobox"]',
-    )).filter((w) => !isNestedSelectWidget(w));
+    )).filter((w) => !isNestedSelectWidget(w) && !isCountryPhoneCodeWidget(w));
 
     const questions = [];
     const labelEls = Array.from(document.querySelectorAll(
@@ -552,6 +565,11 @@ export async function fillWorkdayCustomDropdown(page, field, answer) {
   const widgetKind = inferWidgetKind(field._raw || field);
   const wanted = String(answer || '').trim();
   const label = String(field.label || field._raw?.label || '').replace(/\*+/g, '').trim();
+  if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label)
+    || /countryphonecode|country-phone-code/i.test(field.automationId || field.id || '')) {
+    console.log(`    ⏭️ [No-Touch Country Code Policy] fillWorkdayCustomDropdown skipping "${label}" — auto-populated by Country.`);
+    return { success: true, verifiedValue: wanted, options: [], widgetKind: 'skipped' };
+  }
   const targetObj = { label, questionId: field.questionId || field._raw?.wdQId || '' };
   if (!wanted) {
     return { success: false, verifiedValue: '', options: [], reason: 'missing_answer', widgetKind };
