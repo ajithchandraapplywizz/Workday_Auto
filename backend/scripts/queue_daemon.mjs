@@ -32,6 +32,7 @@ import {
   getWorkerStatuses,
   ensureCanonicalWorkers,
   getBotControl,
+  getMemoryBotControl,
   updateBotControl,
   getWorkerControls,
   updateWorkerControl,
@@ -56,6 +57,7 @@ import {
   isSubmitStopRequested,
   browserLifecycleEvents,
   waitForSlotReleaseOrTimeout,
+  notifySlotReleased,
 } from '../lib/browserLifecycle.mjs';
 import { setClusterStop } from '../lib/clusterBatchRunner.mjs';
 import { createClient } from '@supabase/supabase-js';
@@ -273,6 +275,12 @@ function isNoisyLog(text) {
     if (/(Field \d|disarmed|unfilled|still empty|waiting for selector|Attempt \d)/i.test(trimmed)) return true;
     return false;
   }
+  if (/^\[DAEMON HEARTBEAT\]/i.test(trimmed)) {
+    return false;
+  }
+  if (/^\[INCOMING HTTP\]/i.test(trimmed)) {
+    return false;
+  }
 
   // 6. Suppress all other micro-step logs, DOM operations, ASCII banners, and dumps:
   return true;
@@ -384,6 +392,22 @@ async function syncBotControlState(patch = {}) {
           delete sanitizedPatch.active_worker_count;
         }
       }
+
+      // Multi-replica guard: Submitter replica stopping its local tasks must NOT turn off global submit_status if sibling submitter replica is still active
+      if (sanitizedPatch.submit_status === 'off' && !patch.submit_stop_requested && patch.last_action_requested !== 'stop_submit') {
+        const { data: activeSubmitters } = await supabase
+          .from('worker_status')
+          .select('worker_id,state,stage')
+          .ilike('worker_id', '%submit%')
+          .in('state', ['in_flight', 'running', 'applying']);
+        const hasSiblingSubmitters = Array.isArray(activeSubmitters) && activeSubmitters.some((w) => !submitWorkers.includes(w.worker_id));
+        if (hasSiblingSubmitters) {
+          delete sanitizedPatch.submit_status;
+          delete sanitizedPatch.submit_enabled;
+          delete sanitizedPatch.is_running;
+          delete sanitizedPatch.active_worker_count;
+        }
+      }
     } else if (SERVICE_ROLE === 'scanner') {
       delete sanitizedPatch.submit_status;
       delete sanitizedPatch.submit_enabled;
@@ -396,6 +420,22 @@ async function syncBotControlState(patch = {}) {
         sanitizedPatch.stage = 'submitting';
         sanitizedPatch.mode = 'submitting';
         if (sanitizedPatch.active_worker_count === 0 && currentBc?.active_worker_count) {
+          delete sanitizedPatch.active_worker_count;
+        }
+      }
+
+      // Multi-replica guard: Scanner replica stopping its local tasks must NOT turn off global scan_status if sibling scanner replica is still active
+      if (sanitizedPatch.scan_status === 'off' && !patch.scan_stop_requested && patch.last_action_requested !== 'stop_scan') {
+        const { data: activeScanners } = await supabase
+          .from('worker_status')
+          .select('worker_id,state,stage')
+          .ilike('worker_id', '%scan%')
+          .in('state', ['in_flight', 'running']);
+        const hasSiblingScanners = Array.isArray(activeScanners) && activeScanners.some((w) => !PIPELINE_CONFIG.scanWorkerIds.includes(w.worker_id));
+        if (hasSiblingScanners) {
+          delete sanitizedPatch.scan_status;
+          delete sanitizedPatch.scan_enabled;
+          delete sanitizedPatch.is_running;
           delete sanitizedPatch.active_worker_count;
         }
       }
@@ -1057,7 +1097,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
             current_application_id: null,
           }).catch(() => { });
           try {
-            browserLifecycleEvents.emit('slot_released', workerId);
+            notifySlotReleased(workerId);
           } catch {}
         }
 
@@ -1460,6 +1500,7 @@ const server = http.createServer(async (req, res) => {
 
   const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = parsedUrl.pathname;
+  console.log('[INCOMING HTTP]', req.method, pathname);
 
   // 1. Health check
   if (pathname === '/health' || pathname === '/') {
@@ -1468,9 +1509,9 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // 2. Status (Resilient)
+  // 2. Status (Resilient — 100% In-Memory, Instant Response <1ms)
   if (pathname === '/api/bot/status') {
-    const botControl = await getBotControl().catch(() => null);
+    const botControl = getMemoryBotControl();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     const count = PIPELINE_CONFIG.workersCount || 2;
     res.end(JSON.stringify({
@@ -2502,7 +2543,7 @@ export async function recoverInterruptedSubmissionTasks() {
       .or(`worker_leased_at.is.null,worker_leased_at.lt.${leaseExpiredCutoff}`)
       .neq('status', 'submitted')
       .neq('status', 'completed')
-      .select('*');
+      .select('id');
 
     // Reset submitting workers in worker_status to idle
     for (const wId of submitWorkers) {
@@ -2655,10 +2696,12 @@ export async function initOnStartup() {
     } else {
       console.log(`[DAEMON] Dedicated worker container (${SERVICE_ROLE.toUpperCase()}) initialized — preserving global bot_control stage.`);
     }
-    await recoverInterruptedSubmissionTasks();
-    const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');
-    await reapExpiredLeases(10).catch(() => { });
-    console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
+    if (canExecuteWorkers(args)) {
+      await recoverInterruptedSubmissionTasks();
+      const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');
+      await reapExpiredLeases(10).catch(() => { });
+      console.log(`[DAEMON] Phase 6 Stale lease recovery executed on startup.`);
+    }
 
     // Autonomous startup trigger: strictly gated on AUTO_START_ON_BOOT / explicit flag
     const shouldAutoSubmit = shouldAutoStartOnBoot() || (args.includes('submit') && (args.includes('--immediate') || args.includes('--auto-start'))) || process.env.START_SUBMIT === 'true';
@@ -2696,11 +2739,11 @@ export async function initOnStartup() {
       .catch((e) => console.warn('[DAEMON DAILY SYNC] Error:', e.message));
   }, 4 * 60 * 60 * 1000);
 
-  // Diagnostic heartbeat monitor: logs memory usage every 60s
+  // Diagnostic heartbeat monitor: logs memory usage every 10s
   setInterval(() => {
     const m = process.memoryUsage();
     console.log(`[DAEMON HEARTBEAT] Heap: ${Math.round(m.heapUsed / 1024 / 1024)}MB / ${Math.round(m.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(m.rss / 1024 / 1024)}MB | Uptime: ${Math.round(process.uptime())}s`);
-  }, 60000);
+  }, 10000);
 
   // ── Universal Cloud Bridge: Listen to Supabase signals (bot_control + worker_status fallback) ──
   let warnedMissingBotControl = false;
@@ -2708,9 +2751,9 @@ export async function initOnStartup() {
   const pollCloudBridge = async () => {
     let nextDelay = 500;
     try {
-      // Allow explicit bypass if configured or in local development
-      if (shouldIgnoreCloudSignals() || process.env.IGNORE_CLOUD_SIGNALS === 'true') {
-        cloudBridgeTimer = setTimeout(pollCloudBridge, 1000);
+      // Allow explicit bypass if configured or in local development (when workers are not executing locally)
+      if (shouldIgnoreCloudSignals() || process.env.IGNORE_CLOUD_SIGNALS === 'true' || (!isProduction && !canExecuteWorkers(args))) {
+        nextDelay = 2500;
         return;
       }
       const bc = await getBotControl().catch(() => null);
@@ -2754,7 +2797,7 @@ export async function initOnStartup() {
             current_action: 'Idle (Stopped by user)',
           }).catch(() => { });
         }
-        cloudBridgeTimer = setTimeout(pollCloudBridge, 500);
+        nextDelay = 500;
         return;
       }
 
@@ -2797,7 +2840,7 @@ export async function initOnStartup() {
             }).catch(() => { });
           }
         } else if (isScanTurnOn) {
-          if (scanStatus !== 'running' && !isScanLoopExecuting) {
+          if (scanStatus !== 'running' && !isScanLoopExecuting && canExecuteWorkers(args)) {
             const dynamicScanCount = Number(process.env.SCAN_WORKER_COUNT) || Number(process.env.WORKER_COUNT) || PIPELINE_CONFIG.scanWorkerIds?.length || 2;
             console.log(`\n⚡ [SWITCH (SCANNER)] Turn ON detected in bot_control! Launching ${dynamicScanCount} scanning workers in parallel...`);
             setScanStop(false);
@@ -2842,7 +2885,7 @@ export async function initOnStartup() {
             }).catch(() => { });
           }
         } else if (isSubmitTurnOn) {
-          if (submitStatus !== 'running' && !isSubmitLoopExecuting) {
+          if (submitStatus !== 'running' && !isSubmitLoopExecuting && canExecuteWorkers(args)) {
             const { resolveInstanceSubmissionWorkerIds, SUBMISSION_WORKER_IDS } = await import('../lib/submissionWorkerPool.mjs');
             const submitWorkers = typeof resolveInstanceSubmissionWorkerIds === 'function'
               ? await resolveInstanceSubmissionWorkerIds().catch(() => SUBMISSION_WORKER_IDS)
@@ -2908,10 +2951,20 @@ export async function initOnStartup() {
   cloudBridgeTimer = setTimeout(pollCloudBridge, 500);
 
   // ── Phase 3: 6-Minute Lease Reaper Background Interval (runs every 30s) ──
+  let cachedReapExpiredLeases = null;
   setInterval(async () => {
     try {
-      const { reapExpiredLeases } = await import('../lib/submissionWorkerPool.mjs');
-      await reapExpiredLeases(6);
+      if (!isProduction && !canExecuteWorkers(args)) return;
+      if (!cachedReapExpiredLeases) {
+        const mod = await import('../lib/submissionWorkerPool.mjs');
+        cachedReapExpiredLeases = mod.reapExpiredLeases;
+      }
+      if (typeof cachedReapExpiredLeases === 'function') {
+        await cachedReapExpiredLeases(6);
+      }
+      if (typeof global?.gc === 'function') {
+        global.gc();
+      }
     } catch { }
   }, 30_000);
 

@@ -1919,16 +1919,28 @@ const memoryBotControl = {
   updated_at: new Date().toISOString(),
 };
 
+let lastBotControlFetch = 0;
+const BOT_CONTROL_CACHE_TTL_MS = 3000;
+
+export function getMemoryBotControl() {
+  return { ...memoryBotControl };
+}
+
 /**
  * Fetch the global bot_control primary row (supports R3 mode lock & R11 toggle columns).
  */
-export async function getBotControl() {
+export async function getBotControl(force = false) {
   if (!isSupabaseConfigured()) return { ...memoryBotControl };
+  const now = Date.now();
+  if (!force && lastBotControlFetch > 0 && (now - lastBotControlFetch) < BOT_CONTROL_CACHE_TTL_MS) {
+    return { ...memoryBotControl };
+  }
   try {
     const rows = await request('bot_control', {
       method: 'GET',
       query: '?id=eq.primary&limit=1',
     });
+    lastBotControlFetch = Date.now();
     const dbRow = rows?.[0] || null;
     if (dbRow) {
       Object.assign(memoryBotControl, dbRow);
@@ -1994,6 +2006,7 @@ export async function getBotControl() {
  */
 export async function updateBotControl(patch = {}) {
   const now = new Date().toISOString();
+  lastBotControlFetch = 0;
   Object.assign(memoryBotControl, patch, { updated_at: now });
   if (patch.mode) {
     memoryBotControl.stage = patch.mode;

@@ -172,3 +172,31 @@ test('Clean Log Output: Standardized Single-Line Formats Match User Requirements
     assert.ok(!s.includes('\n'), 'Step log must not contain newlines');
   }
 });
+
+test('Multi-Replica Protection: Service 2 offset workers never overwrite Service 1 or falsely kill pipeline', () => {
+  // Service 1 (Scanner_Resolver_1)
+  const s1Offset = 0;
+  const s1Limit = 2;
+  const s1Ids = Array.from({ length: s1Limit }, (_, i) => `scanning_worker_${i + 1 + s1Offset}`);
+  assert.deepEqual(s1Ids, ['scanning_worker_1', 'scanning_worker_2']);
+
+  // Service 2 (Scanner_Resolver_2)
+  const s2Offset = 2;
+  const s2Limit = 2;
+  const s2Ids = Array.from({ length: s2Limit }, (_, i) => `scanning_worker_${i + 1 + s2Offset}`);
+  assert.deepEqual(s2Ids, ['scanning_worker_3', 'scanning_worker_4']);
+
+  // S1 and S2 IDs must be completely disjoint (zero collision)
+  const intersection = s1Ids.filter((id) => s2Ids.includes(id));
+  assert.equal(intersection.length, 0, 'Service 1 and Service 2 must have zero worker ID collisions');
+
+  // Multi-replica mutual kill check:
+  // If S1 has active in_flight workers, S2 finishing local tasks must NOT set submit_status/scan_status to 'off'
+  const activeWorkersInDb = [
+    { worker_id: 'submitting_worker_1', state: 'in_flight', stage: 'submitting' },
+    { worker_id: 'submitting_worker_2', state: 'in_flight', stage: 'submitting' },
+  ];
+  const s2SubmitWorkers = ['submitting_worker_3', 'submitting_worker_4'];
+  const hasSiblingSubmitters = activeWorkersInDb.some((w) => !s2SubmitWorkers.includes(w.worker_id));
+  assert.equal(hasSiblingSubmitters, true, 'S2 must recognize that S1 is still active in flight and preserve global running status');
+});

@@ -4,27 +4,65 @@ import { EventEmitter } from 'node:events';
 export const browserLifecycleEvents = new EventEmitter();
 browserLifecycleEvents.setMaxListeners(0);
 
+const activeSlotWaiters = new Set();
+
 /**
- * Cleanly waits for either a slot_released event or a timeout without leaking EventEmitters.
- * Guarantees that the event listener is always removed if the timeout triggers first.
+ * Notify all pending slot waiters immediately and emit on browserLifecycleEvents.
+ * Auto-cleans any stale listeners to guarantee zero memory accumulation.
+ */
+export function notifySlotReleased(workerId = 'worker') {
+  if (activeSlotWaiters.size > 0) {
+    const waiters = Array.from(activeSlotWaiters);
+    activeSlotWaiters.clear();
+    for (const waiter of waiters) {
+      try { waiter(); } catch {}
+    }
+  }
+
+  try {
+    if (browserLifecycleEvents.listenerCount('slot_released') > 10) {
+      browserLifecycleEvents.removeAllListeners('slot_released');
+    }
+    browserLifecycleEvents.emit('slot_released', workerId);
+  } catch {}
+}
+
+/**
+ * Cleanly waits for either a slot release notification or a timeout.
+ * Zero-leak guarantee: Uses an internal Set of active waiters instead of accumulating
+ * EventEmitter listeners. When the timeout expires or when a slot is released,
+ * the waiter is immediately deleted from memory.
  */
 export function waitForSlotReleaseOrTimeout(timeoutMs = 100) {
   return new Promise((resolve) => {
     let timer = null;
-    const onRelease = () => {
+    let settled = false;
+
+    const waiter = () => {
+      if (settled) return;
+      settled = true;
       if (timer) {
         clearTimeout(timer);
         timer = null;
       }
+      activeSlotWaiters.delete(waiter);
       resolve(true);
     };
-    browserLifecycleEvents.once('slot_released', onRelease);
+
+    activeSlotWaiters.add(waiter);
+
     timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
       timer = null;
-      browserLifecycleEvents.off('slot_released', onRelease);
+      activeSlotWaiters.delete(waiter);
       resolve(false);
     }, timeoutMs);
   });
+}
+
+export function getPendingSlotWaitersCount() {
+  return activeSlotWaiters.size;
 }
 
 if (!process.env.MALLOC_ARENA_MAX) process.env.MALLOC_ARENA_MAX = '2';
@@ -327,7 +365,7 @@ export function releaseBrowserSlot(workerId = 'worker') {
     }
   }
   try {
-    browserLifecycleEvents.emit('slot_released', workerId);
+    notifySlotReleased(workerId);
   } catch {}
 }
 

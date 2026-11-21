@@ -1696,12 +1696,13 @@ export async function runClusterBatchRunner({
 
   if (freshClustersPreCheck.length === 0 && retryClustersPreCheck.length === 0) {
     console.log(`ℹ️ [CLUSTER] 0 pending unscanned links in batch_job_queue. Scanning workers remaining idle.`);
-    const workerLimit = Number(workers) || 2;
-    for (let slot = 1; slot <= workerLimit; slot++) {
-      await updateWorkerStatus(`scanning_worker_${slot}`, {
+    const activeScanIds = PIPELINE_CONFIG.scanWorkerIds || Array.from({ length: Number(workers) || 2 }, (_, i) => `scanning_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
+    for (const workerId of activeScanIds) {
+      const workerNum = String(workerId).replace(/\D+/g, '') || '1';
+      await updateWorkerStatus(workerId, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: `Scanning Worker ${slot}`,
+        bot_name: `Scanning Worker ${workerNum}`,
         current_application_id: null,
       }).catch(() => { });
     }
@@ -1985,12 +1986,13 @@ export async function runClusterBatchRunner({
   // If no clusters ran at all across both phases
   if (clusterResults.length === 0) {
     console.log(`ℹ️ [CLUSTER] 0 active tasks were processed in batch_job_queue. Workers remaining idle.`);
-    const workerLimit = Number(workers) || 2;
-    for (let slot = 1; slot <= workerLimit; slot++) {
-      await updateWorkerStatus(`scanning_worker_${slot}`, {
+    const activeScanIds = PIPELINE_CONFIG.scanWorkerIds || Array.from({ length: Number(workers) || 2 }, (_, i) => `scanning_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
+    for (const workerId of activeScanIds) {
+      const workerNum = String(workerId).replace(/\D+/g, '') || '1';
+      await updateWorkerStatus(workerId, {
         state: 'idle',
         stage: 'scanning',
-        bot_name: `Scanning Worker ${slot}`,
+        bot_name: `Scanning Worker ${workerNum}`,
         current_application_id: null,
       }).catch(() => { });
     }
@@ -2015,21 +2017,22 @@ export async function runClusterBatchRunner({
 
   // Return scanning workers to idle if stopped, or keep in standing-by state if still running
   const isHalted = await isClusterStopRequested();
-  const workerLimit = Number(workers) || 2;
-  for (let slot = 1; slot <= 10; slot++) {
-    if (slot <= workerLimit && !isHalted) {
-      await updateWorkerStatus(`scanning_worker_${slot}`, {
+  const activeScanIds = PIPELINE_CONFIG.scanWorkerIds || Array.from({ length: Number(workers) || 2 }, (_, i) => `scanning_worker_${i + 1 + (Number(process.env.WORKER_OFFSET) || 0)}`);
+  for (const workerId of activeScanIds) {
+    const workerNum = String(workerId).replace(/\D+/g, '') || '1';
+    if (!isHalted) {
+      await updateWorkerStatus(workerId, {
         state: 'running',
         current_application_id: 'Batch complete. Standing by for next batch...',
         stage: 'scanning',
-        bot_name: `Scanning Worker ${slot}`,
+        bot_name: `Scanning Worker ${workerNum}`,
       }).catch(() => { });
     } else {
-      await updateWorkerStatus(`scanning_worker_${slot}`, {
+      await updateWorkerStatus(workerId, {
         state: 'idle',
         current_application_id: null,
         stage: 'scanning',
-        bot_name: `Scanning Worker ${slot}`,
+        bot_name: `Scanning Worker ${workerNum}`,
       }).catch(() => { });
     }
   }

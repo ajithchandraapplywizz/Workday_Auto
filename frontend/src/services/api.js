@@ -3057,6 +3057,7 @@ export async function triggerSubmissionStage() {
 
     const targetStage = isScanning ? 'parallel' : 'submitting';
 
+    const { scan: scanWorkerTotal, submit: submitWorkerTotal } = getEnvWorkerCounts();
     const basePayload = {
       stage: targetStage,
       mode: targetStage,
@@ -3071,7 +3072,7 @@ export async function triggerSubmissionStage() {
       current_action: isScanning
         ? 'Parallel Pipeline: Scanning & Submitting running concurrently across dedicated workers...'
         : 'Submitting approved applications across dedicated workers...',
-      active_worker_count: 3,
+      active_worker_count: isScanning ? (scanWorkerTotal + submitWorkerTotal) : submitWorkerTotal,
       updated_at: now,
     };
     const { error: sbErr } = await supabase
@@ -3084,8 +3085,8 @@ export async function triggerSubmissionStage() {
       console.warn('Supabase bot_control update error:', sbErr?.message);
     }
 
-    // Mark submitting workers as in_flight (4 canonical workers across 2 services)
-    const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
+    // Mark submitting workers as in_flight dynamically from environment counts
+    const submittingWorkerIds = Array.from({ length: submitWorkerTotal }, (_, i) => `submitting_worker_${i + 1}`);
     await supabase
       .from('worker_status')
       .update({
@@ -3143,6 +3144,7 @@ export async function stopSubmissionStage() {
   try {
     const { data: curBc } = await supabase.from('bot_control').select('scan_status, is_running').eq('id', 'primary').maybeSingle();
     const isScanning = curBc?.scan_status === 'running';
+    const { scan: scanWorkerTotal } = getEnvWorkerCounts();
     const { error: sbErr } = await supabase
       .from('bot_control')
       .update({
@@ -3157,7 +3159,7 @@ export async function stopSubmissionStage() {
         trigger_requested: false,
         last_action_requested: 'stop_submit',
         current_action: isScanning ? 'Scanning in progress (Submissions stopped by user).' : 'Submissions stopped by user.',
-        active_worker_count: isScanning ? 3 : 0,
+        active_worker_count: isScanning ? scanWorkerTotal : 0,
         updated_at: now,
       })
       .eq('id', 'primary');
@@ -3166,8 +3168,9 @@ export async function stopSubmissionStage() {
     console.warn('Supabase stop error:', err);
   }
 
-  // Set submitting workers strictly to idle in worker_status
-  const submittingWorkerIds = ['submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4'];
+  // Set submitting workers strictly to idle in worker_status dynamically
+  const { submit: submitCount } = getEnvWorkerCounts();
+  const submittingWorkerIds = Array.from({ length: submitCount }, (_, i) => `submitting_worker_${i + 1}`);
   try {
     await supabase
       .from('worker_status')

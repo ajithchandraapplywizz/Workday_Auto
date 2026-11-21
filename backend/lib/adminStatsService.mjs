@@ -186,11 +186,21 @@ export async function getOperatorStats() {
   };
 }
 
+let cachedSubmissionStats = null;
+let lastSubmissionStatsFetch = 0;
+let lastSubmissionStatsKey = '';
+const SUBMISSION_STATS_CACHE_TTL_MS = 5000;
+
 /**
  * Compute submission & sources stats directly via SQL/Supabase
  */
 export async function getSubmissionAndSourceStats(range = 'day', date = null) {
   const window = computeIstWindow(range, date);
+  const cacheKey = `${window.range}_${window.date}`;
+  const now = Date.now();
+  if (cachedSubmissionStats && lastSubmissionStatsKey === cacheKey && (now - lastSubmissionStatsFetch) < SUBMISSION_STATS_CACHE_TTL_MS) {
+    return cachedSubmissionStats;
+  }
 
   // 1. Attempt Supabase RPC first if available
   try {
@@ -329,7 +339,7 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
     applications_included: appsIncluded,
   };
 
-  return {
+  const resObj = {
     submitted: submitted + already_applied,
     submitted_only: submitted,
     already_applied,
@@ -339,6 +349,10 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
     ready_for_review,
     sources,
   };
+  cachedSubmissionStats = resObj;
+  lastSubmissionStatsFetch = Date.now();
+  lastSubmissionStatsKey = cacheKey;
+  return resObj;
 }
 
 /**

@@ -81,7 +81,7 @@ function downloadBinary(url, destPath, { rejectUnauthorized = true } = {}) {
       port: target.port || 443,
       path: `${target.pathname}${target.search}`,
       method: 'GET',
-      autoSelectFamily: true,
+      family: 4,
       rejectUnauthorized,
       headers: { Accept: 'application/pdf,*/*', 'User-Agent': 'workday-auto-apply' },
       timeout: 45000,

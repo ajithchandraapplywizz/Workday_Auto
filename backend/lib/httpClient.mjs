@@ -7,19 +7,19 @@
 
 import https from 'node:https';
 
-const defaultKeepAliveAgent = new https.Agent({
+const defaultAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
   keepAliveMsecs: 15000,
+  maxSockets: 10,
+  maxFreeSockets: 5,
   timeout: 30000,
 });
 
-const insecureKeepAliveAgent = new https.Agent({
+const insecureAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 64,
-  maxFreeSockets: 16,
   keepAliveMsecs: 15000,
+  maxSockets: 10,
+  maxFreeSockets: 5,
   timeout: 30000,
   rejectUnauthorized: false,
 });
@@ -60,9 +60,8 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
       port: target.port || 443,
       path: `${target.pathname}${target.search}`,
       method,
-      agent: rejectUnauthorized ? defaultKeepAliveAgent : insecureKeepAliveAgent,
-      autoSelectFamily: true,
-      autoSelectFamilyAttemptTimeout: 250,
+      agent: rejectUnauthorized ? defaultAgent : insecureAgent,
+      family: 4,
       rejectUnauthorized,
       headers: {
         Accept: 'application/json',
@@ -70,12 +69,18 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
         ...(payload ? { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(payload) } : {}),
         ...cleanHeaders,
       },
-      timeout: timeoutMs,
     }, (res) => {
       const chunks = [];
       res.on('data', (chunk) => chunks.push(chunk));
+      res.on('error', (err) => {
+        chunks.length = 0;
+        req.destroy();
+        reject(err);
+      });
       res.on('end', () => {
+        req.setTimeout(0); // Clear request timeout so pooled keepalive socket is not prematurely killed
         const text = Buffer.concat(chunks).toString('utf8');
+        chunks.length = 0;
         resolve({
           status: res.statusCode || 0,
           ok: (res.statusCode || 0) >= 200 && (res.statusCode || 0) < 300,
@@ -86,10 +91,13 @@ export function httpsJsonRequest({ url, method = 'GET', headers = {}, body = nul
         });
       });
     });
-    req.on('timeout', () => {
+    req.setTimeout(timeoutMs, () => {
       req.destroy(Object.assign(new Error('timeout'), { code: 'ETIMEDOUT' }));
     });
-    req.on('error', reject);
+    req.on('error', (err) => {
+      req.destroy();
+      reject(err);
+    });
     if (payload) req.write(payload);
     req.end();
   });

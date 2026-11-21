@@ -1678,10 +1678,11 @@ export default function DeveloperDashboard() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {[1, 2, 3].map((slot) => {
-                  const wid = `scanning_worker_${slot}`;
+                {(workerPool.scanWorkers?.length ? workerPool.scanWorkers : [{ worker_id: 'scanning_worker_1' }, { worker_id: 'scanning_worker_2' }]).map((wItem, idx) => {
+                  const slot = (wItem.worker_id && wItem.worker_id.match(/\d+$/)) ? wItem.worker_id.match(/\d+$/)[0] : (idx + 1);
+                  const wid = wItem.worker_id || `scanning_worker_${slot}`;
                   const w = (workerPool.scanWorkers || []).find((row) => row.worker_id === wid) ||
-                    (workerPool.workers || []).find((row) => row.worker_id === wid);
+                    (workerPool.workers || []).find((row) => row.worker_id === wid) || wItem;
                   const isWorking = Boolean(w && (w.state === 'in_flight' || w.state === 'running' || w.state === 'busy'));
                   const currentJob = w?.current_application_id || (isWorking ? 'Scanning unique link cluster...' : 'Standby • Ready for batch link');
 
@@ -1791,10 +1792,11 @@ export default function DeveloperDashboard() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {[1, 2, 3, 4].map((slot) => {
-                  const wid = `submitting_worker_${slot}`;
+                {(workerPool.submitWorkers?.length ? workerPool.submitWorkers : [{ worker_id: 'submitting_worker_1' }, { worker_id: 'submitting_worker_2' }]).map((wItem, idx) => {
+                  const slot = (wItem.worker_id && wItem.worker_id.match(/\d+$/)) ? wItem.worker_id.match(/\d+$/)[0] : (idx + 1);
+                  const wid = wItem.worker_id || `submitting_worker_${slot}`;
                   const w = (workerPool.submitWorkers || []).find((row) => row.worker_id === wid) ||
-                    (workerPool.workers || []).find((row) => row.worker_id === wid);
+                    (workerPool.workers || []).find((row) => row.worker_id === wid) || wItem;
                   const isWorking = Boolean(w && (w.state === 'in_flight' || w.state === 'running' || w.state === 'busy'));
                   const currentJob = w?.current_application_id || (isWorking ? 'Filling application wizard DOM...' : 'Standby • Ready to submit');
 

@@ -111,7 +111,7 @@ export async function resolveInstanceSubmissionWorkerIds() {
     );
   }
 
-  if (!supabase) {
+  if (!supabase || !canExecuteWorkers()) {
     return candidateGroups[0] || SUBMISSION_WORKER_IDS;
   }
 
@@ -773,7 +773,7 @@ export async function claimNextTask(workerId) {
         .is('application_submitted_screenshot_url', null)
         .neq('status', 'submitted')
         .neq('status', 'completed')
-        .select('*');
+        .select('id');
 
 
 
@@ -891,7 +891,7 @@ export async function sendTaskHeartbeat(taskId, workerId) {
 
 export async function reapExpiredLeases(timeoutMinutes = 3) {
 
-  if (!supabase) return [];
+  if (!supabase || !canExecuteWorkers()) return [];
 
   try {
 
@@ -942,7 +942,7 @@ export async function reapExpiredLeases(timeoutMinutes = 3) {
         .eq('status', 'applying')
         .neq('status', 'submitted')
         .neq('status', 'completed')
-        .select('*');
+        .select('id');
 
 
 

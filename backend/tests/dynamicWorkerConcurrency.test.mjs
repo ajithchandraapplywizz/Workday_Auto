@@ -183,16 +183,29 @@ test('browserLifecycleEvents emits slot_released on releaseBrowserSlot', async (
   }
 });
 
-test('waitForSlotReleaseOrTimeout leaves 0 active listeners after multiple calls (zero memory leak)', async () => {
-  const { browserLifecycleEvents, waitForSlotReleaseOrTimeout } = await import('../lib/browserLifecycle.mjs');
+test('waitForSlotReleaseOrTimeout leaves 0 active listeners and 0 waiters after 500 rapid calls (zero memory leak)', async () => {
+  const { browserLifecycleEvents, waitForSlotReleaseOrTimeout, getPendingSlotWaitersCount, notifySlotReleased } = await import('../lib/browserLifecycle.mjs');
 
   const initialListeners = browserLifecycleEvents.listenerCount('slot_released');
 
-  // Perform 120 rapid timeout cycles (exceeding standard 100 listener leak threshold)
-  for (let i = 0; i < 120; i++) {
+  // Perform 500 rapid timeout cycles (far exceeding standard 100 listener leak threshold)
+  for (let i = 0; i < 500; i++) {
     await waitForSlotReleaseOrTimeout(1);
   }
 
   const finalListeners = browserLifecycleEvents.listenerCount('slot_released');
-  assert.equal(finalListeners, initialListeners, 'Must have zero accumulated listeners after 120 cycles (no memory leak)');
+  assert.equal(finalListeners, initialListeners, 'Must have zero accumulated EventEmitter listeners after 500 cycles');
+  assert.equal(getPendingSlotWaitersCount(), 0, 'Must have zero pending slot waiters in memory after timeouts');
+
+  // Verify instant wake on notifySlotReleased
+  let woken = false;
+  const waitPromise = waitForSlotReleaseOrTimeout(5000).then((res) => {
+    woken = res;
+  });
+
+  assert.equal(getPendingSlotWaitersCount(), 1, 'Should have 1 active waiter registered');
+  notifySlotReleased('test_worker');
+  await waitPromise;
+  assert.equal(woken, true, 'Waiter must be woken immediately on slot release');
+  assert.equal(getPendingSlotWaitersCount(), 0, 'Waiters Set must be instantly empty after notifySlotReleased');
 });
