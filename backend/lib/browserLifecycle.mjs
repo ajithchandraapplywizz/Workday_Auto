@@ -122,6 +122,14 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
 }
 
 let lastDeepCleanTime = 0;
+let hadActiveInstancesSinceLastClean = false;
+
+/**
+ * Marks that a browser or execution slot was active, so that subsequent zero-instance transitions trigger a clean.
+ */
+export function markInstanceActive() {
+  hadActiveInstancesSinceLastClean = true;
+}
 
 /**
  * Deep cache and process purge executed strictly when ZERO active instances (browsers/tasks) are running.
@@ -137,12 +145,18 @@ export function deepCleanWhenZeroActiveInstances({ force = false } = {}) {
     return false;
   }
 
+  // STRICT GUARD: If already clean and no instances have run since the last purge, remain idle silently
+  if (!force && !hadActiveInstancesSinceLastClean && lastDeepCleanTime > 0) {
+    return false;
+  }
+
   const now = Date.now();
   // Throttle to at most once every 10 seconds unless forced
   if (!force && now - lastDeepCleanTime < 10000) {
     return false;
   }
   lastDeepCleanTime = now;
+  hadActiveInstancesSinceLastClean = false;
 
   console.log(`\n🧹 [DEEP PURGE] Zero active instances running (browsers: ${activeCount}, slots: ${slotCount}) — executing deep system cache & process wipe...`);
 
@@ -288,6 +302,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
 
   if (activeBrowsers.size < effectiveMax && activeSlots.size < effectiveMax) {
     activeSlots.add(workerId);
+    markInstanceActive();
     return true;
   }
 
@@ -327,6 +342,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
         cleanup();
         waitingQueue.shift();
         activeSlots.add(workerId);
+        markInstanceActive();
         console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot immediately (${activeBrowsers.size + 1}/${effectiveMax})`);
         resolve(true);
       }
@@ -358,6 +374,7 @@ export function releaseBrowserSlot(workerId = 'worker') {
         next.cleanup();
       }
       activeSlots.add(next.workerId);
+      markInstanceActive();
       console.log(`🔓 [SLOT GUARD] Browser slot released. Handing immediately to waiting worker: ${next.workerId} (${activeSlots.size}/${effectiveMax} active)`);
       if (typeof next.resolve === 'function') {
         next.resolve(true);
@@ -412,6 +429,7 @@ export function isSubmitStopRequested() {
 export function registerActiveBrowser(browser, meta = {}) {
   if (browser) {
     activeBrowsers.add(browser);
+    markInstanceActive();
     const role = meta.role || (meta.workerId && String(meta.workerId).includes('submit') ? 'submit' : 'scan');
     browserRoles.set(browser, role);
     try {

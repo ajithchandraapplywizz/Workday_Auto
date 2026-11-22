@@ -619,7 +619,7 @@ export async function stopSubmitPool() {
         })
         .eq('status', 'applying')
         .in('worker_id', workerIds)
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed');
 
@@ -633,7 +633,7 @@ export async function stopSubmitPool() {
         })
         .eq('status', 'applying')
         .is('worker_id', null)
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed');
 
@@ -980,7 +980,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
           const remaining = await getRemainingReadyForReviewCount();
           if (remaining > 0 || remaining === -1) {
             // Unprocessed or in-flight applications still exist (or transient query error) — keep worker alive until every application is completed
-            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 20000) {
+            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 120000) {
               lastStandbyLogTime = Date.now();
               console.log(`⏳ [SUBMITTER] Standing by — ${remaining === -1 ? 'checking queue' : remaining} task(s) currently awaiting retry cooldown or being claimed across workers.`);
             }
@@ -1004,7 +1004,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
             const { getPendingUnscannedJobsSummary } = await import('../lib/supabaseClient.mjs');
             const queueCheck = await getPendingUnscannedJobsSummary().catch(() => ({ hasPending: false }));
             if (queueCheck.hasPending || isScanLoopExecuting) {
-              if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 30000) {
+              if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 120000) {
                 lastStandbyLogTime = Date.now();
                 console.log(`⏳ [SUBMISSION WORKER] Stage 1 is actively scanning links (${queueCheck.pendingCount || 'active'} pending). Standing by for newly resolved applications...`);
               }
@@ -1024,7 +1024,7 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
           );
 
           if (isSubmitStillSwitchOn) {
-            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 15000) {
+            if (workerId === submitWorkers[0] && (Date.now() - (lastStandbyLogTime || 0)) > 120000) {
               lastStandbyLogTime = Date.now();
               console.log(`⏳ [SUBMISSION WORKER] ${workerId}: Standing by for new ready_for_review applications (Submit switch is ON). Checking queue...`);
             }
@@ -1280,6 +1280,7 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
 
   try {
     console.log(`\n🚀 [DAEMON] Schedule 1: Starting Continuous Scan & Resolve Loop (Run ${scanRunId})...`);
+    let lastScanStandbyLogTime = 0;
 
     while (scanStatus === 'running' && isPoolRunning && !isGlobalStopRequested() && !isScanStopRequested() && !isPoolPaused) {
       // Re-verify pending unscanned jobs before launching parallel stage pass
@@ -1312,7 +1313,10 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
 
           if (isScanStillOn) {
             currentStage = currentMode === 'parallel' ? 'parallel' : 'scanning';
-            console.log(`⏳ [DAEMON] [SCANNER] All current queue links finalized. Scanner switch is ON — standing by for new batch uploads (checking in 5s)...`);
+            if (Date.now() - lastScanStandbyLogTime > 120000) {
+              lastScanStandbyLogTime = Date.now();
+              console.log(`⏳ [DAEMON] [SCANNER] All current queue links finalized. Scanner switch is ON — standing by for new batch uploads (checking in 5s)...`);
+            }
             await syncBotControlState({
               current_action: 'Scan & Resolve active: all current links finalized. Standing by for new uploads...',
               is_running: true,
@@ -1406,7 +1410,10 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
         );
 
         if (isScanStillOn) {
-          console.log(`⏳ [DAEMON] [SCANNER] All current queue links finalized. Scanner switch is ON — standing by for new batch uploads (checking in 5s)...`);
+          if (Date.now() - lastScanStandbyLogTime > 120000) {
+            lastScanStandbyLogTime = Date.now();
+            console.log(`⏳ [DAEMON] [SCANNER] All current queue links finalized. Scanner switch is ON — standing by for new batch uploads (checking in 5s)...`);
+          }
           await syncBotControlState({
             current_action: 'Scan & Resolve active: all current links finalized. Standing by for new uploads...',
           }).catch(() => { });
@@ -1500,7 +1507,12 @@ const server = http.createServer(async (req, res) => {
 
   const parsedUrl = new URL(req.url, `http://localhost:${PORT}`);
   const pathname = parsedUrl.pathname;
-  console.log('[INCOMING HTTP]', req.method, pathname);
+
+  // Suppress high-frequency polling requests (/api/bot/status, /api/bot/logs, /health) from flooding logs
+  const isPollingPath = pathname === '/api/bot/status' || pathname === '/api/bot/logs' || pathname === '/health' || pathname === '/';
+  if (!isPollingPath) {
+    console.log('[INCOMING HTTP]', req.method, pathname);
+  }
 
   // 1. Health check
   if (pathname === '/health' || pathname === '/') {
@@ -2739,11 +2751,14 @@ export async function initOnStartup() {
       .catch((e) => console.warn('[DAEMON DAILY SYNC] Error:', e.message));
   }, 4 * 60 * 60 * 1000);
 
-  // Diagnostic heartbeat monitor: logs memory usage every 10s
+  // Diagnostic heartbeat monitor: only logs when actively executing workloads or when DEBUG_HEARTBEAT is true
   setInterval(() => {
-    const m = process.memoryUsage();
-    console.log(`[DAEMON HEARTBEAT] Heap: ${Math.round(m.heapUsed / 1024 / 1024)}MB / ${Math.round(m.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(m.rss / 1024 / 1024)}MB | Uptime: ${Math.round(process.uptime())}s`);
-  }, 10000);
+    const isActivelyWorking = isPoolRunning || isSubmitLoopExecuting || isScanLoopExecuting || activeSubmittingWorkers.size > 0;
+    if (process.env.DEBUG_HEARTBEAT === 'true' || isActivelyWorking) {
+      const m = process.memoryUsage();
+      console.log(`[DAEMON HEARTBEAT] Heap: ${Math.round(m.heapUsed / 1024 / 1024)}MB / ${Math.round(m.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(m.rss / 1024 / 1024)}MB | Uptime: ${Math.round(process.uptime())}s`);
+    }
+  }, 60000);
 
   // ── Universal Cloud Bridge: Listen to Supabase signals (bot_control + worker_status fallback) ──
   let warnedMissingBotControl = false;

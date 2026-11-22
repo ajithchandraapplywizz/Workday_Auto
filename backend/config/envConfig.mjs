@@ -28,8 +28,11 @@ export function isProduction() {
   return Boolean(
     process.env.NODE_ENV === 'production' ||
     process.env.RAILWAY_ENVIRONMENT ||
+    process.env.RAILWAY_ENVIRONMENT_NAME ||
     process.env.RAILWAY_STATIC_URL ||
-    process.env.RAILWAY_PROJECT_ID
+    process.env.RAILWAY_PROJECT_ID ||
+    process.env.RAILWAY_SERVICE_ID ||
+    process.env.RAILWAY_SERVICE_NAME
   );
 }
 

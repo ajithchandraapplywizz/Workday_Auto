@@ -641,7 +641,7 @@ export async function claimNextTask(workerId) {
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
       .eq('status', 'ready_for_review')
       .eq('is_fully_answered', true)
-      .is('application_submitted_screenshot_url', null)
+      .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
       .neq('status', 'submitted')
       .neq('status', 'completed')
       .neq('status', 'archived');
@@ -664,7 +664,7 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived');
@@ -759,7 +759,7 @@ export async function claimNextTask(workerId) {
 
     for (const cand of candidates) {
       // Atomic CAS claim directly on job_distributions row:
-      // Strictly claims ONLY IF status is currently 'ready_for_review' and screenshot is null
+      // Strictly claims ONLY IF status is currently 'ready_for_review' and application is not already submitted
       const { data: claimed, error: claimErr } = await supabase
         .from('job_distributions')
         .update({
@@ -770,12 +770,10 @@ export async function claimNextTask(workerId) {
         })
         .eq('id', cand.id)
         .eq('status', 'ready_for_review')
-        .is('application_submitted_screenshot_url', null)
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
-        .select('id');
-
-
+        .select('id, applywizz_id, job_url, company, role_title, error_message, resolved_answers');
 
       if (!claimErr && claimed && claimed.length > 0) {
         const claimedDist = claimed[0];
@@ -794,34 +792,19 @@ export async function claimNextTask(workerId) {
         } catch {}
 
         // Format task object for worker execution directly from job_distributions
-
         const claimedTask = {
-
           id: claimedDist.id,
-
           distribution_id: claimedDist.id,
-
-          applywizz_id: claimedDist.applywizz_id,
-
-          job_url: claimedDist.job_url,
-
-          company: claimedDist.company,
-
-          role_title: claimedDist.role_title,
-
+          applywizz_id: claimedDist.applywizz_id || cand.applywizz_id,
+          job_url: claimedDist.job_url || cand.job_url,
+          company: claimedDist.company || cand.company,
+          role_title: claimedDist.role_title || cand.role_title,
           status: 'applying',
-
-          error_message: claimedDist.error_message,
-
-          resolved_answers: claimedDist.resolved_answers || claimedDist.resolved_answers_json,
-
+          error_message: claimedDist.error_message || cand.error_message,
+          resolved_answers: claimedDist.resolved_answers || claimedDist.resolved_answers_json || cand.resolved_answers,
           worker_id: workerId,
-
           started_at: now,
-
         };
-
-
 
         return claimedTask;
 
