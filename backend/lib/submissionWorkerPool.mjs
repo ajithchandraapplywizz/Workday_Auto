@@ -395,6 +395,14 @@ export async function updateJobDistributionWithCheck({
     cleanPatch.status = 'failed';
   }
 
+  // Auto-populate application_submitted_screenshot_url from diagnostic_screenshot in error_message if missing
+  if (!cleanPatch.application_submitted_screenshot_url && /\[diagnostic_screenshot:\s*([^\s\]]+)\]/i.test(errText)) {
+    const shotMatch = errText.match(/\[diagnostic_screenshot:\s*([^\s\]]+)\]/i);
+    if (shotMatch && shotMatch[1] && shotMatch[1] !== 'none' && shotMatch[1] !== 'None') {
+      cleanPatch.application_submitted_screenshot_url = shotMatch[1].trim();
+    }
+  }
+
   // STRICT IMMUTABILITY GUARD: If row is already 'submitted' or possesses authentic confirmation proof,
   // permanently refuse any downgrades to 'ready_for_review', 'failed', or 'applying'!
   if (cleanPatch.status && cleanPatch.status !== 'submitted' && cleanPatch.status !== 'completed') {
@@ -411,7 +419,7 @@ export async function updateJobDistributionWithCheck({
           !targetRow.application_submitted_screenshot_url.includes('failed') &&
           (targetRow.application_submitted_screenshot_url.includes('workday-submitted') || (targetRow.application_submitted_screenshot_url.includes('submitted-applications') && !targetRow.application_submitted_screenshot_url.includes('review_blueprint')))
         );
-        if (isAlreadySubmitted || hasAuthenticProof) {
+        if (isAlreadySubmitted || (hasAuthenticProof && targetRow.status === 'submitted')) {
           console.log(`🔒 [${workerId}] IMMUTABLE PROTECTION: Row #${targetRow.id} (${applywizzId || 'target'}) is already permanently 'submitted' (proof: ${targetRow.application_submitted_screenshot_url || 'confirmed'}). Refusing downgrade to '${cleanPatch.status}'.`);
           return { success: true, data: targetRow, rowsCount: 1, protected: true };
         }
@@ -645,7 +653,8 @@ export async function claimNextTask(workerId) {
       .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
       .eq('status', 'ready_for_review')
       .eq('is_fully_answered', true)
-      .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+      .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
+      .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
       .neq('status', 'submitted')
       .neq('status', 'completed')
       .neq('status', 'archived');
@@ -668,7 +677,8 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
+        .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived');
@@ -697,7 +707,7 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -722,7 +732,7 @@ export async function claimNextTask(workerId) {
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
         .eq('is_fully_answered', true)
-        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -746,7 +756,7 @@ export async function claimNextTask(workerId) {
         .from('job_distributions')
         .select('id, status, applywizz_id, job_url, company, role_title, error_message, resolved_answers, application_submitted_screenshot_url')
         .eq('status', 'ready_for_review')
-        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .neq('status', 'archived')
@@ -774,7 +784,7 @@ export async function claimNextTask(workerId) {
         })
         .eq('id', cand.id)
         .eq('status', 'ready_for_review')
-        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.ilike.%review_blueprint%,application_submitted_screenshot_url.not.ilike.%workday-submitted%')
         .neq('status', 'submitted')
         .neq('status', 'completed')
         .select('id, applywizz_id, job_url, company, role_title, error_message, resolved_answers');

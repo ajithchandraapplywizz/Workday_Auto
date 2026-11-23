@@ -36,7 +36,7 @@ import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
 import { isAutoApplyMode } from './claudeLlm.mjs';
-import { detectWorkdayStep, isWorkdayReviewPage, isWorkdaySubmissionSuccess } from './stateDetector.mjs';
+import { detectWorkdayStep, isWorkdayReviewPage, isWorkdaySubmissionSuccess, waitForWorkdayFormRender } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,
   countUnfilledMandatoryQuestions,
@@ -2777,6 +2777,11 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       const href = window.location.href || '';
       const title = document.title || '';
 
+      // Hard guard: /userHome is the candidate portal and NOT a confirmation of this specific job submission!
+      if (/\/userHome\b/i.test(href)) {
+        return { isSuccess: false, isApplied: false, needsVerification: false, popupText: '' };
+      }
+
       // Query all popup, alert, banner, dialog, toast, and status elements across the page
       const popupEls = Array.from(document.querySelectorAll(
         '[role="alert"], [role="status"], [role="dialog"], [role="alertdialog"], ' +
@@ -2886,13 +2891,13 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     profile?._onLog?.(5, 'Step 5: Workday verified: candidate application already submitted/received on Workday.');
     await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
     await page.waitForTimeout(400);
-    const alreadyProofUrl = await takeScreenshot(page, 'workday-submitted', profile).catch(() => null);
+    const alreadyProofUrl = await takeScreenshot(page, 'workday-already-applied', profile).catch(() => null);
     profile._submissionScreenshotUrl = alreadyProofUrl;
     const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-    console.log(`[${cleanAwl}] already_applied -> submitted | Screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
-    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'submitted', screenshotUrl: alreadyProofUrl }).catch(() => {});
+    console.log(`[${cleanAwl}] already_applied | Screenshot: ${alreadyProofUrl || 'Uploaded to Supabase Storage'}`);
+    await recordClientApplication(profile, { url: canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
     await cleanupClientResume(profile);
-    return 'submitted';
+    return 'already_applied';
   }
 
   console.log('❌ Workday submission confirmation was not detected on page within 25 seconds.');
@@ -3028,11 +3033,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     }
     currentIteration++;
 
-    // Guard: Wait for DOM stabilization & spinner detachment on step transition
-    if (currentIteration > 1) {
-      await page.waitForSelector('[data-automation-id*="loading-spinner"], div.bubble-pulse, [role="progressbar"]', { state: 'detached', timeout: 3500 }).catch(() => {});
-      await page.waitForTimeout(200);
-    }
+    // Guard: Wait for dynamic form render & hydration on every wizard iteration
+    await waitForWorkdayFormRender(page, { timeoutMs: 12000 }).catch(() => {});
 
     const refreshed = await refreshWorkdayPageOnce(page);
     let stepName = await detectWorkdayStep(page);
@@ -4236,9 +4238,9 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         console.log('  ⚡ Direct fill mode: Already on active wizard! Proceeding straight to wizard filling...');
       }
 
-      console.log('  ✅ Workday authentication confirmed — starting 5-step wizard loop...');
-      await page.waitForLoadState('domcontentloaded', { timeout: 4000 }).catch(() => {});
-      await page.waitForTimeout(400);
+      console.log('  ✅ Workday authentication confirmed — waiting for first wizard step hydration...');
+      await waitForWorkdayFormRender(page, { timeoutMs: 15000 }).catch(() => {});
+      await page.waitForTimeout(300);
 
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
 

@@ -996,6 +996,11 @@ export async function executeWorkerTask({
     }
 
     if (scan.authFailed || (scan.field_count === 0 && !await isWorkdayWizardVisible(page))) {
+      // Patiently wait for dynamic page hydration before jumping to auth recovery or declaring failure
+      try {
+        const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+        await waitForWorkdayFormRender(page, { timeoutMs: 12000 });
+      } catch {}
       let wizardNow = await isWorkdayWizardVisible(page).catch(() => false);
 
       // Check if the page is still displaying an Apply button before jumping to auth failed!

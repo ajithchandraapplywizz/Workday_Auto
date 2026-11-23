@@ -83,3 +83,23 @@ test('lookupResolvedAnswerFromProfile matches fuzzy/normalized labels', () => {
   assert.equal(hit.source, 'job_distributions_resolved_answers');
   assert.equal(hit.tier, 0);
 });
+
+test('waitForWorkdayFormRender detects form elements and handles page hydration', async () => {
+  const { waitForWorkdayFormRender } = await import('../lib/stateDetector.mjs');
+  assert.equal(typeof waitForWorkdayFormRender, 'function', 'waitForWorkdayFormRender must be an exported function');
+
+  // Test with null/closed mock page
+  const resultClosed = await waitForWorkdayFormRender({ isClosed: () => true }, { timeoutMs: 100 });
+  assert.equal(resultClosed, false, 'Closed page returns false cleanly');
+
+  // Mock page simulating hydrated form control
+  const mockHydratedPage = {
+    isClosed: () => false,
+    waitForSelector: async () => {},
+    evaluate: async () => ({ isRendered: true, type: 'control' }),
+    waitForTimeout: async () => {},
+  };
+  const resultHydrated = await waitForWorkdayFormRender(mockHydratedPage, { timeoutMs: 500 });
+  assert.equal(resultHydrated, true, 'Hydrated page returns true immediately');
+});
+

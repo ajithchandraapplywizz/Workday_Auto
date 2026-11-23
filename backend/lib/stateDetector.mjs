@@ -14,11 +14,129 @@ export const WORKDAY_STATES = {
 };
 
 /**
+ * Patiently waits for Workday page and form fields to dynamically render (hydrating React/SPA components).
+ * Prevents premature failure where the stepper/header is rendered but form inputs are still loading.
+ *
+ * @param {import('playwright').Page} page
+ * @param {object} options
+ * @param {number} [options.timeoutMs=20000] Maximum time to wait for form hydration
+ * @param {boolean} [options.triggerHydration=true] Dispatch micro-scroll/resize to awaken hydration if blank
+ * @returns {Promise<boolean>} True if form controls or stable wizard state mounted, false on timeout
+ */
+export async function waitForWorkdayFormRender(page, { timeoutMs = 20000, triggerHydration = true } = {}) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+
+  const startTime = Date.now();
+  let hydrated = false;
+
+  // 1. Initial wait for loading spinners/progressbars to detach
+  try {
+    await page.waitForSelector(
+      '[data-automation-id="loadingSpinner"], [data-automation-id*="loading-spinner" i], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i], div[class*="skeleton" i], div.bubble-pulse, div.loading-backdrop',
+      { state: 'detached', timeout: 5000 }
+    );
+  } catch {}
+
+  while (Date.now() - startTime < timeoutMs) {
+    if (page.isClosed()) return false;
+
+    const status = await page.evaluate(() => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+        if (el.closest?.('[hidden], [aria-hidden="true"], [style*="display: none" i], [style*="display:none" i]')) return false;
+        try {
+          const s = window.getComputedStyle(el);
+          if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+        } catch {}
+        return el.offsetParent !== null || el.getClientRects().length > 0;
+      };
+
+      // Check for any genuine form controls or submission/already_applied states
+      const formControls = document.querySelectorAll(
+        'input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"], ' +
+        'input[data-automation-id="emailAddress"], input[data-automation-id="email"], ' +
+        'button[data-automation-id="SignInWithEmailButton"], button[data-automation-id="signInSubmitButton"], ' +
+        'button[data-automation-id="createAccountSubmitButton"], button[data-automation-id="createAccountTab"], ' +
+        'button[data-automation-id="signInTab"], button[data-automation-id="bottom-navigation-next-button"], ' +
+        'button[data-automation-id="pageFooterNextButton"], button[data-automation-id="saveAndContinue"], ' +
+        'button[data-automation-id="pageFooterSubmitButton"], input[data-automation-id="legalNameSection_firstName"], ' +
+        'input[id*="legalName--firstName"], div[data-automation-id="file-upload-drop-zone"], ' +
+        '[data-automation-id="myInformationPage"], [data-automation-id="myExperiencePage"], ' +
+        '[data-automation-id="applicationQuestionsPage"], [data-automation-id="voluntaryDisclosuresPage"], ' +
+        '[data-automation-id="reviewPage"], [data-automation-id="submissionSuccess"], [data-automation-id="appliedButton"]'
+      );
+
+      for (const ctrl of formControls) {
+        if (isVisible(ctrl)) return { isRendered: true, type: 'control' };
+      }
+
+      // Check for generic inputs or dropdowns in main form container
+      const formBody = document.querySelector('main, [role="main"], form, div[data-automation-id*="page" i], div[data-automation-id*="form" i]');
+      if (formBody) {
+        const bodyInputs = formBody.querySelectorAll('input:not([type="hidden"]), select, textarea, button[data-automation-id*="button" i]');
+        for (const bi of bodyInputs) {
+          if (isVisible(bi)) return { isRendered: true, type: 'body_input' };
+        }
+      }
+
+      // Check if stepper is visible (Workday wizard/auth shell is mounted)
+      const stepper = document.querySelector(
+        '[data-automation-id="progressBar"], [data-automation-id="progressBarActiveStep"], nav[aria-label*="progress" i], nav[aria-label*="step" i], ol[class*="progress" i], ul[class*="progress" i], div[class*="stepper" i]'
+      );
+      const bodyText = (document.body?.innerText || '').replace(/\s+/g, ' ');
+      const hasStepper = Boolean(stepper) || (/create\s*account/i.test(bodyText) && /my\s*information/i.test(bodyText));
+
+      const hasSpinner = Boolean(
+        document.querySelector('[data-automation-id*="loadingSpinner" i], [data-automation-id*="loading-spinner" i], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i], div[class*="skeleton" i], div.bubble-pulse')
+      );
+
+      return {
+        isRendered: false,
+        hasStepper,
+        hasSpinner,
+        bodyLen: bodyText.length,
+      };
+    }).catch(() => ({ isRendered: false }));
+
+    if (status.isRendered) {
+      hydrated = true;
+      break;
+    }
+
+    // If stepper is rendered or spinner is active, Workday is dynamically hydrating the page
+    const elapsed = Date.now() - startTime;
+    if (triggerHydration && (status.hasStepper || status.hasSpinner || status.bodyLen > 100)) {
+      if (elapsed > 2000 && elapsed < 8000) {
+        await page.evaluate(() => {
+          try {
+            window.scrollBy(0, 10);
+            window.scrollBy(0, -10);
+            window.dispatchEvent(new Event('resize'));
+          } catch {}
+        }).catch(() => {});
+      }
+    }
+
+    await page.waitForTimeout(400).catch(() => {});
+  }
+
+  await page.waitForTimeout(200).catch(() => {});
+  return hydrated;
+}
+
+/**
  * Detect current Workday wizard step from rendered page content.
  * @param {import('playwright').Page} page
+ * @param {object} [options]
+ * @param {boolean} [options.waitForRender=true]
+ * @param {number} [options.timeoutMs=8000]
  * @returns {Promise<string>}
  */
-export async function detectWorkdayStep(page) {
+export async function detectWorkdayStep(page, { waitForRender = true, timeoutMs = 8000 } = {}) {
+  if (waitForRender && page && !page.isClosed()) {
+    await waitForWorkdayFormRender(page, { timeoutMs }).catch(() => {});
+  }
   return await page.evaluate(() => {
     const isVisible = (el) => {
       if (!el) return false;
@@ -63,7 +181,40 @@ export async function detectWorkdayStep(page) {
     });
     if (authHeaders) return 'Authentication';
 
-    // 1. Detect genuine Workday wizard navigation buttons or step containers
+    // 1. Priority Stepper Detection: Match active progress step in Workday stepper
+    const activeStep = document.querySelector(
+      '[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], ' +
+      '[data-automation-id*="currentStep"], li.active, [aria-current="step"], [aria-current="page"], [aria-selected="true"]'
+    );
+    if (activeStep && isVisible(activeStep)) {
+      const text = (activeStep.textContent || '').trim();
+      if (/create\s*account|sign\s*in/i.test(text)) return 'Authentication';
+      if (/my\s*information/i.test(text)) return 'My Information';
+      if (/my\s*experience/i.test(text)) return 'My Experience';
+      if (/application\s*questions/i.test(text)) return 'Application Questions';
+      if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
+      if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
+      if (/review/i.test(text)) return 'Review';
+    }
+
+    // Also match stepper items by class or styling (e.g. red bullet / active dot on "Create Account/Sign In")
+    const stepperItems = Array.from(document.querySelectorAll('ol li, ul li, [data-automation-id*="step" i], nav[aria-label*="progress" i] div, div[class*="step" i]'));
+    for (const item of stepperItems) {
+      if (!isVisible(item)) continue;
+      const isItemActive = item.classList.contains('active') || item.getAttribute('aria-current') === 'step' || item.getAttribute('aria-selected') === 'true' || Boolean(item.querySelector('[aria-current="step"], .active, svg circle, circle[fill]'));
+      if (isItemActive) {
+        const text = (item.textContent || '').trim();
+        if (/create\s*account|sign\s*in/i.test(text)) return 'Authentication';
+        if (/my\s*information/i.test(text)) return 'My Information';
+        if (/my\s*experience/i.test(text)) return 'My Experience';
+        if (/application\s*questions/i.test(text)) return 'Application Questions';
+        if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
+        if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
+        if (/review/i.test(text)) return 'Review';
+      }
+    }
+
+    // 2. Detect genuine Workday wizard navigation buttons or step containers
     const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
     const hasWizardNavBtn = allButtons.some(b => {
       if (!isVisible(b)) return false;
@@ -93,17 +244,22 @@ export async function detectWorkdayStep(page) {
         'div[data-automation-id="file-upload-drop-zone"], ' +
         '[data-automation-id="progressBar"], ' +
         '[data-automation-id="progressBarActiveStep"], ' +
+        'nav[aria-label*="progress" i], nav[aria-label*="step" i], ' +
+        'ol[class*="progress" i], ul[class*="progress" i], div[class*="stepper" i], ' +
         '[data-automation-id="myInformationPage"], ' +
         '[data-automation-id="myExperiencePage"], ' +
         '[data-automation-id="applicationQuestionsPage"], ' +
         '[data-automation-id="voluntaryDisclosuresPage"], ' +
         '[data-automation-id="reviewPage"]'
       )
+    ) || (
+      /create\s*account\s*[\/\-]\s*sign\s*in/i.test(document.body?.innerText || '') &&
+      /my\s*information/i.test(document.body?.innerText || '')
     );
 
-    // 2. If neither wizard navigation buttons nor wizard DOM containers exist, check Submitted, Already Applied or return Unknown
+    // 2a. If neither wizard navigation buttons nor wizard DOM containers exist, check Submitted, Already Applied or return Unknown
     if (!hasWizardNavBtn && !hasWizardDomElement) {
-      // 2a. Priority check: Application Submission Confirmation (modal dialog, alert, or page)
+      // Priority check: Application Submission Confirmation (modal dialog, alert, or page)
       const isConfirmation = Boolean(
         document.querySelector(
           '[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]'
@@ -168,19 +324,6 @@ export async function detectWorkdayStep(page) {
 
       // No wizard navigation controls and no wizard containers -> strictly Unknown (prevents false step triggers on landing/auth/footer)
       return 'Unknown';
-    }
-
-    // 3. Match active progress step in Workday stepper
-    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"], li.active, [aria-selected="true"]');
-    if (activeStep && isVisible(activeStep)) {
-      const text = (activeStep.textContent || '').trim();
-      if (/^(create\s*account|sign\s*in|create\s*account\s*[\/\-]\s*sign\s*in)$/i.test(text)) return 'Authentication';
-      if (/my\s*information/i.test(text)) return 'My Information';
-      if (/my\s*experience/i.test(text)) return 'My Experience';
-      if (/application\s*questions/i.test(text)) return 'Application Questions';
-      if (/voluntary\s*disclosures?|equal\s*employment|eeo|diversity/i.test(text)) return 'Voluntary Disclosures';
-      if (/self[- ]?identif|disability|cc-?305/i.test(text)) return 'Self Identify';
-      if (/review/i.test(text)) return 'Review';
     }
 
     // 4. Match primary headings

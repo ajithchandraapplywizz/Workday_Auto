@@ -263,7 +263,14 @@ export async function isWorkdayJobPageMissing(page) {
 export async function isWorkdayAlreadyApplied(page) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
   return await page.evaluate(() => {
-    // 0. ABSOLUTE HARD GUARD: If on an active application wizard step, the candidate
+    // 0. ABSOLUTE HARD GUARD: Candidate Home (/userHome) is a general candidate portal,
+    // NOT a job posting or application confirmation for this specific job!
+    const pageUrl = (typeof window !== 'undefined' && window.location?.href) ? window.location.href : '';
+    if (/\/userHome\b/i.test(pageUrl)) {
+      return false;
+    }
+
+    // 0a. ABSOLUTE HARD GUARD: If on an active application wizard step, the candidate
     // is actively applying! Workday NEVER renders the wizard form (Save and Continue,
     // progress steps, form questions, resume uploaders) if already applied.
     const allButtons = Array.from(document.querySelectorAll('button, a[role="button"]'));
@@ -507,7 +514,10 @@ export async function isWorkdayWizardVisible(page) {
 
   // 2. Check if active progress step is explicitly one of the authenticated form steps
   const hasAuthenticatedActiveStep = await page.evaluate(() => {
-    const activeStep = document.querySelector('[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], [data-automation-id*="currentStep"]');
+    const activeStep = document.querySelector(
+      '[data-automation-id="progressBarActiveStep"], [data-automation-id*="wizardStep"][aria-current="step"], ' +
+      '[data-automation-id*="currentStep"], nav[aria-label*="progress" i] [aria-current="step"], ol li.active, ul li.active, [aria-current="step"], [aria-current="page"]'
+    );
     if (!activeStep) return false;
     const t = (activeStep.textContent || '').trim();
     return /^(my\s*information|my\s*experience|application\s*questions|voluntary\s*disclosures|self\s*identify|review)$/i.test(t);
@@ -732,7 +742,16 @@ export async function prescanGatewayElements(page) {
       return (t === 'sign in' || autoId === 'signInLink' || autoId === 'signInTab') && !inNav && !isSubmit && b.offsetParent !== null;
     });
 
-    const isAuthGateway = hasPasswordInput || hasVerifyPassword || ssoWithEmailBtn || hasCreateAccountBtn || hasSignInUnderCreateAccount;
+    const stepperActiveAuth = Boolean(
+      document.querySelector('[aria-current="step"], .active, [data-automation-id="progressBarActiveStep"]') &&
+      /create\s*account|sign\s*in/i.test(document.querySelector('[aria-current="step"], .active, [data-automation-id="progressBarActiveStep"]')?.textContent || '')
+    ) || (
+      /create\s*account\s*[\/\-]\s*sign\s*in/i.test(document.body?.innerText || '') &&
+      /my\s*information/i.test(document.body?.innerText || '') &&
+      !document.querySelector('button[data-automation-id="pageFooterNextButton"], input[data-automation-id="legalNameSection_firstName"]')
+    );
+
+    const isAuthGateway = hasPasswordInput || hasVerifyPassword || ssoWithEmailBtn || hasCreateAccountBtn || hasSignInUnderCreateAccount || stepperActiveAuth;
     const hasWizardFields = !isAuthGateway && !!(
       document.querySelector([
         'button[data-automation-id="pageFooterNextButton"]',
@@ -784,6 +803,7 @@ export async function prescanGatewayElements(page) {
       hasSignInUnderCreateAccount,
       hasForgotPasswordBtn,
       hasResetPasswordBtn,
+      hasStepperAuth: stepperActiveAuth,
     };
   }).catch(() => ({}));
 }
@@ -792,30 +812,12 @@ export async function prescanGatewayElements(page) {
 export async function handleAdaptiveGateway(page, mode = 'signin') {
   console.log(`   Scanning page & gateway elements post-apply (mode: "${mode}")...`);
 
-  // Wait for gateway or form elements to hydrate before scanning
+  // Wait dynamically for gateway or form elements to hydrate before scanning
   try {
-    await page.waitForLoadState('domcontentloaded', { timeout: 10000 });
+    const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+    await waitForWorkdayFormRender(page, { timeoutMs: 15000 });
   } catch {}
-  try {
-    await page.waitForSelector([
-      'input',
-      'button',
-      '[role="dialog"]',
-      'button[data-automation-id="SignInWithEmailButton"]',
-      'button:has-text("Sign in with email")',
-      'input[data-automation-id="password"]',
-      'input[type="password"]',
-      'input[data-automation-id="email"]',
-      'input[type="email"]',
-      'button[data-automation-id="createAccountTab"]',
-      'button[data-automation-id="createAccountLink"]',
-      'button:has-text("Create Account")',
-      'button[data-automation-id="bottom-navigation-next-button"]',
-      'button:has-text("Save and Continue")',
-      'button:has-text("Save & Continue")',
-    ].join(', '), { timeout: 8000 });
-  } catch {}
-  await page.waitForTimeout(800).catch(() => {});
+  await page.waitForTimeout(400).catch(() => {});
 
   const scan = await prescanGatewayElements(page);
   console.log('   Pre-scan elements:', JSON.stringify(scan));

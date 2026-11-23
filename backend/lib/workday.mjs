@@ -447,11 +447,17 @@ export async function isWorkdayLogin(page) {
 
   if (await isWorkdayWizardVisible(page)) return false;
 
+  // Patiently wait for form fields or stepper to render if page is loading
+  try {
+    const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+    await waitForWorkdayFormRender(page, { timeoutMs: 8000 });
+  } catch {}
+
   const scan = await prescanGatewayElements(page);
   if (scan.hasWizardFields) return false;
-  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword) return false;
+  if (scan.hasApplyBtn && !scan.hasPasswordInput && !scan.hasVerifyPassword && !scan.hasStepperAuth) return false;
 
-  // A page is ONLY a login / auth gateway if genuine authentication controls exist:
+  // A page is a login / auth gateway if genuine authentication controls exist OR stepper is on Create Account/Sign In:
   return !!(
     scan.hasPasswordInput ||
     scan.hasVerifyPassword ||
@@ -459,6 +465,7 @@ export async function isWorkdayLogin(page) {
     scan.hasCreateAccountBtn ||
     scan.hasSignInUnderCreateAccount ||
     scan.hasSocialSSO ||
+    scan.hasStepperAuth ||
     (scan.hasEmailInput && (scan.hasForgotPasswordBtn || scan.hasResetPasswordBtn))
   );
 }
@@ -469,6 +476,11 @@ export async function isWorkdayLogin(page) {
  */
 export async function workdayLogin(page, email, password) {
   console.log('   Logging into Workday...');
+
+  // Wait dynamically for sign-in or create account form to finish rendering
+  try {
+    await page.waitForSelector('input[data-automation-id="password"], input[type="password"], input[data-automation-id="emailAddress"], input[data-automation-id="email"]', { timeout: 12000 });
+  } catch {}
 
   // 0. Safety Net: If on Password Reset Form, complete password reset first
   if (typeof isWorkdayPasswordResetSetPage === 'function' && await isWorkdayPasswordResetSetPage(page)) {
@@ -845,8 +857,14 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
       return true;
     }
     if (!await isWorkdayLogin(page)) {
-      console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
-      return false;
+      try {
+        const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+        await waitForWorkdayFormRender(page, { timeoutMs: 12000 });
+      } catch {}
+      if (!await isWorkdayLogin(page)) {
+        console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');
+        return false;
+      }
     }
   }
 
