@@ -1732,6 +1732,11 @@ export async function runClusterBatchRunner({
     if (!clusters || !clusters.length) return;
     if (await isClusterStopRequested()) return;
 
+    try {
+      const { reapExpiredBatchQueueLeases } = await import('./supabaseClient.mjs');
+      await reapExpiredBatchQueueLeases(15);
+    } catch {}
+
     const concurrency = Math.min(maxWorkers, clusters.length);
     console.log(`🚀 [${phaseTitle}] Launching strictly ${concurrency} Parallel Scanning Workers on ${clusters.length} link(s)...`);
     clusters.forEach((c, idx) => {

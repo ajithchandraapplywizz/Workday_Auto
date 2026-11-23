@@ -1,0 +1,27 @@
+{
+  "summary": {
+    "totalCsvRows": 260,
+    "uniqueNormalizedLinks": 190,
+    "uploadedLinksCount": 190,
+    "notUploadedLinksCount": 0,
+    "totalCsvTaskCountSum": 520,
+    "uploadedTaskCountSum": 520,
+    "notUploadedTaskCountSum": 0
+  },
+  "bqStatusCounts": {
+    "pending": 103,
+    "already_scanned": 16,
+    "expired": 8,
+    "already_reached_review": 58,
+    "already_expired": 5
+  },
+  "jobDistributionTaskCounts": {
+    "submitted": 104,
+    "needs_answers": 14,
+    "ready_for_review": 12,
+    "failed": 10,
+    "applying": 4
+  },
+  "totalCandidateTasksInDbForTheseLinks": 144,
+  "notUploadedLinksList": []
+}

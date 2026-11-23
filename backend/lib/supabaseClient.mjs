@@ -647,10 +647,11 @@ export async function upsertSupabaseApplication({
       if (normalizedStatus !== 'submitted' && normalizedStatus !== 'completed') {
         try {
           const exCheck = await request('job_distributions', {
-            query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}&select=status,id`,
+            query: `?applywizz_id=eq.${encode(applywizzId)}&job_url=eq.${encode(cleanUrl)}&select=status,id,application_submitted_screenshot_url`,
           });
           const curStatus = (exCheck?.[0]?.status || '').toLowerCase();
-          if (curStatus === 'submitted' || curStatus === 'completed') {
+          const curShot = (exCheck?.[0]?.application_submitted_screenshot_url || '').toLowerCase();
+          if (curStatus === 'submitted' || curStatus === 'completed' || curShot.includes('workday-submitted') || (curShot.includes('submitted-applications') && !curShot.includes('review_blueprint'))) {
             console.log(`   🛡️ [upsertSupabaseApplication] Candidate ${applywizzId} already submitted on ${cleanUrl} — preserving submitted status!`);
             return { success: true, id: exCheck[0].id, table: 'job_distributions' };
           }
@@ -3623,6 +3624,9 @@ export async function syncQueueWithScannedAndFailedJobs() {
       }
     }
 
+    // Reap any stale 'scanning' leases in batch_job_queue (>15 min cutoff) so abandoned links are recovered
+    await reapExpiredBatchQueueLeases(15).catch(() => {});
+
     if (markedScanned > 0 || markedFailed > 0) {
       console.log(`⚡ [queue_sync] Dynamically synchronized batch_job_queue: ${markedScanned} marked reached_review (with screenshots), ${markedFailed} marked failed.`);
     }
@@ -3630,6 +3634,42 @@ export async function syncQueueWithScannedAndFailedJobs() {
   } catch (err) {
     console.warn(`⚠️ [queue_sync] Error syncing queue with scanned/failed jobs: ${err.message}`);
     return { scanned: 0, failed: 0 };
+  }
+}
+
+/**
+ * Safely unlocks expired or abandoned 'scanning' tasks in batch_job_queue,
+ * returning them to 'pending' so other workers can process them.
+ */
+export async function reapExpiredBatchQueueLeases(timeoutMinutes = 15) {
+  if (!isSupabaseConfigured()) return [];
+  try {
+    const cutoff = new Date(Date.now() - timeoutMinutes * 60 * 1000).toISOString();
+    const stuckRows = await request('batch_job_queue', {
+      query: `?status=eq.scanning&select=id,job_url,worker_id,locked_at&or=(locked_at.lt.${encodeURIComponent(cutoff)},locked_at.is.null)&limit=100`,
+    }).catch(() => []);
+    if (!Array.isArray(stuckRows) || stuckRows.length === 0) return [];
+    const reapedIds = [];
+    for (const row of stuckRows) {
+      await request('batch_job_queue', {
+        method: 'PATCH',
+        query: `?id=eq.${row.id}&status=eq.scanning`,
+        body: {
+          status: 'pending',
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      }).catch(() => {});
+      reapedIds.push(row.id);
+    }
+    if (reapedIds.length > 0) {
+      console.log(`🧹 [queue_sync] Safely unlocked ${reapedIds.length} expired scanning row(s) in batch_job_queue (returned to pending).`);
+    }
+    return reapedIds;
+  } catch (err) {
+    console.warn(`[reapExpiredBatchQueueLeases] Error: ${err.message}`);
+    return [];
   }
 }
 

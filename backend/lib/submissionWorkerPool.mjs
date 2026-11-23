@@ -406,7 +406,11 @@ export async function updateJobDistributionWithCheck({
       const targetRow = targetRows?.[0];
       if (targetRow) {
         const isAlreadySubmitted = targetRow.status === 'submitted' || targetRow.status === 'completed';
-        const hasAuthenticProof = Boolean(targetRow.application_submitted_screenshot_url && !targetRow.application_submitted_screenshot_url.includes('attempt') && !targetRow.application_submitted_screenshot_url.includes('failed'));
+        const hasAuthenticProof = Boolean(
+          targetRow.application_submitted_screenshot_url &&
+          !targetRow.application_submitted_screenshot_url.includes('failed') &&
+          (targetRow.application_submitted_screenshot_url.includes('workday-submitted') || (targetRow.application_submitted_screenshot_url.includes('submitted-applications') && !targetRow.application_submitted_screenshot_url.includes('review_blueprint')))
+        );
         if (isAlreadySubmitted || hasAuthenticProof) {
           console.log(`🔒 [${workerId}] IMMUTABLE PROTECTION: Row #${targetRow.id} (${applywizzId || 'target'}) is already permanently 'submitted' (proof: ${targetRow.application_submitted_screenshot_url || 'confirmed'}). Refusing downgrade to '${cleanPatch.status}'.`);
           return { success: true, data: targetRow, rowsCount: 1, protected: true };
@@ -1031,18 +1035,20 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
 
 
 
-  // Start 30-second heartbeat interval
-
+  // Start 30-second heartbeat interval with a 15-minute hard limit
   let heartbeatActive = true;
+  const heartbeatStartTime = Date.now();
+  const MAX_HEARTBEAT_DURATION_MS = 15 * 60 * 1000; // 15 mins max for a single submission task
 
   const heartbeatTimer = setInterval(() => {
-
     if (heartbeatActive) {
-
+      if (Date.now() - heartbeatStartTime > MAX_HEARTBEAT_DURATION_MS) {
+        console.warn(`[${workerId}] Heartbeat duration limit reached (15m) for task #${task.id}. Stopping heartbeat so reaper can recover.`);
+        stopHeartbeat();
+        return;
+      }
       sendTaskHeartbeat(task.id, workerId).catch(() => { });
-
     }
-
   }, 30_000);
 
 
@@ -1367,7 +1373,28 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
 
     const now = new Date().toISOString();
 
-    const isSuccess = result?.status === 'submitted' || result?.status === 'success';
+    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || result?.failureScreenshotUrl || null;
+
+    let finalStoragePath = result?.screenshotPath || null;
+
+    const isSubmittedProof = Boolean(
+      (typeof finalShotUrl === 'string' && (
+        (finalShotUrl.includes('submitted-applications') && !finalShotUrl.includes('review_blueprint')) ||
+        finalShotUrl.includes('workday-submitted')
+      )) ||
+      (typeof result?.screenshotUrl === 'string' && (
+        (result.screenshotUrl.includes('submitted-applications') && !result.screenshotUrl.includes('review_blueprint')) ||
+        result.screenshotUrl.includes('workday-submitted')
+      ))
+    );
+
+    const isSuccess = (
+      result?.status === 'submitted' ||
+      result?.status === 'success' ||
+      result?.submitted === true ||
+      result?.isSubmitted === true ||
+      isSubmittedProof
+    );
 
     const isAlreadyApplied = (
 
@@ -1388,12 +1415,6 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
       /already applied|already submitted/i.test(result?.failureReason || '')
 
     );
-
-
-
-    let finalShotUrl = result?.screenshotUrl || result?.reviewScreenshotUrl || result?.failureScreenshotUrl || null;
-
-    let finalStoragePath = result?.screenshotPath || null;
 
 
 

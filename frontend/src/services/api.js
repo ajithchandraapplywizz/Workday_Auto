@@ -1160,17 +1160,6 @@ export async function fetchApplicationsDynamic({
  */
 export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', managerId = '', caEmail = '' } = {}) {
   try {
-    let query = supabase.from('job_distributions')
-      .select('id, status, is_fully_answered, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at, job_url')
-      .neq('status', 'archived');
-
-    if (managerId && managerId !== 'All') {
-      query = query.eq('manager_id', managerId);
-    }
-    if (caEmail && caEmail !== 'All') {
-      query = query.or(`ca_id.eq.${caEmail},ca_email.eq.${caEmail}`);
-    }
-
     let bounds = null;
     let isToday = true;
     let startMs = 0;
@@ -1183,11 +1172,40 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       endMs = new Date(bounds.endIso).getTime();
     }
 
-    const { data: apps, error: appsErr } = await query;
-    if (appsErr) {
-      console.error('Error fetching job_distributions KPIs:', appsErr);
+    let allApps = [];
+    let from = 0;
+    const pageSize = 1000;
+    let hasMorePages = true;
+    while (hasMorePages) {
+      let pageQuery = supabase.from('job_distributions')
+        .select('id, status, is_fully_answered, application_submitted_screenshot_url, worker_leased_at, created_at, updated_at, job_url')
+        .neq('status', 'archived')
+        .range(from, from + pageSize - 1);
+
+      if (managerId && managerId !== 'All') {
+        pageQuery = pageQuery.eq('manager_id', managerId);
+      }
+      if (caEmail && caEmail !== 'All') {
+        pageQuery = pageQuery.or(`ca_id.eq.${caEmail},ca_email.eq.${caEmail}`);
+      }
+
+      const { data: pageData, error: pageErr } = await pageQuery;
+      if (pageErr) {
+        console.error('Error fetching job_distributions KPIs chunk:', pageErr);
+        hasMorePages = false;
+        break;
+      }
+      if (!pageData || pageData.length === 0) {
+        hasMorePages = false;
+        break;
+      }
+      allApps.push(...pageData);
+      if (pageData.length < pageSize) {
+        hasMorePages = false;
+        break;
+      }
+      from += pageSize;
     }
-    const allApps = apps || [];
 
     // Fetch active URLs strictly from most recent batch in batch_job_queue
     const activeBatchUrls = await getActiveRecentBatchJobUrls().catch(() => []);
@@ -3370,7 +3388,7 @@ export async function stopAllParallelStage() {
 
   // 2. Mark ALL canonical workers strictly idle in worker_status
   const allWorkerIds = [
-    'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3',
+    'scanning_worker_1', 'scanning_worker_2', 'scanning_worker_3', 'scanning_worker_4',
     'resolving_worker_1', 'resolving_worker_2', 'resolving_worker_3', 'resolving_worker_4',
     'submitting_worker_1', 'submitting_worker_2', 'submitting_worker_3', 'submitting_worker_4',
   ];

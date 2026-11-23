@@ -36,7 +36,7 @@ import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
 import { isAutoApplyMode } from './claudeLlm.mjs';
-import { detectWorkdayStep, isWorkdayReviewPage } from './stateDetector.mjs';
+import { detectWorkdayStep, isWorkdayReviewPage, isWorkdaySubmissionSuccess } from './stateDetector.mjs';
 import {
   getApplicationQuestionsPageInfo,
   countUnfilledMandatoryQuestions,
@@ -3037,6 +3037,20 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     const refreshed = await refreshWorkdayPageOnce(page);
     let stepName = await detectWorkdayStep(page);
 
+    if (stepName === 'Submitted' || await isWorkdaySubmissionSuccess(page).catch(() => false)) {
+      profile?._onLog?.(currentIteration, 'Step 5: Workday submission verified! Screen confirmed: "Congratulations / Application Submitted". Capturing proof screenshot...');
+      console.log('✅ Workday application successfully submitted!');
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await page.waitForTimeout(400);
+      const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
+      profile._submissionScreenshotUrl = finalProofUrl;
+      const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`[${cleanAwl}] submission_completed | Screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
+      await recordClientApplication(profile, { url: profile._canonicalJobUrl || page.url(), status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
+      await cleanupClientResume(profile);
+      return 'submitted';
+    }
+
     if (stepName === 'Already Applied' || await isWorkdayAlreadyApplied(page)) {
       profile?._onLog?.(currentIteration, 'Step 1: Workday verified: candidate has already applied to this position.');
       console.log('  ℹ️ Candidate has ALREADY APPLIED to this position on Workday.');
@@ -3328,6 +3342,20 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       continue;
     }
 
+    const stepAfterAdvance = await detectWorkdayStep(page).catch(() => 'Unknown');
+    if (stepAfterAdvance === 'Submitted' || await isWorkdaySubmissionSuccess(page).catch(() => false)) {
+      console.log('✅ Workday application successfully submitted post-advance!');
+      await page.evaluate(() => window.scrollTo(0, 0)).catch(() => {});
+      await page.waitForTimeout(400);
+      const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
+      profile._submissionScreenshotUrl = finalProofUrl;
+      const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`[${cleanAwl}] submission_completed | Screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
+      await recordClientApplication(profile, { url: profile._canonicalJobUrl || plan?.url || page.url(), status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
+      await cleanupClientResume(profile);
+      return 'submitted';
+    }
+
     const maybeReview = await detectWorkdayStep(page);
     if (maybeReview === 'Review' && (advanceResult.submitBlocked || await isWorkdayReviewPage(page).catch(() => false))) {
       await recordClientApplication(profile, {
@@ -3400,6 +3428,17 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
   }
 
   const finalStep = await detectWorkdayStep(page);
+  if (finalStep === 'Submitted' || await isWorkdaySubmissionSuccess(page).catch(() => false)) {
+    console.log('  🎯 Workday application confirmed submitted during wizard exit check!');
+    const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
+    profile._submissionScreenshotUrl = finalProofUrl;
+    const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+    console.log(`[${cleanAwl}] submission_completed | Screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
+    await recordClientApplication(profile, { url: profile._canonicalJobUrl || plan?.url || page.url(), status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
+    await cleanupClientResume(profile);
+    return 'submitted';
+  }
+
   const stoppedTitle = (finalStep && finalStep !== 'Unknown') ? finalStep : (profile._currentStep || 'Step 1: My Information');
   profile._currentStep = stoppedTitle;
 
@@ -3435,6 +3474,16 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       console.log(`  🛡️  [Stage 3 Guard] Clicked "${nextClicked}" — awaiting navigation...`);
       await page.waitForTimeout(3000);
       const afterStep = await detectWorkdayStep(page).catch(() => 'Unknown');
+      if (afterStep === 'Submitted' || await isWorkdaySubmissionSuccess(page).catch(() => false)) {
+        console.log('  🎯 Workday application submitted on recovery advance!');
+        const finalProofUrl = await takeScreenshot(page, 'workday-submitted', profile);
+        profile._submissionScreenshotUrl = finalProofUrl;
+        const cleanAwl = String(profile?._applyWizzId || profile?.personal?.awlId || 'AWL-UNKNOWN').replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+        console.log(`[${cleanAwl}] submission_completed | Screenshot: ${finalProofUrl || 'Uploaded to Supabase Storage'}`);
+        await recordClientApplication(profile, { url: profile._canonicalJobUrl || plan?.url || page.url(), status: 'submitted', screenshotUrl: finalProofUrl }).catch(() => {});
+        await cleanupClientResume(profile);
+        return 'submitted';
+      }
       if (afterStep === 'Review' || await isWorkdayReviewPage(page).catch(() => false)) {
         return await verifyAndSubmitReview(page, profile, { confirmSubmit, dryRun });
       }

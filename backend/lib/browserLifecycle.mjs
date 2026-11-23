@@ -310,6 +310,8 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
 
   return new Promise((resolve, reject) => {
     let checkTimer = null;
+    const waitStartTime = Date.now();
+    const SLOT_WAIT_TIMEOUT_MS = 120000; // 2 minutes max
     const cleanup = () => {
       if (checkTimer) {
         clearInterval(checkTimer);
@@ -345,6 +347,20 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
         markInstanceActive();
         console.log(`🔓 [SLOT GUARD] ${workerId} acquired browser slot immediately (${activeBrowsers.size + 1}/${effectiveMax})`);
         resolve(true);
+        return;
+      }
+
+      // Safety timeout (120s): if slots leaked or blocked, clear stale slots and grant slot
+      if (Date.now() - waitStartTime > SLOT_WAIT_TIMEOUT_MS) {
+        cleanup();
+        const idx = waitingQueue.indexOf(queueItem);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+        console.warn(`⚠️ [SLOT GUARD] ${workerId} timed out waiting for browser slot (>120s). Force-granting slot.`);
+        activeSlots.clear();
+        activeSlots.add(workerId);
+        markInstanceActive();
+        resolve(true);
+        return;
       }
     }, 20);
 

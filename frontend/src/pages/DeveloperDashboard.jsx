@@ -1678,7 +1678,7 @@ export default function DeveloperDashboard() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {(workerPool.scanWorkers?.length ? workerPool.scanWorkers : [{ worker_id: 'scanning_worker_1' }, { worker_id: 'scanning_worker_2' }]).map((wItem, idx) => {
+                {(workerPool.scanWorkers?.length ? workerPool.scanWorkers : [{ worker_id: 'scanning_worker_1' }, { worker_id: 'scanning_worker_2' }, { worker_id: 'scanning_worker_3' }, { worker_id: 'scanning_worker_4' }]).map((wItem, idx) => {
                   const slot = (wItem.worker_id && wItem.worker_id.match(/\d+$/)) ? wItem.worker_id.match(/\d+$/)[0] : (idx + 1);
                   const wid = wItem.worker_id || `scanning_worker_${slot}`;
                   const w = (workerPool.scanWorkers || []).find((row) => row.worker_id === wid) ||
@@ -1792,7 +1792,7 @@ export default function DeveloperDashboard() {
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                {(workerPool.submitWorkers?.length ? workerPool.submitWorkers : [{ worker_id: 'submitting_worker_1' }, { worker_id: 'submitting_worker_2' }]).map((wItem, idx) => {
+                {(workerPool.submitWorkers?.length ? workerPool.submitWorkers : [{ worker_id: 'submitting_worker_1' }, { worker_id: 'submitting_worker_2' }, { worker_id: 'submitting_worker_3' }, { worker_id: 'submitting_worker_4' }]).map((wItem, idx) => {
                   const slot = (wItem.worker_id && wItem.worker_id.match(/\d+$/)) ? wItem.worker_id.match(/\d+$/)[0] : (idx + 1);
                   const wid = wItem.worker_id || `submitting_worker_${slot}`;
                   const w = (workerPool.submitWorkers || []).find((row) => row.worker_id === wid) ||

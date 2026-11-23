@@ -19,9 +19,15 @@ if (!isSupabaseConfigured()) {
   process.exit(1);
 }
 
-const targetArg = process.argv.slice(2).find((a) => !a.startsWith('--'));
+const args = process.argv.slice(2);
+const targetArg = args.find((a) => !a.startsWith('--'));
 const defaultPath = process.env.CSV_PATH || 'Data/workday-jobs-2026-11-18.csv';
 const csvPath = resolve(targetArg || defaultPath);
+
+const minCountArg = args.find((a) => a.startsWith('--min-count='))?.split('=')[1];
+const minTaskCount = args.includes('--all') || minCountArg !== undefined
+  ? (parseInt(minCountArg, 10) || 1)
+  : (targetArg ? 1 : 15);
 
 if (!existsSync(csvPath)) {
   console.error(`❌ CSV not found at: ${csvPath}`);
@@ -63,7 +69,7 @@ function normalizeUrlKey(url) {
 
 async function upload() {
   console.log('═'.repeat(80));
-  console.log('🚀 INGESTING WORKDAY CSV (task_count >= 15) TO batch_job_queue');
+  console.log(`🚀 INGESTING WORKDAY CSV (task_count >= ${minTaskCount}) TO batch_job_queue`);
   console.log(`   Source CSV: ${csvPath}`);
   console.log('═'.repeat(80));
 
@@ -89,8 +95,8 @@ async function upload() {
     const taskCount = parseInt(parts[4], 10);
     const awlRaw = parts[5] || '';
 
-    if (isNaN(taskCount) || taskCount < 15) {
-      continue; // Filter strictly for task_count >= 15
+    if (isNaN(taskCount) || taskCount < minTaskCount) {
+      continue; // Filter for task_count >= minTaskCount
     }
 
     if (!jobUrl || !/^https?:\/\//i.test(jobUrl)) continue;
@@ -181,7 +187,7 @@ async function upload() {
       existing?.status === 'reached_review' ||
       (matchedSj && matchedSj.scan_status === 'completed')
     ) {
-      initialStatus = 'already_scanned';
+      initialStatus = existing?.status || 'already_scanned';
       scannedId = matchedSj?.id || existing?.scanned_job_id || null;
       screenshotPath = matchedSj?.screenshot_path || existing?.screenshot_path || null;
     } else if (
@@ -189,7 +195,7 @@ async function upload() {
       existing?.status === 'expired' ||
       matchedFj
     ) {
-      initialStatus = 'already_expired';
+      initialStatus = existing?.status || 'already_expired';
       screenshotPath = matchedFj?.screenshot_path || existing?.screenshot_path || null;
     }
 

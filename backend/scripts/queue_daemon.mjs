@@ -1509,7 +1509,7 @@ const server = http.createServer(async (req, res) => {
   const pathname = parsedUrl.pathname;
 
   // Suppress high-frequency polling requests (/api/bot/status, /api/bot/logs, /health) from flooding logs
-  const isPollingPath = pathname === '/api/bot/status' || pathname === '/api/bot/logs' || pathname === '/health' || pathname === '/';
+  const isPollingPath = pathname.startsWith('/api/bot/status') || pathname.startsWith('/api/bot/logs') || pathname === '/health' || pathname === '/';
   if (!isPollingPath) {
     console.log('[INCOMING HTTP]', req.method, pathname);
   }
@@ -2751,10 +2751,9 @@ export async function initOnStartup() {
       .catch((e) => console.warn('[DAEMON DAILY SYNC] Error:', e.message));
   }, 4 * 60 * 60 * 1000);
 
-  // Diagnostic heartbeat monitor: only logs when actively executing workloads or when DEBUG_HEARTBEAT is true
+  // Diagnostic heartbeat monitor: only logs when explicitly enabled via DEBUG_HEARTBEAT
   setInterval(() => {
-    const isActivelyWorking = isPoolRunning || isSubmitLoopExecuting || isScanLoopExecuting || activeSubmittingWorkers.size > 0;
-    if (process.env.DEBUG_HEARTBEAT === 'true' || isActivelyWorking) {
+    if (process.env.DEBUG_HEARTBEAT === 'true') {
       const m = process.memoryUsage();
       console.log(`[DAEMON HEARTBEAT] Heap: ${Math.round(m.heapUsed / 1024 / 1024)}MB / ${Math.round(m.heapTotal / 1024 / 1024)}MB | RSS: ${Math.round(m.rss / 1024 / 1024)}MB | Uptime: ${Math.round(process.uptime())}s`);
     }
@@ -2965,8 +2964,9 @@ export async function initOnStartup() {
 
   cloudBridgeTimer = setTimeout(pollCloudBridge, 500);
 
-  // ── Phase 3: 6-Minute Lease Reaper Background Interval (runs every 30s) ──
+  // ── Phase 3: Lease Reaper Background Interval (runs every 30s) ──
   let cachedReapExpiredLeases = null;
+  let cachedReapBatchQueue = null;
   setInterval(async () => {
     try {
       if (!isProduction && !canExecuteWorkers(args)) return;
@@ -2976,6 +2976,13 @@ export async function initOnStartup() {
       }
       if (typeof cachedReapExpiredLeases === 'function') {
         await cachedReapExpiredLeases(6);
+      }
+      if (!cachedReapBatchQueue) {
+        const sbMod = await import('../lib/supabaseClient.mjs');
+        cachedReapBatchQueue = sbMod.reapExpiredBatchQueueLeases;
+      }
+      if (typeof cachedReapBatchQueue === 'function') {
+        await cachedReapBatchQueue(15);
       }
       if (typeof global?.gc === 'function') {
         global.gc();

@@ -101,8 +101,44 @@ export async function detectWorkdayStep(page) {
       )
     );
 
-    // 2. If neither wizard navigation buttons nor wizard DOM containers exist, check Already Applied or return Unknown
+    // 2. If neither wizard navigation buttons nor wizard DOM containers exist, check Submitted, Already Applied or return Unknown
     if (!hasWizardNavBtn && !hasWizardDomElement) {
+      // 2a. Priority check: Application Submission Confirmation (modal dialog, alert, or page)
+      const isConfirmation = Boolean(
+        document.querySelector(
+          '[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]'
+        )
+      );
+      if (isConfirmation) {
+        return 'Submitted';
+      }
+
+      const confirmContainers = Array.from(document.querySelectorAll(
+        '[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [data-automation-id*="popup" i], [data-automation-id*="modal" i], h1, h2, h3, h4, p, div'
+      ));
+      for (const container of confirmContainers) {
+        if (!isVisible(container)) continue;
+        const text = (container.textContent || '').replace(/\s+/g, ' ').trim();
+        if (!text) continue;
+        if (
+          /congratulations\b/i.test(text) &&
+          /application\s*(?:has\s*been\s*|is\s*|was\s*)?(?:successfully\s*)?(?:submitted|received)/i.test(text)
+        ) {
+          return 'Submitted';
+        }
+        if (
+          /thank\s*you\s*(?:for\s*(?:applying|your\s*application)|very\s*much)|your\s*application\s*has\s*been\s*successfully\s*submitted/i.test(text) &&
+          !/already\s*(?:applied|submitted)/i.test(text)
+        ) {
+          return 'Submitted';
+        }
+      }
+
+      const href = window.location.href || '';
+      if (/\/submitted\b|\/thankyou\b|\/application-submitted\b|\/applicationSubmitted\b/i.test(href)) {
+        return 'Submitted';
+      }
+
       const appliedEl = document.querySelector(
         '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
       );
@@ -417,6 +453,60 @@ export async function detectAlreadyApplied(page) {
     });
   } catch {
     // If evaluation fails (page closed/crashed), treat as not-already-applied
+    return false;
+  }
+}
+
+/**
+ * Checks if the current page or any open modal represents a successful submission confirmation.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function isWorkdaySubmissionSuccess(page) {
+  if (!page || page.isClosed()) return false;
+  try {
+    return await page.evaluate(() => {
+      const isVisible = (el) => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0' && (el.offsetParent !== null || el.getClientRects().length > 0);
+      };
+
+      if (document.querySelector('[data-automation-id="submissionSuccess"], [data-automation-id="applicationSubmitted"], [data-automation-id="congratulations"], [data-automation-id="thankYouMessage"]')) {
+        return true;
+      }
+
+      const href = window.location.href || '';
+      if (/\/submitted\b|\/thankyou\b|\/application-submitted\b|\/applicationSubmitted\b/i.test(href)) {
+        return true;
+      }
+
+      const popupEls = Array.from(document.querySelectorAll(
+        '[role="dialog"], [role="alertdialog"], [role="alert"], [role="status"], [data-automation-id*="popup" i], [data-automation-id*="modal" i], h1, h2, h3, h4, div.wd-popup, #popup-container'
+      ));
+
+      for (const el of popupEls) {
+        if (!isVisible(el)) continue;
+        const t = (el.textContent || '').replace(/\s+/g, ' ').trim();
+        if (/congratulations/i.test(t) && /application\s*(?:has\s*been|is|was)?\s*(?:successfully\s*)?(?:submitted|received)/i.test(t)) {
+          return true;
+        }
+        if (/your\s*application\s*has\s*been\s*successfully\s*submitted/i.test(t)) {
+          return true;
+        }
+        if (/thank\s*you\s*(?:very\s*much\s*)?for\s*(?:applying|your\s*application)/i.test(t) && !/already\s*(?:applied|submitted)/i.test(t)) {
+          return true;
+        }
+      }
+
+      const bodyText = (document.body?.innerText || '').slice(0, 3000);
+      if (/congratulations/i.test(bodyText) && /application\s*(?:has\s*been|is|was)?\s*(?:successfully\s*)?(?:submitted|received)/i.test(bodyText)) {
+        return true;
+      }
+
+      return false;
+    });
+  } catch {
     return false;
   }
 }
