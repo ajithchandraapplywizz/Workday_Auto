@@ -450,7 +450,7 @@ export async function isWorkdayLogin(page) {
   // Patiently wait for form fields or stepper to render if page is loading
   try {
     const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
-    await waitForWorkdayFormRender(page, { timeoutMs: 8000 });
+    await waitForWorkdayFormRender(page, { timeoutMs: 30000 });
   } catch {}
 
   const scan = await prescanGatewayElements(page);
@@ -479,7 +479,8 @@ export async function workdayLogin(page, email, password) {
 
   // Wait dynamically for sign-in or create account form to finish rendering
   try {
-    await page.waitForSelector('input[data-automation-id="password"], input[type="password"], input[data-automation-id="emailAddress"], input[data-automation-id="email"]', { timeout: 12000 });
+    const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+    await waitForWorkdayFormRender(page, { timeoutMs: 30000 });
   } catch {}
 
   // 0. Safety Net: If on Password Reset Form, complete password reset first
@@ -570,6 +571,49 @@ export async function workdayLogin(page, email, password) {
         await page.waitForTimeout(200);
         passwordFilled = true;
         break;
+      }
+    }
+  }
+
+  if (!emailFilled || !passwordFilled) {
+    const { isPageBlankOrHydrating, waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+    if (await isPageBlankOrHydrating(page).catch(() => false)) {
+      console.log('    ⏳ [WorkdayLogin] Sign-in inputs not visible yet — page is still blank / hydrating. Waiting dynamically up to 30s...');
+      await waitForWorkdayFormRender(page, { timeoutMs: 30000 }).catch(() => {});
+      // Re-scan inputs after dynamic hydration
+      const freshEmailInputs = await page.$$([
+        'input[data-automation-id*="email" i]',
+        'input[data-automation-id*="user" i]',
+        'input[type="email"]',
+        'input[name*="email" i]',
+        'input[name*="user" i]',
+        'input[id*="email" i]',
+        'input[id*="user" i]',
+        'input[aria-label*="email" i]',
+        'input[aria-label*="username" i]',
+        'input[placeholder*="email" i]'
+      ].join(', '));
+      for (const inp of freshEmailInputs) {
+        if (await inp.isVisible().catch(() => false)) {
+          await inp.fill(email);
+          await page.waitForTimeout(200);
+          emailFilled = true;
+          break;
+        }
+      }
+      const freshPwdInputs = await page.$$([
+        'input[data-automation-id*="password" i]:not([data-automation-id*="verify" i])',
+        'input[type="password"]',
+        'input[name*="password" i]:not([name*="verify" i])',
+        'input[id*="password" i]:not([id*="verify" i])'
+      ].join(', '));
+      for (const inp of freshPwdInputs) {
+        if (await inp.isVisible().catch(() => false)) {
+          await inp.fill(password);
+          await page.waitForTimeout(200);
+          passwordFilled = true;
+          break;
+        }
       }
     }
   }
@@ -752,6 +796,31 @@ export async function workdayCreateAccount(page, email, givenPassword) {
   }
 
   if (!submitted) {
+    const { isPageBlankOrHydrating, waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+    if (await isPageBlankOrHydrating(page).catch(() => false)) {
+      console.log('   ⏳ [WorkdayCreateAccount] Create Account form still hydrating. Waiting dynamically up to 25s...');
+      await waitForWorkdayFormRender(page, { timeoutMs: 25000 }).catch(() => {});
+      const retrySubmitBtns = (await page.$$([
+        'button[data-automation-id="createAccountSubmitButton"]',
+        '[data-automation-id="createAccountSubmitButton"]',
+        'button:has-text("Create Account")',
+        'button[type="submit"]'
+      ].join(', '))) || [];
+      for (const btn of retrySubmitBtns) {
+        if (await btn.isVisible().catch(() => false)) {
+          if (await isInNavOrHeader(btn)) continue;
+          page._lastRegistrationTime = Date.now() - 30000;
+          await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+          submitted = true;
+          await page.waitForTimeout(4000);
+          try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
+          break;
+        }
+      }
+    }
+  }
+
+  if (!submitted) {
     console.log('   ❌ Could not submit Create Account form.');
     return null;
   }
@@ -858,8 +927,11 @@ export async function handleWorkday(page, { email, password, mode = 'signin', pr
     }
     if (!await isWorkdayLogin(page)) {
       try {
-        const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
-        await waitForWorkdayFormRender(page, { timeoutMs: 12000 });
+        const { waitForWorkdayFormRender, isPageBlankOrHydrating } = await import('./stateDetector.mjs');
+        if (await isPageBlankOrHydrating(page).catch(() => false)) {
+          console.log('   ⏳ [handleWorkday] Page shell mounted but content blank / hydrating. Waiting dynamically up to 30s...');
+          await waitForWorkdayFormRender(page, { timeoutMs: 30000 });
+        }
       } catch {}
       if (!await isWorkdayLogin(page)) {
         console.log('   ⚠️  Neither Workday login nor application wizard detected after gateway scan.');

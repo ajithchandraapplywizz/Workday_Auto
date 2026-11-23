@@ -17,11 +17,13 @@ import { hydrateSupabaseAnswers } from './supabaseClient.mjs';
  * @param {object} plan — apply plan (url, company, resume)
  */
 export async function bootstrapClientContext(profile = {}, plan = {}) {
-  console.log('\n  📋 Stage 1 — Analysing client profile (Apply Wizz API + Supabase + resume)...');
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log('\n  📋 Stage 1 — Analysing client profile (Apply Wizz API + Supabase + resume)...');
+  }
 
   if (!profile._applyWizzHydrated) {
     await hydrateProfileFromApplyWizz(profile);
-  } else {
+  } else if (process.env.VERBOSE_LOGS === 'true') {
     console.log('  ✓ Apply Wizz client already loaded (skipped duplicate API call)');
   }
   if (!profile._supabaseHydrated) {
@@ -59,17 +61,19 @@ export async function bootstrapClientContext(profile = {}, plan = {}) {
   const exp = profile.experience || {};
   const edu = profile.education || {};
 
-  console.log(`  ✓ Identity: ${[personal.first_name, personal.last_name].filter(Boolean).join(' ') || '(name in profile.yml)'}`);
-  console.log(`  ✓ Contact: ${personal.email || '—'} | ${personal.phone || '—'} | ${personal.city || '—'}`);
-  console.log(`  ✓ Work: ${exp.current_title || '—'} @ ${exp.current_company || '—'} | ${exp.years || profile._applyWizzQa?.['years of experience'] || '—'} yrs`);
-  console.log(`  ✓ Education: ${edu.university || 'Other'} / ${edu.degree || "Bachelor's"} / ${edu.major || edu.field_of_study_hierarchy?.[0] || 'Computer Science'}`);
-  const supabaseKeys = Object.keys(profile._supabaseQa || {}).length;
-  console.log(`  ✓ Answer index: ${supabaseKeys} Supabase keys (Tier 1), resume parsing (Tier 2), ${apiKeys} Apply Wizz keys (Tier 3), LLM fallback (Tier 4)`);
-  if (profile._resumePath) {
-    console.log(`  ✓ Resume: ${profile._resumePath}`);
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(`  ✓ Identity: ${[personal.first_name, personal.last_name].filter(Boolean).join(' ') || '(name in profile.yml)'}`);
+    console.log(`  ✓ Contact: ${personal.email || '—'} | ${personal.phone || '—'} | ${personal.city || '—'}`);
+    console.log(`  ✓ Work: ${exp.current_title || '—'} @ ${exp.current_company || '—'} | ${exp.years || profile._applyWizzQa?.['years of experience'] || '—'} yrs`);
+    console.log(`  ✓ Education: ${edu.university || 'Other'} / ${edu.degree || "Bachelor's"} / ${edu.major || edu.field_of_study_hierarchy?.[0] || 'Computer Science'}`);
+    const supabaseKeys = Object.keys(profile._supabaseQa || {}).length;
+    console.log(`  ✓ Answer index: ${supabaseKeys} Supabase keys (Tier 1), resume parsing (Tier 2), ${apiKeys} Apply Wizz keys (Tier 3), LLM fallback (Tier 4)`);
+    if (profile._resumePath) {
+      console.log(`  ✓ Resume: ${profile._resumePath}`);
+    }
+    const order = 'Tier 1 (Supabase) → Tier 2 (Resume Parsing) → Tier 3 (ApplyWizz API) → Tier 4 (LLM + DOM live options)';
+    console.log(`  ✓ Mandatory resolution: ${order}\n`);
   }
-  const order = 'Tier 1 (Supabase) → Tier 2 (Resume Parsing) → Tier 3 (ApplyWizz API) → Tier 4 (LLM + DOM live options)';
-  console.log(`  ✓ Mandatory resolution: ${order}\n`);
 
   profile._clientBootstrapped = true;
   return profile;

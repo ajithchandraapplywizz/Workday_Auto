@@ -809,26 +809,32 @@ export async function prescanGatewayElements(page) {
 }
 
 // ─── Adaptive Gateway Handler post-Apply ───────────────────────────────────
+function gatewayLog(...args) {
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(...args);
+  }
+}
+
 export async function handleAdaptiveGateway(page, mode = 'signin') {
-  console.log(`   Scanning page & gateway elements post-apply (mode: "${mode}")...`);
+  gatewayLog(`   Scanning page & gateway elements post-apply (mode: "${mode}")...`);
 
   // Wait dynamically for gateway or form elements to hydrate before scanning
   try {
     const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
-    await waitForWorkdayFormRender(page, { timeoutMs: 15000 });
+    await waitForWorkdayFormRender(page, { timeoutMs: 30000 });
   } catch {}
   await page.waitForTimeout(400).catch(() => {});
 
   const scan = await prescanGatewayElements(page);
-  console.log('   Pre-scan elements:', JSON.stringify(scan));
+  gatewayLog('   Pre-scan elements:', JSON.stringify(scan));
 
   if (scan.hasActiveModal) {
-    console.log('   ℹ️  Modal dialog detected — scanning and filling fields inside modal without closing it.');
+    gatewayLog('   ℹ️  Modal dialog detected — scanning and filling fields inside modal without closing it.');
   }
 
   // 1. Social SSO Screen with "Sign in with email"
   if (scan.hasSignInWithEmailBtn) {
-    console.log('   🔗 Pre-scan: Detected Social SSO gateway — clicking "Sign in with email"...');
+    gatewayLog('   🔗 Pre-scan: Detected Social SSO gateway — clicking "Sign in with email"...');
     const ssoBtns = await page.$$([
       'button[data-automation-id="SignInWithEmailButton"]',
       'button:has-text("Sign in with email")',
@@ -853,29 +859,29 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
   if (mode === 'signin') {
     // If on reset password form, do NOT treat it as signin form
     if (postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || !postScan.hasEmailInput)) {
-      console.log('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
+      gatewayLog('   🔑 Pre-scan: Detected active Password Reset form — ready for password reset submission.');
       return;
     }
     // If verifyPassword, createAccountBtn, or link under create account is present, click "Sign In" link (except on Reset Password form)
     if (!postScan.hasResetPasswordBtn && (postScan.hasVerifyPassword || postScan.hasCreateAccountBtn || postScan.hasSignInUnderCreateAccount)) {
-      console.log('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
+      gatewayLog('   🔗 Pre-scan: Detected Create Account gateway — clicking "Sign In" link below Create Account button...');
       await clickGatewaySignIn(page);
     }
     // Wait for password input to appear
     try {
       await page.waitForSelector('input[data-automation-id="password"]:visible, input[type="password"]:visible', { timeout: 8000 });
-      console.log('   ✅ Sign-in form ready (password input visible).');
+      gatewayLog('   ✅ Sign-in form ready (password input visible).');
     } catch {
-      console.log('   ⚠️  Waiting for sign-in form inputs...');
+      gatewayLog('   ⚠️  Waiting for sign-in form inputs...');
     }
   } else if (mode === 'signup') {
     if (postScan.hasPasswordInput && !postScan.hasVerifyPassword && postScan.hasCreateAccountBtn) {
-      console.log('   🔗 Pre-scan: On Sign In screen in signup mode — clicking "Create Account"...');
+      gatewayLog('   🔗 Pre-scan: On Sign In screen in signup mode — clicking "Create Account"...');
       await clickGatewayCreateAccount(page);
     }
     try {
       await page.waitForSelector('input[data-automation-id="verifyPassword"]:visible, input[data-automation-id="email"]:visible', { timeout: 8000 });
-      console.log('   ✅ Create Account form ready.');
+      gatewayLog('   ✅ Create Account form ready.');
     } catch {}
   }
 }
@@ -913,7 +919,7 @@ export async function clickGatewaySignIn(page) {
     // Skip elements inside top nav/header
     if (await isInNavOrHeader(el)) continue;
 
-    console.log('   Clicking gateway "Sign In" link (below Create Account, not nav bar)...');
+    gatewayLog('   Clicking gateway "Sign In" link (below Create Account, not nav bar)...');
     await el.click({ force: true }).catch(() => el.evaluate(e => e.click()));
     await page.waitForTimeout(1500).catch(() => {});
     return true;
@@ -926,14 +932,14 @@ export async function clickGatewaySignIn(page) {
 export async function clickGatewayCreateAccount(page) {
   const verifyPwd = await page.$('input[data-automation-id="verifyPassword"]:visible').catch(() => null);
   if (verifyPwd) {
-    console.log('   Create Account form is already visible.');
+    gatewayLog('   Create Account form is already visible.');
     return true;
   }
 
   // If currently on Social SSO, click "Sign in with email" first
   const ssoBtn = await page.$('button[data-automation-id="SignInWithEmailButton"]:visible, button:has-text("Sign in with email"):visible');
   if (ssoBtn) {
-    console.log('   Clicking "Sign in with email" before switching to Create Account...');
+    gatewayLog('   Clicking "Sign in with email" before switching to Create Account...');
     await ssoBtn.click({ force: true }).catch(() => ssoBtn.evaluate(e => e.click()));
     await page.waitForTimeout(1500).catch(() => {});
   }
@@ -959,7 +965,7 @@ export async function clickGatewayCreateAccount(page) {
     if (autoId === 'createAccountSubmitButton' || type === 'submit') continue;
     if (await isInNavOrHeader(btn)) continue;
 
-    console.log('   Clicking gateway "Create Account" button (not nav bar)...');
+    gatewayLog('   Clicking gateway "Create Account" button (not nav bar)...');
     await btn.scrollIntoViewIfNeeded().catch(() => {});
     await btn.click({ force: true }).catch(() => btn.evaluate(e => e.click()));
     await page.waitForTimeout(1500).catch(() => {});
@@ -1315,10 +1321,16 @@ export async function discoverApplicationForm(page, originalUrl, { mode = 'signi
         }
       }
 
-      // 3. Post-Apply Gateway Handling with adaptive element pre-scan (fail-fast 4s networkidle)
+      // 3. Post-Apply Gateway Handling with dynamic form hydration wait
       await page.waitForTimeout(1000).catch(() => {});
       try { await page.waitForLoadState('domcontentloaded', { timeout: 10000 }); } catch {}
       try { await page.waitForLoadState('networkidle', { timeout: 4000 }); } catch {}
+
+      // Patiently wait dynamically up to 30s for the page content, inputs, or wizard to hydrate
+      try {
+        const { waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+        await waitForWorkdayFormRender(page, { timeoutMs: 30000 });
+      } catch {}
 
       if (await isWorkdayWizardVisible(page)) {
         console.log('   ✅ Application wizard active post-apply — waiting for field hydration...');

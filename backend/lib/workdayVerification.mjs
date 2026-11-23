@@ -11,6 +11,12 @@ import { pollZohoWorkdayAuth, getZohoUser, listZohoUsers, isZohoMailboxConnected
 /** Global in-memory registry tracking recent password reset requests (valid for 2 hours) */
 export const PASSWORD_RESET_TRACKER = new Map();
 
+function botLog(...args) {
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(...args);
+  }
+}
+
 /**
  * Cleans and sanitizes a Workday URL, stripping away any unwanted surrounding text,
  * HTML/markdown remnants, quotes, brackets, angle brackets, or trailing punctuation.
@@ -260,7 +266,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
   const targetEmail = email || process.env.WORKDAY_EMAIL || '';
   if (!page) return false;
 
-  console.log('   🔍 [WorkdayBot] Checking for Workday password reset / set form...');
+  botLog('   🔍 [WorkdayBot] Checking for Workday password reset / set form...');
 
   const url = typeof page.url === 'function' ? page.url() : '';
   const isLikelyResetUrl = url.includes('/passwordreset/') || url.includes('password') || url.includes('reset');
@@ -290,7 +296,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     return false;
   }
 
-  console.log('   🔑 [WorkdayBot] Password setup form detected — setting new password and confirmation password...');
+  botLog('   🔑 [WorkdayBot] Password setup form detected — setting new password and confirmation password...');
 
   // 1. Fill fields in DOM with full React event dispatching
   if (typeof page.evaluate === 'function') {
@@ -368,11 +374,11 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     }
   }
 
-  console.log('   ✍️  [WorkdayBot] Successfully filled New Password and Confirmation Password.');
+  botLog('   ✍️  [WorkdayBot] Successfully filled New Password and Confirmation Password.');
   await page.waitForTimeout(600);
 
   // 3. Locate and click submit button
-  console.log('   💾 [WorkdayBot] Submitting new password and confirmation on reset form...');
+  botLog('   💾 [WorkdayBot] Submitting new password and confirmation on reset form...');
   const saveBtn = (typeof page.$ === 'function')
     ? await page.$([
         'button[data-automation-id="changePasswordButton"]:not([disabled])',
@@ -406,7 +412,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
 
   // 4. Post-reset check: If application wizard is already reached, return immediately
   if (typeof isWorkdayWizardVisible === 'function' && await isWorkdayWizardVisible(page)) {
-    console.log('   ✅ [WorkdayBot] Application wizard already reached post-reset!');
+    botLog('   ✅ [WorkdayBot] Application wizard already reached post-reset!');
     return true;
   }
 
@@ -431,7 +437,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     : null;
 
   if (postActionBtn && !await isInNavOrHeader(postActionBtn)) {
-    console.log('   🔗 [WorkdayBot] Clicking post-reset action button ("Sign In" / "Continue")...');
+    botLog('   🔗 [WorkdayBot] Clicking post-reset action button ("Sign In" / "Continue")...');
     await postActionBtn.click({ force: true }).catch(() => postActionBtn.evaluate(el => el.click()));
     await page.waitForTimeout(600);
     try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
@@ -449,7 +455,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     : null;
 
   if (emailInp && pwdInp && submitSignIn && targetEmail) {
-    console.log(`   🔐 [WorkdayBot] Sign-in form visible post-reset — automatically logging in as ${targetEmail}...`);
+    botLog(`   🔐 [WorkdayBot] Sign-in form visible post-reset — automatically logging in as ${targetEmail}...`);
     await emailInp.click().catch(() => {});
     await emailInp.fill(targetEmail);
     await page.waitForTimeout(200);
@@ -470,7 +476,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
         const redirectParam = u.searchParams.get('redirect');
         if (redirectParam) {
           const targetUrl = new URL(redirectParam, u.origin).toString();
-          console.log(`   🚀 [WorkdayBot] Navigating directly to post-reset redirect destination: ${targetUrl}`);
+          botLog(`   🚀 [WorkdayBot] Navigating directly to post-reset redirect destination: ${targetUrl}`);
           await page.goto(targetUrl, { waitUntil: 'domcontentloaded' }).catch(() => {});
           await page.waitForTimeout(600);
           try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
@@ -479,7 +485,7 @@ export async function completeWorkdayPasswordResetForm(page, email, password) {
     }
   } catch {}
 
-  console.log('   ✅ [WorkdayBot] Password reset form submitted and post-reset flow executed.');
+  botLog('   ✅ [WorkdayBot] Password reset form submitted and post-reset flow executed.');
   return true;
 }
 
@@ -613,7 +619,7 @@ export async function resolveWorkdayVerification(page, {
       '[data-automation-id*="resend" i]',
     ].join(', ')).first();
     if (await resendBtn.isVisible({ timeout: 1500 }).catch(() => false)) {
-      console.log('   📩 [WorkdayBot] "Resend Account Verification" detected — clicking to dispatch fresh verification email...');
+      botLog('   📩 [WorkdayBot] "Resend Account Verification" detected — clicking to dispatch fresh verification email...');
       await resendBtn.click({ force: true }).catch(() => {});
       await page.waitForTimeout(2500);
       startTime = Date.now();
@@ -624,7 +630,7 @@ export async function resolveWorkdayVerification(page, {
   const cutoff = startTime ? (Number(startTime) - 15000) : (Date.now() - 300000);
   const effectiveCompany = company || (page && typeof page.url === 'function' ? extractWorkdayCompanyName(page.url()) : '');
 
-  console.log(`   📧 [WorkdayBot] Polling Zoho Mail Reader for candidate ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
+  botLog(`   📧 [WorkdayBot] Polling Zoho Mail Reader for candidate ${email}${effectiveCompany ? ` (${effectiveCompany})` : ''}...`);
 
   const pollRes = await pollZohoWorkdayAuth({
     email,
@@ -644,8 +650,8 @@ export async function resolveWorkdayVerification(page, {
         return { success: false, reason: 'invalid_link' };
       }
 
-      console.log(`   🔗 [WorkdayBot] Captured authentic verification link: ${cleanLink}`);
-      console.log('   🌐 [WorkdayBot] Navigating directly in active browser session...');
+      botLog(`   🔗 [WorkdayBot] Captured authentic verification link: ${cleanLink}`);
+      botLog('   🌐 [WorkdayBot] Navigating directly in active browser session...');
       let navTargetPage = page;
       if (!navTargetPage || (typeof navTargetPage.isClosed === 'function' && navTargetPage.isClosed())) {
         const ctx = page?.context?.();
@@ -698,7 +704,7 @@ export async function resolveWorkdayVerification(page, {
         ].join(', ')).first();
 
         if (await actionBtn.isVisible({ timeout: 4000 }).catch(() => false)) {
-          console.log('   🔗 [WorkdayBot] Clicking post-activation action button...');
+          botLog('   🔗 [WorkdayBot] Clicking post-activation action button...');
           await actionBtn.click({ force: true }).catch(() => {});
           await page.waitForTimeout(2500);
           try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
@@ -714,7 +720,7 @@ export async function resolveWorkdayVerification(page, {
         } catch {}
       }
       if (hasPwd && email && password) {
-        console.log('   🔑 [WorkdayBot] Sign In form active post-verification link — submitting credentials...');
+        botLog('   🔑 [WorkdayBot] Sign In form active post-verification link — submitting credentials...');
         const { workdayLogin } = await import('./workday.mjs');
         await workdayLogin(page, email, password);
         await page.waitForTimeout(2500);
@@ -722,12 +728,12 @@ export async function resolveWorkdayVerification(page, {
       }
 
       const onWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
-      console.log(`   ✅ [WorkdayBot] Account verification / password link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
+      botLog(`   ✅ [WorkdayBot] Account verification / password link processed successfully${onWizard ? ' (Application Wizard active)' : ''}.`);
       return { success: true, type: pollRes.type || 'link', url: cleanLink, passwordReset: resetCompleted, onWizard };
     }
 
     if (pollRes.verificationCode) {
-      console.log(`   🔑 [WorkdayBot] Received verification code from Zoho: ${pollRes.verificationCode}`);
+      botLog(`   🔑 [WorkdayBot] Received verification code from Zoho: ${pollRes.verificationCode}`);
       const codeInput = page.locator([
         'input[data-automation-id="verificationCode"]',
         'input[data-automation-id*="code" i]',
@@ -812,7 +818,7 @@ export async function executeWorkdayForgotPassword(page, {
   distributionId = '',
   taskId = '',
 } = {}) {
-  console.log(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
+  botLog(`   🔄 [WorkdayBot] Initiating automated Forgot Password recovery for ${email}...`);
 
   // 1. Locate and click "Forgot your password?" link/button
   const forgotBtn = await page.$([
@@ -828,14 +834,14 @@ export async function executeWorkdayForgotPassword(page, {
   ].join(', ')).catch(() => null);
 
   if (forgotBtn && (await forgotBtn.isVisible().catch(() => false))) {
-    console.log('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
+    botLog('   🔗 [WorkdayBot] Clicking "Forgot your password?"...');
     await forgotBtn.click({ force: true }).catch(() => forgotBtn.evaluate(el => el.click()));
     await page.waitForTimeout(600).catch(() => {});
     try { await page.waitForLoadState('networkidle', { timeout: 3000 }); } catch {}
   } else {
     const isAlreadyOnForgot = typeof isWorkdayForgotPasswordPage === 'function' ? await isWorkdayForgotPasswordPage(page).catch(() => false) : false;
     if (!isAlreadyOnForgot) {
-      console.log('   ⚠️  [WorkdayBot] Could not locate visible "Forgot your password?" link on page.');
+      botLog('   ⚠️  [WorkdayBot] Could not locate visible "Forgot your password?" link on page.');
       return { success: false, reason: 'forgot_link_not_found' };
     }
   }
@@ -898,7 +904,7 @@ export async function executeWorkdayForgotPassword(page, {
   if (isAlreadyRequested) {
     console.log(`   ℹ️ [WorkdayBot] Password reset was ALREADY requested at ${new Date(requestTime).toLocaleTimeString()} (within 2h validity window). Skipping re-click to avoid token invalidation.`);
   } else {
-    console.log(`   📩 [WorkdayBot] Submitting client email for password reset instructions (strictly single click)...`);
+    botLog(`   📩 [WorkdayBot] Submitting client email for password reset instructions (strictly single click)...`);
 
     const emailFilled = await fillClientEmail();
     if (!emailFilled) {
@@ -944,7 +950,7 @@ export async function executeWorkdayForgotPassword(page, {
           taskId,
           company: effectiveCompany,
         });
-        console.log(`   📸 [WorkdayBot] Mandatory proof screenshot captured post-reset request: ${resetProofShotUrl || 'Supabase Storage'}`);
+        botLog(`   📸 [WorkdayBot] Mandatory proof screenshot captured post-reset request: ${resetProofShotUrl || 'Supabase Storage'}`);
       } catch (shotErr) {
         console.warn('   ⚠️ [WorkdayBot] Note on password-reset-requested screenshot:', shotErr.message);
       }
@@ -966,7 +972,7 @@ export async function executeWorkdayForgotPassword(page, {
 
   const hitTimeoutMs = Math.max(timeoutMs || 90000, 75000);
   const lookbackCutoff = isAlreadyRequested ? (requestTime - 300000) : (Date.now() - 600000);
-  console.log(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader immediately for password reset link for ${cleanEmail} (cutoff: ${new Date(lookbackCutoff).toLocaleTimeString()}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
+  botLog(`   ⏳ [WorkdayBot] Polling Zoho Mail Reader immediately for password reset link for ${cleanEmail} (cutoff: ${new Date(lookbackCutoff).toLocaleTimeString()}, timeout: ${Math.round(hitTimeoutMs / 1000)}s)...`);
 
   // DIRECT POLLING: Poll Zoho Mail Reader immediately for password reset email link
   const pollRes = await pollZohoWorkdayAuth({
@@ -998,8 +1004,8 @@ export async function executeWorkdayForgotPassword(page, {
   if (pollRes?.found && pollRes?.verificationLink) {
     const rawLink = pollRes.verificationLink;
     const cleanLink = sanitizeWorkdayUrl(rawLink) || rawLink;
-    console.log(`   🎉 [WorkdayBot] Captured authentic password reset link from Zoho: ${cleanLink}`);
-    console.log(`   🌐 [WorkdayBot] Pasting reset link into CURRENT browser session and running...`);
+    botLog(`   🎉 [WorkdayBot] Captured authentic password reset link from Zoho: ${cleanLink}`);
+    botLog(`   🌐 [WorkdayBot] Pasting reset link into CURRENT browser session and running...`);
 
     let navTargetPage = page;
     if (!navTargetPage || (typeof navTargetPage.isClosed === 'function' && navTargetPage.isClosed())) {
@@ -1033,7 +1039,7 @@ export async function executeWorkdayForgotPassword(page, {
     try { await navTargetPage.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
     page = navTargetPage;
 
-    console.log(`   🔑 [WorkdayBot] Completing password reset form in current browser...`);
+    botLog(`   🔑 [WorkdayBot] Completing password reset form in current browser...`);
     const resetCompleted = await completeWorkdayPasswordResetForm(page, cleanEmail, effectivePassword);
     PASSWORD_RESET_TRACKER.delete(trackerKey);
 
@@ -1045,7 +1051,7 @@ export async function executeWorkdayForgotPassword(page, {
         ? await page.$('input[data-automation-id="password"]:visible, input[type="password"]:visible, button[data-automation-id="signInSubmitButton"]:visible').catch(() => null)
         : null;
       if (hasPwd) {
-        console.log('   🔐 [WorkdayBot] Sign In form active post-reset — logging in with new credentials...');
+        botLog('   🔐 [WorkdayBot] Sign In form active post-reset — logging in with new credentials...');
         const { workdayLogin } = await import('./workday.mjs');
         await workdayLogin(page, cleanEmail, effectivePassword);
         await page.waitForTimeout(2000);
@@ -1067,7 +1073,7 @@ export async function executeWorkdayForgotPassword(page, {
           ].join(', ')).catch(() => null)
         : null;
       if (applyBtn && !await isInNavOrHeader(applyBtn).catch(() => false)) {
-        console.log('   🚀 [WorkdayBot] Clicking Apply button post-reset to enter application wizard...');
+        botLog('   🚀 [WorkdayBot] Clicking Apply button post-reset to enter application wizard...');
         await applyBtn.click({ force: true }).catch(() => applyBtn.evaluate(el => el.click()));
         await page.waitForTimeout(2000).catch(() => {});
         try { await page.waitForLoadState('networkidle', { timeout: 10000 }); } catch {}
@@ -1075,7 +1081,7 @@ export async function executeWorkdayForgotPassword(page, {
     }
 
     const finalWizard = typeof isWorkdayWizardVisible === 'function' ? await isWorkdayWizardVisible(page) : false;
-    console.log(`   ✅ [WorkdayBot] Password reset processed and current browser running! (Wizard active: ${finalWizard})`);
+    botLog(`   ✅ [WorkdayBot] Password reset processed and current browser running! (Wizard active: ${finalWizard})`);
     return {
       success: resetCompleted || finalWizard,
       resumed: true,
@@ -1087,7 +1093,7 @@ export async function executeWorkdayForgotPassword(page, {
   }
 
   // If reset link was not retrieved during polling timeout:
-  console.log(`   ⏳ [WorkdayBot] Forgot Password reset link has not arrived yet in Zoho Mail within ${Math.round(hitTimeoutMs / 1000)}s.`);
+  botLog(`   ⏳ [WorkdayBot] Forgot Password reset link has not arrived yet in Zoho Mail within ${Math.round(hitTimeoutMs / 1000)}s.`);
 
   // STRICT GUARD: DO NOT MARK AS FAILED! Keep status = 'ready_for_review' and record reset tracking tag!
   const resetPendingMsg = `[Attempt 1/3] Halted at "Authentication": [password_reset_requested:${requestTime}] Password reset requested on Workday — awaiting Zoho Mail delivery (valid for 2 hours) [diagnostic_screenshot: ${resetProofShotUrl || 'none'}]`;

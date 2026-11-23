@@ -23,11 +23,12 @@ export const WORKDAY_STATES = {
  * @param {boolean} [options.triggerHydration=true] Dispatch micro-scroll/resize to awaken hydration if blank
  * @returns {Promise<boolean>} True if form controls or stable wizard state mounted, false on timeout
  */
-export async function waitForWorkdayFormRender(page, { timeoutMs = 20000, triggerHydration = true } = {}) {
+export async function waitForWorkdayFormRender(page, { timeoutMs = 35000, triggerHydration = true } = {}) {
   if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
 
   const startTime = Date.now();
   let hydrated = false;
+  let hasAttemptedReload = false;
 
   // 1. Initial wait for loading spinners/progressbars to detach
   try {
@@ -55,16 +56,19 @@ export async function waitForWorkdayFormRender(page, { timeoutMs = 20000, trigge
       // Check for any genuine form controls or submission/already_applied states
       const formControls = document.querySelectorAll(
         'input[type="password"], input[data-automation-id="password"], input[data-automation-id="verifyPassword"], ' +
-        'input[data-automation-id="emailAddress"], input[data-automation-id="email"], ' +
+        'input[data-automation-id="emailAddress"], input[data-automation-id="email"], input[type="email"], ' +
         'button[data-automation-id="SignInWithEmailButton"], button[data-automation-id="signInSubmitButton"], ' +
         'button[data-automation-id="createAccountSubmitButton"], button[data-automation-id="createAccountTab"], ' +
-        'button[data-automation-id="signInTab"], button[data-automation-id="bottom-navigation-next-button"], ' +
+        'button[data-automation-id="signInTab"], button[data-automation-id="signInLink"], button[data-automation-id="createAccountLink"], ' +
+        'button[data-automation-id="bottom-navigation-next-button"], ' +
         'button[data-automation-id="pageFooterNextButton"], button[data-automation-id="saveAndContinue"], ' +
         'button[data-automation-id="pageFooterSubmitButton"], input[data-automation-id="legalNameSection_firstName"], ' +
         'input[id*="legalName--firstName"], div[data-automation-id="file-upload-drop-zone"], ' +
         '[data-automation-id="myInformationPage"], [data-automation-id="myExperiencePage"], ' +
         '[data-automation-id="applicationQuestionsPage"], [data-automation-id="voluntaryDisclosuresPage"], ' +
-        '[data-automation-id="reviewPage"], [data-automation-id="submissionSuccess"], [data-automation-id="appliedButton"]'
+        '[data-automation-id="reviewPage"], [data-automation-id="submissionSuccess"], [data-automation-id="appliedButton"], ' +
+        '[data-automation-id="alreadyApplied"], [data-automation-id="jobPostingApplyButton"], ' +
+        'a[data-automation-id="adventureButton"], button[data-automation-id="continueApplication"]'
       );
 
       for (const ctrl of formControls) {
@@ -104,8 +108,18 @@ export async function waitForWorkdayFormRender(page, { timeoutMs = 20000, trigge
       break;
     }
 
-    // If stepper is rendered or spinner is active, Workday is dynamically hydrating the page
     const elapsed = Date.now() - startTime;
+
+    // Fallback: If page shell/stepper is mounted but inner form remains completely blank after 12s, reload page once to trigger hydration
+    if (triggerHydration && !hasAttemptedReload && elapsed > 12000 && (status.hasStepper || status.hasSpinner) && typeof page.reload === 'function') {
+      hasAttemptedReload = true;
+      console.log('   🔄 [WorkdayHydration] Page shell mounted but form content blank after 12s — reloading page to trigger hydration...');
+      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+      await page.waitForTimeout(2000).catch(() => {});
+      continue;
+    }
+
+    // If stepper is rendered or spinner is active, Workday is dynamically hydrating the page
     if (triggerHydration && (status.hasStepper || status.hasSpinner || status.bodyLen > 100)) {
       if (elapsed > 2000 && elapsed < 8000) {
         await page.evaluate(() => {
@@ -123,6 +137,47 @@ export async function waitForWorkdayFormRender(page, { timeoutMs = 20000, trigge
 
   await page.waitForTimeout(200).catch(() => {});
   return hydrated;
+}
+
+/**
+ * Detects if a Workday page has mounted its outer shell/stepper but the inner form content is still blank/hydrating.
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>}
+ */
+export async function isPageBlankOrHydrating(page) {
+  if (!page || (typeof page.isClosed === 'function' && page.isClosed())) return false;
+  return await page.evaluate(() => {
+    const isVisible = (el) => {
+      if (!el) return false;
+      if (el.hidden || el.getAttribute('aria-hidden') === 'true') return false;
+      try {
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+      } catch {}
+      return el.offsetParent !== null || el.getClientRects().length > 0;
+    };
+
+    // 1. Loading indicators
+    const hasSpinner = Boolean(
+      document.querySelector('[data-automation-id*="loadingSpinner" i], [data-automation-id*="loading-spinner" i], [role="progressbar"], .loading-spinner, div[class*="loading" i], div[class*="spinner" i], div[class*="skeleton" i], div.bubble-pulse')
+    );
+    if (hasSpinner) return true;
+
+    // 2. Interactive form controls
+    const formControls = document.querySelectorAll(
+      'input:not([type="hidden"]), select, textarea, button[data-automation-id="pageFooterNextButton"], button[data-automation-id="signInSubmitButton"], button[data-automation-id="createAccountSubmitButton"], button[data-automation-id="bottom-navigation-next-button"], button[data-automation-id="saveAndContinue"]'
+    );
+    for (const ctrl of formControls) {
+      if (isVisible(ctrl)) return false;
+    }
+
+    // 3. Shell detection (stepper or /apply header)
+    const stepper = document.querySelector('[data-automation-id="progressBar"], [data-automation-id="progressBarActiveStep"], nav[aria-label*="progress" i], ol[class*="progress" i], div[class*="stepper" i]');
+    const bodyText = (document.body?.innerText || '').trim();
+    const isShellMounted = Boolean(stepper) || /create\s*account/i.test(bodyText) || /back to job posting/i.test(bodyText) || /sign in/i.test(bodyText);
+
+    return isShellMounted;
+  }).catch(() => false);
 }
 
 /**

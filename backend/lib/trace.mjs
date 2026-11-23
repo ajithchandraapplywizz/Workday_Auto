@@ -144,8 +144,10 @@ export function logFieldTrace({
 
   trace(event);
 
-  const icon = isSuccess ? '✅ SUCCESS' : `❌ FAIL${reason ? ` (${reason})` : ''}`;
-  console.log(`  📊 [FIELD TRACE] aid="${cleanAid}" | label="${cleanLabel.slice(0, 45)}" | type=${cleanType} | tier=${normTier} | val="${cleanVal.slice(0, 35)}" | ${icon}`);
+  if (process.env.VERBOSE_LOGS === 'true') {
+    const icon = isSuccess ? '✅ SUCCESS' : `❌ FAIL${reason ? ` (${reason})` : ''}`;
+    console.log(`  📊 [FIELD TRACE] aid="${cleanAid}" | label="${cleanLabel.slice(0, 45)}" | type=${cleanType} | tier=${normTier} | val="${cleanVal.slice(0, 35)}" | ${icon}`);
+  }
 
   return event;
 }

@@ -99,6 +99,12 @@ import { writeFieldTraceLine, escalateToManualReview } from './reporter.mjs';
 
 export const DEFAULT_MAX_FILL_ATTEMPTS = 2;
 
+function inPageLog(...args) {
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(...args);
+  }
+}
+
 /**
  * Read the current on-screen value of a form field in the DOM.
  */
@@ -806,7 +812,7 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
         return blob.includes('country') || blob.includes('code') || blob.includes('phonetype') || blob.includes('device');
       }).catch(() => false);
       if (isCountryElement) {
-        console.log('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
+        inPageLog('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
         return;
       }
       const currentDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
@@ -905,12 +911,12 @@ export async function ensureStep1PhoneDetailsComplete(page, profile = {}) {
 }
 
 export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
-  console.log('\n  📋 [Step 1: My Information] Automating required form controls...');
+  inPageLog('\n  📋 [Step 1: My Information] Automating required form controls...');
   await attachFormMutationObserver(page);
   await discoverWorkdayFields(page);
 
   // ─── Legal Name Fields (Top of Form / No Dependencies) ───────────────────
-  console.log('  🎯 [Field 0/5] Resolving Legal Name (First Name, Middle Name, Last Name)...');
+  inPageLog('  🎯 [Field 0/5] Resolving Legal Name (First Name, Middle Name, Last Name)...');
   try {
     const { splitGivenFamilyName, toTitleCase } = await import('./personName.mjs');
     const split = splitGivenFamilyName(profile?.personal?.full_name || profile?.personal?.name || profile?.name || profile?.client_name || '');
@@ -989,7 +995,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   }
 
   // ─── Email Address (Top / Mandatory Contact Field) ─────────────────────────
-  console.log('  🎯 [Field 0b/5] Resolving Email Address (mandatory client email)...');
+  inPageLog('  🎯 [Field 0b/5] Resolving Email Address (mandatory client email)...');
   try {
     const emailValue = String(
       profile?.personal?.email
@@ -1039,7 +1045,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           emailOk = verifiedEmail.toLowerCase() === emailValue.toLowerCase();
         }
         if (emailOk) {
-          console.log(`    ✅ Field 0b Complete: Email Address verified in DOM: "${verifiedEmail}"`);
+          inPageLog(`    ✅ Field 0b Complete: Email Address verified in DOM: "${verifiedEmail}"`);
         } else {
           console.log(`    ⚠️  Email Address DOM mismatch: expected "${emailValue}", got "${verifiedEmail}"`);
         }
@@ -1059,10 +1065,10 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       }
     }
   } catch (err) {
-    console.log(`    ⚠️  Email Address warning: ${err.message?.substring(0, 100)}`);
+    inPageLog(`    ⚠️  Email Address warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 1/4] Resolving "How Did You Hear About Us?" (yaml/mjs/URL — no terminal)...');
+  inPageLog('  🎯 [Field 1/4] Resolving "How Did You Hear About Us?" (yaml/mjs/URL — no terminal)...');
   try {
     const currentSourceText = await getReferralSourceDisplay(page);
     const contaminatedWithPhoneCode = /\+91|\(\+91\)|country\s*\/\s*territory\s*phone|phone\s*device/i.test(currentSourceText);
@@ -1104,7 +1110,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
 
       if (sourceResult.success && isReferralSourceFullySelected(verifiedDisplay)) {
         const selected = sourceResult.selected || verifiedDisplay;
-        console.log(`    ✅ Field 1 Complete: "${SOURCE_LABEL}" → "${selected}" (DOM: "${verifiedDisplay}")`);
+        inPageLog(`    ✅ Field 1 Complete: "${SOURCE_LABEL}" → "${selected}" (DOM: "${verifiedDisplay}")`);
         profile._step1SourceFilled = true;
         profile.personal = profile.personal || {};
         profile.personal.source = selected;
@@ -1124,7 +1130,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           step: 'My Information',
         });
       } else {
-        console.log(`    ⚠️  Field 1: source not verified in DOM ("${verifiedDisplay || '(empty)'}") — continuing without terminal prompt`);
+        inPageLog(`    ⚠️  Field 1: source not verified in DOM ("${verifiedDisplay || '(empty)'}") — continuing without terminal prompt`);
         logFieldTrace({
           automationId: 'source--source',
           label: SOURCE_LABEL,
@@ -1138,13 +1144,13 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       }
     }
   } catch (err) {
-    console.log(`    ⚠️  Field 1 warning: ${err.message?.substring(0, 100)}`);
+    inPageLog(`    ⚠️  Field 1 warning: ${err.message?.substring(0, 100)}`);
   }
 
   await page.keyboard.press('Escape').catch(() => {});
   await page.waitForTimeout(300);
 
-  console.log('  🎯 [Field 2/4] Resolving Previous Worker / Employed Before radio group (default: "No")...');
+  inPageLog('  🎯 [Field 2/4] Resolving Previous Worker / Employed Before radio group (default: "No")...');
   try {
     const prevWorkerRegex = /previously\s*(been\s*)?employed|previously\s*worked|prior\s*(to\s*this\s*)?(employment|worker|experience)|employed.*in\s*the\s*past|current\s*or\s*former\s*employee|former\s*.*employee|former\s*.*worker|affiliate.*employee|candidateIsPreviousWorker/i;
     const previousWorkerGroup = page.getByRole('group', { name: prevWorkerRegex })
@@ -1193,7 +1199,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         });
       }
       const checkedNow = await noRadio.isChecked().catch(() => true);
-      console.log('    ✅ Field 2 Complete: previous worker = "No"');
+      inPageLog('    ✅ Field 2 Complete: previous worker = "No"');
       recordFilled(profile, 'Previous Worker', 'No');
       logFieldTrace({
         automationId: 'candidateIsPreviousWorker',
@@ -1206,11 +1212,11 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       });
     }
   } catch (err) {
-    console.log(`    ⚠️  Field 2 warning: ${err.message?.substring(0, 100)}`);
+    inPageLog(`    ⚠️  Field 2 warning: ${err.message?.substring(0, 100)}`);
   }
 
   // ─── Field 2a: Phone Number FIRST (Mandatory — Strictly Candidate Clean Digits) ───
-  console.log('  🎯 [Field 2a/4] Resolving Phone Number FIRST (strictly client clean digits)...');
+  inPageLog('  🎯 [Field 2a/4] Resolving Phone Number FIRST (strictly client clean digits)...');
   try {
     const pickValidPhone = (...candidates) => {
       for (const c of candidates) {
@@ -1318,7 +1324,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
         return blob.includes('country') || blob.includes('code') || blob.includes('phonetype') || blob.includes('device');
       }).catch(() => false);
       if (isCountryElement) {
-        console.log('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
+        inPageLog('    ⏭️ [No-Touch Country Code Policy] Detected country/code in phone locator — skipping interaction.');
         return true;
       }
       const curDigits = (await phoneNumberInput.inputValue().catch(() => '')).replace(/\D/g, '');
@@ -1364,7 +1370,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       if (!phoneOk) {
         console.log(`    ⚠️  Phone verify mismatch: expected ${cleanDigits}, got ${verified}`);
       } else {
-        console.log(`    ✅ Field 2a Complete: Phone Number "${cleanDigits}"`);
+        inPageLog(`    ✅ Field 2a Complete: Phone Number "${cleanDigits}"`);
       }
       recordFilled(profile, 'Phone Number', cleanDigits);
       logFieldTrace({
@@ -1378,10 +1384,10 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
       });
     }
   } catch (err) {
-    console.log(`    ⚠️  Field 2a Phone Number warning: ${err.message?.substring(0, 100)}`);
+    inPageLog(`    ⚠️  Field 2a Phone Number warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 2b/4] Resolving Phone Device Type...');
+  inPageLog('  🎯 [Field 2b/4] Resolving Phone Device Type...');
   try {
     const phoneValue = profile?.qa_answers?.['phone device type'] || profile?.personal?.phone_device_type || 'Mobile';
     const phoneTypeBtn = await locateWorkdayFieldByLabel(page, 'phone\\s*device\\s*type')
@@ -1420,7 +1426,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
   } catch {}
 
   // ─── Synchronize Country & Country Phone Code (Zero/Low Tokens) ───────────
-  console.log('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
+  inPageLog('  🎯 [Field 2c/4] Checking Country at top (address / applicant)...');
   const { normalizeCountryForWorkday } = await import('./clientContact.mjs');
   let selectedCountry = normalizeCountryForWorkday(profile.personal?.country || profile._dbClient?.raw_profile_json?.additional_information?.country || profile._dbClient?.country || profile._applyWizzQa?.['country'] || profile._applyWizzQa?.['country / territory'] || '');
   try {
@@ -1481,7 +1487,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  Country at top check warning: ${err.message?.substring(0, 80)}`);
   }
 
-  console.log('  🎯 [Field 3/4] Country Phone Code automatically bound to Country — skipping dropdown click');
+  inPageLog('  🎯 [Field 3/4] Country Phone Code automatically bound to Country — skipping dropdown click');
   const expectedPhoneCode = profile.personal?.country_phone_code || workdayPhoneCodeForCountry(selectedCountry) || 'United States of America (+1)';
   recordFilled(profile, 'Country / Territory Phone Code', expectedPhoneCode);
   logFieldTrace({
@@ -1540,7 +1546,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     }
   } catch {}
 
-  console.log('  🎯 [Field 5] Resolving City (DOM verify / commit with Enter)...');
+  inPageLog('  🎯 [Field 5] Resolving City (DOM verify / commit with Enter)...');
   try {
     let citySuccess = false;
     const cityResult = await fillCityFromDom(page, profile);
@@ -1600,7 +1606,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  City field warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 5b] Resolving Address Line 1 (mandatory)...');
+  inPageLog('  🎯 [Field 5b] Resolving Address Line 1 (mandatory)...');
   try {
     const { mergeResumeContactIntoProfile } = await import('./clientContact.mjs');
     mergeResumeContactIntoProfile(profile);
@@ -1659,7 +1665,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  Address Line 1 warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 5a] Resolving Country (address — from Apply Wizz / resume)...');
+  inPageLog('  🎯 [Field 5a] Resolving Country (address — from Apply Wizz / resume)...');
   try {
     const rawCountry = profile?.personal?.country
       || profile?._dbClient?.raw_profile_json?.additional_information?.country
@@ -1675,7 +1681,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
           return Boolean(el.closest('[data-automation-id*="phone" i], [id*="phone" i], section[aria-label*="phone" i], [data-automation-id*="phoneNumberSection"]'));
         }).catch(() => false);
         if (isInPhoneSection) {
-          console.log('    ⏭️ [No-Touch Country Code Policy] Field 5a Country matched inside phone section — skipping to avoid touching country code.');
+          inPageLog('    ⏭️ [No-Touch Country Code Policy] Field 5a Country matched inside phone section — skipping to avoid touching country code.');
         } else {
           const current = ((await countryControl.innerText().catch(() => '')) || (await countryControl.inputValue().catch(() => '')) || '').trim();
           const want = countryValue.toLowerCase();
@@ -1703,7 +1709,7 @@ export async function handleStep1MyInformation(page, profile = {}, plan = {}) {
     console.log(`    ⚠️  Country field warning: ${err.message?.substring(0, 100)}`);
   }
 
-  console.log('  🎯 [Field 5c] Resolving State dropdown (mandatory — DOM verify)...');
+  inPageLog('  🎯 [Field 5c] Resolving State dropdown (mandatory — DOM verify)...');
   try {
     const stateValue = resolveStateValue(profile, profile?._tenant || getWorkdayTenant(page.url()));
     if (stateValue) {
@@ -1869,7 +1875,7 @@ async function fillWorkdayField(page, field, mappedVal, profile) {
   const label = field.label || field.id;
   if (/country\s*(\/\s*territory\s*)?phone\s*code|^country\s*code$|phone.*country.*code|territory\s*phone\s*code/i.test(label || '')
     || /countryphonecode|country-phone-code/i.test(field.automationId || field.id || '')) {
-    console.log(`    ⏭️ [No-Touch Country Code Policy] fillWorkdayField skipping "${label}" — auto-populated by Country.`);
+    inPageLog(`    ⏭️ [No-Touch Country Code Policy] fillWorkdayField skipping "${label}" — auto-populated by Country.`);
     return true;
   }
   let el = await findField(page, field);
@@ -2090,7 +2096,7 @@ async function runWorkdayQuestionWorkflow(page, profile, plan, stepName, options
 
 // ─── Fill Current Workday Step ──────────────────────────────────────────────
 async function fillCurrentWorkdayStep(page, stepName, profile, plan) {
-  console.log(`\n  📝 [Workday] Filling Step: "${stepName}" (script-only: required fields)...`);
+  inPageLog(`\n  📝 [Workday] Filling Step: "${stepName}" (script-only: required fields)...`);
 
   // Disarm Certifications / Languages / bare Add / chrome before any fill on this step.
   await installScriptOnlyClickGuard(page);
@@ -2193,7 +2199,7 @@ async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint =
   if (fingerprint && profile._filledFingerprints.has(fingerprint)) {
     const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => -1);
     if (remaining === 0) {
-      console.log(`  ⚡ [Fast Advance] "${stepName}" already filled — fast moving to next page immediately!`);
+      inPageLog(`  ⚡ [Fast Advance] "${stepName}" already filled — fast moving to next page immediately!`);
       return true;
     }
     console.log(`  ↻ "${stepName}" revisited with ${remaining} empty required — fill those only`);
@@ -2205,18 +2211,18 @@ async function fillStepUntilReady(page, stepName, profile, plan, { fingerprint =
 
   const remaining = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
   if (remaining === 0) {
-    console.log(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified in DOM! Fast moving to next page immediately.`);
+    inPageLog(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified in DOM! Fast moving to next page immediately.`);
     return true;
   }
 
   // One targeted retry only for any newly revealed or missing required fields
-  console.log(`  ↻ ${remaining} required still empty or newly revealed — rescanning DOM and running targeted fill...`);
+  inPageLog(`  ↻ ${remaining} required still empty or newly revealed — rescanning DOM and running targeted fill...`);
   await page.waitForTimeout(200);
   await fillCurrentWorkdayStep(page, stepName, profile, plan);
 
   const after = await countUnfilledMandatoryQuestions(page, profile, stepName).catch(() => 0);
   if (after === 0) {
-    console.log(`  ⚡ [Fast Advance] "${stepName}" — complete after dynamic rescan! Fast moving to next page immediately.`);
+    inPageLog(`  ⚡ [Fast Advance] "${stepName}" — complete after dynamic rescan! Fast moving to next page immediately.`);
   } else {
     console.log(`  ⚠️  ${after} field(s) may still be empty — advancing to Save and Continue verification`);
   }
@@ -2232,7 +2238,7 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
 
   for (let attempt = 0; attempt < maxAdvance; attempt++) {
     if (attempt > 0) {
-      console.log(`  ↻ Advance retry ${attempt + 1}/${maxAdvance}...`);
+      inPageLog(`  ↻ Advance retry ${attempt + 1}/${maxAdvance}...`);
 
       // Workday named the offending fields — fix exactly those instead of
       // re-filling the whole step.
@@ -2912,7 +2918,7 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
 
 // ─── Workday 5-Step Wizard Loop ─────────────────────────────────────────────
 export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit = false, dryRun = false, workdayEmail = '', workdayPassword = '', mode = 'signin' } = {}) {
-  console.log('STARTING WORKDAY WIZARD LOOP (script-only Playwright, required fields only)');
+  inPageLog('STARTING WORKDAY WIZARD LOOP (script-only Playwright, required fields only)');
 
   // Fresh session markers for THIS job URL — never reuse prior page fingerprints/skips.
   resetPerApplicationSessionState(profile);
@@ -2937,7 +2943,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     profile._tenant = tenant;
     profile._workdayPlatform = detected?.platform || '';
     if (detected?.platform) {
-      console.log(`  🌐 Workday tenant=${tenant} platform=${detected.platform} host=${detected.hostname}`);
+      inPageLog(`  🌐 Workday tenant=${tenant} platform=${detected.platform} host=${detected.hostname}`);
     }
   }
 
@@ -3034,7 +3040,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
     currentIteration++;
 
     // Guard: Wait for dynamic form render & hydration on every wizard iteration
-    await waitForWorkdayFormRender(page, { timeoutMs: 12000 }).catch(() => {});
+    await waitForWorkdayFormRender(page, { timeoutMs: 30000 }).catch(() => {});
 
     const refreshed = await refreshWorkdayPageOnce(page);
     let stepName = await detectWorkdayStep(page);
@@ -3248,7 +3254,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
         }
       }
     }
-    console.log(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
+    inPageLog(`  🔍 Fresh DOM scan for this page: ${liveFields.length} control(s) (fingerprint labels=${fingerprint.split('::').pop()?.length || 0})`);
     profile?._onLog?.(currentIteration, `Step ${currentIteration}: Discovered ${liveFields.length} control(s) on "${stepName}". Auto-filling fields...`);
 
     await fillStepUntilReady(page, stepName, profile, plan, { fingerprint });
@@ -3260,12 +3266,12 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
     const pageGate = await validatePage(page, profile, stepName).catch(() => null);
     if (pageGate && !pageGate.ok) {
-      console.log(`  ⚠️  Page not ready for Next: ${pageGate.reason}`);
+      inPageLog(`  ⚠️  Page not ready for Next: ${pageGate.reason}`);
     }
 
     const orch = profile._lastOrchestrator;
     if (orch?.status === 'blocked') {
-      console.log(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
+      inPageLog(`  ℹ️  Orchestrator note (${orch.reason}) — proceeding to rapid advance`);
     }
 
     // Re-harvest only in scanning mode; during live submission, advance immediately to next step
@@ -3320,7 +3326,7 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       await fillCurrentWorkdayStep(page, stepName, profile, plan);
     }
 
-    console.log(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified. Instant Save & Continue...`);
+    inPageLog(`  ⚡ [Fast Advance] "${stepName}" — all required fields verified. Instant Save & Continue...`);
     profile?._onLog?.(currentIteration, `Step ${currentIteration}: Completed filling "${stepName}". Fast moving to next page...`);
     let advanceResult;
     try {
@@ -3539,7 +3545,7 @@ export async function runWorkdayQuestionScanLoop(page, profile, plan = {}, {
     profile._tenant = detected?.tenant || getWorkdayTenant(url);
     profile._workdayPlatform = detected?.platform || '';
     if (detected?.platform) {
-      console.log(`  🌐 Workday tenant=${profile._tenant} platform=${detected.platform} host=${detected.hostname}`);
+      inPageLog(`  🌐 Workday tenant=${profile._tenant} platform=${detected.platform} host=${detected.hostname}`);
     }
   }
 
@@ -4235,11 +4241,11 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           return 'auth-failed';
         }
       } else {
-        console.log('  ⚡ Direct fill mode: Already on active wizard! Proceeding straight to wizard filling...');
+        inPageLog('  ⚡ Direct fill mode: Already on active wizard! Proceeding straight to wizard filling...');
       }
 
-      console.log('  ✅ Workday authentication confirmed — waiting for first wizard step hydration...');
-      await waitForWorkdayFormRender(page, { timeoutMs: 15000 }).catch(() => {});
+      inPageLog('  ✅ Workday authentication confirmed — waiting for first wizard step hydration...');
+      await waitForWorkdayFormRender(page, { timeoutMs: 30000 }).catch(() => {});
       await page.waitForTimeout(300);
 
       const status = await runWorkdayWizardLoop(page, profile, plan, { confirmSubmit, dryRun, workdayEmail, workdayPassword, mode });
@@ -4252,7 +4258,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
         await recordResult(url, plan, status, fieldResults);
       } catch { /* non-critical */ }
 
-      console.log(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
+      inPageLog(`🏁 Result: ${typeof status === 'object' ? JSON.stringify(status) : status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
 
       // Determine hold time before browser close based on outcome:
       // — quick close for skipped/declined/blocked/reached-review
@@ -4656,7 +4662,7 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
       await recordResult(url, plan, status, fieldResults);
     } catch { /* non-critical */ }
 
-    console.log(`🏁 Result: ${status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
+    inPageLog(`🏁 Result: ${status} | Screenshots: In-Memory Buffer -> Supabase Storage`);
 
     console.log(`\n   — Closing browser...`);
     try {

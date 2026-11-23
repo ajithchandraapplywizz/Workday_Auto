@@ -1551,7 +1551,11 @@ export async function executeWorkerTask({
       if (!completionShotUrl) {
         let buf = profile?._submissionScreenshotBuffer || null;
         if (!buf && page && !page.isClosed()) {
-          const { detectWorkdayStep } = await import('./stateDetector.mjs');
+          const { detectWorkdayStep, isPageBlankOrHydrating, waitForWorkdayFormRender } = await import('./stateDetector.mjs');
+          if (!isSuccessStatus && await isPageBlankOrHydrating(page).catch(() => false)) {
+            console.log(`   ⏳ [${workerId}] Page shell mounted but content still blank / hydrating. Waiting dynamically up to 35s before screenshot...`);
+            await waitForWorkdayFormRender(page, { timeoutMs: 35000 }).catch(() => {});
+          }
           detectedStep = await detectWorkdayStep(page).catch(() => null);
           onReviewPage = String(detectedStep || profile?._currentStep || '').toLowerCase().includes('review');
           isSuccessStatus = (

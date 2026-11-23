@@ -352,9 +352,11 @@ export async function getVerificationLink({
       throw new Error(`Mailbox not found in users list: ${email}`);
     }
   }
-  console.log(`   ✓ [ZohoMail] Mailbox connection verified for ${email}`);
-  if (company || tenant) {
-    console.log(`   🎯 [ZohoMail] Targeted Employer Match: ${company ? `Company: "${company}"` : ''} ${tenant ? `Tenant: "${tenant}"` : ''} (Cutoff: ${new Date(effectiveCutoff).toLocaleTimeString()})`);
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(`   ✓ [ZohoMail] Mailbox connection verified for ${email}`);
+    if (company || tenant) {
+      console.log(`   🎯 [ZohoMail] Targeted Employer Match: ${company ? `Company: "${company}"` : ''} ${tenant ? `Tenant: "${tenant}"` : ''} (Cutoff: ${new Date(effectiveCutoff).toLocaleTimeString()})`);
+    }
   }
 
   // Step 2: Poll inbox until deadline

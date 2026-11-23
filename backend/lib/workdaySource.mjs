@@ -14,6 +14,12 @@ import {
 
 const SOURCE_LABEL = 'How Did You Hear About Us?';
 
+function sourceLog(...args) {
+  if (process.env.VERBOSE_LOGS === 'true') {
+    console.log(...args);
+  }
+}
+
 const KNOWN_JOB_BOARD_CHILDREN = [
   'LinkedIn', 'Indeed', 'Glassdoor', 'Monster', 'CareerBuilder', 'Careerbuilder',
   'ZipRecruiter', 'Dice', 'DICE', 'Google', 'Handshake', 'Ladders', 'Hired',
@@ -696,10 +702,10 @@ async function tryHierarchicalSource(page, trigger, parent, childCandidates, top
   await openSourceDropdown(page, trigger);
   const parentClicked = await clickSourceListOption(page, parent);
   if (!parentClicked) {
-    console.log(`    ↳ Parent "${parent}" not clicked in DOM`);
+    sourceLog(`    ↳ Parent "${parent}" not clicked in DOM`);
     return null;
   }
-  console.log(`    ↳ Parent clicked: "${parentClicked}" — waiting for submenu...`);
+  sourceLog(`    ↳ Parent clicked: "${parentClicked}" — waiting for submenu...`);
 
   await page.waitForTimeout(900);
 
@@ -710,7 +716,7 @@ async function tryHierarchicalSource(page, trigger, parent, childCandidates, top
     childOptions = await collectSubmenuOptions(page, topLevelKeys);
   }
 
-  console.log(`    ↳ Submenu options: [${childOptions.slice(0, 8).join(', ')}${childOptions.length > 8 ? ', ...' : ''}]`);
+  sourceLog(`    ↳ Submenu options: [${childOptions.slice(0, 8).join(', ')}${childOptions.length > 8 ? ', ...' : ''}]`);
 
   const tryChildren = children.length > 0 ? children : getChildCandidatesForParent(parentClicked);
 
@@ -718,35 +724,35 @@ async function tryHierarchicalSource(page, trigger, parent, childCandidates, top
     const childMatch = matchPreferredToDomOption(childPref, childOptions, { strict: false })
       || matchPreferredToDomOption(childPref, await collectReferralSourceOptions(page), { strict: false });
     if (!childMatch) {
-      console.log(`    ↳ Child "${childPref}" not found in submenu`);
+      sourceLog(`    ↳ Child "${childPref}" not found in submenu`);
       continue;
     }
 
     const childClicked = await clickSourceListOption(page, childMatch);
     if (!childClicked) {
-      console.log(`    ↳ Child "${childMatch}" visible but click failed`);
+      sourceLog(`    ↳ Child "${childMatch}" visible but click failed`);
       continue;
     }
-    console.log(`    ↳ Child clicked: "${childClicked}"`);
+    sourceLog(`    ↳ Child clicked: "${childClicked}"`);
 
     await page.waitForTimeout(600);
     const display = await getReferralSourceDisplay(page);
     if (displayMatchesExpected(display, childClicked) || displayMatchesExpected(display, childMatch)) {
-      console.log(`    ✓ DOM verified: "${display}"`);
+      sourceLog(`    ✓ DOM verified: "${display}"`);
       return childClicked;
     }
-    console.log(`    ↳ Child "${childClicked}" not verified (DOM: "${display || '(empty)'}")`);
+    sourceLog(`    ↳ Child "${childClicked}" not verified (DOM: "${display || '(empty)'}")`);
   }
 
   const fallbackChild = pickBestSubmenuLeaf(childOptions, tryChildren);
   if (fallbackChild) {
-    console.log(`    ↳ Fallback child from submenu: "${fallbackChild}"`);
+    sourceLog(`    ↳ Fallback child from submenu: "${fallbackChild}"`);
     const childClicked = await clickSourceListOption(page, fallbackChild);
     if (childClicked) {
       await page.waitForTimeout(600);
       const display = await getReferralSourceDisplay(page);
       if (displayMatchesExpected(display, childClicked) || isReferralSourceFullySelected(display)) {
-        console.log(`    ✓ DOM verified (fallback): "${display}"`);
+        sourceLog(`    ✓ DOM verified (fallback): "${display}"`);
         return childClicked;
       }
     }
@@ -766,10 +772,10 @@ async function tryFlatSource(page, trigger, value) {
   await page.waitForTimeout(500);
   const display = await getReferralSourceDisplay(page);
   if (displayMatchesExpected(display, clicked)) {
-    console.log(`    ✓ DOM verified: "${display}"`);
+    sourceLog(`    ✓ DOM verified: "${display}"`);
     return clicked;
   }
-  console.log(`    ↳ Flat "${clicked}" not verified in DOM (shows: "${display || '(empty)'}")`);
+  sourceLog(`    ↳ Flat "${clicked}" not verified in DOM (shows: "${display || '(empty)'}")`);
   return null;
 }
 
@@ -786,12 +792,12 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
   let trigger = await locateReferralSourceControl(page);
   trigger = trigger ? await ensureSourceTrigger(page, trigger) : null;
   if (!trigger || !(await trigger.isVisible({ timeout: 2000 }).catch(() => false))) {
-    console.log('    ⚠️  Referral source control not found on page.');
+    sourceLog('    ⚠️  Referral source control not found on page.');
     return { success: false, domOptions: [] };
   }
 
   const controlId = await trigger.evaluate((el) => el.id || el.getAttribute('data-automation-id') || '').catch(() => '');
-  console.log(`    🎯 Source control located: ${controlId || '(referral source)'}`);
+  sourceLog(`    🎯 Source control located: ${controlId || '(referral source)'}`);
 
   await openSourceDropdown(page, trigger);
   let topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
@@ -800,7 +806,7 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
     topLevelOptions = await collectReferralSourceOptionsWithScroll(page);
   }
 
-  console.log(`    📋 Source options (DOM): [${topLevelOptions.slice(0, 10).join(', ')}${topLevelOptions.length > 10 ? ', ...' : ''}]`);
+  sourceLog(`    📋 Source options (DOM): [${topLevelOptions.slice(0, 10).join(', ')}${topLevelOptions.length > 10 ? ', ...' : ''}]`);
 
   if (topLevelOptions.length === 0) {
     return { success: false, domOptions: [] };
@@ -808,11 +814,11 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
 
   const topLevelKeys = new Set(topLevelOptions.map(normalizeKey));
   const attempts = buildOrderedSourceAttempts(topLevelOptions, profile);
-  console.log(`    🔄 Trying ${attempts.length} source attempt(s) from workdayDefaults.mjs (hierarchical first)...`);
+  sourceLog(`    🔄 Trying ${attempts.length} source attempt(s) from workdayDefaults.mjs (hierarchical first)...`);
 
   for (const attempt of attempts) {
     if (attempt.type === 'hierarchical') {
-      console.log(`    ↳ Attempt: "${attempt.parent}" → "${attempt.child}"`);
+      sourceLog(`    ↳ Attempt: "${attempt.parent}" → "${attempt.child}"`);
       const childTryList = [
         attempt.child,
         ...getChildCandidatesForParent(attempt.parent).filter((c) => c !== attempt.child),
@@ -825,7 +831,7 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
       continue;
     }
 
-    console.log(`    ↳ Attempt flat: "${attempt.value}"`);
+    sourceLog(`    ↳ Attempt flat: "${attempt.value}"`);
     const selected = await tryFlatSource(page, trigger, attempt.value);
     if (selected) {
       return { success: true, selected, domOptions: topLevelOptions };
@@ -833,7 +839,7 @@ export async function fillHowDidYouHearFromDom(page, profile = {}) {
   }
 
   const display = await getReferralSourceDisplay(page);
-  console.log(`    ⚠️  All workdayDefaults.mjs source attempts failed. DOM: "${display || '(empty)'}" — will ask in terminal.`);
+  sourceLog(`    ⚠️  All workdayDefaults.mjs source attempts failed. DOM: "${display || '(empty)'}" — will ask in terminal.`);
   return { success: false, domOptions: topLevelOptions };
 }
 
@@ -851,7 +857,7 @@ export async function applySourceTerminalAnswer(page, profile, userAnswer) {
   }
 
   if (isHierarchicalParentOption(answer)) {
-    console.log(`    ℹ️  "${answer}" is a parent category — drilling down to child (LinkedIn/Indeed/Glassdoor from defaults)...`);
+    sourceLog(`    ℹ️  "${answer}" is a parent category — drilling down to child (LinkedIn/Indeed/Glassdoor from defaults)...`);
     let trigger = await locateReferralSourceControl(page);
     trigger = trigger ? await ensureSourceTrigger(page, trigger) : null;
     if (!trigger) return { success: false };
@@ -924,7 +930,7 @@ export async function fillSourceFieldAuto(page, profile = {}) {
   if (trigger) trigger = await ensureSourceTrigger(page, trigger);
 
   if (!trigger) {
-    console.log('    ⚠️  Source control not found — scanned labels for "How did you hear"');
+    sourceLog('    ⚠️  Source control not found — scanned labels for "How did you hear"');
     const labels = await page.evaluate(() => {
       const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
       return Array.from(document.querySelectorAll('label, [data-automation-id*="label"], [data-automation-id*="richText"]'))
@@ -932,16 +938,16 @@ export async function fillSourceFieldAuto(page, profile = {}) {
         .filter((t) => t && t.length < 80)
         .slice(0, 25);
     });
-    console.log(`    🔍 Page labels: ${labels.join(' | ')}`);
+    sourceLog(`    🔍 Page labels: ${labels.join(' | ')}`);
     return { success: false, domOptions: [] };
   }
 
   const controlId = await trigger.evaluate((el) => el.id || el.getAttribute('data-automation-id') || '').catch(() => '');
-  console.log(`    🎯 Source control located: ${controlId || '(referral source)'}`);
+  sourceLog(`    🎯 Source control located: ${controlId || '(referral source)'}`);
 
   const current = await getReferralSourceDisplay(page);
   if (isReferralSourceFullySelected(current)) {
-    console.log(`    ✓ Source already set: "${current}"`);
+    sourceLog(`    ✓ Source already set: "${current}"`);
     return { success: true, selected: current };
   }
 
@@ -956,14 +962,14 @@ export async function fillSourceFieldAuto(page, profile = {}) {
 
   // 2) Try each auto candidate (profile → URL → LinkedIn → Indeed → Glassdoor…)
   const candidates = resolveSourceAnswerCandidates(profile, url);
-  console.log(`    🔄 Auto source from yaml/mjs/URL: [${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? ', ...' : ''}]`);
+  sourceLog(`    🔄 Auto source from yaml/mjs/URL: [${candidates.slice(0, 8).join(', ')}${candidates.length > 8 ? ', ...' : ''}]`);
 
   for (const answer of candidates) {
-    console.log(`    ↳ Applying: "${answer}"`);
+    sourceLog(`    ↳ Applying: "${answer}"`);
     const applied = await applySourceTerminalAnswer(page, profile, answer);
     display = await getReferralSourceDisplay(page);
     if (applied.success && applied.selected && isReferralSourceFullySelected(display)) {
-      console.log(`    ✅ Source auto-filled: "${applied.selected}" (DOM: "${display}")`);
+      sourceLog(`    ✅ Source auto-filled: "${applied.selected}" (DOM: "${display}")`);
       return { success: true, selected: applied.selected, domOptions: result.domOptions };
     }
   }
@@ -980,17 +986,17 @@ export async function fillSourceFieldAuto(page, profile = {}) {
   }
 
   // 4) Pick ANY valid parent → ANY child (user preference: any dropdown selection is fine)
-  console.log('    🎲 Source fallback: picking any parent + child from live DOM...');
+  sourceLog('    🎲 Source fallback: picking any parent + child from live DOM...');
   const anyResult = await tryPickAnyHierarchicalSource(page, trigger);
   display = await getReferralSourceDisplay(page);
   if (anyResult?.success && isReferralSourceFullySelected(display)) {
     const selected = anyResult.selected || display;
-    console.log(`    ✅ Source pick-any: "${selected}"`);
+    sourceLog(`    ✅ Source pick-any: "${selected}"`);
     return { success: true, selected, domOptions: result.domOptions || [] };
   }
 
   display = await getReferralSourceDisplay(page);
-  console.log(`    ⚠️  Source auto-fill incomplete (DOM: "${display || '(empty)'}") — continuing apply`);
+  sourceLog(`    ⚠️  Source auto-fill incomplete (DOM: "${display || '(empty)'}") — continuing apply`);
   return { success: false, domOptions: result.domOptions || [], selected: display || undefined };
 }
 
@@ -1039,7 +1045,7 @@ async function tryPickAnyHierarchicalSource(page, trigger) {
     await openSourceDropdown(page, trigger);
     const parentClicked = await clickSourceListOption(page, parent);
     if (!parentClicked) continue;
-    console.log(`    🎲 Picked parent: "${parentClicked}"`);
+    sourceLog(`    🎲 Picked parent: "${parentClicked}"`);
     await page.waitForTimeout(850);
 
     let childOptions = await collectSubmenuOptions(page, topLevelKeys);
@@ -1059,7 +1065,7 @@ async function tryPickAnyHierarchicalSource(page, trigger) {
     for (const child of children) {
       const childClicked = await clickSourceListOption(page, child);
       if (!childClicked) continue;
-      console.log(`    🎲 Picked child: "${childClicked}"`);
+      sourceLog(`    🎲 Picked child: "${childClicked}"`);
       await page.waitForTimeout(550);
       const display = await getReferralSourceDisplay(page);
       if (isReferralSourceFullySelected(display)) {
