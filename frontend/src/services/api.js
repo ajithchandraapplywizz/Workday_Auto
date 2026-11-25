@@ -2916,6 +2916,7 @@ export async function triggerAutonomousBot() {
         .eq('id', 'primary');
       if (!bcErr) supabaseSuccess = true;
       else console.warn('Note on updating bot_control:', bcErr?.message);
+      await supabase.from('worker_controls').upsert({ key: 'scan', enabled: true, status: 'running', stop_requested: false, updated_at: now }).catch(() => {});
     } catch (bcErr) {
       console.warn('Note on updating bot_control:', bcErr?.message);
     }
@@ -3015,6 +3016,7 @@ export async function stopAutonomousBot() {
           updated_at: now,
         })
         .eq('id', 'primary');
+      await supabase.from('worker_controls').upsert({ key: 'scan', enabled: false, status: 'off', stop_requested: true, updated_at: now }).catch(() => {});
     } catch (bcErr) {
       console.warn('Note on updating bot_control stop state:', bcErr?.message);
     }
@@ -3102,6 +3104,7 @@ export async function triggerSubmissionStage() {
     } else {
       console.warn('Supabase bot_control update error:', sbErr?.message);
     }
+    await supabase.from('worker_controls').upsert({ key: 'submit', enabled: true, status: 'running', stop_requested: false, updated_at: now }).catch(() => {});
 
     // Mark submitting workers as in_flight dynamically from environment counts
     const submittingWorkerIds = Array.from({ length: submitWorkerTotal }, (_, i) => `submitting_worker_${i + 1}`);
@@ -3182,6 +3185,7 @@ export async function stopSubmissionStage() {
       })
       .eq('id', 'primary');
     if (!sbErr) supabaseSuccess = true;
+    await supabase.from('worker_controls').upsert({ key: 'submit', enabled: false, status: 'off', stop_requested: true, updated_at: now }).catch(() => {});
   } catch (err) {
     console.warn('Supabase stop error:', err);
   }
@@ -3290,6 +3294,10 @@ export async function triggerAllParallelStage() {
     } else if (!sbErr) {
       supabaseSuccess = true;
     }
+    await supabase.from('worker_controls').upsert([
+      { key: 'scan', enabled: true, status: 'running', stop_requested: false, updated_at: now },
+      { key: 'submit', enabled: true, status: 'running', stop_requested: false, updated_at: now }
+    ]).catch(() => {});
 
     // 2. Mark both scanning and submitting workers as in_flight
     const { scan, submit } = getEnvWorkerCounts();
@@ -3385,6 +3393,10 @@ export async function stopAllParallelStage() {
   } catch (bcErr) {
     console.warn('Note on updating bot_control for stop all:', bcErr?.message);
   }
+  await supabase.from('worker_controls').upsert([
+    { key: 'scan', enabled: false, status: 'off', stop_requested: true, updated_at: now },
+    { key: 'submit', enabled: false, status: 'off', stop_requested: true, updated_at: now }
+  ]).catch(() => {});
 
   // 2. Mark ALL canonical workers strictly idle in worker_status
   const allWorkerIds = [

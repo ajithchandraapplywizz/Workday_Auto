@@ -573,6 +573,7 @@ export async function stopScanPool() {
       is_running: isPoolRunning,
       current_action: submitStatus === 'running' ? 'Submitting in progress (Scan stopped)' : 'Scan & Resolve stopped by user',
     }).catch(() => { });
+    await updateWorkerControl('scan', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
   }
 
   console.log(`✅ [DAEMON] Scan stop complete. Scan progress safely halted. submission_tasks untouched.`);
@@ -682,6 +683,7 @@ export async function stopSubmitPool() {
       is_running: isPoolRunning,
       current_action: 'Submissions stopped by user',
     }).catch(() => { });
+    await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
   }
 
   console.log(`✅ [DAEMON] Submit stop complete. Submissions halted. Scan & Resolve progress untouched.`);
@@ -737,6 +739,8 @@ export async function stopAutonomousPool() {
   ]);
 
   await resetAllWorkersIdle().catch(() => { });
+  await updateWorkerControl('scan', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
+  await updateWorkerControl('submit', { enabled: false, status: 'off', stop_requested: false }).catch(() => { });
   await syncBotControlState({
     mode: 'idle',
     stage: 'idle',
@@ -947,14 +951,22 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
           try {
             const bcCheck = await getBotControl().catch(() => null);
             const isSubmitStopped = Boolean(
-              bcCheck && (
+              submitStopRequested ||
+              isSubmitStopRequested() ||
+              isGlobalStopRequested() ||
+              (bcCheck && (
                 bcCheck.stop_requested === true ||
                 bcCheck.submit_stop_requested === true ||
+                bcCheck.universal_stop_requested === true ||
+                bcCheck.submit_status === 'off' ||
+                bcCheck.submit_enabled === false ||
+                (!bcCheck.is_running && bcCheck.stage !== 'submitting' && bcCheck.stage !== 'parallel') ||
                 ((bcCheck.last_action_requested === 'stop_submit' ||
                   bcCheck.last_action_requested === 'stop' ||
-                  bcCheck.last_action_requested === 'stop_all') &&
+                  bcCheck.last_action_requested === 'stop_all' ||
+                  bcCheck.last_action_requested === 'stop_universal') &&
                   bcCheck.submit_status !== 'running')
-              )
+              ))
             );
             if (isSubmitStopped) {
               console.log(`🛑 [SUBMISSION WORKER] ${workerId} detected stop signal in bot_control. Halting submission worker loop immediately.`);
@@ -1039,8 +1051,18 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
 
           // 4. If submit switch is actively running in bot_control (not stopped by user), stand by for new tasks!
           const bcCheckActive = await getBotControl().catch(() => null);
-          const isSubmitStillSwitchOn = !submitStopRequested && Boolean(
-            submitStatus === 'running' ||
+          const isSubmitExplicitlyOff = Boolean(
+            submitStopRequested ||
+            isSubmitStopRequested() ||
+            isGlobalStopRequested() ||
+            bcCheckActive?.submit_status === 'off' ||
+            bcCheckActive?.submit_enabled === false ||
+            bcCheckActive?.submit_stop_requested === true ||
+            bcCheckActive?.stop_requested === true ||
+            bcCheckActive?.universal_stop_requested === true ||
+            (bcCheckActive && !bcCheckActive.is_running && bcCheckActive.stage !== 'submitting' && bcCheckActive.stage !== 'parallel')
+          );
+          const isSubmitStillSwitchOn = !isSubmitExplicitlyOff && Boolean(
             bcCheckActive?.submit_status === 'running' ||
             bcCheckActive?.submit_enabled === true ||
             bcCheckActive?.universal_status === 'running' ||
@@ -1327,8 +1349,18 @@ export async function runScanAndResolveParallel({ force = false } = {}) {
 
         if (!hasPendingDist) {
           const bcCheckScan = await getBotControl().catch(() => null);
-          const isScanStillOn = !isGlobalStopRequested() && !isScanStopRequested() && Boolean(
-            scanStatus === 'running' ||
+          const isScanExplicitlyOff = Boolean(
+            isGlobalStopRequested() ||
+            isScanStopRequested() ||
+            scanStopRequested ||
+            bcCheckScan?.scan_status === 'off' ||
+            bcCheckScan?.scan_enabled === false ||
+            bcCheckScan?.scan_stop_requested === true ||
+            bcCheckScan?.stop_requested === true ||
+            bcCheckScan?.universal_stop_requested === true ||
+            (bcCheckScan && !bcCheckScan.is_running && bcCheckScan.stage !== 'scanning' && bcCheckScan.stage !== 'parallel')
+          );
+          const isScanStillOn = !isScanExplicitlyOff && Boolean(
             bcCheckScan?.scan_status === 'running' ||
             bcCheckScan?.scan_enabled === true ||
             bcCheckScan?.universal_status === 'running' ||
