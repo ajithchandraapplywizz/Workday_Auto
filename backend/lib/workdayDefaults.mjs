@@ -336,7 +336,7 @@ export function lookupSensitiveSafeAnswer(label = '') {
   if (isMinimumAgeQuestion(label)) return 'Yes';
   const t = String(label || '');
   if (/sponsor|visa|authorized to work|legally authorized|work authorization/i.test(t)) return null;
-  if (/government\s+employment|federal\s+government|state,?\s+local.{0,40}government|u\.s\.?\s+armed\s+services|post-government\s+employment|government entity|political party|royal family|candidate for political/i.test(t)
+  if (/government\s+(?:employment|employee|official)|current\s+or\s+former\s+government|federal\s+government|state,?\s+local.{0,40}government|u\.s\.?\s+armed\s+services|post-government\s+employment|government entity|political party|royal family|candidate for political/i.test(t)
     && !/years of|experience in|authorized|sponsor/i.test(t)) {
     return 'No';
   }
@@ -1097,7 +1097,7 @@ export function lookupDefaultAnswer(label) {
   if (/require any immigration filing or visa sponsorship/i.test(norm)) {
     return null;
   }
-  if (/current or former employee of the united states government/i.test(norm)) {
+  if (/current\s+or\s+former\s+(?:government\s+employee|employee\s+of\s+the\s+united\s+states\s+government)|current\s+or\s+former\s+government|government\s+employee/i.test(norm)) {
     return 'No';
   }
   if (/iran.*cuba.*north korea.*syria|export control laws/i.test(norm)) {

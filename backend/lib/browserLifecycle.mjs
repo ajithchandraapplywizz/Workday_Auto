@@ -248,8 +248,16 @@ export function getDynamicMaxBrowsers(workerId = null) {
     (process.env.NODE_ENV === 'production' && process.platform !== 'win32');
 
   if (isContainerLinux) {
-    if (Number.isFinite(envExplicit) && envExplicit > 1 && process.env.FORCE_CONCURRENT_BROWSERS === 'true') {
+    if (Number.isFinite(envExplicit) && envExplicit > 0) {
       return Math.floor(envExplicit);
+    }
+    const isScanRole = (process.env.SERVICE_ROLE === 'scanner' || process.env.ROLE === 'scanner') ||
+      Boolean(workerId && String(workerId).includes('scan'));
+    if (isScanRole) {
+      const scanCount = Number(process.env.SCAN_WORKER_COUNT) ||
+        Number(process.env.SCAN_WORKERS) ||
+        Number(process.env.WORKER_COUNT) || 2;
+      return Math.max(1, Math.floor(scanCount));
     }
     return 1;
   }

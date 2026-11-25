@@ -701,6 +701,14 @@ export async function runClusterWorker(workerId, cluster, options = {}) {
 
     console.log(`[${serviceName}] [${workerId}] [${candidateAwlId}] | Company: ${company} | Status: scanning | Screenshot: none`);
 
+    await updateWorkerStatus(workerId, {
+      state: 'in_flight',
+      current_application_id: `${company}: ${candidateAwlId} (${cIdx + 1}/${candidatePool.length})`,
+      stage: 'scanning',
+      bot_name: PIPELINE_CONFIG.workerNames?.[workerId] || `Scanning Worker ${String(workerId).replace(/\D+/g, '') || '1'}`,
+      updated_at: new Date().toISOString(),
+    }).catch(() => {});
+
     const result = await executeWorkerTask({
       task: candidateTask,
       workerId,
@@ -1761,7 +1769,54 @@ export async function runClusterBatchRunner({
           query: `?job_url=eq.${encodeURIComponent(cluster.jobUrl)}&select=id,scan_status,screenshot_path&limit=1`,
         }).catch(() => null);
         if (checkScanned?.[0]?.scan_status === 'completed') {
-          console.log(`⚡ [${workerId}] Link "${cluster.jobUrl}" is already completed in scanned_jobs (ID: ${checkScanned[0].id}). Updating batch_job_queue status to "already_scanned".`);
+          console.log(`⚡ [${workerId}] Link "${cluster.jobUrl}" is already completed in scanned_jobs (ID: ${checkScanned[0].id}). Distributing to all cluster candidates...`);
+          try {
+            const fullScanned = await queueDbRequest('scanned_jobs', {
+              query: `?id=eq.${checkScanned[0].id}&select=id,applywizz_id,job_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&limit=1`,
+            }).catch(() => null);
+            const sjRecord = fullScanned?.[0] || checkScanned[0];
+
+            const { recordJobDistributions } = await import('./supabaseClient.mjs');
+            const allCandidateAwlIds = Array.from(new Set([
+              ...(cluster.allTasks || []).flatMap((t) => parseCandidateAwlIds(t.applywizz_id || t.client_ids)),
+              ...(cluster.tasks || []).flatMap((t) => parseCandidateAwlIds(t.applywizz_id || t.client_ids)),
+            ])).filter(Boolean);
+
+            if (allCandidateAwlIds.length > 0) {
+              const clientRows = allCandidateAwlIds.map((awl) => ({
+                applywizzId: awl,
+                jobId: sjRecord.job_id || cluster.reqId || null,
+                jobUrl: cluster.jobUrl,
+                company: sjRecord.company || cluster.company,
+                roleTitle: sjRecord.role_title || cluster.role,
+                resolvedAnswers: sjRecord.resolved_answers || [],
+                unansweredQuestions: [],
+                unansweredCount: 0,
+                isFullyAnswered: true,
+                screenshotUrl: null,
+                status: 'ready_for_review',
+              }));
+
+              await recordJobDistributions({
+                scannedJobId: sjRecord.id,
+                leadApplywizzId: sjRecord.applywizz_id || allCandidateAwlIds[0],
+                jobId: sjRecord.job_id || cluster.reqId || null,
+                jobUrl: cluster.jobUrl,
+                company: sjRecord.company || cluster.company,
+                roleTitle: sjRecord.role_title || cluster.role,
+                scrapedQuestions: sjRecord.scraped_questions || [],
+                resolvedAnswers: sjRecord.resolved_answers || [],
+                screenshotUrl: null,
+                status: 'ready_for_review',
+                clients: clientRows,
+              }).catch((e) => console.warn(`⚠️ [${workerId}] recordJobDistributions error for pre-scanned link:`, e?.message));
+
+              console.log(`✅ [${workerId}] Distributed ${clientRows.length} candidate(s) directly into job_distributions (ready_for_review) for "${cluster.company}".`);
+            }
+          } catch (preDistErr) {
+            console.warn(`⚠️ [${workerId}] Non-critical: pre-scanned distribution error:`, preDistErr?.message);
+          }
+
           const urlsToClaim = Array.from(cluster.rawUrls?.size ? cluster.rawUrls : [cluster.jobUrl]);
           for (const u of urlsToClaim) {
             await queueDbRequest('batch_job_queue', {

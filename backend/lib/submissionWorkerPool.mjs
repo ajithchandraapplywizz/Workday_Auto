@@ -322,33 +322,39 @@ export async function updateSubmissionTaskWithCheck({
 
  */
 
-export async function updateJobDistributionWithCheck({
+export async function updateJobDistributionWithCheck(params = {}) {
+  let {
+    distributionId,
+    applywizzId,
+    jobUrl,
+    workerId = 'worker',
+    patch,
+    maxRetries = 3,
+    ...rest
+  } = params || {};
 
-  distributionId,
-
-  applywizzId,
-
-  jobUrl,
-
-  workerId = 'worker',
-
-  patch,
-
-  maxRetries = 3,
-
-}) {
+  distributionId = distributionId || rest.id || rest.taskId || rest.distribution_id;
+  applywizzId = applywizzId || rest.applywizz_id;
+  jobUrl = jobUrl || rest.job_url;
 
   if (!distributionId && (!applywizzId || !jobUrl)) {
-
     return { success: false, error: new Error('Neither distributionId nor (applywizzId and jobUrl) provided') };
-
   }
 
   let lastErr = null;
 
-
-
-  const cleanPatch = { ...patch };
+  // Defensive: if patch object was omitted and flat properties were passed, collect them
+  const cleanPatch = patch ? { ...patch } : { ...rest };
+  delete cleanPatch.id;
+  delete cleanPatch.taskId;
+  delete cleanPatch.distributionId;
+  delete cleanPatch.distribution_id;
+  delete cleanPatch.applywizzId;
+  delete cleanPatch.applywizz_id;
+  delete cleanPatch.jobUrl;
+  delete cleanPatch.job_url;
+  delete cleanPatch.workerId;
+  delete cleanPatch.maxRetries;
 
   // job_distributions uses application_submitted_screenshot_url (screenshot_url was dropped in migration 024)
 
@@ -481,7 +487,7 @@ export async function updateJobDistributionWithCheck({
 
           if (!fbErr && fbData && fbData.length > 0) {
 
-            console.log(`[${workerId}] job_distributions record updated via fallback (applywizz_id=${applywizzId}) to '${patch.status || 'updated'}'`);
+            console.log(`[${workerId}] job_distributions record updated via fallback (applywizz_id=${applywizzId}) to '${cleanPatch.status || 'updated'}'`);
 
             return { success: true, data: fbData[0], rowsCount: fbData.length };
 
@@ -501,7 +507,7 @@ export async function updateJobDistributionWithCheck({
 
 
 
-      console.log(`[${workerId}] job_distributions record updated to '${patch.status || 'updated'}' (rows=${data.length}) for dist #${distributionId || applywizzId}`);
+      console.log(`[${workerId}] job_distributions record updated to '${cleanPatch.status || 'updated'}' (rows=${data.length}) for dist #${distributionId || applywizzId}`);
 
       return { success: true, data: data[0], rowsCount: data.length };
 
@@ -1027,11 +1033,16 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
     console.log(`⚡ [${serviceName}] [${workerId}] [PRE-CHECK FAST-PATH] Candidate ${task.applywizz_id} already applied to ${task.company} (matched ${priorApp.matchType} #${priorApp.matchedId} on ${formattedDate}). Skipping browser launch!`);
 
     await updateJobDistributionWithCheck({
-      id: task.id,
-      status: 'already_applied',
-      application_submitted_screenshot_url: priorApp.screenshotUrl || 'prior_submission_proof',
-      error_message: `Pre-check: Already applied (matched previous submission #${priorApp.matchedId} on ${formattedDate})`,
-      updated_at: new Date().toISOString(),
+      distributionId: task.distribution_id || task.id,
+      applywizzId: task.applywizz_id,
+      jobUrl: task.job_url,
+      workerId,
+      patch: {
+        status: 'already_applied',
+        application_submitted_screenshot_url: priorApp.screenshotUrl || 'prior_submission_proof',
+        error_message: `Pre-check: Already applied (matched previous submission #${priorApp.matchedId} on ${formattedDate})`,
+        updated_at: new Date().toISOString(),
+      },
     });
 
     return {

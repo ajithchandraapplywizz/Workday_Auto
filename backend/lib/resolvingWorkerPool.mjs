@@ -85,7 +85,7 @@ export async function runResolvingWorkerPool(options = {}) {
   }
 
   const scannedRes = await httpsJsonWithRetry({
-    url: `${url}/rest/v1/scanned_jobs?select=id,applywizz_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=200`,
+    url: `${url}/rest/v1/scanned_jobs?select=id,applywizz_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=500`,
     headers: { apikey: key, Authorization: `Bearer ${key}` },
   });
 
@@ -95,10 +95,10 @@ export async function runResolvingWorkerPool(options = {}) {
     return { success: true, processedCount: 0 };
   }
 
-  // Strictly filter scanned jobs to only those belonging to the current active batch
+  // Match scanned jobs against batch_job_queue links needing resolution/distribution
   try {
     const { getRecentBatchJobUrls } = await import('./supabaseClient.mjs');
-    const { urls: activeBatchUrls } = await getRecentBatchJobUrls({ windowMinutes: 180 }).catch(() => ({ urls: [] }));
+    const { urls: activeBatchUrls } = await getRecentBatchJobUrls({ windowMinutes: 1440 }).catch(() => ({ urls: [] }));
     if (activeBatchUrls && activeBatchUrls.length > 0) {
       const normSet = new Set(activeBatchUrls.map((u) => {
         try {
@@ -108,7 +108,7 @@ export async function runResolvingWorkerPool(options = {}) {
           return String(u || '').toLowerCase().trim();
         }
       }));
-      scannedJobs = scannedJobs.filter((j) => {
+      const matchedJobs = scannedJobs.filter((j) => {
         try {
           const p = new URL(j.job_url);
           const k = (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
@@ -117,6 +117,9 @@ export async function runResolvingWorkerPool(options = {}) {
           return normSet.has(String(j.job_url || '').toLowerCase().trim());
         }
       });
+      if (matchedJobs.length > 0) {
+        scannedJobs = matchedJobs;
+      }
     }
   } catch {}
 

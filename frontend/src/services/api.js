@@ -244,7 +244,7 @@ export async function saveClientQuestion({ applywizzId, questionRaw, answer, fie
  * Helper to fetch active/recently uploaded job URLs from the latest batch in batch_job_queue.
  * Strictly isolates recently uploaded links and ignores older links from previous upload batches.
  */
-export async function getActiveRecentBatchJobUrls({ windowMinutes = 120 } = {}) {
+export async function getActiveRecentBatchJobUrls({ windowMinutes = 1440 } = {}) {
   try {
     const { data: latestQueueRow } = await supabase
       .from('batch_job_queue')
@@ -277,27 +277,30 @@ export async function getActiveRecentBatchJobUrls({ windowMinutes = 120 } = {}) 
 export async function fetchBatchQueue() {
   try {
     // 1. Fetch active URLs strictly from most recent batch in batch_job_queue
-    const activeBatchUrls = await getActiveRecentBatchJobUrls();
+    const activeBatchUrls = await getActiveRecentBatchJobUrls({ windowMinutes: 1440 });
 
-    let query = supabase
+    const query = supabase
       .from('job_distributions')
       .select('id, applywizz_id, job_url, company, role_title, status, is_fully_answered, created_at, updated_at')
       .in('status', ['ready_for_review', 'ready_to_review'])
       .eq('is_fully_answered', true)
-      .neq('status', 'archived');
-
-    if (activeBatchUrls && activeBatchUrls.length > 0) {
-      query = query.in('job_url', activeBatchUrls);
-    } else {
-      return { success: true, queue: [] };
-    }
-
-    const { data, error } = await query
+      .neq('status', 'archived')
       .order('created_at', { ascending: false })
       .limit(500);
 
+    const { data, error } = await query;
     if (error) throw error;
-    return { success: true, queue: data || [] };
+    const rows = data || [];
+
+    if (activeBatchUrls && activeBatchUrls.length > 0) {
+      const oneDayAgo = Date.now() - 24 * 3600 * 1000;
+      const filtered = rows.filter((r) => {
+        const createdMs = r.created_at ? new Date(r.created_at).getTime() : 0;
+        return activeBatchUrls.includes(r.job_url?.trim()) || createdMs >= oneDayAgo;
+      });
+      return { success: true, queue: filtered };
+    }
+    return { success: true, queue: rows };
   } catch (err) {
     return { success: false, error: err.message, queue: [] };
   }
@@ -896,7 +899,7 @@ export async function fetchWorkerStatuses() {
     const workers = allKnownIds.map((id) => {
       const match = rows.find((r) => r.worker_id === id);
       const last = match ? new Date(match.updated_at || 0).getTime() : 0;
-      const isFresh = last && (now - last < 5 * 60 * 1000);
+      const isFresh = last && (now - last < 15 * 60 * 1000);
       const activeState = match?.state === 'in_flight' || match?.state === 'running';
 
       let stage = 'scanning';
@@ -1124,15 +1127,18 @@ export async function fetchApplicationsDynamic({
       return true;
     });
 
-    // Filter out older unsubmitted/review links: Only show ready_for_review / queued items for recently uploaded batch!
+    // Filter out older unsubmitted/review links: Only show ready_for_review / queued items for recently uploaded batch or jobs created in last 24h
     if (activeBatchUrls && activeBatchUrls.length > 0) {
+      const oneDayAgo = Date.now() - 24 * 3600 * 1000;
       list = list.filter((item) => {
         // Submitted or failed items are historical records for the date filter
         if (item.status === 'submitted' || item.status === 'failed' || item.status === 'already_applied') {
           return true;
         }
-        // Unsubmitted / ready_for_review / queued items must belong strictly to recently uploaded batch
-        return activeBatchUrls.includes(item.job_url?.trim());
+        // Unsubmitted / ready_for_review / queued items: must belong strictly to recently uploaded batch or be active within last 24h
+        const createdMs = item.created_at ? new Date(item.created_at).getTime() : 0;
+        const updatedMs = item.updated_at ? new Date(item.updated_at).getTime() : 0;
+        return activeBatchUrls.includes(item.job_url?.trim()) || createdMs >= oneDayAgo || updatedMs >= oneDayAgo;
       });
     }
 
@@ -1272,10 +1278,13 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
     }).length;
 
     // 4. Queued: Strictly completely resolved applications with status ready_for_review / ready_to_review AND is_fully_answered === true
+    const oneDayAgo = Date.now() - 24 * 3600 * 1000;
     const queued = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
       const isQ = (st === 'ready_for_review' || st === 'ready_to_review') && a.is_fully_answered === true;
-      const isRecentBatch = !activeBatchUrls?.length || activeBatchUrls.includes(a.job_url?.trim());
+      const createdMs = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const updatedMs = a.updated_at ? new Date(a.updated_at).getTime() : 0;
+      const isRecentBatch = !activeBatchUrls?.length || activeBatchUrls.includes(a.job_url?.trim()) || createdMs >= oneDayAgo || updatedMs >= oneDayAgo;
       return isQ && isRecentBatch;
     }).length;
 

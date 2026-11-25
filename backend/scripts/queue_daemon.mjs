@@ -832,6 +832,9 @@ async function runStage2Resolving() {
 
   console.log(`\n⚡ [DAEMON] Starting Stage 2: Resolving candidate answers with ${PIPELINE_CONFIG.resolveWorkerIds.length} resolving workers (${PIPELINE_CONFIG.resolveWorkerIds.join(', ')})...`);
 
+  const { distributeScannedJobsToQueueCandidates } = await import('../lib/supabaseClient.mjs');
+  await distributeScannedJobsToQueueCandidates().catch(() => {});
+
   const { runResolvingWorkerPool } = await import('../lib/resolvingWorkerPool.mjs');
   await runResolvingWorkerPool();
 

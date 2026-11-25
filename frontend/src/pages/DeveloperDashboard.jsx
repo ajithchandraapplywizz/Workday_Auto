@@ -1109,7 +1109,7 @@ export default function DeveloperDashboard() {
                 borderRadius: '6px',
                 border: '1px solid rgba(56, 189, 248, 0.3)'
               }}>
-                <strong style={{ color: '#38bdf8' }}>Pool 1 (Scan &amp; Resolve):</strong> 3 Dedicated Workers ({isScanActive ? 'Active' : 'Idle'})
+                <strong style={{ color: '#38bdf8' }}>Pool 1 (Scan &amp; Resolve):</strong> {workerPool.scanWorkers?.length || 4} Dedicated Workers ({isScanActive ? 'Active' : 'Idle'})
               </div>
               <div style={{
                 fontSize: '0.78rem',
@@ -1119,7 +1119,7 @@ export default function DeveloperDashboard() {
                 borderRadius: '6px',
                 border: '1px solid rgba(129, 140, 248, 0.3)'
               }}>
-                <strong style={{ color: '#818cf8' }}>Pool 2 (Submissions):</strong> 3 Dedicated Workers ({isSubmitActive ? 'Active' : 'Idle'})
+                <strong style={{ color: '#818cf8' }}>Pool 2 (Submissions):</strong> {workerPool.submitWorkers?.length || 4} Dedicated Workers ({isSubmitActive ? 'Active' : 'Idle'})
               </div>
               <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
                 • Triggers automatically when tasks are uploaded into batch queue
@@ -1202,7 +1202,7 @@ export default function DeveloperDashboard() {
               }}
               title="Stop scanning workers immediately"
             >
-              <span>🛑 Stop Scanning (3 Workers)</span>
+              <span>🛑 Stop Scanning ({workerPool.scanWorkers?.length || 4} Workers)</span>
             </button>
           ) : (
             <button
@@ -1224,9 +1224,9 @@ export default function DeveloperDashboard() {
                 boxShadow: '0 4px 12px rgba(2, 132, 199, 0.35)',
                 transition: 'all 0.15s ease',
               }}
-              title="Trigger 3 parallel workers to scan links and pre-resolve candidate answers into job_distributions"
+              title="Trigger parallel workers to scan links and pre-resolve candidate answers into job_distributions"
             >
-              <span>⚡ Trigger Scanning & Resolving (3 Workers)</span>
+              <span>⚡ Trigger Scanning & Resolving ({workerPool.scanWorkers?.length || 4} Workers)</span>
             </button>
           )}
 
@@ -1292,7 +1292,7 @@ export default function DeveloperDashboard() {
               }}
               title="Stop submission workers immediately"
             >
-              <span>🛑 Stop Submissions (3 Workers)</span>
+              <span>🛑 Stop Submissions ({workerPool.submitWorkers?.length || 4} Workers)</span>
             </button>
           ) : (
             <button
@@ -1314,9 +1314,9 @@ export default function DeveloperDashboard() {
                 boxShadow: '0 4px 12px rgba(16, 185, 129, 0.35)',
                 transition: 'all 0.15s ease',
               }}
-              title="Trigger 3 dedicated workers to submit applications in ready_for_review"
+              title="Trigger dedicated workers to submit applications in ready_for_review"
             >
-              <span>🚀 Trigger Submissions (3 Workers)</span>
+              <span>🚀 Trigger Submissions ({workerPool.submitWorkers?.length || 4} Workers)</span>
             </button>
           )}
 

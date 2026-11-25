@@ -3630,6 +3630,9 @@ export async function syncQueueWithScannedAndFailedJobs() {
     // Reap any stale 'scanning' leases in batch_job_queue (>15 min cutoff) so abandoned links are recovered
     await reapExpiredBatchQueueLeases(15).catch(() => {});
 
+    // Automatically distribute any batch_job_queue candidates whose blueprints are completed in scanned_jobs
+    await distributeScannedJobsToQueueCandidates().catch(() => {});
+
     if (markedScanned > 0 || markedFailed > 0) {
       console.log(`⚡ [queue_sync] Dynamically synchronized batch_job_queue: ${markedScanned} marked reached_review (with screenshots), ${markedFailed} marked failed.`);
     }
@@ -3637,6 +3640,152 @@ export async function syncQueueWithScannedAndFailedJobs() {
   } catch (err) {
     console.warn(`⚠️ [queue_sync] Error syncing queue with scanned/failed jobs: ${err.message}`);
     return { scanned: 0, failed: 0 };
+  }
+}
+
+/**
+ * Distributes all pending or unscanned queue candidates whose job links
+ * have already been scanned in scanned_jobs directly into job_distributions (ready_for_review).
+ */
+export async function distributeScannedJobsToQueueCandidates({ maxJobs = 200 } = {}) {
+  if (!isSupabaseConfigured()) return { distributedCandidates: 0, distributedJobs: 0 };
+  try {
+    const scannedJobs = await request('scanned_jobs', {
+      query: '?select=id,applywizz_id,job_id,job_url,company,role_title,scraped_questions,resolved_answers,screenshot_path&order=created_at.desc&limit=1000',
+    }).catch(() => []);
+    if (!Array.isArray(scannedJobs) || scannedJobs.length === 0) {
+      return { distributedCandidates: 0, distributedJobs: 0 };
+    }
+
+    function normUrl(u) {
+      try {
+        const p = new URL(u);
+        return (p.host + p.pathname).toLowerCase().replace(/\/+$/, '').replace(/\/apply$/, '');
+      } catch {
+        return String(u || '').toLowerCase().trim();
+      }
+    }
+
+    const scannedMap = new Map();
+    for (const s of scannedJobs) {
+      if (s.job_url) {
+        scannedMap.set(normUrl(s.job_url), s);
+      }
+    }
+
+    const queueTasks = await request('batch_job_queue', {
+      query: '?select=id,applywizz_id,job_id,job_url,company,role_title,status&status=in.(already_scanned,scanned,already_reached_review,pending,queued)&limit=5000',
+    }).catch(() => []);
+    if (!Array.isArray(queueTasks) || queueTasks.length === 0) {
+      return { distributedCandidates: 0, distributedJobs: 0 };
+    }
+
+    const existingDists = await request('job_distributions', {
+      query: '?select=applywizz_id,job_url&limit=10000',
+    }).catch(() => []);
+    const existingKeySet = new Set(
+      (existingDists || []).map((d) => `${String(d.applywizz_id).trim().toUpperCase()}###${normUrl(d.job_url)}`)
+    );
+
+    const jobsToDistribute = new Map();
+    const queueIdsToMarkScanned = [];
+
+    for (const q of queueTasks) {
+      const qNorm = normUrl(q.job_url);
+      const sj = scannedMap.get(qNorm);
+      if (!sj) continue;
+
+      const awlIds = parseCandidateAwlIds(q.applywizz_id);
+      for (const awl of awlIds) {
+        const cleanAwl = String(awl).trim().toUpperCase();
+        if (!cleanAwl) continue;
+        const key = `${cleanAwl}###${qNorm}`;
+        if (!existingKeySet.has(key)) {
+          if (!jobsToDistribute.has(sj)) {
+            jobsToDistribute.set(sj, new Set());
+          }
+          jobsToDistribute.get(sj).add(cleanAwl);
+        }
+      }
+      if (q.status === 'pending' || q.status === 'queued') {
+        queueIdsToMarkScanned.push(q.id);
+      }
+    }
+
+    if (jobsToDistribute.size === 0) {
+      return { distributedCandidates: 0, distributedJobs: 0 };
+    }
+
+    let distributedCandidates = 0;
+    let distributedJobs = 0;
+
+    for (const [sj, awlSet] of jobsToDistribute.entries()) {
+      if (distributedJobs >= maxJobs) break;
+      const awlList = Array.from(awlSet);
+      if (awlList.length === 0) continue;
+
+      const clientRows = awlList.map((awl) => ({
+        applywizzId: awl,
+        jobId: sj.job_id || null,
+        jobUrl: sj.job_url,
+        company: sj.company || 'Workday Partner',
+        roleTitle: sj.role_title || 'Application',
+        resolvedAnswers: sj.resolved_answers || [],
+        unansweredQuestions: [],
+        unansweredCount: 0,
+        isFullyAnswered: true,
+        screenshotUrl: null,
+        status: 'ready_for_review',
+      }));
+
+      const ok = await recordJobDistributions({
+        scannedJobId: sj.id,
+        leadApplywizzId: sj.applywizz_id || awlList[0],
+        jobId: sj.job_id || null,
+        jobUrl: sj.job_url,
+        company: sj.company,
+        roleTitle: sj.role_title,
+        scrapedQuestions: sj.scraped_questions || [],
+        resolvedAnswers: sj.resolved_answers || [],
+        screenshotUrl: null,
+        status: 'ready_for_review',
+        clients: clientRows,
+      }).catch((e) => {
+        console.warn(`⚠️ [distributeScannedJobsToQueueCandidates] Distribution error for ${sj.job_url}:`, e?.message);
+        return false;
+      });
+
+      if (ok) {
+        distributedCandidates += clientRows.length;
+        distributedJobs++;
+        for (const awl of awlList) {
+          existingKeySet.add(`${awl}###${normUrl(sj.job_url)}`);
+        }
+      }
+    }
+
+    for (const qId of queueIdsToMarkScanned) {
+      await request('batch_job_queue', {
+        method: 'PATCH',
+        query: `?id=eq.${qId}&status=in.(pending,queued)`,
+        prefer: 'return=minimal',
+        body: {
+          status: 'already_scanned',
+          worker_id: null,
+          locked_at: null,
+          updated_at: new Date().toISOString(),
+        },
+      }).catch(() => {});
+    }
+
+    if (distributedCandidates > 0) {
+      console.log(`✅ [distributeScannedJobsToQueueCandidates] Distributed ${distributedCandidates} candidate applications across ${distributedJobs} scanned jobs into job_distributions (ready_for_review)!`);
+    }
+
+    return { distributedCandidates, distributedJobs };
+  } catch (err) {
+    console.warn(`⚠️ [distributeScannedJobsToQueueCandidates] Error: ${err.message}`);
+    return { distributedCandidates: 0, distributedJobs: 0 };
   }
 }
 
