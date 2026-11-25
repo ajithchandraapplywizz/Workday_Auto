@@ -1,4 +1,4 @@
-import { exec } from 'node:child_process';
+import { exec, execSync } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 
 export const browserLifecycleEvents = new EventEmitter();
@@ -115,10 +115,40 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
   }
   if (process.platform === 'linux') {
     try {
-      exec('pkill -9 -f "crashpad_handler" || pkill -9 -f "chrome-headless-shell" || pkill -9 -f "chromium" || pkill -9 -f "chrome" || true', () => {});
-      exec('rm -rf /tmp/playwright_* /tmp/core.* || true', () => {});
+      execSync('pkill -9 -f "crashpad_handler" || true; pkill -9 -f "chrome-headless-shell" || true; pkill -9 -f "chromium" || true; rm -rf /tmp/playwright_* /tmp/core.* || true', { stdio: 'ignore', timeout: 5000 });
     } catch {}
   }
+}
+
+let launchLockPromise = Promise.resolve();
+let lastLaunchTime = 0;
+const MIN_LAUNCH_GAP_MS = 600;
+
+/**
+ * Atomic launch lock that serializes browser launches across concurrent workers
+ * and enforces a minimum 600ms gap to give Linux OS kernel time to reap terminating
+ * processes and release thread memory, eliminating spawn EAGAIN (errno 11).
+ */
+export async function acquireBrowserLaunchLock(workerId = 'worker') {
+  let release;
+  const currentLock = launchLockPromise;
+  launchLockPromise = new Promise((res) => {
+    release = res;
+  });
+
+  await currentLock;
+
+  const now = Date.now();
+  const elapsed = now - lastLaunchTime;
+  if (elapsed < MIN_LAUNCH_GAP_MS) {
+    const waitMs = MIN_LAUNCH_GAP_MS - elapsed;
+    await new Promise((r) => setTimeout(r, waitMs));
+  }
+
+  return () => {
+    lastLaunchTime = Date.now();
+    release();
+  };
 }
 
 let lastDeepCleanTime = 0;
@@ -197,14 +227,34 @@ const waitingQueue = [];
 
 /**
  * Dynamically calculates the maximum allowable concurrent browsers from environment variables.
- * Enforces per-service concurrency matching the instance's active worker count:
- * - If WORKER_COUNT / SUBMIT_WORKER_COUNT is set to 2 or 3, exactly 2 or 3 browsers run concurrently.
- * - Never clamps below the configured worker count.
- * - If explicit worker IDs list is provided (SUBMISSION_WORKER_IDS, SCAN_WORKER_IDS), uses that list length.
+ * Enforces per-service concurrency matching container safety invariants:
+ * - If MAX_ACTIVE_BROWSERS is explicitly set in env, it directly defines the container limit.
+ * - In Linux container / Railway environments (RAILWAY_ENVIRONMENT or Linux production),
+ *   strictly enforces MAX_ACTIVE_BROWSERS = 1 per container by default to prevent Linux
+ *   cgroup pthread_create (errno 11) and spawn EAGAIN errors.
+ * - Concurrency is scaled horizontally across container replicas (Submitting_1, Submitting_2).
+ * - In local dev (Windows/Mac non-container), defaults safely to 2 or configured worker counts.
  */
 export function getDynamicMaxBrowsers(workerId = null) {
   const envExplicit = Number(process.env.MAX_ACTIVE_BROWSERS);
 
+  // Strict Single-Browser Limit for Linux Container / Railway Production
+  // In Linux container environments with cgroup limits, launching multiple concurrent
+  // Chromium instances triggers pthread_create (errno 11) and spawn EAGAIN.
+  // We enforce MAX_ACTIVE_BROWSERS = 1 per container. Scale horizontally across replicas.
+  const isContainerLinux = process.platform === 'linux' ||
+    Boolean(process.env.RAILWAY_ENVIRONMENT) ||
+    Boolean(process.env.RAILWAY_SERVICE_NAME) ||
+    (process.env.NODE_ENV === 'production' && process.platform !== 'win32');
+
+  if (isContainerLinux) {
+    if (Number.isFinite(envExplicit) && envExplicit > 1 && process.env.FORCE_CONCURRENT_BROWSERS === 'true') {
+      return Math.floor(envExplicit);
+    }
+    return 1;
+  }
+
+  // In local development / Windows non-container environments:
   const isSubmitWorker = Boolean(workerId && String(workerId).includes('submit'));
   const isScanWorker = Boolean(workerId && String(workerId).includes('scan'));
 

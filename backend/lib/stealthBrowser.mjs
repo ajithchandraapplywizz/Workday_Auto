@@ -151,9 +151,9 @@ function createResilientLauncher(extraLauncher = null) {
       if (isRes) {
         try {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-          cleanupOrphanChromeProcesses({ ignoreSlots: true });
+          cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
         } catch {}
-        await new Promise((r) => setTimeout(r, 1200));
+        await new Promise((r) => setTimeout(r, 1500));
       }
     };
 
@@ -211,6 +211,14 @@ function createResilientLauncher(extraLauncher = null) {
           '--disable-setuid-sandbox',
           '--disable-dev-shm-usage',
           '--disable-gpu',
+          '--no-zygote',
+          '--no-crashpad',
+          '--disable-crash-reporter',
+          '--disable-breakpad',
+          '--in-process-gpu',
+          '--renderer-process-limit=1',
+          '--num-raster-threads=1',
+          '--disable-features=AudioServiceOutOfProcess,OptimizationHints,Translate,PaintHolding,DialMediaRouteProvider,GlobalMediaControls',
         ],
       });
       console.log('[BROWSER] Minimal emergency Chromium instance launched successfully.');

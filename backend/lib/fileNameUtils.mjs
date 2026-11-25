@@ -6,6 +6,8 @@
  * Falls back gracefully if any component is missing.
  */
 
+import { basename } from 'path';
+
 /**
  * Extracts the job title/role from the current page's document.title.
  * Uses the same parsing strategy as AnalyticsTracker.
@@ -79,6 +81,92 @@ export function sanitizeForFileName(text = '', maxLength = 30) {
     .replace(/_+/g, '_')   // Collapse multiple underscores
     .replace(/^_|_$/g, '') // Trim leading/trailing underscores
     .substring(0, maxLength);
+}
+
+/**
+ * Resolves the EXACT resume file name as specified in the candidate's authentic
+ * record / file source (CRM AWS S3 URL, profile resume_filename, or local file).
+ * Strictly preserves the exact original filename for every application in Stage 3.
+ *
+ * @param {object} profile - Candidate profile
+ * @param {string} [absPath=''] - Local disk path if available
+ * @returns {string} The exact authentic resume file name
+ */
+export function getExactResumeFileName(profile = {}, absPath = '') {
+  // 1. Explicit resume_filename / resume_name on profile or task
+  if (profile?._resumeFileName && typeof profile._resumeFileName === 'string') {
+    return profile._resumeFileName.trim();
+  }
+  if (profile?.resume_filename && typeof profile.resume_filename === 'string') {
+    return profile.resume_filename.trim();
+  }
+  if (profile?.resume_name && typeof profile.resume_name === 'string') {
+    return profile.resume_name.trim();
+  }
+
+  // Helper to extract clean filename from URL or path
+  const extractName = (urlOrPath) => {
+    if (!urlOrPath || typeof urlOrPath !== 'string') return '';
+    try {
+      let clean = urlOrPath.trim().split('?')[0].split('#')[0];
+      try { clean = decodeURIComponent(clean); } catch {}
+      const name = clean.split(/[\/\\]/).pop();
+      if (name && /\.(pdf|docx?)$/i.test(name)) {
+        return name;
+      }
+    } catch {}
+    return '';
+  };
+
+  // 2. High priority: Authentic CRM S3 filename from raw_profile_json (Apply Wizz CRM)
+  const crmUrls = [
+    profile?._dbClient?.raw_profile_json?.additional_information?.resume_url,
+    profile?._dbClient?.raw_profile_json?.additional_information?.resume_path,
+    profile?._dbClient?.raw_profile_json?.client?.resume_url,
+    profile?._dbClient?.raw_profile_json?.client?.resume_path,
+    profile?._applyWizzClientContext?.additional_information?.resume_url,
+    profile?._applyWizzClientContext?.additional_information?.resume_path,
+    profile?._applyWizzClientContext?.client?.resume_url,
+    profile?._applyWizzClientContext?.client?.resume_path,
+  ].filter(Boolean);
+
+  for (const raw of crmUrls) {
+    const fn = extractName(raw);
+    if (fn && !/^[a-f0-9-]{36}\.pdf$/i.test(fn)) {
+      return fn;
+    }
+  }
+
+  // 3. Direct client table resume_url / resume_path
+  const directUrls = [
+    profile?._dbClient?.resume_url,
+    profile?._dbClient?.resume_path,
+    profile?._resumeUrl,
+    profile?.resume_url,
+  ].filter(Boolean);
+
+  // If a direct URL has a rich CRM filename (not just generic AWL-xxx.pdf), prioritize it
+  for (const raw of directUrls) {
+    const fn = extractName(raw);
+    if (fn && !/^[a-f0-9-]{36}\.pdf$/i.test(fn)) {
+      if (fn.includes('-resume_') || fn.includes('_resume') || !/^AWL-\d+\.pdf$/i.test(fn)) {
+        return fn;
+      }
+    }
+  }
+
+  // 4. Any direct URL filename
+  for (const raw of directUrls) {
+    const fn = extractName(raw);
+    if (fn) return fn;
+  }
+
+  // 5. Disk file basename
+  if (absPath) {
+    return basename(absPath);
+  }
+
+  return 'resume.pdf';
 }
 
 /**

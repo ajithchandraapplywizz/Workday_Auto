@@ -218,6 +218,27 @@ export async function detectWorkdayStep(page, { waitForRender = true, timeoutMs 
     )).some(el => isVisible(el));
     if (isAuthVisible) return 'Authentication';
 
+    // 0a. Check for explicit "Already Applied" indicators FIRST (prevents matching stepper headers when an already-applied notice is shown)
+    const appliedDataEl = document.querySelector(
+      '[data-automation-id="appliedButton"], [data-automation-id="alreadyApplied"], [data-automation-id="previouslyApplied"], [data-automation-id="applicationAlreadySubmitted"], [data-automation-id="duplicateApplication"]'
+    );
+    if (appliedDataEl && isVisible(appliedDataEl)) return 'Already Applied';
+
+    const fullBodyText = (document.body?.innerText || '').replace(/\s+/g, ' ');
+    if (
+      /you(?:'ve|\s+have)?\s+already\s+applied\b/i.test(fullBodyText) ||
+      /already\s+applied\s+(?:for|to|on)\s+this\s+(?:job|position|role)\b/i.test(fullBodyText) ||
+      /you(?:'ve|\s+have)?\s+already\s+submitted\s+(?:an?|your)\s+application\b/i.test(fullBodyText) ||
+      /application\s+(?:has\s+already\s+been|is\s+already)\s+submitted\b/i.test(fullBodyText) ||
+      /we\s+have\s+already\s+received\s+your\s+application\b/i.test(fullBodyText) ||
+      /duplicate\s+application\s+detected\b/i.test(fullBodyText) ||
+      /already\s+submitted\s+an\s+application\b/i.test(fullBodyText)
+    ) {
+      if (!/once (?:your|the) application|will not be able to update/i.test(fullBodyText)) {
+        return 'Already Applied';
+      }
+    }
+
     // Check for auth page headings or text prompts
     const authHeaders = Array.from(document.querySelectorAll('h1, h2, h3, [data-automation-id="pageHeader"], legend')).some(h => {
       if (!isVisible(h)) return false;

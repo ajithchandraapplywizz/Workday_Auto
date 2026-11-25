@@ -5,6 +5,7 @@ import {
   cleanJobRole,
   sanitizeForFileName,
   buildDocumentFileName,
+  getExactResumeFileName,
 } from '../lib/fileNameUtils.mjs';
 
 test('cleanJobRole removes boilerplate prefixes correctly', () => {
@@ -111,4 +112,47 @@ test('DEMO APPLICATION: End-to-end Workday candidate resume naming', () => {
   console.log(`  ✨ [DEMO] Generated Upload Name: "${outputName}"`);
 
   assert.equal(outputName, 'Resume_Ravi_Teja_Vadla_Senior_Lead_Business_Execution.pdf');
+});
+
+test('getExactResumeFileName: preserves the exact authentic resume filename for Stage 3 submissions', () => {
+  // 1. From CRM S3 URL in raw_profile_json
+  const profileWithCrm = {
+    applywizz_id: 'AWL-35049',
+    _dbClient: {
+      raw_profile_json: {
+        additional_information: {
+          resume_url: 'https://applywizz-prod-v2.s3.us-east-2.amazonaws.com/CRM/AWL-35049-17112026-1514-resume_manisha-medasani_fa.pdf',
+        },
+      },
+    },
+  };
+  assert.equal(
+    getExactResumeFileName(profileWithCrm, 'data/client-resumes/AWL-35049.pdf'),
+    'AWL-35049-17112026-1514-resume_manisha-medasani_fa.pdf'
+  );
+
+  // 2. From direct client resume_url
+  const profileWithDirectUrl = {
+    applywizz_id: 'AWL-46680',
+    resume_url: 'https://applywizz-prod-v2.s3.us-east-2.amazonaws.com/CRM/AWL-46680-17112026-1024-resume_vyshnavi-n_se-1-2-.pdf',
+  };
+  assert.equal(
+    getExactResumeFileName(profileWithDirectUrl, 'resumes/AWL-46680.pdf'),
+    'AWL-46680-17112026-1024-resume_vyshnavi-n_se-1-2-.pdf'
+  );
+
+  // 3. Explicit resume_filename override
+  const profileWithExplicit = {
+    resume_filename: 'Exact_Candidate_Resume_V2.pdf',
+  };
+  assert.equal(
+    getExactResumeFileName(profileWithExplicit, 'resumes/any.pdf'),
+    'Exact_Candidate_Resume_V2.pdf'
+  );
+
+  // 4. Fallback to disk file basename
+  assert.equal(
+    getExactResumeFileName({}, 'data/client-resumes/AWL-38247.pdf'),
+    'AWL-38247.pdf'
+  );
 });

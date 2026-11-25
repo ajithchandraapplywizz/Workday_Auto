@@ -384,23 +384,23 @@ export async function updateJobDistributionWithCheck({
     delete cleanPatch.completed_at;
   }
 
+  // Auto-populate application_submitted_screenshot_url from diagnostic_screenshot in error_message if missing
+  const errText = String(cleanPatch.error_message || '');
+  if (!cleanPatch.application_submitted_screenshot_url && /\[diagnostic_screenshot:\s*([^\s\]]+)\]/i.test(errText)) {
+    const shotMatch = errText.match(/\[diagnostic_screenshot:\s*([^\s\]]+)\]/i);
+    if (shotMatch && shotMatch[1] && shotMatch[1] !== 'none' && shotMatch[1] !== 'None') {
+      cleanPatch.application_submitted_screenshot_url = shotMatch[1].trim();
+    }
+  }
+
   // Never overwrite an existing proof screenshot with null or undefined
   if (cleanPatch.application_submitted_screenshot_url === null || cleanPatch.application_submitted_screenshot_url === undefined) {
     delete cleanPatch.application_submitted_screenshot_url;
   }
 
   // STRICT ATTEMPT 3 FAILURE POLICY: Any application that reaches or exhausts Attempt 3 is permanently marked 'failed'!
-  const errText = String(cleanPatch.error_message || '');
   if (/\[Attempt 3\/3|Attempt 3\/3 Failed/i.test(errText)) {
     cleanPatch.status = 'failed';
-  }
-
-  // Auto-populate application_submitted_screenshot_url from diagnostic_screenshot in error_message if missing
-  if (!cleanPatch.application_submitted_screenshot_url && /\[diagnostic_screenshot:\s*([^\s\]]+)\]/i.test(errText)) {
-    const shotMatch = errText.match(/\[diagnostic_screenshot:\s*([^\s\]]+)\]/i);
-    if (shotMatch && shotMatch[1] && shotMatch[1] !== 'none' && shotMatch[1] !== 'None') {
-      cleanPatch.application_submitted_screenshot_url = shotMatch[1].trim();
-    }
   }
 
   // STRICT IMMUTABILITY GUARD: If row is already 'submitted' or possesses authentic confirmation proof,
@@ -1387,43 +1387,36 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
 
     let finalStoragePath = result?.screenshotPath || null;
 
+    const isAlreadyApplied = Boolean(
+      result?.status === 'already_applied' ||
+      result?.status === 'applied' ||
+      result?.reason === 'already_applied' ||
+      result?.isAlreadyApplied === true ||
+      result?.alreadyApplied === true ||
+      /already applied|already submitted/i.test(result?.error || '') ||
+      /already applied|already submitted/i.test(result?.reason || '') ||
+      /already applied|already submitted/i.test(result?.failureReason || '')
+    );
+
     const isSubmittedProof = Boolean(
-      (typeof finalShotUrl === 'string' && (
-        (finalShotUrl.includes('submitted-applications') && !finalShotUrl.includes('review_blueprint')) ||
+      !isAlreadyApplied &&
+      ((typeof finalShotUrl === 'string' && (
+        (finalShotUrl.includes('submitted-applications') && !finalShotUrl.includes('review_blueprint') && !finalShotUrl.includes('already_applied') && !finalShotUrl.includes('failed')) ||
         finalShotUrl.includes('workday-submitted')
       )) ||
       (typeof result?.screenshotUrl === 'string' && (
-        (result.screenshotUrl.includes('submitted-applications') && !result.screenshotUrl.includes('review_blueprint')) ||
+        (result.screenshotUrl.includes('submitted-applications') && !result.screenshotUrl.includes('review_blueprint') && !result.screenshotUrl.includes('already_applied') && !result.screenshotUrl.includes('failed')) ||
         result.screenshotUrl.includes('workday-submitted')
-      ))
+      )))
     );
 
-    const isSuccess = (
-      result?.status === 'submitted' ||
-      result?.status === 'success' ||
-      result?.submitted === true ||
-      result?.isSubmitted === true ||
-      isSubmittedProof
-    );
-
-    const isAlreadyApplied = (
-
-      result?.status === 'already_applied' ||
-
-      result?.status === 'applied' ||
-
-      result?.reason === 'already_applied' ||
-
-      result?.isAlreadyApplied === true ||
-
-      result?.alreadyApplied === true ||
-
-      /already applied|already submitted/i.test(result?.error || '') ||
-
-      /already applied|already submitted/i.test(result?.reason || '') ||
-
-      /already applied|already submitted/i.test(result?.failureReason || '')
-
+    const isSuccess = Boolean(
+      !isAlreadyApplied &&
+      (result?.status === 'submitted' ||
+       result?.status === 'success' ||
+       result?.submitted === true ||
+       result?.isSubmitted === true ||
+       isSubmittedProof)
     );
 
 
@@ -1520,7 +1513,24 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
 
 
 
-    if (isSuccess) {
+    if (isAlreadyApplied) {
+      const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
+      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Screenshot: ${finalShotUrl || 'none'}`);
+
+      await updateJobDistributionWithCheck({
+        distributionId: task.distribution_id || task.id,
+        applywizzId: task.applywizz_id,
+        jobUrl: task.job_url,
+        workerId,
+        patch: {
+          status: 'already_applied',
+          error_message: 'Application already submitted on Workday',
+          application_submitted_screenshot_url: finalShotUrl,
+          updated_at: now,
+        },
+      });
+
+    } else if (isSuccess) {
       const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
       console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: submitted | Screenshot: ${finalShotUrl || 'none'}`);
 
@@ -1535,36 +1545,6 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
           application_submitted_screenshot_url: finalShotUrl,
           updated_at: now,
         },
-      });
-
-    } else if (isAlreadyApplied) {
-      const cleanId = String(task.applywizz_id).replace(/["'\[\]\\]/g, '').trim().toUpperCase();
-      console.log(`[${cleanId}] | Company: ${task.company || 'Workday'} | Status: already_applied | Screenshot: ${finalShotUrl || 'none'}`);
-
-
-
-      await updateJobDistributionWithCheck({
-
-        distributionId: task.distribution_id || task.id,
-
-        applywizzId: task.applywizz_id,
-
-        jobUrl: task.job_url,
-
-        workerId,
-
-        patch: {
-
-          status: 'already_applied',
-
-          error_message: 'Application already submitted on Workday',
-
-          application_submitted_screenshot_url: finalShotUrl,
-
-          updated_at: now,
-
-        },
-
       });
 
     } else {
@@ -1635,7 +1615,7 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
         console.warn(`\n⚠️ [STAGE 3: SUBMITTER] [${workerId}] Host resource limitation detected (${rawErrMsg}). Preserving task #${task.distribution_id || task.id} in ready_for_review WITHOUT burning attempt count.`);
         try {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-          cleanupOrphanChromeProcesses();
+          cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
         } catch {}
         await updateJobDistributionWithCheck({
           distributionId: task.distribution_id || task.id,
@@ -1997,7 +1977,7 @@ export async function processClaimedTask({ task, workerId, headless = (process.e
       console.warn(`\n⚠️ [STAGE 3: SUBMITTER] [${workerId}] Host resource limitation caught in outer handler (${errMsg}). Preserving task #${task.distribution_id || task.id} cleanly in ready_for_review WITHOUT burning attempts.`);
       try {
         const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-        cleanupOrphanChromeProcesses();
+        cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
       } catch {}
       await updateJobDistributionWithCheck({
         distributionId: task.distribution_id || task.id,

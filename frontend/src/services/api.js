@@ -1223,10 +1223,10 @@ export async function fetchDynamicKPIMetrics({ dateStr = '', timeframe = 'day', 
       return (effTs >= startMs && effTs <= endMs) || (leaseMs >= startMs && leaseMs <= endMs) || (updMs >= startMs && updMs <= endMs);
     };
 
-    // 1. Submitted: strictly matching the day's time bounds
+    // 1. Submitted: strictly matching the day's time bounds (authentic submissions only)
     const submitted = allApps.filter((a) => {
       const st = (a.status || '').toLowerCase();
-      const isSub = st === 'submitted' || st === 'completed' || st === 'already_applied';
+      const isSub = st === 'submitted' || st === 'completed';
       return isSub && matchesDay(a);
     }).length;
 

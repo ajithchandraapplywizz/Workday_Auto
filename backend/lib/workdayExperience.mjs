@@ -6,7 +6,7 @@
  */
 
 import { fillApplicationQuestionField } from './workdayQuestionFill.mjs';
-import { handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, typeAndClickOption } from './fields.mjs';
+import { handleDropdown, handleHierarchicalDropdown, handleSearchableDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, typeAndClickOption, safeTypeSearchBox } from './fields.mjs';
 import { resolveField, mapLabelToProfileValue, getNestedValue } from './planner.mjs';
 import { lookupResolvedAnswerFromProfile } from './clientAnswer.mjs';
 import { createQAStore, saveAnswerToYaml } from './qaStore.mjs';
@@ -1419,14 +1419,7 @@ async function fillSingleFieldOfStudy(page, field, unique, leaf, force) {
 
   for (const term of unique) {
     const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
-    if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
-      await search.fill('').catch(() => {});
-      await page.waitForTimeout(100);
-      await search.pressSequentially(term, { delay: 45 });
-    } else {
-      await page.waitForTimeout(100);
-      await page.keyboard.type(term, { delay: 45 });
-    }
+    await safeTypeSearchBox(page, search, term, { delay: 40 });
     await page.waitForTimeout(400);
     const picked = await clickVisiblePromptOption(page, [term, 'Computer Science', 'Computer Engineering']);
     if (!picked) await page.keyboard.press('Enter').catch(() => {});
@@ -1450,14 +1443,7 @@ async function fillSingleFieldOfStudy(page, field, unique, leaf, force) {
   await page.waitForTimeout(150);
 
   const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[placeholder*="Search" i]:visible, input[role="combobox"]:visible').last();
-  if (await search.isVisible({ timeout: 500 }).catch(() => false)) {
-    await search.fill('').catch(() => {});
-    await page.waitForTimeout(50);
-    await search.pressSequentially(letter, { delay: 30 });
-  } else {
-    await page.waitForTimeout(50);
-    await page.keyboard.type(letter, { delay: 30 });
-  }
+  await safeTypeSearchBox(page, search, letter, { delay: 30 });
 
   await page.waitForTimeout(300);
 
@@ -1554,12 +1540,7 @@ async function fillFieldOfStudy(page, fieldLoc, answer) {
       await page.waitForTimeout(200);
       const letter = (String(leaf || '').trim()[0] || 'c').toLowerCase();
       const searchBox = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[role="combobox"]:visible').last();
-      if (await searchBox.isVisible({ timeout: 600 }).catch(() => false)) {
-        await searchBox.fill('').catch(() => {});
-        await searchBox.pressSequentially(letter, { delay: 45 });
-      } else {
-        await page.keyboard.type(letter, { delay: 45 });
-      }
+      await safeTypeSearchBox(page, searchBox, letter, { delay: 45 });
       await page.waitForTimeout(500);
       const picked = await clickFirstVisiblePromptOption(page);
       if (!picked) {

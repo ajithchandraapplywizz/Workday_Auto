@@ -340,7 +340,7 @@ export async function getSubmissionAndSourceStats(range = 'day', date = null) {
   };
 
   const resObj = {
-    submitted: submitted + already_applied,
+    submitted: submitted,
     submitted_only: submitted,
     already_applied,
     failed,

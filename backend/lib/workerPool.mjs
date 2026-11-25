@@ -24,7 +24,7 @@ import { resolveCompanyEmail, stripWorkdayQuestionLabel, parseAddress } from './
 import { normalizeLabel } from './qaStore.mjs';
 import { checkAndPreResolveJobForClient, recordDiscoveredJobForm, bulkPreResolveForJobUrl } from './jobFormCache.mjs';
 import { upsertSupabaseApplication, updateQueueTaskStatus, leaseNextQueueTask, leaseSpecificQueueTask, fetchPendingTasksForActiveCAs, getBatchQueueStats, updateWorkerStatus, getActiveCaCandidateIds, getTotalApplicationCountForCandidates, uploadStorageScreenshot, getActiveOperators, logAutomationTrace } from './supabaseClient.mjs';
-import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot, cleanupOrphanChromeProcesses, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
+import { isGlobalStopRequested, isSubmitStopRequested, isScanStopRequested, setGlobalStop, registerActiveBrowser, unregisterActiveBrowser, registerWorkerContext, unregisterWorkerContext, acquireBrowserSlot, releaseBrowserSlot, acquireBrowserLaunchLock, cleanupOrphanChromeProcesses, LEAN_CHROMIUM_ARGS } from './browserLifecycle.mjs';
 import { isSkippableUnimportantLabel, hasRequiredSignal } from './scanFieldFilter.mjs';
 import { canExecuteWorkers } from '../config/envConfig.mjs';
 import { createClient } from '@supabase/supabase-js';
@@ -528,7 +528,9 @@ export async function executeWorkerTask({
       const cachedResume = await getResumePathForApply(profile, {});
       if (cachedResume) {
         profile._resumePath = cachedResume;
-        console.log(`   📎 [${workerId}] Loaded authentic candidate resume: ${basename(cachedResume)}`);
+        const { getExactResumeFileName } = await import('./fileNameUtils.mjs');
+        profile._resumeFileName = getExactResumeFileName(profile, cachedResume);
+        console.log(`   📎 [${workerId}] Loaded authentic candidate resume: "${profile._resumeFileName}" (cached: ${basename(cachedResume)})`);
       }
     } catch {}
   }
@@ -622,6 +624,7 @@ export async function executeWorkerTask({
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
 
     for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
+      const releaseLaunchLock = await acquireBrowserLaunchLock(workerId);
       try {
         browser = await chromium.launch({
           headless: Boolean(headless),
@@ -632,13 +635,15 @@ export async function executeWorkerTask({
       } catch (launchErr) {
         const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
         console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
-        cleanupOrphanChromeProcesses({ ignoreSlots: true });
+        cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
         if (launchAttempt < 3) {
           const retryDelay = isHostResourceError ? (3000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
           await new Promise((r) => setTimeout(r, retryDelay));
         } else {
           throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);
         }
+      } finally {
+        try { releaseLaunchLock(); } catch {}
       }
     }
     registerActiveBrowser(browser, {
@@ -682,7 +687,12 @@ export async function executeWorkerTask({
           resumePath = await pickResume('', resumesYml);
         }
       }
-      if (resumePath) profile._resumePath = resumePath;
+      if (resumePath) {
+        profile._resumePath = resumePath;
+        const { getExactResumeFileName } = await import('./fileNameUtils.mjs');
+        profile._resumeFileName = getExactResumeFileName(profile, resumePath);
+        console.log(`   📎 [${workerId}] Authentic resume file name resolved: "${profile._resumeFileName}"`);
+      }
 
       const plan = {
         company: company || profile._company || 'Workday',

@@ -78,10 +78,16 @@ test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env an
   const { getDynamicMaxBrowsers } = await import('../lib/browserLifecycle.mjs');
 
   const originalMax = process.env.MAX_ACTIVE_BROWSERS;
+  const originalRailway = process.env.RAILWAY_ENVIRONMENT;
 
   try {
     delete process.env.MAX_ACTIVE_BROWSERS;
-    assert.equal(getDynamicMaxBrowsers(), 2, 'Default should be 2 concurrent browsers per container');
+    delete process.env.RAILWAY_ENVIRONMENT;
+    assert.equal(getDynamicMaxBrowsers(), 2, 'Default should be 2 concurrent browsers per container in local dev');
+
+    process.env.RAILWAY_ENVIRONMENT = 'production';
+    assert.equal(getDynamicMaxBrowsers(), 1, 'In Railway container, should default strictly to 1 active browser to prevent EAGAIN');
+    delete process.env.RAILWAY_ENVIRONMENT;
 
     process.env.MAX_ACTIVE_BROWSERS = '1';
     assert.equal(getDynamicMaxBrowsers(), 1, 'Should respect explicit MAX_ACTIVE_BROWSERS=1');
@@ -94,7 +100,30 @@ test('getDynamicMaxBrowsers dynamically respects MAX_ACTIVE_BROWSERS from env an
   } finally {
     if (originalMax !== undefined) process.env.MAX_ACTIVE_BROWSERS = originalMax;
     else delete process.env.MAX_ACTIVE_BROWSERS;
+    if (originalRailway !== undefined) process.env.RAILWAY_ENVIRONMENT = originalRailway;
+    else delete process.env.RAILWAY_ENVIRONMENT;
   }
+});
+
+test('acquireBrowserLaunchLock serializes browser launches cleanly with gap', async () => {
+  const { acquireBrowserLaunchLock } = await import('../lib/browserLifecycle.mjs');
+
+  const release1 = await acquireBrowserLaunchLock('worker_test_1');
+  assert.equal(typeof release1, 'function');
+
+  let worker2Started = false;
+  const p2 = acquireBrowserLaunchLock('worker_test_2').then((rel) => {
+    worker2Started = true;
+    rel();
+  });
+
+  // Verify worker 2 is waiting while lock is held
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(worker2Started, false, 'Worker 2 must wait for launch lock');
+
+  release1();
+  await p2;
+  assert.equal(worker2Started, true, 'Worker 2 must acquire lock after worker 1 releases');
 });
 
 test('acquireBrowserSlot allows concurrent browsers up to effectiveMax (2) and queues on overflow', async () => {

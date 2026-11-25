@@ -272,7 +272,7 @@ export default function CADashboard() {
               if (!countMap[id]) countMap[id] = { toExecute: 0, submitted: 0, total: 0 };
               countMap[id].total++;
               const st = (row.status || '').toLowerCase();
-              if (st === 'submitted' || st === 'completed' || st === 'already_applied') {
+              if (st === 'submitted' || st === 'completed') {
                 countMap[id].submitted++;
               } else {
                 countMap[id].toExecute++;
@@ -1146,8 +1146,8 @@ export default function CADashboard() {
                       const isQ = (j.status === 'queued' || j.status === 'queued_for_submission' || j.status === 'in_queue' || j.status === 'approved_for_submission') && j.is_fully_answered === true;
                       const hasMissing = (j.unanswered_count && j.unanswered_count > 0) || j.status === 'needs_answers' || j.is_fully_answered === false;
                       const isSelected = activeTask?.id === j.id;
-                      const isSubmitted = j.status === 'submitted' || j.status === 'already_applied';
-                      const cardScreenshot = (isSubmitted || j.application_submitted_screenshot_url || j.applied_screenshot)
+                      const isSubmitted = j.status === 'submitted' || j.status === 'completed';
+                      const cardScreenshot = (isSubmitted || isAlreadyApplied || j.application_submitted_screenshot_url || j.applied_screenshot)
                         ? (j.application_submitted_screenshot_url || j.applied_screenshot || j.screenshot_url || null)
                         : null;
 

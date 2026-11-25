@@ -643,6 +643,16 @@ export async function ensureWorkdayApplicationWizard(page, { mode = 'signin', pr
 
   // Mandatory Refresh Fallback: If fields/wizard not displaying post-navigation/login, reload page once to trigger Workday client hydration
   if (!await isWorkdayWizardVisible(page)) {
+    const utilityBtn = await page.$('button[data-automation-id="utilityButtonSignIn"], a[data-automation-id="utilityButtonSignIn"]').catch(() => null);
+    if (utilityBtn && await utilityBtn.isVisible().catch(() => false)) {
+      console.log('   🔓 [ensureWorkdayApplicationWizard] Header "Sign In" button present — opening authentication modal...');
+      await utilityBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(2000).catch(() => {});
+      if (await page.$('input[data-automation-id="password"], input[type="password"]')) {
+        return { entered: false, requiresAuth: true, method: 'utility-signin' };
+      }
+    }
+
     console.log('   🔄 [ensureWorkdayApplicationWizard] Wizard fields not displaying — refreshing page to trigger Workday client hydration...');
     await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
     await page.waitForTimeout(3000).catch(() => {});
@@ -728,6 +738,11 @@ export async function prescanGatewayElements(page) {
       return (t.includes('google') || t.includes('apple') || t.includes('linkedin')) && b.offsetParent !== null;
     });
 
+    const hasUtilitySignIn = buttons.some(b => {
+      const autoId = b.getAttribute('data-automation-id') || '';
+      return (autoId === 'utilityButtonSignIn' || (b.textContent || '').trim().toLowerCase() === 'sign in') && b.offsetParent !== null;
+    });
+
     const hasCreateAccountBtn = buttons.some(b => {
       const t = (b.textContent || '').trim().toLowerCase();
       const autoId = b.getAttribute('data-automation-id') || '';
@@ -798,6 +813,7 @@ export async function prescanGatewayElements(page) {
       hasPasswordInput,
       hasVerifyPassword,
       hasSocialSSO,
+      hasUtilitySignIn,
       hasSignInWithEmailBtn: ssoWithEmailBtn,
       hasCreateAccountBtn,
       hasSignInUnderCreateAccount,
@@ -830,6 +846,16 @@ export async function handleAdaptiveGateway(page, mode = 'signin') {
 
   if (scan.hasActiveModal) {
     gatewayLog('   ℹ️  Modal dialog detected — scanning and filling fields inside modal without closing it.');
+  }
+
+  // 0. Modern Workday Header "Sign In" Button (utilityButtonSignIn)
+  if (!scan.hasEmailInput && !scan.hasPasswordInput && !scan.hasActiveModal) {
+    const utilityBtn = await page.$('button[data-automation-id="utilityButtonSignIn"], a[data-automation-id="utilityButtonSignIn"]').catch(() => null);
+    if (utilityBtn && await utilityBtn.isVisible().catch(() => false)) {
+      gatewayLog('   🔓 Pre-scan: Clicking Workday header "Sign In" button (utilityButtonSignIn) to open auth modal...');
+      await utilityBtn.click({ force: true }).catch(() => {});
+      await page.waitForTimeout(2000).catch(() => {});
+    }
   }
 
   // 1. Social SSO Screen with "Sign in with email"

@@ -3,7 +3,7 @@
  */
 
 import { writeFile } from 'fs/promises';
-import { handleDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, fuzzyScore, typeAndClickOption } from './fields.mjs';
+import { handleDropdown, clickVisiblePromptOption, clickFirstVisiblePromptOption, fuzzyScore, typeAndClickOption, safeTypeSearchBox } from './fields.mjs';
 import {
   isForegoingStatementCertifyLabel,
   isShiftAvailabilityQuestion,
@@ -2498,12 +2498,7 @@ async function fillDropdownInFieldBox(page, fieldBox, label, answer, profile = n
     console.log(`    ↻ [Field of Study Question] Options did not match typed words — executing 1-letter typing + first dropdown option fallback on "${label}"...`);
     const letter = (String(answer || '').trim()[0] || 'c').toLowerCase();
     const search = page.locator('input[role="searchbox"]:visible, input[type="search"]:visible, input[role="combobox"]:visible').last();
-    if (await search.isVisible({ timeout: 600 }).catch(() => false)) {
-      await search.fill('').catch(() => {});
-      await search.pressSequentially(letter, { delay: 45 });
-    } else {
-      await page.keyboard.type(letter, { delay: 45 });
-    }
+    await safeTypeSearchBox(page, search, letter, { delay: 45 });
     await page.waitForTimeout(500);
     const pickedFirst = await clickFirstVisiblePromptOption(page);
     if (!pickedFirst) {

@@ -48,7 +48,7 @@ function normalizeUrl(rawUrl = '') {
 
 async function countStats() {
   // 1. Analyze the Nov 23 CSV
-  const csvPath = resolve(homedir(), 'Downloads', 'workday-jobs-2026-11-23.csv');
+  const csvPath = resolve(homedir(), 'Downloads', 'workday-jobs-2026-11-25.csv');
   const content = readFileSync(csvPath, 'utf8');
   const clean = content.charCodeAt(0) === 0xFEFF ? content.slice(1) : content;
   const lines = clean.split(/\r?\n/).filter((l) => l.trim().length > 0);

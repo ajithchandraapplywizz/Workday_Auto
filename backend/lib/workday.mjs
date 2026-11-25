@@ -466,6 +466,7 @@ export async function isWorkdayLogin(page) {
     scan.hasSignInUnderCreateAccount ||
     scan.hasSocialSSO ||
     scan.hasStepperAuth ||
+    (scan.hasUtilitySignIn && /apply/i.test(url)) ||
     (scan.hasEmailInput && (scan.hasForgotPasswordBtn || scan.hasResetPasswordBtn))
   );
 }

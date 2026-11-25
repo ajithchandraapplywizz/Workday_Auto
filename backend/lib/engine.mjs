@@ -31,7 +31,7 @@ import { handleWorkday, isWorkdayLogin } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
 import { peekClientAnswer } from './clientAnswer.mjs';
 import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
-import { buildDocumentFileName } from './fileNameUtils.mjs';
+import { getExactResumeFileName, buildDocumentFileName } from './fileNameUtils.mjs';
 import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
@@ -85,6 +85,7 @@ import {
 import { runDynamicFieldLoop, resetPerApplicationSessionState } from './dynamicFieldEngine.mjs';
 import { validatePage } from './interaction/index.mjs';
 import { repairRequiredFieldsFromErrors, parseErrorFieldNames } from './workdayErrorRepair.mjs';
+import { runMiniDomRemediation } from './miniDomAgent.mjs';
 import { bootstrapClientContext } from './profileBootstrap.mjs';
 import { resolvePostalForWorkday, workdayPhoneCodeForCountry } from './clientContact.mjs';
 import { disarmRiskyAddButtons, installScriptOnlyClickGuard, drainBlockedScriptClicks } from './safeClick.mjs';
@@ -593,10 +594,11 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
   const diskFileName = basename(absPath);
   let uploadFileName = diskFileName;
   try {
-    const { buildDocumentFileName } = await import('./fileNameUtils.mjs');
-    const pageTitle = typeof page.title === 'function' ? await page.title().catch(() => '') : '';
-    uploadFileName = buildDocumentFileName(profile, diskFileName, true, pageTitle);
-  } catch {}
+    uploadFileName = getExactResumeFileName(profile, absPath);
+  } catch {
+    uploadFileName = diskFileName;
+  }
+  if (profile) profile._uploadedResumeFileName = uploadFileName;
 
   const already = await page.evaluate((needle) => {
     const item = document.querySelector(
@@ -640,7 +642,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     }
 
     try {
-      console.log(`    📎 Uploading resume as "${uploadFileName}" (source: ${diskFileName}) (attempt ${attempt}/3)...`);
+      console.log(`    📎 Uploading resume as exact file name: "${uploadFileName}" (source: ${diskFileName}) (attempt ${attempt}/3)...`);
       const fileBuffer = readFileSync(absPath);
       await fileInput.setInputFiles({
         name: uploadFileName,
@@ -2604,9 +2606,14 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     await ensureReviewAgreementsAndSignatures(page, profile);
     await acknowledgeAllPageAgreements(page, profile, 'Review');
 
+    // Mini DOM Agent: Real-time pre-submit remediation safety net
+    await runMiniDomRemediation(page, profile, { currentStep: 'Review' }).catch((err) => {
+      console.warn('  ⚠️ [Mini DOM Agent] Pre-submit remediation warning:', err.message);
+    });
+
     console.log('🚀 Clicking final "Submit" button...');
     profile?._onLog?.(5, 'Step 5: CA submission triggered! Bot clicking final "Submit" button on Workday...');
-    await clickSubmitButton(page, { allowSubmit: true });
+    await clickSubmitButton(page, { allowSubmit: true, profile });
     await waitForDomSettled(page);
     try { await page.waitForLoadState('networkidle', { timeout: 15000 }); } catch {}
   } else {
@@ -3949,7 +3956,7 @@ export async function ensureReviewAgreementsAndSignatures(page, profile) {
  * @param {{allowSubmit?: boolean}} [options]
  * @returns {Promise<boolean>}
  */
-export async function clickSubmitButton(page, { allowSubmit = false } = {}) {
+export async function clickSubmitButton(page, { allowSubmit = false, profile = {} } = {}) {
   if (!allowSubmit) {
     console.log('  🛑 Submit blocked — no operator confirmation for this run. Nothing was submitted.');
     return false;
@@ -3987,6 +3994,12 @@ export async function clickSubmitButton(page, { allowSubmit = false } = {}) {
           console.log(`  ⏳ Submit button found ("${sel}") but currently disabled. Waiting for enable state...`);
           await btn.waitForElementState('enabled', { timeout: 3500 }).catch(() => {});
           isDisabled = await btn.isDisabled().catch(() => false);
+          if (isDisabled) {
+            console.log(`  🛡️  [Mini DOM Agent] Submit button remains disabled. Invoking real-time remediation...`);
+            await runMiniDomRemediation(page, profile, { currentStep: 'Submit Disabled' }).catch(() => {});
+            await page.waitForTimeout(500);
+            isDisabled = await btn.isDisabled().catch(() => false);
+          }
         }
 
         const text = await btn.textContent().catch(() => '');

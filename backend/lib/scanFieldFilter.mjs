@@ -93,12 +93,15 @@ function isOptionalIfApplicableLabel(label = '') {
  */
 export function hasRequiredSignal(label = '', field = {}) {
   const text = String(label || '').trim();
-  if (field?.required === true || field?.ariaRequired === true) return true;
-  if (field?.hasRequiredMarker === true) return true;
+  if (/\bnot\s+required\b/i.test(text)) return false;
+  if (field?.ariaRequired === true || field?.ariaRequired === 'true') return true;
+  if (field?.required === true || field?.hasRequiredMarker === true) return true;
   if (/\*/.test(text)) return true;
+  if (/\boptional\b/i.test(text)) return false;
   if (/\b(required|mandatory)\b/i.test(text) && !/indicates a required field/i.test(text)) return true;
 
   const container = String(field?.containerText || '');
+  if (/\bnot\s+required\b/i.test(container)) return false;
   const plain = text.replace(/\*+$/, '').trim();
   const anchor = plain.slice(0, Math.min(plain.length, 48));
   if (anchor && container) {
@@ -178,10 +181,12 @@ export function isSkippableUnimportantLabel(label = '', field = {}, stepName = '
 export function isMandatoryField(label = '', field = {}, stepName = '') {
   const text = String(label || '').trim();
   if (!text) return false;
+  if (/\bnot\s+required\b/i.test(text)) return false;
   if (isCountryPhoneCodeField(label, field)) return false; // Strictly auto-populated by Country selection — never mandatory/touch
   if (isPhoneRelatedField(label, field)) return true;
   if (isMinimumAgeQuestion(text)) return true;
   if (isCc305SelfIdentifyField(label, field, stepName)) return true;
+  if (SKIP_LABEL_PATTERNS.some((re) => re.test(text.toLowerCase()))) return false;
   const plain = text.replace(/\*+$/, '').trim();
   if (/^(race(\s*[\/\-]\s*ethnicity)?|ethnicity|gender|sex|hispanic|latino|veteran(\s*status)?)$/i.test(plain)) return true;
   const effectiveStep = String(stepName || field?.stepName || '');

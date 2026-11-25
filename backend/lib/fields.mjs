@@ -526,6 +526,90 @@ export async function clickFirstVisiblePromptOption(page) {
 }
 
 // ─── Searchable dropdown handler (Country Phone Code etc.) ──────────────────
+/**
+ * Safely and robustly types search text into a Workday popup searchbox or combobox.
+ * Prevents race conditions where dropdown mount / autofocus routines wipe the first
+ * 2-4 characters (e.g. typing "puter Science" instead of "Computer Science").
+ * Validates actual input value post-typing and auto-heals with atomic fill if truncated.
+ * @param {import('playwright').Page} page
+ * @param {import('playwright').Locator} [inputLocator]
+ * @param {string} text
+ * @param {object} [options]
+ * @returns {Promise<boolean>}
+ */
+export async function safeTypeSearchBox(page, inputLocator, text, { delay = 35 } = {}) {
+  const searchTerm = String(text || '').trim();
+  if (!searchTerm) return false;
+
+  let input = inputLocator;
+  let isInputVisible = false;
+
+  if (input) {
+    isInputVisible = await input.isVisible({ timeout: 400 }).catch(() => false);
+  }
+
+  if (!isInputVisible) {
+    input = page.locator([
+      'input[role="searchbox"]:visible',
+      'input[type="search"]:visible',
+      '[data-automation-id*="searchBox"] input:visible',
+      '[data-automation-id*="promptSearch"] input:visible',
+      '[data-automation-id*="searchField"] input:visible',
+      'input[placeholder*="Search" i]:visible',
+      'input[aria-label*="Search" i]:visible',
+      'input[role="combobox"]:visible',
+    ].join(', ')).last();
+    isInputVisible = await input.isVisible({ timeout: 600 }).catch(() => false);
+  }
+
+  if (isInputVisible && input) {
+    await input.scrollIntoViewIfNeeded().catch(() => {});
+    await input.click({ force: true }).catch(() => {});
+    await input.focus().catch(() => {});
+    // Allow Workday autofocus/mount animation to settle so leading chars are never wiped
+    await page.waitForTimeout(180);
+
+    // Clean slate: clear and backspace
+    await input.fill('').catch(() => {});
+    await page.waitForTimeout(60);
+
+    // Type with controlled delay
+    await input.pressSequentially(searchTerm, { delay }).catch(async () => {
+      await input.fill(searchTerm).catch(() => {});
+    });
+    await page.waitForTimeout(150);
+
+    // Mandatory Post-Typing Verification & Truncation Self-Healing
+    let actualVal = await input.inputValue().catch(() => '');
+    const expectedPrefix = searchTerm.slice(0, Math.min(3, searchTerm.length)).toLowerCase();
+    const isTruncated = !actualVal || !actualVal.toLowerCase().startsWith(expectedPrefix);
+
+    if (isTruncated) {
+      console.warn(`    ⚠️ [safeTypeSearchBox] Truncated search input detected: "${actualVal}" (expected "${searchTerm}"). Healing with atomic fill...`);
+      await input.click({ force: true }).catch(() => {});
+      await input.focus().catch(() => {});
+      await page.waitForTimeout(80);
+      await input.fill('');
+      await input.fill(searchTerm);
+      await input.dispatchEvent('input').catch(() => {});
+      await input.dispatchEvent('change').catch(() => {});
+      await page.waitForTimeout(100);
+
+      // Trigger Workday internal filter event by dispatching End -> Space -> Backspace
+      await input.press('End').catch(() => {});
+      await page.keyboard.press('Space').catch(() => {});
+      await page.waitForTimeout(40);
+      await page.keyboard.press('Backspace').catch(() => {});
+    }
+    return true;
+  } else {
+    // If no search input found, send keyboard strokes with settle delay
+    await page.waitForTimeout(250);
+    await page.keyboard.type(searchTerm, { delay: Math.max(delay, 45) });
+    return true;
+  }
+}
+
 export async function handleSearchableDropdown(page, trigger, searchTerm, optionText, options = {}) {
   const timeout = options.timeout || 8000;
   try {
@@ -554,12 +638,7 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
 
     const isSearchBoxVisible = await searchInput.isVisible({ timeout: 400 }).catch(() => false);
     if (isSearchBoxVisible) {
-      await searchInput.scrollIntoViewIfNeeded().catch(() => {});
-      await searchInput.click({ force: true }).catch(() => {});
-      await page.waitForTimeout(80);
-      await searchInput.fill('');
-      await page.waitForTimeout(50);
-      await searchInput.pressSequentially(searchTerm, { delay: 40 });
+      await safeTypeSearchBox(page, searchInput, searchTerm, { delay: 40 });
     } else {
       let isInput = false;
       try {
@@ -567,15 +646,9 @@ export async function handleSearchableDropdown(page, trigger, searchTerm, option
       } catch {}
 
       if (isInput) {
-        await trigger.click({ force: true }).catch(() => {});
-        await page.waitForTimeout(80);
-        await trigger.fill('');
-        await page.waitForTimeout(50);
-        await trigger.pressSequentially(searchTerm, { delay: 40 });
+        await safeTypeSearchBox(page, trigger, searchTerm, { delay: 40 });
       } else {
-        // Wait for dropdown animation to settle before sending raw keystrokes
-        await page.waitForTimeout(300);
-        await page.keyboard.type(searchTerm, { delay: 50 });
+        await safeTypeSearchBox(page, null, searchTerm, { delay: 45 });
       }
     }
 
@@ -653,13 +726,7 @@ export async function typeAndClickOption(page, fieldLoc, searchText) {
     'input[aria-label*="Search" i]:visible',
     'input[role="combobox"]:visible',
   ].join(', ')).last();
-  if (await search.isVisible({ timeout: 900 }).catch(() => false)) {
-    await search.click({ force: true }).catch(() => {});
-    await search.fill('');
-    await search.pressSequentially(needle, { delay: 35 });
-  } else {
-    await page.keyboard.type(needle, { delay: 35 });
-  }
+  await safeTypeSearchBox(page, search, needle, { delay: 35 });
 
   await page.waitForTimeout(400);
   try {

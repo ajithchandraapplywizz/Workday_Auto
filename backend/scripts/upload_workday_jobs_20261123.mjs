@@ -25,8 +25,8 @@ const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SER
 const args = process.argv.slice(2);
 const isDryRun = args.includes('--dry-run');
 const fileArg = args.find((a) => !a.startsWith('--'));
-const defaultCsvPath = process.env.CSV_PATH || resolve(process.cwd(), 'data', 'workday-jobs-2026-11-23.csv');
-const userDownloadsPath = resolve(homedir(), 'Downloads', 'workday-jobs-2026-11-23.csv');
+const defaultCsvPath = process.env.CSV_PATH || resolve(homedir(), 'Downloads', 'workday-jobs-2026-11-25.csv');
+const userDownloadsPath = resolve(homedir(), 'Downloads', 'workday-jobs-2026-11-25.csv');
 
 const csvPath = fileArg || (existsSync(userDownloadsPath) ? userDownloadsPath : defaultCsvPath);
 
@@ -69,6 +69,69 @@ function normalizeUrl(rawUrl = '') {
 }
 
 async function run() {
+  console.log(`\n══════════════════════════════════════════════════════════════════════`);
+  console.log(`🧹 STEP 0: EXECUTING PREREQUISITE DELETION QUERIES`);
+  console.log(`══════════════════════════════════════════════════════════════════════`);
+
+  console.log(`▶ Executing: DELETE FROM job_distributions WHERE status = 'ready_for_review';`);
+  const { count: jdBeforeCount, error: jdCountErr } = await supabase
+    .from('job_distributions')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'ready_for_review');
+
+  if (jdCountErr) {
+    console.warn(`   ⚠️ Warning counting job_distributions: ${jdCountErr.message}`);
+  } else {
+    console.log(`   Found ${jdBeforeCount ?? 0} rows with status = 'ready_for_review' in job_distributions.`);
+  }
+
+  const { error: jdErr } = await supabase
+    .from('job_distributions')
+    .delete()
+    .eq('status', 'ready_for_review');
+
+  if (jdErr) {
+    console.error(`   ❌ Failed to delete from job_distributions:`, jdErr.message);
+    process.exit(1);
+  }
+
+  const { count: jdAfterCount } = await supabase
+    .from('job_distributions')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'ready_for_review');
+  const jdDeleted = (jdBeforeCount ?? 0) - (jdAfterCount ?? 0);
+  console.log(`   ✅ Success: Deleted ${jdDeleted} rows from job_distributions (Remaining: ${jdAfterCount ?? 0}).`);
+
+  console.log(`\n▶ Executing: DELETE FROM batch_job_queue WHERE status = 'pending';`);
+  const { count: bqBeforeCount, error: bqCountErr } = await supabase
+    .from('batch_job_queue')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'pending');
+
+  if (bqCountErr) {
+    console.warn(`   ⚠️ Warning counting batch_job_queue: ${bqCountErr.message}`);
+  } else {
+    console.log(`   Found ${bqBeforeCount ?? 0} rows with status = 'pending' in batch_job_queue.`);
+  }
+
+  const { error: bqErr } = await supabase
+    .from('batch_job_queue')
+    .delete()
+    .eq('status', 'pending');
+
+  if (bqErr) {
+    console.error(`   ❌ Failed to delete from batch_job_queue:`, bqErr.message);
+    process.exit(1);
+  }
+
+  const { count: bqAfterCount } = await supabase
+    .from('batch_job_queue')
+    .select('*', { count: 'exact', head: true })
+    .eq('status', 'pending');
+  const bqDeleted = (bqBeforeCount ?? 0) - (bqAfterCount ?? 0);
+  console.log(`   ✅ Success: Deleted ${bqDeleted} rows from batch_job_queue (Remaining: ${bqAfterCount ?? 0}).`);
+  console.log(`══════════════════════════════════════════════════════════════════════\n`);
+
   console.log(`\n══════════════════════════════════════════════════════════════════════`);
   console.log(`🚀 INGESTING CSV TO BATCH JOB QUEUE`);
   console.log(`   Source:   ${csvPath}`);
@@ -300,9 +363,20 @@ async function fetchBatchPageWithRetry(page, pageSize, retries = 4) {
     }
   }
 
+  const totalTasksInserted = jobsToInsert.slice(0, insertedCount).reduce((sum, j) => {
+    try {
+      const awls = JSON.parse(j.applywizz_id);
+      return sum + (Array.isArray(awls) ? awls.length : 1);
+    } catch {
+      return sum + 1;
+    }
+  }, 0);
+
   console.log(`\n🎉 Ingestion Finished!`);
-  console.log(`   Successfully inserted: ${insertedCount}`);
-  console.log(`   Chunk errors:         ${errorCount}`);
+  console.log(`   Unique Links Ingested:        ${insertedCount}`);
+  console.log(`   Candidate Tasks Ingested:     ${totalTasksInserted}`);
+  console.log(`   Duplicate Links Skipped:      ${alreadyExistingJobs.length}`);
+  console.log(`   Chunk Errors:                 ${errorCount}`);
 
   // Final count check
   const { count: finalCount } = await supabase

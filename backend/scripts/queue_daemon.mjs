@@ -619,6 +619,7 @@ export async function stopSubmitPool() {
         })
         .eq('status', 'applying')
         .in('worker_id', workerIds)
+        .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
         .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
         .neq('status', 'submitted')
         .neq('status', 'completed');
@@ -633,7 +634,22 @@ export async function stopSubmitPool() {
         })
         .eq('status', 'applying')
         .is('worker_id', null)
+        .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
         .or('application_submitted_screenshot_url.is.null,application_submitted_screenshot_url.not.ilike.%submitted-applications%')
+        .neq('status', 'submitted')
+        .neq('status', 'completed');
+
+      // Tasks in applying that reached or exhausted Attempt 3/3 must strictly transition to failed
+      await supabase
+        .from('job_distributions')
+        .update({
+          status: 'failed',
+          worker_id: null,
+          worker_leased_at: null,
+          updated_at: nowIso,
+        })
+        .eq('status', 'applying')
+        .ilike('error_message', '%Attempt 3/3%')
         .neq('status', 'submitted')
         .neq('status', 'completed');
 
@@ -704,6 +720,14 @@ export async function stopAutonomousPool() {
       .from('job_distributions')
       .update({ status: 'ready_for_review', worker_id: null, worker_leased_at: null, updated_at: nowIso })
       .eq('status', 'applying')
+      .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
+      .neq('status', 'submitted')
+      .neq('status', 'completed'),
+    supabase
+      .from('job_distributions')
+      .update({ status: 'failed', worker_id: null, worker_leased_at: null, updated_at: nowIso })
+      .eq('status', 'applying')
+      .ilike('error_message', '%Attempt 3/3%')
       .neq('status', 'submitted')
       .neq('status', 'completed'),
     supabase
@@ -2553,9 +2577,25 @@ export async function recoverInterruptedSubmissionTasks() {
       .eq('status', 'applying')
       .in('worker_id', submitWorkers)
       .or(`worker_leased_at.is.null,worker_leased_at.lt.${leaseExpiredCutoff}`)
+      .or('error_message.is.null,error_message.not.ilike.%Attempt 3/3%')
       .neq('status', 'submitted')
       .neq('status', 'completed')
       .select('id');
+
+    // Also mark tasks that genuinely reached Attempt 3/3 as failed
+    await supabase
+      .from('job_distributions')
+      .update({
+        status: 'failed',
+        worker_id: null,
+        worker_leased_at: null,
+        updated_at: now,
+      })
+      .eq('status', 'applying')
+      .in('worker_id', submitWorkers)
+      .ilike('error_message', '%Attempt 3/3%')
+      .neq('status', 'submitted')
+      .neq('status', 'completed');
 
     // Reset submitting workers in worker_status to idle
     for (const wId of submitWorkers) {

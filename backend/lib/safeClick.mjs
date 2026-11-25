@@ -11,13 +11,13 @@
 import { isForbiddenOptionalAddName, OPTIONAL_SECTION_PATTERN } from './workdayOptionalSections.mjs';
 
 /** Buttons that are never safe as a generic "click first matching button" target. */
-const RISKY_NAME_RE = /^(add|\+|add\s+another|add\s+a\s+new|create|delete|remove|edit|clear|cancel|close|×|x|help|share|print|feedback|preview|skip|back|save\s*for\s*later|withdraw|start\s*over)$/i;
+const RISKY_NAME_RE = /^([+➕]?\s*add(\s+(another|more|additional|extra|a\s+new|row|item))?|\+|➕|create|delete|remove|edit|clear|cancel|close|×|x|help|share|print|feedback|preview|skip|back|save\s*for\s*later|withdraw|start\s*over)$/i;
 
 /** Page chrome / marketing / optional actions — never scripted. */
 const CHROME_BLOCK_RE = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over|view\s*job|return\s*to\s*job|linkedin|facebook|twitter|instagram|cookie|privacy\s*policy|terms\s*of\s*use)\b/i;
 
 /** Allow only these named section Adds (My Experience initial row only — NEVER Add Another). */
-const ALLOWED_SECTION_ADD_RE = /^add\s*(work\s*)?experience$|^add\s*education$/i;
+const ALLOWED_SECTION_ADD_RE = /^([+➕]?\s*)?add\s*(work\s*)?experience$|^([+➕]?\s*)?add\s*education$/i;
 
 /** Wizard footer / navigation that is intentionally clickable elsewhere. */
 const NAV_ALLOW_RE = /^(save\s*(and|&)\s*continue|next|continue|submit(\s+application)?|review\s*(and|&)\s*submit|sign\s*in|create\s*account|apply(\s+manually)?|continue\s*application)$/i;
@@ -42,12 +42,13 @@ export function isRiskyMisclickButton(name = '', opts = {}) {
   const text = normalizeButtonName(name);
   if (!text) return false;
   if (NAV_ALLOW_RE.test(text)) return false;
-  if (/\banother\b/i.test(text)) return true; // Strictly forbid "Add Another" in all contexts
+  // Strictly forbid any button with "another", "more", "additional", "extra" in all contexts
+  if (/\b(another|more|additional|extra)\b/i.test(text)) return true;
   if (opts.allowSectionAdd && ALLOWED_SECTION_ADD_RE.test(text)) return false;
   if (isForbiddenOptionalAddName(text)) return true;
   if (RISKY_NAME_RE.test(text)) return true;
   if (CHROME_BLOCK_RE.test(text) && !NAV_ALLOW_RE.test(text)) return true;
-  if (/^add\b/i.test(text) && !ALLOWED_SECTION_ADD_RE.test(text)) return true;
+  if (/^[+➕]?\s*add\b/i.test(text) && !ALLOWED_SECTION_ADD_RE.test(text)) return true;
   return false;
 }
 
@@ -121,8 +122,8 @@ export async function installScriptOnlyClickGuard(page) {
     const norm = (v) => String(v || '').replace(/\s+/g, ' ').trim();
     const optionalRe = new RegExp(optionalPattern, 'i');
     const optionalWordRe = /certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social\s*(network|media)|volunteer|credential|website/i;
-    const addRe = /^(\+\s*)?add\b|^add(\s+(a|an|new))?\b/i;
-    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$/i;
+    const addRe = /^(\+\s*|➕\s*)?add\b|^add(\s+(a|an|new))?\b/i;
+    const allowedAddRe = /^(\+\s*|➕\s*)?add\s*(work\s*)?experience$|^(\+\s*|➕\s*)?add\s*education$/i;
     const navAllowRe = /^(save\s*(and|&)\s*continue|next|continue|submit(\s+application)?|review\s*(and|&)\s*submit|sign\s*in|create\s*account|apply(\s+manually)?|continue\s*application)$/i;
     const chromeRe = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over|view\s*job|return\s*to\s*job|cookie)\b/i;
     const headingSelector = 'h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"],[data-automation-id="panelTitle"]';
@@ -152,11 +153,13 @@ export async function installScriptOnlyClickGuard(page) {
       const auto = btn.getAttribute('data-automation-id') || '';
       if (navAllowRe.test(name)) return null;
       if (chromeRe.test(name)) return name || 'chrome';
-      // Strictly block any button containing "another"
-      if (/\banother\b/i.test(name) || /\banother\b/i.test(auto)) return name || 'Add Another';
-      if (allowedAddRe.test(name)) return null;
+      // Strictly block any button containing "another", "more", "additional", "extra"
+      if (/\b(another|more|additional|extra)\b/i.test(name) || /\b(another|more|additional|extra)\b/i.test(auto)) {
+        return name || 'Add Another';
+      }
+      if (allowedAddRe.test(name) && !/\b(another|more|additional|extra)\b/i.test(name)) return null;
 
-      const isAdd = addRe.test(name) || /^add$/i.test(auto);
+      const isAdd = addRe.test(name) || /^[+➕]?\s*add$/i.test(auto) || /^[+➕]$/.test(name);
       if (!isAdd) return null;
 
       if (optionalWordRe.test(name)) return name || 'Add';
@@ -219,9 +222,9 @@ export async function drainBlockedScriptClicks(page) {
 export async function disarmRiskyAddButtons(page) {
   return await page.evaluate(({ optionalPattern }) => {
     const optionalRe = new RegExp(optionalPattern, 'i');
-    const allowedAddRe = /^add\s*(work\s*)?experience$|^add\s*education$|^add\s*(phone|contact(\s*information)?)(\s*number)?$/i;
-    const forbiddenNameRe = /add(\s+(another|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)/i;
-    const bareAddRe = /^(add|\+)$/i;
+    const allowedAddRe = /^([+➕]?\s*)?add\s*(work\s*)?experience$|^([+➕]?\s*)?add\s*education$|^([+➕]?\s*)?add\s*(phone|contact(\s*information)?)(\s*number)?$/i;
+    const forbiddenNameRe = /add(\s+(another|additional|more|extra|a|an|new))?\s*(certificat|licen[cs]|language|award|honor|publication|patent|affiliation|membership|reference|social|volunteer|credential|websites?)|another|more|additional|extra/i;
+    const bareAddRe = /^([+➕]?\s*add|\+|➕)$/i;
     const chromeRe = /\b(help|support|feedback|share|print|download|preview|save\s*for\s*later|withdraw|start\s*over)\b/i;
     const headingSelector = 'h1,h2,h3,h4,h5,legend,[data-automation-id*="title"],[data-automation-id*="heading"],[data-automation-id="panelTitle"]';
     const norm = (v) => (v || '').replace(/\s+/g, ' ').trim();
@@ -255,8 +258,8 @@ export async function disarmRiskyAddButtons(page) {
         continue;
       }
 
-      // Strictly disarm any "Add Another" button anywhere on the page
-      if (/\banother\b/i.test(name) || /\banother\b/i.test(text) || /\banother\b/i.test(aria)) {
+      // Strictly disarm any "Add Another", "Add More", "Add Additional", etc. button anywhere on the page
+      if (/\b(another|more|additional|extra)\b/i.test(name) || /\b(another|more|additional|extra)\b/i.test(text) || /\b(another|more|additional|extra)\b/i.test(aria) || /\b(another|more|additional|extra)\b/i.test(auto)) {
         btn.setAttribute('data-wd-optional-add-blocked', '1');
         btn.setAttribute('data-wd-script-block', '1');
         btn.setAttribute('aria-disabled', 'true');
