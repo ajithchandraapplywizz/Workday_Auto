@@ -505,8 +505,8 @@ export async function workdayLogin(page, email, password) {
     await page.waitForSelector('input[data-automation-id="password"], input[type="password"]', { timeout: 8000 });
   } catch {}
 
-  // 3. Fill visible email
-  const emailInputs = await page.$$([
+  // 3. Fill visible email (prefer active modal/popup inputs first so we never hit a background/nav input)
+  const emailSelectors = [
     'input[data-automation-id*="email" i]',
     'input[data-automation-id*="user" i]',
     'input[type="email"]',
@@ -517,29 +517,70 @@ export async function workdayLogin(page, email, password) {
     'input[aria-label*="email" i]',
     'input[aria-label*="username" i]',
     'input[placeholder*="email" i]'
-  ].join(', '));
+  ].join(', ');
+  const modalEmailSelectors = [
+    '[role="dialog"]',
+    '.modal',
+    '[data-automation-id*="modal" i]',
+    '[data-automation-id*="dialog" i]'
+  ].map(m => emailSelectors.split(', ').map(s => `${m} ${s}`)).flat().join(', ');
+
+  const fillAuthInput = async (inp, value) => {
+    await inp.scrollIntoViewIfNeeded().catch(() => {});
+    await inp.click({ force: true }).catch(() => {});
+    await inp.fill('').catch(() => {});
+    await inp.fill(value).catch(() => {});
+    const val = await inp.inputValue().catch(() => '');
+    if (val !== value) {
+      await inp.click({ force: true }).catch(() => {});
+      await page.keyboard.type(value, { delay: 15 }).catch(() => {});
+    }
+    await inp.evaluate((el) => {
+      el.dispatchEvent(new Event('input', { bubbles: true }));
+      el.dispatchEvent(new Event('change', { bubbles: true }));
+      el.dispatchEvent(new Event('blur', { bubbles: true }));
+    }).catch(() => {});
+  };
+
+  const emailInputs = [
+    ...(await page.$$(modalEmailSelectors).catch(() => [])),
+    ...(await page.$$(emailSelectors).catch(() => [])),
+  ];
   let emailFilled = false;
   for (const inp of emailInputs) {
     if (await inp.isVisible().catch(() => false)) {
-      await inp.fill(email);
-      await page.waitForTimeout(200);
+      if (await isInNavOrHeader(inp)) continue;
+      await fillAuthInput(inp, email);
+      await page.waitForTimeout(150);
       emailFilled = true;
       break;
     }
   }
 
-  // 4. Fill visible password
-  const passwordInputs = await page.$$([
+  // 4. Fill visible password (prefer active modal/popup inputs first)
+  const passwordSelectors = [
     'input[data-automation-id*="password" i]:not([data-automation-id*="verify" i])',
     'input[type="password"]',
     'input[name*="password" i]:not([name*="verify" i])',
     'input[id*="password" i]:not([id*="verify" i])'
-  ].join(', '));
+  ].join(', ');
+  const modalPasswordSelectors = [
+    '[role="dialog"]',
+    '.modal',
+    '[data-automation-id*="modal" i]',
+    '[data-automation-id*="dialog" i]'
+  ].map(m => passwordSelectors.split(', ').map(s => `${m} ${s}`)).flat().join(', ');
+
+  const passwordInputs = [
+    ...(await page.$$(modalPasswordSelectors).catch(() => [])),
+    ...(await page.$$(passwordSelectors).catch(() => [])),
+  ];
   let passwordFilled = false;
   for (const inp of passwordInputs) {
     if (await inp.isVisible().catch(() => false)) {
-      await inp.fill(password);
-      await page.waitForTimeout(200);
+      if (await isInNavOrHeader(inp)) continue;
+      await fillAuthInput(inp, password);
+      await page.waitForTimeout(150);
       passwordFilled = true;
       break;
     }
@@ -633,15 +674,26 @@ export async function workdayLogin(page, email, password) {
     }
   } catch {}
 
-  // 5. Click visible Sign In submit button with force: true (excluding nav header)
-  const signInButtons = await page.$$([
+  // 5. Click visible Sign In submit button (prefer inside active modal/popup first, excluding nav header)
+  const signInBtnSelectors = [
     'button[data-automation-id="signInSubmitButton"]',
     'button[type="submit"]',
     'button:has-text("Sign In")',
     'button:has-text("Sign in")',
     'button:has-text("Log In")',
     'button:has-text("Log in")',
-  ].join(', '));
+  ];
+  const modalSignInSelectors = [
+    '[role="dialog"]',
+    '.modal',
+    '[data-automation-id*="modal" i]',
+    '[data-automation-id*="dialog" i]'
+  ].flatMap(m => signInBtnSelectors.map(s => `${m} ${s}`));
+
+  const signInButtons = [
+    ...(await page.$$(modalSignInSelectors.join(', ')).catch(() => [])),
+    ...(await page.$$(signInBtnSelectors.join(', ')).catch(() => [])),
+  ];
   let clickedSignIn = false;
   for (const btn of signInButtons) {
     if (await btn.isVisible().catch(() => false)) {
@@ -651,7 +703,10 @@ export async function workdayLogin(page, email, password) {
       const type = await btn.getAttribute('type').catch(() => '');
       if (autoId === 'signInSubmitButton' || type === 'submit' || /sign\s*in|log\s*in/i.test(text)) {
         await btn.scrollIntoViewIfNeeded().catch(() => {});
-        await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        // Clear any Workday click_filter overlay by dispatching real click first, then force/DOM click fallback
+        await btn.click({ timeout: 3000 }).catch(async () => {
+          await btn.click({ force: true }).catch(() => btn.evaluate(el => el.click()));
+        });
         clickedSignIn = true;
         break;
       }
@@ -662,9 +717,27 @@ export async function workdayLogin(page, email, password) {
     await page.keyboard.press('Enter');
   }
 
-  await page.waitForTimeout(4000);
-  try { await page.waitForLoadState('networkidle', { timeout: 20000 }); } catch {}
-  await page.waitForTimeout(2000);
+  // Dynamic post-login wait (up to 12s): exit as soon as wizard loads, modal closes, or explicit error appears
+  const loginWaitStart = Date.now();
+  while (Date.now() - loginWaitStart < 12000) {
+    await page.waitForTimeout(500);
+    if (await isWorkdayWizardVisible(page).catch(() => false)) {
+      console.log('   Workday login successful (wizard visible).');
+      return true;
+    }
+    if (await isWorkdayAlreadyApplied(page).catch(() => false)) {
+      console.log('   Workday login successful (already applied visible).');
+      return true;
+    }
+    if (!(await isStillOnSignInForm(page).catch(() => true))) {
+      break;
+    }
+    const quickReason = await detectLoginFailureReason(page).catch(() => 'unknown');
+    if (quickReason === 'needs-verification' || quickReason === 'locked' || quickReason === 'wrong-password-or-locked') {
+      break;
+    }
+  }
+  try { await page.waitForLoadState('networkidle', { timeout: 8000 }); } catch {}
 
   if (await isStillOnSignInForm(page)) {
     // Retry pressing Enter on password field in case button click was intercepted

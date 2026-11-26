@@ -104,11 +104,11 @@ async function firstPdfInResumesFolders() {
 export async function resolveResumePath(explicitPath, targetAwl = null) {
   const fromExplicit = findExistingResumeFile(explicitPath);
   if (fromExplicit) {
-    if (!targetAwl || targetAwl === 'CLIENT' || basename(fromExplicit).toUpperCase().includes(targetAwl)) return fromExplicit;
+    if (!targetAwl || targetAwl === 'CLIENT' || fromExplicit.toUpperCase().includes(targetAwl)) return fromExplicit;
   }
 
   const fromYml = await loadDefaultFromResumesYml();
-  if (fromYml && (!targetAwl || targetAwl === 'CLIENT' || basename(fromYml).toUpperCase().includes(targetAwl))) return fromYml;
+  if (fromYml && (!targetAwl || targetAwl === 'CLIENT' || fromYml.toUpperCase().includes(targetAwl))) return fromYml;
 
   // Strict isolation: never fall back to generic/other client resume if targetAwl is set!
   if (targetAwl && targetAwl !== 'CLIENT') {
@@ -149,9 +149,22 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
     console.warn(`    ⚠️ Candidate resume resolution notice: ${err.message}`);
   }
 
-  // 2. Direct local check in data/client-resumes/
+  // 2. Direct local check in data/client-resumes/ (strict Resume_<Name>_<ShortRole>.pdf folder first)
   if (targetAwl && targetAwl !== 'CLIENT') {
     for (const root of appRootCandidates()) {
+      const awlDir = resolve(root, 'data', 'client-resumes', targetAwl);
+      if (existsSync(awlDir)) {
+        try {
+          const files = await readdir(awlDir);
+          const strictPdf = files.find((f) => /^Resume_.*\.pdf$/i.test(f)) || files.find((f) => /\.pdf$/i.test(f));
+          if (strictPdf) {
+            const cand = resolve(awlDir, strictPdf);
+            console.log(`    📎 Candidate authentic resume found on disk: ${basename(cand)}`);
+            if (profile) profile._resumePath = cand;
+            return cand;
+          }
+        } catch {}
+      }
       const candidates = [
         resolve(root, 'data', 'client-resumes', `${targetAwl}.pdf`),
         resolve(root, 'data', 'client-resumes', `_${targetAwl}_.pdf`),
@@ -180,7 +193,7 @@ export async function getResumePathForApply(profile = {}, plan = {}) {
     const abs = findExistingResumeFile(c);
     if (abs) {
       if (targetAwl && targetAwl !== 'CLIENT') {
-        if (!basename(abs).toUpperCase().includes(targetAwl)) {
+        if (!abs.toUpperCase().includes(targetAwl)) {
           console.warn(`    ⚠️  Strict Resume Match: Rejecting unverified path ${basename(abs)} for client ${targetAwl}`);
           continue;
         }

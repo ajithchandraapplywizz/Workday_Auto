@@ -67,6 +67,20 @@ export function cleanJobRole(raw = '') {
 }
 
 /**
+ * Abbreviates a job role into an uppercase acronym by merging the first letter
+ * of every word (e.g. "Software Engineer" -> "SE", "Data Analyst" -> "DA").
+ *
+ * @param {string} rawRole
+ * @returns {string}
+ */
+export function abbreviateJobRole(rawRole = '') {
+  const cleaned = cleanJobRole(rawRole);
+  if (!cleaned) return '';
+  const words = cleaned.split(/[^a-zA-Z0-9]+/).filter(Boolean);
+  return words.map((w) => w[0].toUpperCase()).join('');
+}
+
+/**
  * Sanitizes a string for use in a file name:
  * - Removes characters that are invalid in filenames
  * - Replaces spaces/special chars with underscores
@@ -170,18 +184,22 @@ export function getExactResumeFileName(profile = {}, absPath = '') {
 }
 
 /**
- * Builds a professional, dynamic resume filename.
+ * Builds a strict, standardized resume/cover letter filename:
+ *   Resume_<Name_of_Client>_<ShortRole>.pdf
+ * where <ShortRole> is the uppercase first-letter abbreviation of each word
+ * in the job role (e.g. "Software Engineer" -> "SE", "Data Analyst" -> "DA").
  *
  * Priority order for job role:
  *   1. Extracted from current page's document.title (or passed page title)
- *   2. Falls back to user's current/most recent job title from profile
- *   3. Falls back to nothing (omits role from filename)
+ *   2. Explicit target job role on profile (_roleTitle, _jobTitle, roleTitle, job_title)
+ *   3. Falls back to user's current/most recent job title from profile
+ *   4. Falls back to nothing (omits role from filename)
  *
  * Examples:
- *   Resume_John_Smith_Software_Engineer.pdf
- *   Resume_Jane_Doe_Senior_Product_Manager.pdf
- *   Resume_John_Smith.pdf  (when no role is found)
- *   resume.pdf             (when no profile data at all)
+ *   Resume_John_Smith_SE.pdf
+ *   Resume_Jane_Doe_SPM.pdf
+ *   Resume_Alice_Wonderland.pdf  (when no role is found)
+ *   resume.pdf                   (when no profile data at all)
  *
  * @param {object} profile - The user's canonical profile object
  * @param {string} [storedFileName] - The originally uploaded filename (used for extension detection)
@@ -207,34 +225,58 @@ export function buildDocumentFileName(
     || profile?.personal?.first_name?.trim()
     || profile?.firstName?.trim()
     || profile?.first_name?.trim()
+    || profile?._dbClient?.first_name?.trim()
+    || profile?._dbClient?.raw_profile_json?.client?.first_name?.trim()
     || '';
 
   const lastName = profile?.personal?.lastName?.trim()
     || profile?.personal?.last_name?.trim()
     || profile?.lastName?.trim()
     || profile?.last_name?.trim()
+    || profile?._dbClient?.last_name?.trim()
+    || profile?._dbClient?.raw_profile_json?.client?.last_name?.trim()
     || '';
 
-  // Get job role: first try page title, then fallback to profile's current job title
+  const fullName = (!firstName && !lastName)
+    ? (
+      profile?.personal?.full_name?.trim()
+      || profile?.personal?.name?.trim()
+      || profile?.name?.trim()
+      || profile?.client_name?.trim()
+      || profile?._clientName?.trim()
+      || profile?._dbClient?.client_name?.trim()
+      || profile?._dbClient?.name?.trim()
+      || profile?._dbClient?.raw_profile_json?.client?.client_name?.trim()
+      || profile?._dbClient?.raw_profile_json?.client?.name?.trim()
+      || ''
+    )
+    : '';
+
+  // Get job role: first try page title, then explicit target role, then profile's current job title
   let jobRole = extractJobRoleFromPage(pageTitle);
 
-  if (!jobRole && profile?.experience?.length > 0) {
-    // Use the most recent job title from the profile as a fallback
+  if (!jobRole && (profile?._roleTitle || profile?._jobTitle || profile?.roleTitle || profile?.job_title)) {
+    jobRole = profile._roleTitle || profile._jobTitle || profile.roleTitle || profile.job_title || '';
+  }
+  if (!jobRole && Array.isArray(profile?.experience) && profile.experience.length > 0) {
     jobRole = profile.experience[0]?.title || profile.experience[0]?.role || '';
   }
-  if (!jobRole && profile?.work_experience?.length > 0) {
+  if (!jobRole && profile?.experience && !Array.isArray(profile.experience)) {
+    jobRole = profile.experience.current_title || profile.experience.title || '';
+  }
+  if (!jobRole && Array.isArray(profile?.work_experience) && profile.work_experience.length > 0) {
     jobRole = profile.work_experience[0]?.job_title || profile.work_experience[0]?.title || '';
   }
-  if (!jobRole && (profile?._roleTitle || profile?._jobTitle || profile?.roleTitle)) {
-    jobRole = profile._roleTitle || profile._jobTitle || profile.roleTitle || '';
-  }
+
+  const shortRole = abbreviateJobRole(jobRole);
 
   // Build name parts
   const parts = [prefix];
 
   if (firstName) parts.push(sanitizeForFileName(firstName, 20));
   if (lastName) parts.push(sanitizeForFileName(lastName, 20));
-  if (jobRole) parts.push(sanitizeForFileName(jobRole, 30));
+  if (!firstName && !lastName && fullName) parts.push(sanitizeForFileName(fullName, 40));
+  if (shortRole) parts.push(shortRole);
 
   // Graceful fallback: if no names or role, return lower-case default
   if (parts.length === 1) {

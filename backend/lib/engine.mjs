@@ -31,7 +31,7 @@ import { handleWorkday, isWorkdayLogin } from './workday.mjs';
 import { loadProfile, mapLabelToProfileValue, resolveField, safeAskHuman, isFormAnswerTerminalEnabled } from './planner.mjs';
 import { peekClientAnswer } from './clientAnswer.mjs';
 import { getResumePathForApply, findExistingResumeFile } from './resumeParser.mjs';
-import { getExactResumeFileName, buildDocumentFileName } from './fileNameUtils.mjs';
+import { buildDocumentFileName } from './fileNameUtils.mjs';
 import { cleanupClientResume } from './applyWizzResume.mjs';
 import { fillWorkdaySkillsSection } from './workdaySkills.mjs';
 import { normalizeLabel, createQAStore, isComplianceSensitive } from './qaStore.mjs';
@@ -570,7 +570,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
   if (resumePath) {
     const found = findExistingResumeFile(resumePath) || (existsSync(resumePath) ? resumePath : null);
     if (found) {
-      if (!targetAwl || targetAwl === 'CLIENT' || basename(found).toUpperCase().includes(targetAwl)) {
+      if (!targetAwl || targetAwl === 'CLIENT' || found.toUpperCase().includes(targetAwl)) {
         absPath = found;
       } else {
         console.warn(`    ⚠️ Resume mismatch: passed path ${basename(found)} does not match candidate ${targetAwl}. Re-resolving...`);
@@ -586,7 +586,7 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
     return false;
   }
 
-  if (targetAwl && targetAwl !== 'CLIENT' && !basename(absPath).toUpperCase().includes(targetAwl)) {
+  if (targetAwl && targetAwl !== 'CLIENT' && !absPath.toUpperCase().includes(targetAwl)) {
     console.error(`    ❌ CRITICAL GUARD: Refusing to upload ${basename(absPath)} for candidate ${targetAwl}! Strict client isolation enforced.`);
     return false;
   }
@@ -594,7 +594,8 @@ export async function handleWorkdayResumeUpload(page, resumePath, profile = null
   const diskFileName = basename(absPath);
   let uploadFileName = diskFileName;
   try {
-    uploadFileName = getExactResumeFileName(profile, absPath);
+    const pageTitle = await page.title().catch(() => '');
+    uploadFileName = buildDocumentFileName(profile, diskFileName, true, pageTitle);
   } catch {
     uploadFileName = diskFileName;
   }
@@ -2253,6 +2254,10 @@ async function clickSaveAndContinueAtAnyCost(page, stepName, profile, plan) {
       if (lastErrors.length) {
         repaired += await repairRequiredFieldsFromErrors(page, profile, before, lastErrors).catch(() => 0);
       }
+      if (repaired === 0) {
+        const domRes = await runMiniDomRemediation(page, profile, { currentStep: before }).catch(() => null);
+        repaired += domRes?.remediatedCount || 0;
+      }
 
       if (repaired > 0) {
         console.log(`  🔧 Repaired ${repaired} flagged field(s) — skipping full re-fill`);
@@ -2823,8 +2828,53 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
       const needsVerification =
         /verification\s*code|enter.*code|confirm.*human|code\s*was\s*sent/i.test(combinedText);
 
-      return { isSuccess, isApplied, needsVerification, popupText };
-    }).catch(() => ({ isSuccess: false, isApplied: false, needsVerification: false }));
+      // Detect Workday Review-page validation errors ("Errors Found" / "Error - Page Error" / "Enter your work experience.")
+      const reviewErrorSet = new Set();
+      const hasErrorsFoundBanner =
+        /\berrors\s+found\b/i.test(bodyText) ||
+        /\berror\s*-\s*page\s*error\b/i.test(bodyText) ||
+        !!document.querySelector('[data-automation-id="errorBanner"], [data-automation-id="pageError"]');
+
+      if (hasErrorsFoundBanner) {
+        const errSelectors = [
+          '[data-automation-id="errorBanner"] li',
+          '[data-automation-id="errorBanner"] [data-automation-id="errorMessage"]',
+          '[data-automation-id="errorBanner"] p',
+          '[data-automation-id="errorMessage"]',
+          '[data-automation-id="pageError"]',
+          '[role="alert"] li',
+          '[role="alert"] p',
+        ];
+        for (const sel of errSelectors) {
+          for (const el of document.querySelectorAll(sel)) {
+            const t = (el.innerText || el.textContent || '').replace(/\s+/g, ' ').trim();
+            if (!t || t.length > 260) continue;
+            if (/^errors\s+found$/i.test(t) || /^\d+\.\s*error\s*-\s*page\s*error$/i.test(t)) continue;
+            if (/successfully|success[!.]?$/i.test(t)) continue;
+            reviewErrorSet.add(t);
+          }
+        }
+        // Fallback: parse lines immediately following "Errors Found" or "Error - Page Error"
+        if (reviewErrorSet.size === 0) {
+          const lines = bodyText.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+          for (let idx = 0; idx < lines.length; idx++) {
+            if (/^\d+\.\s*error\s*-\s*page\s*error$/i.test(lines[idx]) && lines[idx + 1]) {
+              reviewErrorSet.add(lines[idx + 1]);
+            } else if (/^enter your (work experience|education|skills|certifications|resume)/i.test(lines[idx])) {
+              reviewErrorSet.add(lines[idx]);
+            }
+          }
+        }
+      }
+
+      return {
+        isSuccess,
+        isApplied,
+        needsVerification,
+        popupText,
+        reviewErrors: Array.from(reviewErrorSet),
+      };
+    }).catch(() => ({ isSuccess: false, isApplied: false, needsVerification: false, reviewErrors: [] }));
 
     if (checkState.isSuccess) {
       confirmationFound = true;
@@ -2833,6 +2883,33 @@ async function verifyAndSubmitReview(page, profile, { confirmSubmit = false, dry
     if (checkState.isApplied) {
       isAlreadyApplied = true;
       break;
+    }
+
+    // If Workday rejected Submit on Review with validation errors (e.g. "Enter your work experience."),
+    // stop immediately instead of waiting 25s so the worker can close, remember the field, and reopen cleanly.
+    if (
+      !checkState.needsVerification &&
+      Array.isArray(checkState.reviewErrors) &&
+      checkState.reviewErrors.length > 0 &&
+      (Date.now() - confirmStart > 1500)
+    ) {
+      const reviewErrors = checkState.reviewErrors;
+      const joined = reviewErrors.join(' | ');
+      const forcedSections = [];
+      if (/work\s*experience|employment\s*history/i.test(joined)) forcedSections.push('work');
+      if (/education|school|degree/i.test(joined)) forcedSections.push('education');
+      if (/certification/i.test(joined)) forcedSections.push('certifications');
+      if (/skill/i.test(joined)) forcedSections.push('skills');
+      if (/linkedin|website|social\s*network/i.test(joined)) forcedSections.push('websites');
+      if (/resume|cv\b/i.test(joined)) forcedSections.push('resume');
+
+      console.log(`  🚨 [REVIEW ERROR DETECTED] Submit rejected on Review page with error(s): ${JSON.stringify(reviewErrors)} | Recovery section(s): [${forcedSections.join(', ') || 'dom_agent'}]`);
+      profile?._onLog?.(5, `Step 5: Review Submit validation error detected (${reviewErrors.join('; ')}) — closing & re-opening form to fill required recovery field.`);
+      return {
+        status: 'review_validation_error',
+        reviewErrors,
+        forcedSections,
+      };
     }
 
     if (checkState.needsVerification) {
@@ -3075,8 +3152,8 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
       return 'already_applied';
     }
 
-    if (stepName === 'Unknown' && !await isWorkdayWizardVisible(page)) {
-      console.log('  🔎 Not on wizard yet — looking for Continue Application / Apply / Auth Gateway...');
+    if ((stepName === 'Unknown' || /^authentication$/i.test(stepName) || await isWorkdayLogin(page)) && !await isWorkdayWizardVisible(page)) {
+      console.log('  🔎 Auth / Gateway detected inside wizard loop — clearing Sign In / Popup...');
       const entry = await ensureWorkdayApplicationWizard(page, { mode, profile });
       if (entry.entered) {
         console.log(`  ✅ Entered wizard via ${entry.method}`);
@@ -3102,10 +3179,13 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
             await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'already_applied', screenshotUrl: alreadyProofUrl }).catch(() => {});
             return 'already_applied';
           }
-          if (authOk === 'mailbox_not_connected') {
+          if (authOk === 'mailbox_not_connected' || authOk?.status === 'zoho_not_connected' || authOk?.isZohoNotConnected) {
             const failShotUrl = await takeScreenshot(page, 'zoho-disconnected', profile).catch(() => null);
             await recordClientApplication(profile, { url: profile._canonicalJobUrl, status: 'failed', failureReason: 'zoho mail not connected', screenshotUrl: failShotUrl }).catch(() => {});
             return 'mailbox_not_connected';
+          }
+          if (authOk && typeof authOk === 'object' && (authOk.passwordResetPending || authOk.status === 'ready_for_review' || authOk.reason === 'password_reset_pending')) {
+            return authOk;
           }
           if (!authOk) return 'auth-failed';
         }
@@ -3384,10 +3464,22 @@ export async function runWorkdayWizardLoop(page, profile, plan, { confirmSubmit 
 
     if (advanceResult.hasErrors) {
       clearStaleFilledValuesFromErrors(profile, advanceResult.errors || []);
-      const repaired = await repairRequiredFieldsFromErrors(page, profile, stepName, advanceResult.errors || [])
+      let repaired = await repairRequiredFieldsFromErrors(page, profile, stepName, advanceResult.errors || [])
         .catch(() => 0);
+      if (repaired === 0) {
+        const domRes = await runMiniDomRemediation(page, profile, { currentStep: stepName }).catch(() => null);
+        repaired += domRes?.remediatedCount || 0;
+      }
       if (repaired > 0) {
         console.log(`  🔧 Repaired ${repaired} field(s) named in the validation errors — retrying Save and Continue`);
+        noProgressCount = 0;
+        lastFingerprint = fingerprint;
+        continue;
+      }
+    } else if (!advanceResult.transitioned && noProgressCount === 0) {
+      const domRes = await runMiniDomRemediation(page, profile, { currentStep: stepName }).catch(() => null);
+      if (domRes?.remediatedCount > 0) {
+        console.log(`  🛡️  [Mini DOM Agent] Remediated ${domRes.remediatedCount} uncommitted field(s) on "${stepName}" — retrying Save and Continue`);
         noProgressCount = 0;
         lastFingerprint = fingerprint;
         continue;
@@ -4242,6 +4334,11 @@ export async function fillForm(url, plan, { workdayEmail, workdayPassword, mode 
           await recordClientApplication(profile, { url, status: 'already_applied', screenshotUrl: proofUrl }).catch(() => {});
           if (ownBrowser) await browser.close().catch(() => {});
           return { status: 'already_applied', screenshotUrl: proofUrl };
+        }
+        if (wdOk && typeof wdOk === 'object' && (wdOk.passwordResetPending || wdOk.status === 'ready_for_review' || wdOk.reason === 'password_reset_pending')) {
+          console.log('  ⏳ Workday password reset email pending via Zoho — preserving task cleanly without entering wizard on login screen.');
+          if (ownBrowser) await browser.close().catch(() => {});
+          return wdOk;
         }
         if (!wdOk || wdOk === 'mailbox_not_connected' || wdOk?.status === 'zoho_not_connected' || wdOk?.reason === 'zoho mail not connected' || wdOk?.isZohoNotConnected) {
           if (wdOk === 'mailbox_not_connected' || wdOk?.status === 'zoho_not_connected' || wdOk?.reason === 'zoho mail not connected' || wdOk?.isZohoNotConnected) {

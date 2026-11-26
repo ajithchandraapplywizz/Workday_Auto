@@ -528,8 +528,8 @@ export async function executeWorkerTask({
       const cachedResume = await getResumePathForApply(profile, {});
       if (cachedResume) {
         profile._resumePath = cachedResume;
-        const { getExactResumeFileName } = await import('./fileNameUtils.mjs');
-        profile._resumeFileName = getExactResumeFileName(profile, cachedResume);
+        const { buildDocumentFileName } = await import('./fileNameUtils.mjs');
+        profile._resumeFileName = buildDocumentFileName(profile, cachedResume, true);
         console.log(`   📎 [${workerId}] Loaded authentic candidate resume: "${profile._resumeFileName}" (cached: ${basename(cachedResume)})`);
       }
     } catch {}
@@ -668,8 +668,15 @@ export async function executeWorkerTask({
     // Direct submission is strictly forbidden during scan / blueprint tasks (Stage 1)
     const directSubmit = isDirectSubmission && !isScanTask;
     let status;
+    let reviewRecoveryPayload = null;
     let scan = null;
     let completionShotUrl = profile?._submissionScreenshotUrl || null;
+    if (Array.isArray(task._forcedRequiredSections) && task._forcedRequiredSections.length > 0) {
+      profile._forcedRequiredSections = new Set(task._forcedRequiredSections);
+    }
+    if (Array.isArray(task._reviewValidationErrors) && task._reviewValidationErrors.length > 0) {
+      profile._reviewValidationErrors = task._reviewValidationErrors;
+    }
 
     if (directSubmit) {
       appLog(5, `Stage 3 Submission: Direct execution for ${applywizzId} using pre-resolved answers. Skipping Stage 1 scan and Stage 2 plan.`);
@@ -690,8 +697,8 @@ export async function executeWorkerTask({
       }
       if (resumePath) {
         profile._resumePath = resumePath;
-        const { getExactResumeFileName } = await import('./fileNameUtils.mjs');
-        profile._resumeFileName = getExactResumeFileName(profile, resumePath);
+        const { buildDocumentFileName } = await import('./fileNameUtils.mjs');
+        profile._resumeFileName = buildDocumentFileName(profile, resumePath, true);
         console.log(`   📎 [${workerId}] Authentic resume file name resolved: "${profile._resumeFileName}"`);
       }
 
@@ -735,6 +742,9 @@ export async function executeWorkerTask({
 
       if (status && typeof status === 'object') {
         if (status.screenshotUrl) completionShotUrl = status.screenshotUrl;
+        if (status.status === 'review_validation_error') {
+          reviewRecoveryPayload = status;
+        }
         status = status.status || 'unknown';
       }
     } else {
@@ -1428,6 +1438,100 @@ export async function executeWorkerTask({
         isScanOnly: directSubmit ? false : isScanTask,
         isClusterBlueprint: directSubmit ? false : Boolean(options.isClusterBlueprint || task.isClusterBlueprint),
       });
+      if (status && typeof status === 'object') {
+        if (status.screenshotUrl) completionShotUrl = status.screenshotUrl;
+        if (status.status === 'review_validation_error') {
+          reviewRecoveryPayload = status;
+        }
+        status = status.status || 'unknown';
+      }
+    }
+
+    // Automatic Close & Reopen Recovery when Workday Review Submit rejects an optional-looking field (e.g. "Enter your work experience.")
+    if (status === 'review_validation_error' && !isScanTask && (directSubmit || effectiveConfirmSubmit)) {
+      const reviewErrors = reviewRecoveryPayload?.reviewErrors || [];
+      const forcedList = (Array.isArray(reviewRecoveryPayload?.forcedSections) && reviewRecoveryPayload.forcedSections.length > 0)
+        ? reviewRecoveryPayload.forcedSections
+        : ['work'];
+      console.log(`   🔄 [${workerId}] [REVIEW RECOVERY] Closing application & remembering error field(s): [${forcedList.join(', ')}] (errors: ${JSON.stringify(reviewErrors)}). Re-opening fresh form...`);
+      appLog(10, `Review Submit raised error (${reviewErrors.join('; ') || forcedList.join(', ')}). Closing & re-opening application to fill required recovery field(s)...`);
+
+      profile._forcedRequiredSections = new Set(forcedList);
+      profile._reviewValidationErrors = reviewErrors;
+      task._forcedRequiredSections = [...forcedList];
+      task._reviewValidationErrors = [...reviewErrors];
+
+      // 1. Immediately close current application browser/context
+      try { unregisterWorkerContext(workerId); } catch {}
+      try { if (page && !page.isClosed()) await page.close().catch(() => {}); } catch {}
+      try { if (context) await context.close().catch(() => {}); } catch {}
+      try { if (browser) await browser.close().catch(() => {}); } catch {}
+      try { unregisterActiveBrowser(browser, workerId); } catch {}
+      page = null;
+      context = null;
+      browser = null;
+
+      await new Promise((r) => setTimeout(r, 1500));
+
+      // 2. Re-open same application form in a fresh browser/context with DOM recovery active
+      await acquireBrowserSlot(workerId);
+      const releaseRecoveryLock = await acquireBrowserLaunchLock(workerId);
+      try {
+        browser = await chromium.launch({
+          headless: Boolean(headless),
+          channel: process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || 'chromium',
+          args: LEAN_CHROMIUM_ARGS,
+        });
+      } finally {
+        try { releaseRecoveryLock(); } catch {}
+      }
+      registerActiveBrowser(browser, {
+        role: (options?.isDirectSubmission || task?.isDirectSubmission || String(workerId).includes('submit')) ? 'submit' : 'scan',
+        workerId,
+      });
+      context = await browser.newContext({
+        viewport: { width: 1280, height: 900 },
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        locale: 'en-US',
+        timezoneId: 'America/New_York',
+      });
+      await context.clearCookies().catch(() => {});
+      await context.clearPermissions().catch(() => {});
+      await context.addInitScript(() => {
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+      }).catch(() => {});
+      page = await context.newPage();
+      registerWorkerContext(workerId, { browser, context, page, taskId, applywizzId });
+
+      const recoveryPlan = {
+        company: company || profile._company || 'Workday',
+        role: roleTitle || profile._roleTitle || 'Workday Application',
+        url: jobUrl,
+        answers: profile._resolvedAnswersMap ? Object.fromEntries(profile._resolvedAnswersMap.entries()) : {},
+      };
+
+      status = await fillForm(jobUrl, recoveryPlan, {
+        browser,
+        context,
+        page,
+        profile,
+        workdayEmail,
+        workdayPassword,
+        mode: 'signin',
+        confirmSubmit: true,
+        dryRun: false,
+        isBatch: true,
+        isScanOnly: false,
+        isClusterBlueprint: false,
+      });
+
+      if (status && typeof status === 'object') {
+        if (status.screenshotUrl) completionShotUrl = status.screenshotUrl;
+        status = status.status || 'unknown';
+      }
+      if (status === 'review_validation_error') {
+        status = 'failed';
+      }
     }
 
     if (status === 'job_not_found') {

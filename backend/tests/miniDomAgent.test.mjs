@@ -112,3 +112,46 @@ test('runMiniDomRemediation: clean exit when DOM has 0 uncommitted fields', asyn
   assert.equal(result.remediatedCount, 0);
   assert.equal(result.unresolvedCount, 0);
 });
+
+test('runMiniDomRemediation: records feedback on profile when remediating a field', async () => {
+  const mockInput = {
+    click: async () => {},
+    fill: async () => {},
+    press: async () => {},
+    evaluate: async () => {},
+    inputValue: async () => 'John Doe',
+  };
+  const mockContainer = {
+    scrollIntoViewIfNeeded: async () => {},
+    $: async () => mockInput,
+  };
+  const mockPage = {
+    evaluate: async (fn, arg) => {
+      if (arg) return;
+      return [{
+        remediationId: 'wd-rem-1',
+        containerSelector: '[data-mini-dom-id="wd-rem-1"]',
+        label: 'Please type your full legal name to sign',
+        controlType: 'text',
+        currentValue: '',
+        options: [],
+        isError: true,
+      }];
+    },
+    $: async () => mockContainer,
+    waitForTimeout: async () => {},
+  };
+
+  const profile = {
+    _isScanOnly: false,
+    personal: { full_name: 'John Doe' },
+  };
+
+  const result = await runMiniDomRemediation(mockPage, profile, { currentStep: 'Application Questions' });
+  assert.equal(result.success, true);
+  assert.equal(result.remediatedCount, 1);
+  assert.equal(profile._filledValues['Please type your full legal name to sign'], 'John Doe');
+  assert.equal(profile._domAgentFeedback.length, 1);
+  assert.equal(profile._domAgentFeedback[0].step, 'Application Questions');
+  assert.equal(profile._domAgentFeedback[0].answer, 'John Doe');
+});

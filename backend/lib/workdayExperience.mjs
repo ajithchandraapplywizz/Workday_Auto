@@ -595,12 +595,20 @@ async function clickRequiredSectionAdd(page, sectionType) {
     console.log(`    ⏭️  Blocked Add click — disarmed optional Add`);
     return false;
   }
-  if (isRiskyMisclickButton(accessible, { allowSectionAdd: true })) {
+  if (isRiskyMisclickButton(accessible, { allowSectionAdd: true }) && !/^(add|\+)$/i.test(accessible)) {
     console.log(`    ⏭️  Blocked Add click — risky misclick "${accessible}"`);
     return false;
   }
 
-  const clicked = await safeClick(btn, {}, { allowSectionAdd: true });
+  // Button was strictly scoped to Work Experience / Education above; click directly so bare "Add" isn't blocked by safeClick
+  await btn.scrollIntoViewIfNeeded().catch(() => {});
+  let clicked = false;
+  try {
+    await btn.click({ force: true });
+    clicked = true;
+  } catch {
+    clicked = await btn.evaluate((el) => { el.click(); return true; }).catch(() => false);
+  }
   if (!clicked) return false;
   await page.waitForTimeout(900);
   console.log(`    ✓ Clicked ${sectionType} Add (${marker.via})`);
@@ -608,17 +616,19 @@ async function clickRequiredSectionAdd(page, sectionType) {
 }
 
 /** Expand Work Experience / Education if collapsed (visible fillable input missing). */
-async function ensureSectionsExpanded(page) {
+async function ensureSectionsExpanded(page, { forceWork = false, forceEdu = false } = {}) {
   const checks = [
     {
       name: 'Work Experience',
       fieldRe: /job\s*title/i,
       sectionType: 'work',
+      forced: forceWork,
     },
     {
       name: 'Education',
       fieldRe: /school\s*or\s*university|^school$/i,
       sectionType: 'education',
+      forced: forceEdu,
     },
   ];
 
@@ -644,7 +654,7 @@ async function ensureSectionsExpanded(page) {
       continue;
     }
 
-    console.log(`  ➕ Expanding ${check.name} section...`);
+    console.log(`  ➕ Expanding ${check.name} section${check.forced ? ' (FORCED by Review validation recovery)' : ''}...`);
     const clicked = await clickRequiredSectionAdd(page, check.sectionType);
     if (!clicked) {
       console.log(`    ℹ️  Could not expand ${check.name} — no section-specific Add button found`);
@@ -2304,16 +2314,26 @@ export async function handleStep2MyExperience(page, profile = {}) {
     profile._dbClient?.education
   );
 
+  const forcedSections = profile?._forcedRequiredSections instanceof Set
+    ? profile._forcedRequiredSections
+    : new Set(Array.isArray(profile?._forcedRequiredSections) ? profile._forcedRequiredSections : []);
+  const forceWork = forcedSections.has('work');
+  const forceEdu = forcedSections.has('education');
+
   const workOnPage = await sectionPresentOnPage(page, 'work');
   const workExpanded = workOnPage && await sectionHasVisibleFields(page, 'work');
-  let workRequired = workOnPage && !workExpanded && (fillOptional || hasCandidateWorkData || await isSectionRequiredInDom(page, 'work'));
+  let workRequired = workOnPage && !workExpanded && (forceWork || fillOptional || hasCandidateWorkData || await isSectionRequiredInDom(page, 'work'));
   const hasWorkSection = workExpanded || workRequired;
 
   const educationOnPage = await sectionPresentOnPage(page, 'education');
   const educationExpanded = educationOnPage && await sectionHasVisibleFields(page, 'education');
   let educationRequired = educationOnPage && !educationExpanded
-    && (fillOptional || hasCandidateEduData || await isSectionRequiredInDom(page, 'education'));
+    && (forceEdu || fillOptional || hasCandidateEduData || await isSectionRequiredInDom(page, 'education'));
   const hasEducationSection = educationExpanded || educationRequired;
+
+  if (forceWork || forceEdu) {
+    console.log(`  🚨 [DOM RECOVERY AGENT] Activating forced fill for: ${[forceWork ? 'Work Experience' : '', forceEdu ? 'Education' : ''].filter(Boolean).join(', ')}`);
+  }
 
   if (workOnPage && !hasWorkSection) {
     console.log('  ⏭️  Work Experience section optional and collapsed — no Add clicked, skipped');
@@ -2339,7 +2359,7 @@ export async function handleStep2MyExperience(page, profile = {}) {
   }
 
   if (workRequired || educationRequired) {
-  await ensureSectionsExpanded(page);
+  await ensureSectionsExpanded(page, { forceWork, forceEdu });
     // Re-disarm: expanding work/education must never leave a Certifications Add live.
     await disarmRiskyAddButtons(page);
     await skipOptionalExperienceSections(page, profile, { force: stepBlocked });

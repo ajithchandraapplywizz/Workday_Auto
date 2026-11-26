@@ -22,6 +22,7 @@ import { clickVisiblePromptOption, findBestOptionMatch } from './fields.mjs';
 import { waitForDomSettled } from './workdayDom.mjs';
 import { pickNearestSelectOption } from './claudeLlm.mjs';
 import { isComplianceSensitive } from './qaStore.mjs';
+import { upsertSupabaseAnswers } from './supabaseClient.mjs';
 
 const DEFAULT_MAX_FIELDS = 6;
 const DEFAULT_TIMEOUT_MS = 25000;
@@ -506,6 +507,8 @@ export async function runMiniDomRemediation(page, profile = {}, opts = {}) {
   let remediatedCount = 0;
   let unresolvedCount = 0;
   const report = [];
+  const feedbackEntries = [];
+  const isScanMode = Boolean(profile?._isScanOnly || profile?._isClusterBlueprint);
 
   for (let i = 0; i < Math.min(uncommitted.length, maxFields); i++) {
     // Circuit breaker: check timeout deadline
@@ -530,6 +533,34 @@ export async function runMiniDomRemediation(page, profile = {}, opts = {}) {
           source: synthesis.source,
           verified: true,
         });
+        if (!isScanMode && profile && typeof profile === 'object') {
+          profile._filledValues = profile._filledValues || {};
+          profile._filledValues[field.label] = synthesis.answer;
+          profile._domAgentFeedback = profile._domAgentFeedback || [];
+          profile._domAgentFeedback.push({
+            step: stepName,
+            label: field.label,
+            controlType: field.controlType,
+            answer: synthesis.answer,
+            source: synthesis.source,
+            confidence: synthesis.confidence,
+            timestamp: new Date().toISOString(),
+          });
+          if (
+            synthesis.source !== 'scan_bypass'
+            && synthesis.source !== 'stage2_resolved_answers'
+            && !isComplianceSensitive(field.label)
+          ) {
+            feedbackEntries.push({
+              question: field.label,
+              questionNormalized: field.label,
+              answer: String(synthesis.answer),
+              source: synthesis.source,
+              fieldType: field.controlType,
+              options: field.options || [],
+            });
+          }
+        }
         console.log(`     ✅ Committed & verified: "${synthesis.answer}" (${synthesis.source})`);
       } else {
         unresolvedCount++;
@@ -543,11 +574,29 @@ export async function runMiniDomRemediation(page, profile = {}, opts = {}) {
     await page.waitForTimeout(200);
   }
 
+  let feedbackSaved = false;
+  if (feedbackEntries.length > 0 && !isScanMode) {
+    const applyWizzId = String(
+      profile?._applyWizzId
+      || profile?.applywizz_id
+      || profile?.applywizzId
+      || profile?._dbClient?.applywizz_id
+      || ''
+    ).trim();
+    if (applyWizzId) {
+      feedbackSaved = await upsertSupabaseAnswers(applyWizzId, feedbackEntries).catch(() => false);
+      if (feedbackSaved) {
+        console.log(`  🧠 [Mini DOM Agent Feedback] Persisted ${feedbackEntries.length} resolved answer(s) for ${applyWizzId}.`);
+      }
+    }
+  }
+
   console.log(`🛡️  [Mini DOM Agent] Finished: ${remediatedCount} remediated, ${unresolvedCount} unresolved.`);
   return {
     success: unresolvedCount === 0,
     remediatedCount,
     unresolvedCount,
+    feedbackSaved,
     report,
   };
 }

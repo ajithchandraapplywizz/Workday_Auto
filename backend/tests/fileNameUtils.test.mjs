@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   extractJobRoleFromPage,
   cleanJobRole,
+  abbreviateJobRole,
   sanitizeForFileName,
   buildDocumentFileName,
   getExactResumeFileName,
@@ -42,7 +43,16 @@ test('sanitizeForFileName creates clean, OS-safe file string tokens', () => {
   assert.equal(sanitizeForFileName('___Hello___World___'), 'Hello_World');
 });
 
-test('buildDocumentFileName generates clean professional resume and cover letter filenames', () => {
+test('abbreviateJobRole merges the first letter of every word in uppercase', () => {
+  assert.equal(abbreviateJobRole('Software Engineer'), 'SE');
+  assert.equal(abbreviateJobRole('Data Analyst'), 'DA');
+  assert.equal(abbreviateJobRole('Senior Product Manager'), 'SPM');
+  assert.equal(abbreviateJobRole('Senior Lead Business Execution Consultant'), 'SLBEC');
+  assert.equal(abbreviateJobRole('Apply for Full Stack Developer'), 'FSD');
+  assert.equal(abbreviateJobRole(''), '');
+});
+
+test('buildDocumentFileName generates strict Resume_<Name_of_Client>_<ShortRole> filenames', () => {
   const profile1 = {
     personal: {
       firstName: 'John',
@@ -55,12 +65,12 @@ test('buildDocumentFileName generates clean professional resume and cover letter
 
   assert.equal(
     buildDocumentFileName(profile1, 'old_resume.pdf', true, 'Software Engineer at Google | Greenhouse'),
-    'Resume_John_Smith_Software_Engineer.pdf'
+    'Resume_John_Smith_SE.pdf'
   );
 
   assert.equal(
     buildDocumentFileName(profile1, 'cover.docx', false, 'Senior Product Manager - Stripe - LinkedIn'),
-    'CoverLetter_John_Smith_Senior_Product_Manager.docx'
+    'CoverLetter_John_Smith_SPM.docx'
   );
 
   const profile2 = {
@@ -69,14 +79,20 @@ test('buildDocumentFileName generates clean professional resume and cover letter
       last_name: 'Doe',
     },
     work_experience: [
-      { job_title: 'Senior Product Manager' },
+      { job_title: 'Data Analyst' },
     ],
   };
 
   // When no page title provided, falls back to profile's most recent experience
   assert.equal(
     buildDocumentFileName(profile2, 'resume.pdf', true),
-    'Resume_Jane_Doe_Senior_Product_Manager.pdf'
+    'Resume_Jane_Doe_DA.pdf'
+  );
+
+  // Explicit _roleTitle and flat client name fallback
+  assert.equal(
+    buildDocumentFileName({ name: 'Manisha Medasani', _roleTitle: 'Data Analyst' }, 'AWL-35049.pdf', true),
+    'Resume_Manisha_Medasani_DA.pdf'
   );
 
   // When no job role found at all, formats with names only
@@ -111,7 +127,7 @@ test('DEMO APPLICATION: End-to-end Workday candidate resume naming', () => {
   console.log(`  📄 [DEMO] Live Page Title: "${workdayPageTitle}"`);
   console.log(`  ✨ [DEMO] Generated Upload Name: "${outputName}"`);
 
-  assert.equal(outputName, 'Resume_Ravi_Teja_Vadla_Senior_Lead_Business_Execution.pdf');
+  assert.equal(outputName, 'Resume_Ravi_Teja_Vadla_SLBEC.pdf');
 });
 
 test('getExactResumeFileName: preserves the exact authentic resume filename for Stage 3 submissions', () => {
@@ -155,4 +171,25 @@ test('getExactResumeFileName: preserves the exact authentic resume filename for 
     getExactResumeFileName({}, 'data/client-resumes/AWL-38247.pdf'),
     'AWL-38247.pdf'
   );
+});
+
+test('cachePathForClient saves resumes strictly in Resume_<Name_of_Client>_<ShortRole>.pdf format', async () => {
+  const { cachePathForClient } = await import('../lib/applyWizzResume.mjs');
+  const path = await import('path');
+
+  const p1 = cachePathForClient({
+    _applyWizzId: 'AWL-35049',
+    personal: { firstName: 'Manisha', lastName: 'Medasani' },
+    _roleTitle: 'Data Analyst',
+  });
+  assert.equal(path.basename(p1), 'Resume_Manisha_Medasani_DA.pdf');
+  assert.ok(p1.toUpperCase().includes('AWL-35049'));
+
+  const p2 = cachePathForClient({
+    _applyWizzId: 'AWL-46680',
+    name: 'John Smith',
+    experience: [{ title: 'Software Engineer' }],
+  });
+  assert.equal(path.basename(p2), 'Resume_John_Smith_SE.pdf');
+  assert.ok(p2.toUpperCase().includes('AWL-46680'));
 });
