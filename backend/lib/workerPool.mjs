@@ -623,7 +623,7 @@ export async function executeWorkerTask({
     await new Promise((r) => setTimeout(r, launchJitterMs));
     appLog(4, `Playwright: Initialized isolated browser context (1280x900) for ${workdayEmail}. Launching ${headless ? 'headless stealth' : 'headed'} Chrome.`);
 
-    for (let launchAttempt = 1; launchAttempt <= 3; launchAttempt++) {
+    for (let launchAttempt = 1; launchAttempt <= 2; launchAttempt++) {
       const releaseLaunchLock = await acquireBrowserLaunchLock(workerId);
       try {
         browser = await chromium.launch({
@@ -634,10 +634,11 @@ export async function executeWorkerTask({
         break;
       } catch (launchErr) {
         const isHostResourceError = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|Failed to launch|Target page, context or browser has been closed|Target page|closed|ENOMEM/i.test(launchErr?.message || '');
-        console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/3 failed: ${launchErr.message}`);
-        cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
-        if (launchAttempt < 3) {
-          const retryDelay = isHostResourceError ? (3000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1000;
+        console.warn(`⚠️ [${workerId}] Browser launch attempt ${launchAttempt}/2 failed: ${launchErr.message}`);
+        // Safe cleanup: only reap orphan Chrome if zero active browsers are running
+        cleanupOrphanChromeProcesses();
+        if (launchAttempt < 2) {
+          const retryDelay = isHostResourceError ? (5000 * launchAttempt) + Math.floor(Math.random() * 2000) : 1500;
           await new Promise((r) => setTimeout(r, retryDelay));
         } else {
           throw new Error(`[HOST_RESOURCE_EXHAUSTION] ${launchErr.message}`);

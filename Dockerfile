@@ -9,7 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends tini procps && 
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 ENV PLAYWRIGHT_CHROMIUM_CHANNEL=chromium
 ENV MALLOC_ARENA_MAX=2
-ENV UV_THREADPOOL_SIZE=64
+ENV UV_THREADPOOL_SIZE=8
 
 # Copy workspace package manifests first for optimal layer caching
 COPY package*.json ./

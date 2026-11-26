@@ -146,14 +146,17 @@ function createResilientLauncher(extraLauncher = null) {
     const prepared = prepareLaunchOptions(baseOptions);
     const preferredChannel = process.env.PLAYWRIGHT_CHROMIUM_CHANNEL || baseOptions.channel || 'chromium';
 
+    const isSpawnResourceError = (err) => /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|ENOMEM/i.test(err?.message || '');
+
     const handleTierResourceCooldown = async (err) => {
-      const isRes = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page/i.test(err?.message || '');
+      const isRes = /EAGAIN|spawn.*EAGAIN|pthread_create|Resource temporarily unavailable|closed|Target page|ENOMEM/i.test(err?.message || '');
       if (isRes) {
         try {
           const { cleanupOrphanChromeProcesses } = await import('./browserLifecycle.mjs');
-          cleanupOrphanChromeProcesses({ force: true, ignoreSlots: true });
+          // Safe cleanup: never force-kill live sibling browsers
+          cleanupOrphanChromeProcesses();
         } catch {}
-        await new Promise((r) => setTimeout(r, 1500));
+        await new Promise((r) => setTimeout(r, isSpawnResourceError(err) ? 3000 : 1500));
       }
     };
 
@@ -166,8 +169,11 @@ function createResilientLauncher(extraLauncher = null) {
         });
         return wrapBrowserInstance(browser);
       } catch (err1) {
-        console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}). Retrying stealth without channel...`);
+        console.warn(`[STEALTH] Launch with channel "${preferredChannel}" failed (${err1?.message}).`);
         await handleTierResourceCooldown(err1);
+        if (isSpawnResourceError(err1)) {
+          throw err1;
+        }
         // Tier 2: Stealth launcher with default headless shell
         try {
           const { channel: _, ...withoutChannel } = prepared;
@@ -176,6 +182,9 @@ function createResilientLauncher(extraLauncher = null) {
         } catch (err2) {
           console.warn(`[STEALTH] Stealth launch failed (${err2?.message}), falling back to standard Chromium.`);
           await handleTierResourceCooldown(err2);
+          if (isSpawnResourceError(err2)) {
+            throw err2;
+          }
         }
       }
     }
@@ -188,8 +197,11 @@ function createResilientLauncher(extraLauncher = null) {
       });
       return wrapBrowserInstance(browser);
     } catch (err3) {
-      console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}). Retrying standard without channel...`);
+      console.warn(`[BROWSER] Standard Chromium launch with channel "${preferredChannel}" failed (${err3?.message}).`);
       await handleTierResourceCooldown(err3);
+      if (isSpawnResourceError(err3)) {
+        throw err3;
+      }
     }
 
     // Tier 4: Standard Chromium with default binary and hardened container args
@@ -198,8 +210,11 @@ function createResilientLauncher(extraLauncher = null) {
       const browser = await origStandardLaunch(withoutChannel);
       return wrapBrowserInstance(browser);
     } catch (err4) {
-      console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}). Attempting minimal safe container launch...`);
+      console.warn(`[BROWSER] Standard Chromium launch without channel failed (${err4?.message}).`);
       await handleTierResourceCooldown(err4);
+      if (isSpawnResourceError(err4)) {
+        throw err4;
+      }
     }
 
     // Tier 5: Minimal emergency container launch

@@ -66,7 +66,7 @@ export function getPendingSlotWaitersCount() {
 }
 
 if (!process.env.MALLOC_ARENA_MAX) process.env.MALLOC_ARENA_MAX = '2';
-if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '64';
+if (!process.env.UV_THREADPOOL_SIZE) process.env.UV_THREADPOOL_SIZE = '8';
 
 export const LEAN_CHROMIUM_ARGS = [
   '--no-sandbox',
@@ -122,7 +122,7 @@ export function cleanupOrphanChromeProcesses({ force = false, ignoreSlots = fals
 
 let launchLockPromise = Promise.resolve();
 let lastLaunchTime = 0;
-const MIN_LAUNCH_GAP_MS = 600;
+const MIN_LAUNCH_GAP_MS = 1500;
 
 /**
  * Atomic launch lock that serializes browser launches across concurrent workers
@@ -369,7 +369,8 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
   return new Promise((resolve, reject) => {
     let checkTimer = null;
     const waitStartTime = Date.now();
-    const SLOT_WAIT_TIMEOUT_MS = 120000; // 2 minutes max
+    const STALE_SLOT_TIMEOUT_MS = 120000; // 2 minutes max if 0 live browsers exist (leaked slot recovery)
+    const MAX_LIVE_WAIT_MS = 600000; // 10 minutes max if a live browser is genuinely running
     const cleanup = () => {
       if (checkTimer) {
         clearInterval(checkTimer);
@@ -379,7 +380,7 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
     const queueItem = { workerId, resolve, reject, cleanup };
     waitingQueue.push(queueItem);
 
-    // Rapid check (20ms) to unblock immediately when a slot frees up or on stop signals
+    // Check every 200ms to unblock when a slot frees up or on stop signals
     checkTimer = setInterval(() => {
       if (isGlobalStopRequested() || (String(workerId).includes('submit') && isSubmitStopRequested())) {
         cleanup();
@@ -408,19 +409,30 @@ export async function acquireBrowserSlot(workerId = 'worker', maxSlots = null) {
         return;
       }
 
-      // Safety timeout (120s): if slots leaked or blocked, clear stale slots and grant slot
-      if (Date.now() - waitStartTime > SLOT_WAIT_TIMEOUT_MS) {
+      const waitedMs = Date.now() - waitStartTime;
+
+      // Only recover leaked slots when ZERO live browsers are actually connected!
+      // Never force-grant a 2nd browser while a live browser is still running (prevents 2/1 EAGAIN).
+      if (activeBrowsers.size === 0 && waitedMs > STALE_SLOT_TIMEOUT_MS) {
         cleanup();
         const idx = waitingQueue.indexOf(queueItem);
         if (idx !== -1) waitingQueue.splice(idx, 1);
-        console.warn(`⚠️ [SLOT GUARD] ${workerId} timed out waiting for browser slot (>120s). Force-granting slot.`);
+        console.warn(`⚠️ [SLOT GUARD] ${workerId} detected leaked slot with 0 live browsers (>120s). Reclaiming stale slot.`);
         activeSlots.clear();
         activeSlots.add(workerId);
         markInstanceActive();
         resolve(true);
         return;
       }
-    }, 20);
+
+      if (waitedMs > MAX_LIVE_WAIT_MS) {
+        cleanup();
+        const idx = waitingQueue.indexOf(queueItem);
+        if (idx !== -1) waitingQueue.splice(idx, 1);
+        reject(new Error(`[HOST_RESOURCE_EXHAUSTION] Timed out waiting for active browser slot (>10m)`));
+        return;
+      }
+    }, 200);
 
     if (checkTimer && typeof checkTimer.unref === 'function') {
       checkTimer.unref();

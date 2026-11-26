@@ -1152,12 +1152,13 @@ export async function runStage3Submissions({ isStreaming = false, force = false 
 
         // If host resource exhaustion occurred, back off and clean up instead of immediate 20ms pickup
         if (res?.status === 'resource_cooldown') {
-          console.warn(`⏳ [${workerId}] Host resource limitation detected (EAGAIN/pthread_create). Backing off for 15s to allow system threads and memory to recover...`);
+          const cooldownMs = 30000 + Math.floor(Math.random() * 5000);
+          console.warn(`⏳ [${workerId}] Host resource limitation detected (EAGAIN/pthread_create). Backing off for ${Math.round(cooldownMs / 1000)}s to allow system threads and memory to recover...`);
           try {
             const { cleanupOrphanChromeProcesses } = await import('../lib/browserLifecycle.mjs');
             cleanupOrphanChromeProcesses();
           } catch {}
-          await new Promise((r) => setTimeout(r, 15000));
+          await new Promise((r) => setTimeout(r, cooldownMs));
           continue;
         }
 
